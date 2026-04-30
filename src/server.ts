@@ -55,7 +55,7 @@ app.get("/", (_req, res) => {
   res.json({ ok: true });
 });
 
-app.use("/v1", apiRouter);
+app.use("/api", apiRouter);
 
 app.use(errorHandler);
 
