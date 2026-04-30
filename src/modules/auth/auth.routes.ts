@@ -18,10 +18,14 @@ authRouter.use((_req, res, next) => {
 });
 
 const registerSchema = z.object({
-  merchantName: z.string().min(2),
+  businessName: z.string().min(2).optional(),
+  merchantName: z.string().min(2).optional(),
   email: z.string().email(),
   password: z.string().min(8),
   name: z.string().optional()
+}).refine((body) => body.businessName || body.merchantName, {
+  path: ["businessName"],
+  message: "businessName is required"
 });
 
 authRouter.post("/register", async (req, res) => {
@@ -34,10 +38,11 @@ authRouter.post("/register", async (req, res) => {
   if (exists) throw new HttpError(409, "EMAIL_EXISTS");
 
   const passwordHash = await bcrypt.hash(body.password, 12);
+  const merchantName = body.businessName || body.merchantName!;
 
   const merchant = await prisma.merchant.create({
     data: {
-      name: body.merchantName,
+      name: merchantName,
       email: body.email
     }
   });
@@ -82,11 +87,11 @@ authRouter.post("/login", async (req, res) => {
     where: { email: body.email }
   });
 
-  if (!user) throw new HttpError(401, "INVALID_LOGIN");
+  if (!user) throw new HttpError(400, "INVALID_LOGIN");
 
   const valid = await bcrypt.compare(body.password, user.passwordHash);
 
-  if (!valid) throw new HttpError(401, "INVALID_LOGIN");
+  if (!valid) throw new HttpError(400, "INVALID_LOGIN");
 
   const token = jwt.sign(
     {
@@ -99,4 +104,40 @@ authRouter.post("/login", async (req, res) => {
   );
 
   res.json({ token });
+});
+
+authRouter.get("/me", async (req, res) => {
+  const xAuthToken = req.header("x-auth-token");
+  const authorization = req.header("authorization") || "";
+  const token = xAuthToken || (authorization.toLowerCase().startsWith("bearer ") ? authorization.slice(7).trim() : "");
+
+  if (!token) {
+    return res.status(401).json({ error: "No token, authorization denied" });
+  }
+
+  try {
+    const decoded = jwt.verify(token, env.JWT_SECRET) as {
+      userId: string;
+      merchantId: string;
+      role?: string;
+    };
+
+    const user = await prisma.user.findUnique({
+      where: { id: decoded.userId },
+      include: { merchant: true }
+    });
+
+    if (!user) return res.status(401).json({ error: "Token is not valid" });
+
+    return res.json({
+      id: user.id,
+      email: user.email,
+      businessName: user.merchant.name,
+      merchantId: user.merchantId,
+      plan: "Lite",
+      role: user.role
+    });
+  } catch (err) {
+    return res.status(401).json({ error: "Token is not valid" });
+  }
 });

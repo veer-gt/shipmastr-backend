@@ -69,7 +69,6 @@ model Merchant {
 model User {
   id           String   @id @default(cuid())
   merchantId   String
-  firebaseUid  String?  @unique
   email        String   @unique
   passwordHash String
   name         String?

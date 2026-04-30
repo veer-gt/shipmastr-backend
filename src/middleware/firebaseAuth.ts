@@ -1,5 +1,4 @@
 import type { Request, Response, NextFunction } from "express";
-import type { DecodedIdToken } from "firebase-admin/auth";
 import admin from "../lib/firebase.js";
 import { prisma } from "../lib/prisma.js";
 
@@ -8,12 +7,17 @@ export type AuthUser = {
   merchantId: string;
   role: string;
   firebaseUid?: string;
+  email?: string | null;
+  phone?: string | null;
 };
 
 export type FirebaseRequestUser = {
+  id?: string;
   firebaseUid: string;
   email: string | null;
   phone: string | null;
+  role?: string;
+  merchantId?: string;
 };
 
 declare global {
@@ -37,67 +41,56 @@ export async function requireFirebaseAuth(
     return res.status(401).json({ error: "Missing Firebase token" });
   }
 
-  let decoded: DecodedIdToken;
+  let decoded: admin.auth.DecodedIdToken;
 
   try {
     decoded = await admin.auth().verifyIdToken(token);
-  } catch {
+  } catch (err) {
+    console.error("Firebase token verification failed:", err);
     return res.status(401).json({ error: "Invalid Firebase token" });
   }
 
-  const email = decoded.email ?? null;
-  const phone = decoded.phone_number ?? null;
-
-  req.user = {
-    firebaseUid: decoded.uid,
-    email,
-    phone,
-  };
+  const firebaseUid = decoded.uid;
+  const email = decoded.email || null;
+  const phone = decoded.phone_number || null;
 
   try {
-    const user = await resolveFirebaseUser(decoded.uid, email);
+    const user = email
+      ? await prisma.user.findUnique({
+          where: { email },
+          include: { merchant: true },
+        })
+      : null;
 
-    req.auth = {
-      userId: user.id,
-      merchantId: user.merchant.id,
+    if (!user) {
+      return res.status(403).json({
+        error: "USER_NOT_ONBOARDED",
+        message:
+          "Firebase login is valid, but no Shipmastr merchant account is linked to this user.",
+      });
+    }
+
+    (req as any).user = {
+      id: user.id,
+      firebaseUid,
+      email: user.email,
+      phone,
       role: user.role,
-      firebaseUid: decoded.uid,
+      merchantId: user.merchantId,
+    };
+
+    (req as any).auth = {
+      userId: user.id,
+      firebaseUid,
+      email: user.email,
+      phone,
+      role: user.role,
+      merchantId: user.merchantId,
     };
 
     next();
-  } catch (error) {
-    if (error instanceof Error && error.message === "FIREBASE_USER_NOT_MAPPED") {
-      return res.status(403).json({ error: "Firebase user is not mapped to a merchant" });
-    }
-
-    return next(error);
+  } catch (err) {
+    console.error("Firebase auth DB lookup failed:", err);
+    return res.status(500).json({ error: "AUTH_MERCHANT_LOOKUP_FAILED" });
   }
-}
-
-async function resolveFirebaseUser(firebaseUid: string, email: string | null) {
-  const existingByUid = await prisma.user.findUnique({
-    where: { firebaseUid },
-    include: { merchant: true },
-  });
-
-  if (existingByUid) {
-    return existingByUid;
-  }
-
-  if (email) {
-    const existingByEmail = await prisma.user.findUnique({
-      where: { email },
-      include: { merchant: true },
-    });
-
-    if (existingByEmail) {
-      return prisma.user.update({
-        where: { id: existingByEmail.id },
-        data: { firebaseUid },
-        include: { merchant: true },
-      });
-    }
-  }
-
-  throw new Error("FIREBASE_USER_NOT_MAPPED");
 }
