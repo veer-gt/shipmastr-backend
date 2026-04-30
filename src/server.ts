@@ -3,7 +3,7 @@ import cors from "cors";
 import helmet from "helmet";
 import compression from "compression";
 import rateLimit from "express-rate-limit";
-import pinoHttpModule from "pino-http";
+import { pinoHttp } from "pino-http";
 
 import { env, corsOrigins } from "./config/env.js";
 import { logger } from "./lib/logger.js";
@@ -41,7 +41,6 @@ app.use(
   })
 );
 
-const pinoHttp = (pinoHttpModule as any).default ?? pinoHttpModule;
 app.use(pinoHttp({ logger }));
 
 app.use(

@@ -1,4 +1,4 @@
-import type { Order, RiskDecision, RiskLevel } from "@prisma/client";
+import type { Order, Prisma, RiskDecision, RiskLevel } from "@prisma/client";
 import { prisma } from "../../lib/prisma.js";
 
 type RiskResult = {
@@ -108,14 +108,14 @@ export function calculateRisk(
  };
 }
 
-export async function scoreOrder(orderId:string){
- const order=await prisma.order.findUniqueOrThrow({
+export async function scoreOrder(orderId:string, client: Prisma.TransactionClient = prisma){
+ const order=await client.order.findUniqueOrThrow({
    where:{id:orderId}
  });
 
  const result=calculateRisk(order);
 
- const risk=await prisma.riskScore.create({
+ const risk=await client.riskScore.create({
    data:{
     orderId,
     score:result.score,
@@ -126,7 +126,7 @@ export async function scoreOrder(orderId:string){
    }
  });
 
- await prisma.order.update({
+ await client.order.update({
    where:{id:orderId},
    data:{status:"RISK_SCORED"}
  });

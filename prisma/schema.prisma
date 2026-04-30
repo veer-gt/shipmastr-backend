@@ -148,10 +148,14 @@ model WebhookEvent {
 
 model IdempotencyKey {
   id        String   @id @default(cuid())
-  key       String   @unique
+  merchantId String
+  key       String
   route     String
   response  Json?
   createdAt DateTime @default(now())
+
+  @@unique([merchantId, route, key])
+  @@index([merchantId])
 }
 
 model AuditLog {
