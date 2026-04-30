@@ -3,13 +3,11 @@ import { Prisma } from "@prisma/client";
 import { z } from "zod";
 import { prisma } from "../../lib/prisma.js";
 import { HttpError } from "../../lib/httpError.js";
-import { requireAuth } from "../../middleware/auth.js";
 import { requireIdempotency } from "../../middleware/idempotency.js";
 import { scoreOrder } from "../risk/risk.service.js";
 
 export const ordersRouter = Router();
 
-ordersRouter.use(requireAuth);
 
 const createOrderSchema = z.object({
  externalOrderId:z.string(),

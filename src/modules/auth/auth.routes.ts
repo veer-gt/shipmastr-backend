@@ -8,6 +8,15 @@ import { HttpError } from "../../lib/httpError.js";
 
 export const authRouter = Router();
 
+authRouter.use((_req, res, next) => {
+  res.setHeader("Deprecation", "true");
+  res.setHeader(
+    "Link",
+    '</v1/auth>; rel="deprecation"; title="JWT auth is retained only for backward compatibility. Use Firebase ID tokens for protected APIs."'
+  );
+  next();
+});
+
 const registerSchema = z.object({
   merchantName: z.string().min(2),
   email: z.string().email(),

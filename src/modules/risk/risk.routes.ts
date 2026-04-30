@@ -1,11 +1,9 @@
 import { Router } from "express";
 import { z } from "zod";
-import { requireAuth } from "../../middleware/auth.js";
 import { calculateRisk } from "./risk.service.js";
 
 export const riskRouter = Router();
 
-riskRouter.use(requireAuth);
 
 const schema = z.object({
   buyerPhone: z.string(),
