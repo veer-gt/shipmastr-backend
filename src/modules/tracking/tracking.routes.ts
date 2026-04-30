@@ -1,4 +1,5 @@
 import { Router } from "express";
+import admin from "../../lib/firebase.js";
 
 export const trackingRouter = Router();
 
@@ -86,4 +87,27 @@ trackingRouter.get("/mobile/:mobile", (req, res) => {
 
   if (mobile !== demoOrder.customerPhone) return notFound(res);
   return res.json(normalizedResponse("mobile"));
+});
+
+trackingRouter.post("/mobile/verified", async (req, res) => {
+  const mobile = String(req.body?.mobile || "").trim();
+  const firebaseIdToken = String(req.body?.firebaseIdToken || "").trim();
+
+  if (!/^\d{10}$/.test(mobile) || !firebaseIdToken) {
+    return res.status(400).json({ success: false, error: "Invalid lookup value" });
+  }
+
+  try {
+    const decoded = await admin.auth().verifyIdToken(firebaseIdToken);
+    const tokenPhone = decoded.phone_number || "";
+    if (tokenPhone !== `+91${mobile}`) {
+      return res.status(403).json({ success: false, error: "Phone verification mismatch" });
+    }
+
+    if (mobile !== demoOrder.customerPhone) return notFound(res);
+    return res.json(normalizedResponse("mobile"));
+  } catch (err) {
+    console.error("Firebase mobile tracking verification failed:", err);
+    return res.status(401).json({ success: false, error: "Invalid Firebase token" });
+  }
 });
