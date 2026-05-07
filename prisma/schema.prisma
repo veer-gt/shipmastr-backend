@@ -25,11 +25,13 @@ enum OrderStatus {
   CANCELLED
 }
 
-enum RiskDecision {
+enum LegacyRiskDecision {
   SHIP
   VERIFY
   HOLD
   BLOCK
+
+  @@map("RiskDecision")
 }
 
 enum RiskLevel {
@@ -37,6 +39,259 @@ enum RiskLevel {
   MEDIUM
   HIGH
   CRITICAL
+}
+
+enum RiskDecisionType {
+  ALLOW
+  OTP_REQUIRED
+  PREPAID_ONLY
+  HOLD
+  BLOCK
+}
+
+enum CodDecision {
+  ALLOW_COD
+  REQUIRE_OTP
+  PREPAID_ONLY
+  MANUAL_REVIEW
+}
+
+enum ConsigneeTier {
+  GOLD
+  SILVER
+  BRONZE
+  IRON
+}
+
+enum ShipmentDecision {
+  SHIP
+  VERIFY_BEFORE_SHIP
+  HOLD
+  DO_NOT_SHIP
+}
+
+enum ActualOutcome {
+  PENDING
+  DELIVERED
+  NDR
+  RTO
+  CANCELLED
+  RETURNED
+  LOST
+}
+
+enum AutonomousActionType {
+  SEND_COD_OTP
+  SEND_ADDRESS_CORRECTION_LINK
+  HIDE_COD
+  SEND_PREPAID_LINK
+  AUTO_SELECT_COURIER
+  HOLD_SHIPMENT
+  RELEASE_SHIPMENT
+  REQUEST_NDR_REATTEMPT
+  SEND_NDR_RECOVERY_MESSAGE
+  ESCALATE_INTERNAL_REVIEW
+  REQUEST_SELLER_APPROVAL
+}
+
+enum AutomationLevel {
+  AUTO_EXECUTE
+  AUTO_EXECUTE_NOTIFY
+  REQUIRE_SELLER_APPROVAL
+  REQUIRE_INTERNAL_REVIEW
+}
+
+enum AutonomousActionStatus {
+  PENDING
+  EXECUTED
+  FAILED
+  CANCELLED
+  APPROVED
+  REJECTED
+  EXPIRED
+}
+
+enum CommunicationChannel {
+  WHATSAPP
+  SMS
+  EMAIL
+  CALL
+}
+
+enum BuyerCommunicationResponse {
+  OTP_VERIFIED
+  OTP_FAILED
+  ADDRESS_CONFIRMED
+  ADDRESS_CORRECTED
+  PREPAID_CONVERTED
+  BUYER_CONFIRMED_REATTEMPT
+  BUYER_REFUSED
+  NO_RESPONSE
+  INVALID_RESPONSE
+}
+
+enum CommunicationStatus {
+  QUEUED
+  SENT
+  DELIVERED
+  READ
+  RESPONDED
+  FAILED
+  EXPIRED
+}
+
+enum ReconciliationStatus {
+  AUTO_APPROVED
+  PARTIAL_MATCH
+  COD_SHORTFALL
+  COD_DELAYED
+  INVOICE_MISMATCH
+  WEIGHT_DISPUTE
+  ZONE_DISPUTE
+  DUPLICATE_BILLING
+  MISSING_REMITTANCE
+  RTO_CHARGE_REVIEW
+  FAKE_ATTEMPT_REVIEW
+  MANUAL_REVIEW
+  PAYMENT_HOLD
+  SETTLED
+}
+
+enum ReconciliationDisputeType {
+  INVOICE_MISMATCH
+  COD_SHORTFALL
+  COD_DELAY
+  DUPLICATE_BILLING
+  UNKNOWN_AWB
+  WEIGHT_DISPUTE
+  ZONE_DISPUTE
+  RTO_CHARGE_ISSUE
+  FAKE_ATTEMPT_NDR_ISSUE
+}
+
+enum DisputeWorkflowStatus {
+  OPEN
+  UNDER_REVIEW
+  APPROVED
+  REJECTED
+  RESOLVED
+}
+
+enum PaymentHoldStatus {
+  ACTIVE
+  RELEASED
+  CANCELLED
+}
+
+enum SellerSettlementStatus {
+  PENDING
+  BLOCKED
+  APPROVED
+  SETTLED
+}
+
+enum CourierSettlementFrequency {
+  WEEKLY
+  BIWEEKLY
+  MONTHLY
+}
+
+enum CourierPenaltyType {
+  COD_REMITTANCE_DELAY
+}
+
+enum CourierPenaltyStatus {
+  CALCULATED
+  APPLIED
+  WAIVED
+}
+
+enum FinanceApprovalType {
+  SELLER_SETTLEMENT
+  PAYMENT_HOLD_RELEASE
+  COURIER_SETTLEMENT
+}
+
+enum FinanceApprovalStatus {
+  PENDING
+  APPROVED
+  REJECTED
+  CANCELLED
+}
+
+enum CourierImportStatus {
+  UPLOADED
+  PREVIEWED
+  IMPORTED
+  FAILED
+  DUPLICATE
+}
+
+enum JournalPostStatus {
+  DRAFT
+  PUBLISHED
+  HELD
+  SENT
+}
+
+enum NewsletterSubscriberStatus {
+  SUBSCRIBED
+  UNSUBSCRIBED
+}
+
+enum TrustTier {
+  NEW
+  WATCHLIST
+  TRUSTED
+  PREFERRED
+  RISKY
+  SUSPENDED
+}
+
+enum UserRole {
+  SELLER
+  COURIER
+  ADMIN
+}
+
+enum CourierEventType {
+  PICKUP_SCHEDULED
+  PICKED_UP
+  IN_TRANSIT
+  OUT_FOR_DELIVERY
+  DELIVERED
+  NDR
+  RTO
+  LOST
+  CANCELLED
+}
+
+enum NdrReason {
+  CUSTOMER_NOT_REACHABLE
+  ADDRESS_ISSUE
+  CUSTOMER_REFUSED
+  PAYMENT_ISSUE
+  RESCHEDULE_REQUESTED
+  OTHER
+}
+
+enum RtoReason {
+  FAILED_DELIVERY
+  CUSTOMER_REFUSED
+  ADDRESS_INCOMPLETE
+  CUSTOMER_UNREACHABLE
+  COURIER_ISSUE
+  OTHER
+}
+
+enum SlaBreachType {
+  AWB_GENERATION_FAILED
+  PICKUP_DELAYED
+  WEBHOOK_DELAYED
+  TRACKING_STALE
+  NDR_ACTION_DELAYED
+  COD_REMITTANCE_DELAYED
+  LEDGER_MISMATCH
 }
 
 enum WebhookProvider {
@@ -66,17 +321,630 @@ model Merchant {
   auditLogs AuditLog[]
 }
 
+model CourierPartner {
+  id                  String   @id @default(cuid())
+  name                String
+  code                String   @unique
+  active              Boolean  @default(true)
+  apiMode             String   @default("manual")
+  supportsCOD         Boolean  @default(true)
+  supportsPrepaid     Boolean  @default(true)
+  supportsPickup      Boolean  @default(true)
+  priority            Int      @default(100)
+  trackingUrlTemplate String?
+  createdAt           DateTime @default(now())
+  updatedAt           DateTime @updatedAt
+
+  rateCards      RateCard[]
+  users          CourierUser[]
+  shipments      CourierShipment[]
+  webhookConfigs CourierWebhookConfig[]
+  invoices       CourierInvoice[]
+  financePolicies CourierFinancePolicy[]
+  penalties       CourierPenalty[]
+
+  @@index([active])
+  @@index([priority])
+}
+
+model RateCard {
+  id             String   @id @default(cuid())
+  courierId      String
+  zone           String
+  minWeight      Int
+  maxWeight      Int
+  baseRate       Int
+  additionalRate Int      @default(0)
+  codFee         Int      @default(0)
+  fuelSurcharge  Int      @default(0)
+  rtoCharge      Int      @default(0)
+  gstPercent     Decimal  @default(18.00) @db.Decimal(5, 2)
+  etaDays        Int      @default(5)
+  createdAt      DateTime @default(now())
+  updatedAt      DateTime @updatedAt
+
+  courier CourierPartner @relation(fields: [courierId], references: [id], onDelete: Cascade)
+
+  @@index([courierId])
+  @@index([zone])
+  @@index([minWeight, maxWeight])
+}
+
+model CourierUser {
+  id           String    @id @default(cuid())
+  courierId    String
+  name         String
+  email        String    @unique
+  passwordHash String
+  role         String    @default("courier_partner")
+  active       Boolean   @default(true)
+  lastLoginAt  DateTime?
+  createdAt    DateTime  @default(now())
+  updatedAt    DateTime  @updatedAt
+
+  courier CourierPartner @relation(fields: [courierId], references: [id], onDelete: Cascade)
+
+  @@index([courierId])
+  @@index([active])
+}
+
+model CourierShipment {
+  id                   String      @id @default(cuid())
+  courierId            String
+  orderId              String?
+  awbNumber            String      @unique
+  fromPincode          String
+  toPincode            String
+  status               String      @default("pickup_scheduled")
+  weightGrams          Int?
+  paymentMode          PaymentMode @default(PREPAID)
+  codAmount            Int         @default(0)
+  lastEvent            String?
+  expectedDeliveryDate DateTime?
+  createdAt            DateTime    @default(now())
+  updatedAt            DateTime    @updatedAt
+
+  courier CourierPartner @relation(fields: [courierId], references: [id], onDelete: Cascade)
+  events  CourierEvent[]
+  ndr     CourierNdr?
+  rto     CourierRto?
+
+  @@index([courierId])
+  @@index([courierId, status])
+  @@index([orderId])
+}
+
+model CourierEvent {
+  id                String   @id @default(cuid())
+  courierShipmentId String
+  courierId         String
+  courierUserId     String?
+  eventType         String
+  status            String
+  location          String?
+  remarks           String?
+  rawPayload        Json?
+  createdAt         DateTime @default(now())
+
+  shipment CourierShipment @relation(fields: [courierShipmentId], references: [id], onDelete: Cascade)
+
+  @@index([courierId])
+  @@index([courierShipmentId])
+  @@index([status])
+}
+
+model CourierNdr {
+  id                String    @id @default(cuid())
+  courierShipmentId String    @unique
+  courierId         String
+  reason            String
+  actionRequired    String
+  nextAttemptDate   DateTime?
+  remarks           String?
+  status            String    @default("open")
+  createdAt         DateTime  @default(now())
+  updatedAt         DateTime  @updatedAt
+
+  shipment CourierShipment @relation(fields: [courierShipmentId], references: [id], onDelete: Cascade)
+
+  @@index([courierId])
+  @@index([status])
+}
+
+model CourierRto {
+  id                 String    @id @default(cuid())
+  courierShipmentId  String    @unique
+  courierId          String
+  rtoStatus          String
+  reason             String
+  expectedReturnDate DateTime?
+  remarks            String?
+  createdAt          DateTime  @default(now())
+  updatedAt          DateTime  @updatedAt
+
+  shipment CourierShipment @relation(fields: [courierShipmentId], references: [id], onDelete: Cascade)
+
+  @@index([courierId])
+  @@index([rtoStatus])
+}
+
+model CourierWebhookConfig {
+  id        String   @id @default(cuid())
+  courierId String
+  targetUrl String
+  secret    String
+  active    Boolean  @default(true)
+  events    String[] @default([])
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+
+  courier CourierPartner @relation(fields: [courierId], references: [id], onDelete: Cascade)
+
+  @@index([courierId])
+  @@index([active])
+}
+
+model CourierInvoice {
+  id            String   @id @default(cuid())
+  courierId     String
+  invoiceNumber String?
+  periodStart   DateTime
+  periodEnd     DateTime
+  shipmentCount Int      @default(0)
+  payableAmount Int      @default(0)
+  deductions    Int      @default(0)
+  totalAmount   Decimal? @db.Decimal(12, 2)
+  gstAmount     Decimal? @db.Decimal(12, 2)
+  status        String   @default("draft")
+  metadata      Json?
+  createdAt     DateTime @default(now())
+  updatedAt     DateTime @updatedAt
+
+  courier CourierPartner @relation(fields: [courierId], references: [id], onDelete: Cascade)
+  lines   CourierInvoiceLine[]
+
+  @@index([courierId])
+  @@index([status])
+  @@index([invoiceNumber])
+}
+
+model CourierInvoiceLine {
+  id                   String   @id @default(uuid())
+  courierInvoiceId     String
+  merchantId           String?
+  courierId            String
+  awb                  String?
+  orderId              String?
+  externalOrderId      String?
+  chargedWeightGrams   Int?
+  billedWeightGrams    Int?
+  zone                 String?
+  forwardFreight       Decimal  @default(0) @db.Decimal(12, 2)
+  rtoFreight           Decimal  @default(0) @db.Decimal(12, 2)
+  codFee               Decimal  @default(0) @db.Decimal(12, 2)
+  otherCharges         Decimal  @default(0) @db.Decimal(12, 2)
+  gstAmount            Decimal  @default(0) @db.Decimal(12, 2)
+  totalCharge          Decimal  @db.Decimal(12, 2)
+  rawPayload           Json?
+  createdAt            DateTime @default(now())
+  updatedAt            DateTime @updatedAt
+
+  invoice CourierInvoice @relation(fields: [courierInvoiceId], references: [id], onDelete: Cascade)
+
+  @@index([courierInvoiceId])
+  @@index([merchantId])
+  @@index([courierId])
+  @@index([awb])
+  @@index([orderId])
+  @@index([externalOrderId])
+}
+
+model CourierImportFile {
+  id                String              @id @default(uuid())
+  merchantId        String
+  courierId         String?
+  fileName          String
+  mimeType          String?
+  fileHash          String
+  status            CourierImportStatus @default(UPLOADED)
+  totalRows         Int                 @default(0)
+  validRows         Int                 @default(0)
+  invalidRows       Int                 @default(0)
+  duplicateAwbRows  Int                 @default(0)
+  metadata          Json?
+  importedInvoiceId String?
+  importedAt        DateTime?
+  createdAt         DateTime            @default(now())
+  updatedAt         DateTime            @updatedAt
+
+  rows CourierImportRow[]
+
+  @@unique([merchantId, fileHash])
+  @@index([merchantId])
+  @@index([courierId])
+  @@index([status])
+  @@index([createdAt])
+}
+
+model CourierImportRow {
+  id             String   @id @default(uuid())
+  importFileId   String
+  rowNumber      Int
+  awb            String?
+  orderId        String?
+  externalOrderId String?
+  valid          Boolean  @default(false)
+  duplicateAwb   Boolean  @default(false)
+  errors         String[] @default([])
+  rawData        Json
+  normalizedData Json?
+  createdAt      DateTime @default(now())
+
+  importFile CourierImportFile @relation(fields: [importFileId], references: [id], onDelete: Cascade)
+
+  @@index([importFileId])
+  @@index([rowNumber])
+  @@index([awb])
+  @@index([orderId])
+  @@index([externalOrderId])
+  @@index([valid])
+}
+
+model CodRemittance {
+  id              String   @id @default(uuid())
+  merchantId      String
+  courierId       String?
+  awb             String?
+  orderId         String?
+  externalOrderId String?
+  codAmount       Decimal  @default(0) @db.Decimal(12, 2)
+  remittedAmount  Decimal  @db.Decimal(12, 2)
+  remittedAt      DateTime?
+  utr             String?
+  status          String   @default("imported")
+  rawPayload      Json?
+  createdAt       DateTime @default(now())
+  updatedAt       DateTime @updatedAt
+
+  @@index([merchantId])
+  @@index([courierId])
+  @@index([awb])
+  @@index([orderId])
+  @@index([externalOrderId])
+  @@index([remittedAt])
+}
+
+model CodRemittanceImportFile {
+  id                 String              @id @default(uuid())
+  merchantId         String
+  fileName           String
+  mimeType           String?
+  fileHash           String
+  status             CourierImportStatus @default(UPLOADED)
+  totalRows          Int                 @default(0)
+  validRows          Int                 @default(0)
+  invalidRows        Int                 @default(0)
+  duplicateAwbRows   Int                 @default(0)
+  metadata           Json?
+  importedRowCount   Int?
+  importedAt         DateTime?
+  createdAt          DateTime            @default(now())
+  updatedAt          DateTime            @updatedAt
+
+  rows CodRemittanceImportRow[]
+
+  @@unique([merchantId, fileHash])
+  @@index([merchantId])
+  @@index([status])
+  @@index([createdAt])
+}
+
+model CodRemittanceImportRow {
+  id              String   @id @default(uuid())
+  importFileId    String
+  rowNumber       Int
+  awb             String?
+  orderId         String?
+  externalOrderId String?
+  valid           Boolean  @default(false)
+  duplicateAwb    Boolean  @default(false)
+  errors          String[] @default([])
+  rawData         Json
+  normalizedData  Json?
+  createdAt       DateTime @default(now())
+
+  importFile CodRemittanceImportFile @relation(fields: [importFileId], references: [id], onDelete: Cascade)
+
+  @@index([importFileId])
+  @@index([rowNumber])
+  @@index([awb])
+  @@index([orderId])
+  @@index([externalOrderId])
+  @@index([valid])
+}
+
+model SellerWalletLedger {
+  id           String   @id @default(uuid())
+  merchantId   String
+  orderId      String?
+  awb          String?
+  entryType    String
+  direction    String
+  amount       Decimal  @db.Decimal(12, 2)
+  balanceAfter Decimal? @db.Decimal(12, 2)
+  metadata     Json?
+  createdAt    DateTime @default(now())
+
+  @@index([merchantId])
+  @@index([orderId])
+  @@index([awb])
+  @@index([entryType])
+  @@index([createdAt])
+}
+
+model SellerSettlement {
+  id                     String                 @id @default(uuid())
+  merchantId             String
+  orderId                String?
+  awb                    String?
+  reconciliationResultId String?
+  status                 SellerSettlementStatus @default(PENDING)
+  codCollected           Decimal                @default(0) @db.Decimal(12, 2)
+  courierCharge          Decimal                @default(0) @db.Decimal(12, 2)
+  platformFee            Decimal                @default(0) @db.Decimal(12, 2)
+  adjustmentAmount       Decimal                @default(0) @db.Decimal(12, 2)
+  sellerPayable          Decimal                @db.Decimal(12, 2)
+  approvedAt             DateTime?
+  settledAt              DateTime?
+  metadata               Json?
+  createdAt              DateTime               @default(now())
+  updatedAt              DateTime               @updatedAt
+
+  reconciliationResult ReconciliationResult? @relation(fields: [reconciliationResultId], references: [id], onDelete: SetNull)
+
+  @@index([merchantId])
+  @@index([orderId])
+  @@index([awb])
+  @@index([reconciliationResultId])
+  @@index([status])
+}
+
+model ReconciliationRun {
+  id               String   @id @default(uuid())
+  merchantId       String?
+  status           String   @default("COMPLETED")
+  periodStart      DateTime?
+  periodEnd        DateTime?
+  totalResults     Int      @default(0)
+  autoApprovedCount Int     @default(0)
+  disputeCount     Int      @default(0)
+  paymentHoldCount Int      @default(0)
+  metadata         Json?
+  startedAt        DateTime @default(now())
+  completedAt      DateTime?
+  createdAt        DateTime @default(now())
+  updatedAt        DateTime @updatedAt
+
+  results ReconciliationResult[]
+
+  @@index([merchantId])
+  @@index([status])
+  @@index([startedAt])
+}
+
+model ReconciliationResult {
+  id                    String               @id @default(uuid())
+  runId                 String
+  merchantId             String
+  orderId               String?
+  externalOrderId       String?
+  awb                   String?
+  courierId             String?
+  status                ReconciliationStatus
+  expectedCourierCharge Decimal              @default(0) @db.Decimal(12, 2)
+  invoicedCourierCharge Decimal?             @db.Decimal(12, 2)
+  expectedCodAmount     Decimal              @default(0) @db.Decimal(12, 2)
+  remittedCodAmount     Decimal?             @db.Decimal(12, 2)
+  sellerPayable         Decimal?             @db.Decimal(12, 2)
+  courierPayable        Decimal?             @db.Decimal(12, 2)
+  mismatchAmount        Decimal              @default(0) @db.Decimal(12, 2)
+  disputeAmount         Decimal              @default(0) @db.Decimal(12, 2)
+  paymentHoldAmount     Decimal              @default(0) @db.Decimal(12, 2)
+  reasons               String[]             @default([])
+  metadata              Json?
+  createdAt             DateTime             @default(now())
+  updatedAt             DateTime             @updatedAt
+
+  run         ReconciliationRun       @relation(fields: [runId], references: [id], onDelete: Cascade)
+  disputes    ReconciliationDispute[]
+  paymentHolds PaymentHold[]
+  settlements SellerSettlement[]
+  penalties   CourierPenalty[]
+
+  @@index([runId])
+  @@index([merchantId])
+  @@index([orderId])
+  @@index([externalOrderId])
+  @@index([awb])
+  @@index([courierId])
+  @@index([status])
+  @@index([createdAt])
+}
+
+model ReconciliationDispute {
+  id                     String                    @id @default(uuid())
+  reconciliationResultId String?
+  merchantId             String?
+  courierId              String?
+  awb                    String?
+  orderId                String?
+  type                   ReconciliationDisputeType
+  status                 DisputeWorkflowStatus     @default(OPEN)
+  amount                 Decimal                   @default(0) @db.Decimal(12, 2)
+  reason                 String
+  evidence               Json?
+  resolution             Json?
+  resolvedAt             DateTime?
+  createdAt              DateTime                  @default(now())
+  updatedAt              DateTime                  @updatedAt
+
+  reconciliationResult ReconciliationResult? @relation(fields: [reconciliationResultId], references: [id], onDelete: SetNull)
+
+  @@index([reconciliationResultId])
+  @@index([merchantId])
+  @@index([courierId])
+  @@index([awb])
+  @@index([orderId])
+  @@index([type])
+  @@index([status])
+  @@index([createdAt])
+}
+
+model PaymentHold {
+  id                     String            @id @default(uuid())
+  reconciliationResultId String?
+  merchantId             String
+  orderId                String?
+  awb                    String?
+  reason                 String
+  status                 PaymentHoldStatus @default(ACTIVE)
+  amount                 Decimal           @db.Decimal(12, 2)
+  releasedAt             DateTime?
+  metadata               Json?
+  createdAt              DateTime          @default(now())
+  updatedAt              DateTime          @updatedAt
+
+  reconciliationResult ReconciliationResult? @relation(fields: [reconciliationResultId], references: [id], onDelete: SetNull)
+
+  @@index([reconciliationResultId])
+  @@index([merchantId])
+  @@index([orderId])
+  @@index([awb])
+  @@index([status])
+  @@index([createdAt])
+}
+
+model CourierFinancePolicy {
+  id                           String                     @id @default(uuid())
+  merchantId                   String
+  courierId                    String
+  creditPeriodDays             Int                        @default(7)
+  codRemittanceSlaDays         Int                        @default(7)
+  penaltyGraceDays             Int                        @default(0)
+  codDelayPenaltyRateBps       Int                        @default(50)
+  codDelayPenaltyFixedAmount   Decimal                    @default(0) @db.Decimal(12, 2)
+  maxCodDelayPenaltyAmount     Decimal?                   @db.Decimal(12, 2)
+  settlementFrequency          CourierSettlementFrequency @default(WEEKLY)
+  settlementAnchorDay          Int                        @default(5)
+  makerCheckerRequired         Boolean                    @default(true)
+  active                       Boolean                    @default(true)
+  notes                        String?
+  createdAt                    DateTime                   @default(now())
+  updatedAt                    DateTime                   @updatedAt
+
+  courier CourierPartner @relation(fields: [courierId], references: [id], onDelete: Cascade)
+
+  @@unique([merchantId, courierId])
+  @@index([merchantId])
+  @@index([courierId])
+  @@index([active])
+}
+
+model CourierPenalty {
+  id                     String               @id @default(uuid())
+  merchantId             String
+  courierId              String
+  reconciliationResultId String?
+  awb                    String?
+  orderId                String?
+  penaltyType            CourierPenaltyType
+  status                 CourierPenaltyStatus @default(CALCULATED)
+  baseAmount             Decimal              @default(0) @db.Decimal(12, 2)
+  penaltyAmount          Decimal              @default(0) @db.Decimal(12, 2)
+  delayedDays            Int                  @default(0)
+  reason                 String
+  calculatedAt           DateTime             @default(now())
+  appliedAt              DateTime?
+  waivedAt               DateTime?
+  metadata               Json?
+  createdAt              DateTime             @default(now())
+  updatedAt              DateTime             @updatedAt
+
+  courier              CourierPartner        @relation(fields: [courierId], references: [id], onDelete: Cascade)
+  reconciliationResult ReconciliationResult? @relation(fields: [reconciliationResultId], references: [id], onDelete: SetNull)
+
+  @@unique([reconciliationResultId, penaltyType])
+  @@index([merchantId])
+  @@index([courierId])
+  @@index([penaltyType])
+  @@index([status])
+  @@index([calculatedAt])
+}
+
+model FinanceApprovalRequest {
+  id              String                @id @default(uuid())
+  merchantId      String
+  approvalType    FinanceApprovalType
+  status          FinanceApprovalStatus @default(PENDING)
+  settlementId    String?
+  paymentHoldId   String?
+  courierId       String?
+  amount          Decimal               @default(0) @db.Decimal(12, 2)
+  reason          String
+  requestedBy     String
+  requestedAt     DateTime              @default(now())
+  checkedBy       String?
+  checkedAt       DateTime?
+  rejectionReason String?
+  metadata        Json?
+  createdAt       DateTime              @default(now())
+  updatedAt       DateTime              @updatedAt
+
+  @@index([merchantId])
+  @@index([approvalType])
+  @@index([status])
+  @@index([settlementId])
+  @@index([paymentHoldId])
+  @@index([courierId])
+  @@index([requestedAt])
+}
+
+model PaymentBlockNote {
+  id            String   @id @default(uuid())
+  merchantId    String
+  paymentHoldId String?
+  settlementId  String?
+  approvalId    String?
+  courierId     String?
+  reasonCode    String
+  note          String
+  createdBy     String?
+  createdAt     DateTime @default(now())
+
+  @@index([merchantId])
+  @@index([paymentHoldId])
+  @@index([settlementId])
+  @@index([approvalId])
+  @@index([courierId])
+  @@index([reasonCode])
+  @@index([createdAt])
+}
+
 model User {
   id           String   @id @default(cuid())
   merchantId   String
   email        String   @unique
+  firebaseUid  String?  @unique
   passwordHash String
   name         String?
+  userType     String   @default("EXTERNAL_MERCHANT")
   role         String   @default("OWNER")
   createdAt    DateTime @default(now())
   updatedAt    DateTime @updatedAt
 
   merchant Merchant @relation(fields: [merchantId], references: [id], onDelete: Cascade)
+
+  @@index([firebaseUid])
 }
 
 model Order {
@@ -98,9 +966,16 @@ model Order {
   createdAt       DateTime    @default(now())
   updatedAt       DateTime    @updatedAt
 
-  merchant      Merchant      @relation(fields: [merchantId], references: [id], onDelete: Cascade)
-  riskScores    RiskScore[]
-  webhookEvents WebhookEvent[]
+  merchant          Merchant           @relation(fields: [merchantId], references: [id], onDelete: Cascade)
+  riskScores        RiskScore[]
+  webhookEvents     WebhookEvent[]
+  shipmentDetails   ShipmentDetails?
+  orderIntelligence OrderIntelligence?
+  predictionOutcome PredictionOutcome?
+  orderDataSignals  OrderDataSignals?
+  autonomousActions AutonomousAction[]
+  buyerCommunicationEvents BuyerCommunicationEvent[]
+  actionOutcomes ActionOutcome[]
 
   @@unique([merchantId, externalOrderId])
   @@index([merchantId, buyerPhone])
@@ -108,16 +983,338 @@ model Order {
   @@index([status])
 }
 
+model ShipmentDetails {
+  id                    String    @id @default(uuid())
+  orderId               String    @unique
+  merchantId            String
+  courierId             String?
+  awb                   String?
+  trackingNumber        String?
+  pincode               String
+  city                  String?
+  state                 String?
+  addressHash           String?
+  shipmentStatus        String    @default("CREATED")
+  pickupStatus          String?
+  deliveryStatus        String?
+  ndrStatus             String?
+  rtoStatus             String?
+  weightGrams           Int?
+  volumetricWeight      Decimal?  @db.Decimal(12, 2)
+  zone                  String?
+  shippingCharge        Decimal?  @db.Decimal(12, 2)
+  codCharge             Decimal?  @db.Decimal(12, 2)
+  rtoCharge             Decimal?  @db.Decimal(12, 2)
+  estimatedDeliveryDate DateTime?
+  actualDeliveryDate    DateTime?
+  firstAttemptAt        DateTime?
+  deliveredAt           DateTime?
+  rtoInitiatedAt        DateTime?
+  rtoDeliveredAt        DateTime?
+  createdAt             DateTime  @default(now())
+  updatedAt             DateTime  @updatedAt
+
+  order Order @relation(fields: [orderId], references: [id], onDelete: Cascade)
+
+  @@index([orderId])
+  @@index([merchantId])
+  @@index([courierId])
+  @@index([awb])
+  @@index([trackingNumber])
+  @@index([pincode])
+  @@index([shipmentStatus])
+  @@index([createdAt])
+}
+
+model OrderIntelligence {
+  id                     String           @id @default(uuid())
+  orderId                String           @unique
+  merchantId             String
+  buyerPhoneHash         String?
+  addressHash            String?
+  pincode                String?
+  consigneeScore         Int              @default(50)
+  consigneeTier          ConsigneeTier    @default(SILVER)
+  consigneeReasons       String[]         @default([])
+  merchantTrustScore     Int              @default(50)
+  merchantTrustTier      TrustTier?
+  merchantReasons        String[]         @default([])
+  courierId              String?
+  courierScore           Int?
+  courierReasons         String[]         @default([])
+  addressConfidenceScore Int?
+  pincodeRiskScore       Int?
+  codRiskScore           Int?
+  rtoRiskScore           Int?
+  fraudRiskScore         Int?
+  overallRiskScore       Int?
+  codDecision            CodDecision      @default(ALLOW_COD)
+  shipmentDecision       ShipmentDecision @default(SHIP)
+  riskReasons            String[]         @default([])
+  dataSnapshot           Json?
+  createdAt              DateTime         @default(now())
+  updatedAt              DateTime         @updatedAt
+
+  order Order @relation(fields: [orderId], references: [id], onDelete: Cascade)
+
+  @@index([orderId])
+  @@index([merchantId])
+  @@index([buyerPhoneHash])
+  @@index([addressHash])
+  @@index([pincode])
+  @@index([consigneeTier])
+  @@index([codDecision])
+  @@index([shipmentDecision])
+  @@index([overallRiskScore])
+  @@index([createdAt])
+}
+
+model ConsigneeProfile {
+  id                   String        @id @default(uuid())
+  phoneHash            String        @unique
+  totalOrders          Int           @default(0)
+  deliveredOrders      Int           @default(0)
+  rtoOrders            Int           @default(0)
+  ndrOrders            Int           @default(0)
+  cancelledOrders      Int           @default(0)
+  codOrders            Int           @default(0)
+  prepaidOrders        Int           @default(0)
+  postpaidOrders       Int           @default(0)
+  successfulCodOrders  Int           @default(0)
+  failedCodOrders      Int           @default(0)
+  repeatCodFailures    Int           @default(0)
+  avgOrderValue        Decimal       @default(0) @db.Decimal(12, 2)
+  maxOrderValue        Decimal       @default(0) @db.Decimal(12, 2)
+  avgCodAmount         Decimal       @default(0) @db.Decimal(12, 2)
+  maxCodAmount         Decimal       @default(0) @db.Decimal(12, 2)
+  addressCount         Int           @default(0)
+  highRiskAddressCount Int           @default(0)
+  pincodeCount         Int           @default(0)
+  deliverySuccessRate  Float         @default(0)
+  rtoRate              Float         @default(0)
+  ndrRate              Float         @default(0)
+  codSuccessRate       Float         @default(0)
+  prepaidRatio         Float         @default(0)
+  codRatio             Float         @default(0)
+  trustScore           Int           @default(50)
+  tier                 ConsigneeTier @default(SILVER)
+  riskLevel            RiskLevel     @default(MEDIUM)
+  lastOrderAt          DateTime?
+  createdAt            DateTime      @default(now())
+  updatedAt            DateTime      @updatedAt
+
+  @@index([phoneHash])
+  @@index([tier])
+  @@index([riskLevel])
+  @@index([trustScore])
+  @@index([lastOrderAt])
+}
+
+model PredictionOutcome {
+  id                        String           @id @default(uuid())
+  orderId                   String           @unique
+  merchantId                String
+  predictedConsigneeTier    ConsigneeTier
+  predictedCodDecision      CodDecision
+  predictedShipmentDecision ShipmentDecision
+  predictedRtoRiskScore     Int?
+  predictedCourierId        String?
+  actualOutcome             ActualOutcome    @default(PENDING)
+  predictionCorrect         Boolean?
+  falsePositive             Boolean?
+  falseNegative             Boolean?
+  reasonMismatch            String[]         @default([])
+  evaluatedAt               DateTime?
+  createdAt                 DateTime         @default(now())
+  updatedAt                 DateTime         @updatedAt
+
+  order Order @relation(fields: [orderId], references: [id], onDelete: Cascade)
+
+  @@index([orderId])
+  @@index([merchantId])
+  @@index([actualOutcome])
+  @@index([predictionCorrect])
+  @@index([createdAt])
+}
+
+model OrderDataSignals {
+  id                              String    @id @default(uuid())
+  orderId                         String    @unique
+  merchantId                      String
+  skuId                           String?
+  productCategory                 String?
+  itemCount                       Int?
+  productTitleNormalized          String?
+  salesChannel                    String?
+  storePlatform                   String?
+  utmSource                       String?
+  utmMedium                       String?
+  utmCampaign                     String?
+  campaignId                      String?
+  couponCode                      String?
+  discountAmount                  Decimal?  @db.Decimal(12, 2)
+  discountPercent                 Float?
+  otpVerified                     Boolean   @default(false)
+  whatsappConfirmed               Boolean   @default(false)
+  callConfirmed                   Boolean   @default(false)
+  failedOtpAttempts               Int       @default(0)
+  orderHour                       Int
+  orderDayOfWeek                  Int
+  isLateNightOrder                Boolean   @default(false)
+  isWeekendOrder                  Boolean   @default(false)
+  sellerProcessingTimeMinutes     Int?
+  ndrActionDelayMinutes           Int?
+  shippingChargeToSeller          Decimal?  @db.Decimal(12, 2)
+  courierCostToShipmastr          Decimal?  @db.Decimal(12, 2)
+  codFeeCharged                   Decimal?  @db.Decimal(12, 2)
+  codFeeCost                      Decimal?  @db.Decimal(12, 2)
+  rtoCost                         Decimal?  @db.Decimal(12, 2)
+  netMargin                       Decimal?  @db.Decimal(12, 2)
+  marginAfterRto                  Decimal?  @db.Decimal(12, 2)
+  promisedPickupDate              DateTime?
+  actualPickupDate                DateTime?
+  promisedDeliveryDate            DateTime?
+  actualDeliveryDate              DateTime?
+  promiseBreached                 Boolean?
+  declaredWeight                  Decimal?  @db.Decimal(12, 2)
+  chargedWeight                   Decimal?  @db.Decimal(12, 2)
+  courierMeasuredWeight           Decimal?  @db.Decimal(12, 2)
+  weightDisputeRaised             Boolean   @default(false)
+  manualEditCount                 Int       @default(0)
+  addressEditedAfterCreation      Boolean   @default(false)
+  paymentModeChangedAfterCreation Boolean   @default(false)
+  createdAt                       DateTime  @default(now())
+  updatedAt                       DateTime  @updatedAt
+
+  order Order @relation(fields: [orderId], references: [id], onDelete: Cascade)
+
+  @@index([orderId])
+  @@index([merchantId])
+  @@index([skuId])
+  @@index([campaignId])
+  @@index([salesChannel])
+  @@index([productCategory])
+  @@index([createdAt])
+}
+
+model MerchantAutomationPolicy {
+  id                                      String   @id @default(uuid())
+  merchantId                              String   @unique
+  autoCodControlEnabled                   Boolean  @default(true)
+  autoOtpForBronzeEnabled                 Boolean  @default(true)
+  autoPrepaidOnlyForIronEnabled           Boolean  @default(false)
+  autoAddressCorrectionEnabled            Boolean  @default(true)
+  autoCourierSelectionEnabled             Boolean  @default(true)
+  autoNdrRecoveryEnabled                  Boolean  @default(true)
+  autoRtoHoldEnabled                      Boolean  @default(false)
+  autoCancelAfterFailedVerificationEnabled Boolean @default(false)
+  maxAutoHoldOrderValue                   Decimal? @db.Decimal(12, 2)
+  maxAutoCourierCostIncrease              Decimal? @db.Decimal(12, 2)
+  maxAutoCodAmount                        Decimal? @db.Decimal(12, 2)
+  allowPrepaidConversionMessage           Boolean  @default(true)
+  allowBuyerWhatsappMessages              Boolean  @default(true)
+  allowBuyerSmsMessages                   Boolean  @default(true)
+  communicationEnabled                    Boolean  @default(true)
+  dailyWhatsappLimit                      Int?
+  dailySmsLimit                           Int?
+  buyerMessageQuietHoursStart             String?
+  buyerMessageQuietHoursEnd               String?
+  createdAt                               DateTime @default(now())
+  updatedAt                               DateTime @updatedAt
+
+  @@index([merchantId])
+}
+
+model AutonomousAction {
+  id                String                  @id @default(uuid())
+  orderId           String
+  merchantId        String
+  actionType        AutonomousActionType
+  automationLevel   AutomationLevel
+  status            AutonomousActionStatus  @default(PENDING)
+  reason            String
+  inputSnapshot     Json?
+  resultSnapshot    Json?
+  requiresApproval  Boolean                 @default(false)
+  approvedBy        String?
+  approvedAt        DateTime?
+  executedAt        DateTime?
+  failedAt          DateTime?
+  expiresAt         DateTime?
+  createdAt         DateTime                @default(now())
+  updatedAt         DateTime                @updatedAt
+
+  order Order @relation(fields: [orderId], references: [id], onDelete: Cascade)
+
+  @@index([orderId])
+  @@index([merchantId])
+  @@index([actionType])
+  @@index([status])
+  @@index([automationLevel])
+  @@index([createdAt])
+}
+
+model BuyerCommunicationEvent {
+  id                String                      @id @default(uuid())
+  orderId           String
+  merchantId        String
+  phoneHash         String?
+  channel           CommunicationChannel
+  template          String
+  status            CommunicationStatus         @default(QUEUED)
+  response          BuyerCommunicationResponse?
+  providerMessageId String?
+  sentAt            DateTime?
+  deliveredAt       DateTime?
+  readAt            DateTime?
+  respondedAt       DateTime?
+  metadata          Json?
+  createdAt         DateTime                    @default(now())
+  updatedAt         DateTime                    @updatedAt
+
+  order Order @relation(fields: [orderId], references: [id], onDelete: Cascade)
+
+  @@index([orderId])
+  @@index([merchantId])
+  @@index([phoneHash])
+  @@index([channel])
+  @@index([status])
+  @@index([providerMessageId])
+  @@index([createdAt])
+}
+
+/// Autonomy v1 uses ActionOutcome as the durable replacement for planned DecisionActionOutcome records.
+model ActionOutcome {
+  id              String                @id @default(uuid())
+  orderId         String
+  merchantId      String
+  actionType      AutonomousActionType
+  expectedOutcome String
+  actualOutcome   String?
+  worked          Boolean?
+  cost            Decimal?              @db.Decimal(12, 2)
+  createdAt       DateTime              @default(now())
+  updatedAt       DateTime              @updatedAt
+
+  order Order @relation(fields: [orderId], references: [id], onDelete: Cascade)
+
+  @@index([orderId])
+  @@index([merchantId])
+  @@index([actionType])
+  @@index([worked])
+  @@index([createdAt])
+}
+
 model RiskScore {
-  id                String       @id @default(cuid())
-  orderId            String
-  score              Int
-  level              RiskLevel
-  decision           RiskDecision
-  addressConfidence  Int
-  reasons            Json
-  modelVersion       String       @default("rules-v1")
-  createdAt          DateTime     @default(now())
+  id                String             @id @default(cuid())
+  orderId           String
+  score             Int
+  level             RiskLevel
+  decision          LegacyRiskDecision
+  addressConfidence Int
+  reasons           Json
+  modelVersion      String             @default("rules-v1")
+  createdAt         DateTime           @default(now())
 
   order Order @relation(fields: [orderId], references: [id], onDelete: Cascade)
 
@@ -127,16 +1324,16 @@ model RiskScore {
 }
 
 model WebhookEvent {
-  id             String        @id @default(cuid())
+  id             String          @id @default(cuid())
   provider       WebhookProvider
   eventType      String
   externalId     String
   orderId        String?
   payload        Json
-  signatureValid Boolean       @default(false)
-  status         WebhookStatus @default(RECEIVED)
+  signatureValid Boolean         @default(false)
+  status         WebhookStatus   @default(RECEIVED)
   error          String?
-  receivedAt     DateTime      @default(now())
+  receivedAt     DateTime        @default(now())
   processedAt    DateTime?
 
   order Order? @relation(fields: [orderId], references: [id], onDelete: SetNull)
@@ -147,12 +1344,12 @@ model WebhookEvent {
 }
 
 model IdempotencyKey {
-  id        String   @id @default(cuid())
+  id         String   @id @default(cuid())
   merchantId String
-  key       String
-  route     String
-  response  Json?
-  createdAt DateTime @default(now())
+  key        String
+  route      String
+  response   Json?
+  createdAt  DateTime @default(now())
 
   @@unique([merchantId, route, key])
   @@index([merchantId])
@@ -172,4 +1369,434 @@ model AuditLog {
 
   @@index([merchantId])
   @@index([action])
+}
+
+model JournalPost {
+  id                String            @id @default(uuid())
+  slug              String            @unique
+  title             String
+  category          String
+  seoTitle          String
+  metaDescription   String
+  excerpt           String
+  bodyHtml          String
+  bodyText          String
+  sourceNotes       Json
+  homepageTeaser    String
+  emailSubject      String
+  emailPreview      String
+  emailHtml         String
+  emailText         String
+  status            JournalPostStatus @default(DRAFT)
+  guardrailStatus   String
+  guardrailFailures Json
+  metadata          Json?
+  publishedAt       DateTime?
+  sentAt            DateTime?
+  createdAt         DateTime          @default(now())
+  updatedAt         DateTime          @updatedAt
+
+  @@index([status])
+  @@index([publishedAt])
+  @@index([createdAt])
+  @@index([category])
+}
+
+model NewsletterSubscriber {
+  id               String                     @id @default(uuid())
+  email            String                     @unique
+  status           NewsletterSubscriberStatus @default(SUBSCRIBED)
+  source           String?
+  subscribedAt     DateTime                   @default(now())
+  unsubscribedAt   DateTime?
+  unsubscribeToken String                     @unique
+  createdAt        DateTime                   @default(now())
+  updatedAt        DateTime                   @updatedAt
+
+  @@index([email])
+  @@index([status])
+  @@index([source])
+  @@index([subscribedAt])
+  @@index([unsubscribeToken])
+}
+
+model MerchantMetrics {
+  id               String   @id @default(uuid())
+  merchantId       String   @unique
+  totalOrders      Int      @default(0)
+  codOrders        Int      @default(0)
+  prepaidOrders    Int      @default(0)
+  deliveredOrders  Int      @default(0)
+  ndrOrders        Int      @default(0)
+  rtoOrders        Int      @default(0)
+  fraudSignalCount Int      @default(0)
+  codExposure      Decimal  @default(0) @db.Decimal(12, 2)
+  orderValueTotal  Decimal  @default(0) @db.Decimal(12, 2)
+  rtoRate          Decimal  @default(0) @db.Decimal(5, 4)
+  ndrRate          Decimal  @default(0) @db.Decimal(5, 4)
+  deliveryRate     Decimal  @default(0) @db.Decimal(5, 4)
+  trustScore       Int      @default(50)
+  metadata         Json?
+  createdAt        DateTime @default(now())
+  updatedAt        DateTime @updatedAt
+
+  @@index([merchantId])
+  @@index([createdAt])
+}
+
+model PincodeIntelligence {
+  id                String   @id @default(uuid())
+  pincode           String   @unique
+  totalOrders       Int      @default(0)
+  deliveredOrders   Int      @default(0)
+  ndrOrders         Int      @default(0)
+  rtoOrders         Int      @default(0)
+  fraudSignalCount  Int      @default(0)
+  addressConfidence Int      @default(70)
+  deliveryRate      Decimal  @default(0) @db.Decimal(5, 4)
+  rtoRate           Decimal  @default(0) @db.Decimal(5, 4)
+  ndrRate           Decimal  @default(0) @db.Decimal(5, 4)
+  metadata          Json?
+  createdAt         DateTime @default(now())
+  updatedAt         DateTime @updatedAt
+
+  @@index([pincode])
+  @@index([createdAt])
+}
+
+model AddressFingerprint {
+  id               String    @id @default(uuid())
+  merchantId       String
+  addressHash      String
+  pincode          String
+  totalOrders      Int       @default(0)
+  deliveredOrders  Int       @default(0)
+  ndrOrders        Int       @default(0)
+  rtoOrders        Int       @default(0)
+  fraudSignalCount Int       @default(0)
+  confidenceScore  Int       @default(70)
+  riskLevel        RiskLevel @default(LOW)
+  metadata         Json?
+  createdAt        DateTime  @default(now())
+  updatedAt        DateTime  @updatedAt
+
+  @@unique([merchantId, addressHash])
+  @@index([merchantId])
+  @@index([pincode])
+  @@index([addressHash])
+  @@index([createdAt])
+}
+
+model BuyerBehaviourProfile {
+  id               String   @id @default(uuid())
+  merchantId       String
+  phoneHash        String
+  totalOrders      Int      @default(0)
+  codOrders        Int      @default(0)
+  prepaidOrders    Int      @default(0)
+  deliveredOrders  Int      @default(0)
+  ndrOrders        Int      @default(0)
+  rtoOrders        Int      @default(0)
+  fraudSignalCount Int      @default(0)
+  riskScore        Int      @default(20)
+  metadata         Json?
+  createdAt        DateTime @default(now())
+  updatedAt        DateTime @updatedAt
+
+  @@unique([merchantId, phoneHash])
+  @@index([merchantId])
+  @@index([phoneHash])
+  @@index([createdAt])
+}
+
+model CodBehaviourProfile {
+  id                 String      @id @default(uuid())
+  merchantId         String
+  phoneHash          String
+  totalCodOrders     Int         @default(0)
+  deliveredCodOrders Int         @default(0)
+  rtoCodOrders       Int         @default(0)
+  otpRequiredCount   Int         @default(0)
+  prepaidOnlyCount   Int         @default(0)
+  codExposure        Decimal     @default(0) @db.Decimal(12, 2)
+  codSuccessRate     Decimal     @default(0) @db.Decimal(5, 4)
+  decision           CodDecision @default(ALLOW_COD)
+  metadata           Json?
+  createdAt          DateTime    @default(now())
+  updatedAt          DateTime    @updatedAt
+
+  @@unique([merchantId, phoneHash])
+  @@index([merchantId])
+  @@index([phoneHash])
+  @@index([createdAt])
+}
+
+model CourierPincodePerformance {
+  id              String   @id @default(uuid())
+  courierId       String
+  pincode         String
+  totalShipments  Int      @default(0)
+  deliveredCount  Int      @default(0)
+  ndrCount        Int      @default(0)
+  rtoCount        Int      @default(0)
+  lostCount       Int      @default(0)
+  avgDeliveryDays Decimal  @default(0) @db.Decimal(6, 2)
+  deliveryRate    Decimal  @default(0) @db.Decimal(5, 4)
+  rtoRate         Decimal  @default(0) @db.Decimal(5, 4)
+  score           Int      @default(50)
+  metadata        Json?
+  createdAt       DateTime @default(now())
+  updatedAt       DateTime @updatedAt
+
+  @@unique([courierId, pincode])
+  @@index([courierId])
+  @@index([pincode])
+  @@index([createdAt])
+}
+
+model CourierScorecard {
+  id              String   @id @default(uuid())
+  courierId       String   @unique
+  shipmentCount   Int      @default(0)
+  deliveredCount  Int      @default(0)
+  ndrCount        Int      @default(0)
+  rtoCount        Int      @default(0)
+  lostCount       Int      @default(0)
+  avgDeliveryDays Decimal  @default(0) @db.Decimal(6, 2)
+  deliveryRate    Decimal  @default(0) @db.Decimal(5, 4)
+  rtoRate         Decimal  @default(0) @db.Decimal(5, 4)
+  codDelayDays    Decimal  @default(0) @db.Decimal(6, 2)
+  score           Int      @default(50)
+  metadata        Json?
+  createdAt       DateTime @default(now())
+  updatedAt       DateTime @updatedAt
+
+  @@index([courierId])
+  @@index([createdAt])
+}
+
+model MerchantTrustProfile {
+  id               String    @id @default(uuid())
+  merchantId       String    @unique
+  tier             TrustTier @default(NEW)
+  trustScore       Int       @default(50)
+  totalOrders      Int       @default(0)
+  rtoRate          Decimal   @default(0) @db.Decimal(5, 4)
+  ndrRate          Decimal   @default(0) @db.Decimal(5, 4)
+  codExposure      Decimal   @default(0) @db.Decimal(12, 2)
+  reliabilityScore Int       @default(70)
+  reasons          Json?
+  metadata         Json?
+  createdAt        DateTime  @default(now())
+  updatedAt        DateTime  @updatedAt
+
+  @@index([merchantId])
+  @@index([tier])
+  @@index([createdAt])
+}
+
+model MerchantTrustEvent {
+  id          String     @id @default(uuid())
+  merchantId  String
+  orderId     String?
+  tierBefore  TrustTier?
+  tierAfter   TrustTier
+  scoreBefore Int?
+  scoreAfter  Int
+  reason      String
+  metadata    Json?
+  createdAt   DateTime   @default(now())
+
+  @@index([merchantId])
+  @@index([orderId])
+  @@index([createdAt])
+}
+
+model CodRemittanceLedger {
+  id             String    @id @default(uuid())
+  merchantId     String
+  orderId        String?
+  courierId      String?
+  amount         Decimal   @default(0) @db.Decimal(12, 2)
+  remittedAmount Decimal   @default(0) @db.Decimal(12, 2)
+  deductions     Decimal   @default(0) @db.Decimal(12, 2)
+  status         String    @default("pending")
+  expectedAt     DateTime?
+  remittedAt     DateTime?
+  metadata       Json?
+  createdAt      DateTime  @default(now())
+  updatedAt      DateTime  @updatedAt
+
+  @@index([merchantId])
+  @@index([orderId])
+  @@index([courierId])
+  @@index([createdAt])
+}
+
+model CodVerificationAttempt {
+  id         String      @id @default(uuid())
+  merchantId String
+  orderId    String?
+  phoneHash  String
+  decision   CodDecision
+  riskLevel  RiskLevel
+  success    Boolean     @default(false)
+  metadata   Json?
+  createdAt  DateTime    @default(now())
+  updatedAt  DateTime    @updatedAt
+
+  @@index([merchantId])
+  @@index([orderId])
+  @@index([phoneHash])
+  @@index([createdAt])
+}
+
+model NdrEvent {
+  id             String    @id @default(uuid())
+  merchantId     String
+  orderId        String?
+  courierId      String?
+  pincode        String?
+  phoneHash      String?
+  addressHash    String?
+  reason         NdrReason @default(OTHER)
+  actionRequired String?
+  metadata       Json?
+  createdAt      DateTime  @default(now())
+  updatedAt      DateTime  @updatedAt
+
+  @@index([merchantId])
+  @@index([orderId])
+  @@index([courierId])
+  @@index([pincode])
+  @@index([phoneHash])
+  @@index([addressHash])
+  @@index([createdAt])
+}
+
+model RtoEvent {
+  id          String    @id @default(uuid())
+  merchantId  String
+  orderId     String?
+  courierId   String?
+  pincode     String?
+  phoneHash   String?
+  addressHash String?
+  reason      RtoReason @default(OTHER)
+  metadata    Json?
+  createdAt   DateTime  @default(now())
+  updatedAt   DateTime  @updatedAt
+
+  @@index([merchantId])
+  @@index([orderId])
+  @@index([courierId])
+  @@index([pincode])
+  @@index([phoneHash])
+  @@index([addressHash])
+  @@index([createdAt])
+}
+
+model FraudSignal {
+  id          String    @id @default(uuid())
+  merchantId  String
+  orderId     String?
+  phoneHash   String?
+  addressHash String?
+  pincode     String?
+  riskLevel   RiskLevel
+  score       Int       @default(0)
+  signalType  String
+  reasons     Json?
+  metadata    Json?
+  createdAt   DateTime  @default(now())
+  updatedAt   DateTime  @updatedAt
+
+  @@index([merchantId])
+  @@index([orderId])
+  @@index([pincode])
+  @@index([phoneHash])
+  @@index([addressHash])
+  @@index([createdAt])
+}
+
+model RiskDecision {
+  id                String           @id @default(uuid())
+  merchantId        String
+  orderId           String
+  phoneHash         String?
+  addressHash       String?
+  riskLevel         RiskLevel
+  decision          RiskDecisionType
+  codDecision       CodDecision?
+  riskScore         Int              @default(0)
+  addressConfidence Int              @default(70)
+  reasons           Json?
+  metadata          Json?
+  createdAt         DateTime         @default(now())
+  updatedAt         DateTime         @updatedAt
+
+  @@index([merchantId])
+  @@index([orderId])
+  @@index([phoneHash])
+  @@index([addressHash])
+  @@index([createdAt])
+  @@map("RiskDecisionRecord")
+}
+
+model CourierRecommendation {
+  id               String   @id @default(uuid())
+  merchantId       String
+  orderId          String
+  courierId        String?
+  pincode          String
+  score            Int      @default(0)
+  estimatedCost    Decimal? @db.Decimal(12, 2)
+  estimatedEtaDays Int?
+  reasons          Json?
+  metadata         Json?
+  createdAt        DateTime @default(now())
+  updatedAt        DateTime @updatedAt
+
+  @@index([merchantId])
+  @@index([orderId])
+  @@index([courierId])
+  @@index([pincode])
+  @@index([createdAt])
+}
+
+model OperationalEvent {
+  id         String            @id @default(uuid())
+  merchantId String?
+  orderId    String?
+  courierId  String?
+  eventType  CourierEventType?
+  status     String
+  severity   RiskLevel         @default(LOW)
+  metadata   Json?
+  createdAt  DateTime          @default(now())
+  updatedAt  DateTime          @updatedAt
+
+  @@index([merchantId])
+  @@index([orderId])
+  @@index([courierId])
+  @@index([createdAt])
+}
+
+model SlaBreach {
+  id         String        @id @default(uuid())
+  merchantId String?
+  orderId    String?
+  courierId  String?
+  breachType SlaBreachType
+  status     String        @default("open")
+  severity   RiskLevel     @default(MEDIUM)
+  resolvedAt DateTime?
+  metadata   Json?
+  createdAt  DateTime      @default(now())
+  updatedAt  DateTime      @updatedAt
+
+  @@index([merchantId])
+  @@index([orderId])
+  @@index([courierId])
+  @@index([createdAt])
 }
