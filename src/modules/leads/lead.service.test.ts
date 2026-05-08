@@ -1,17 +1,20 @@
 import assert from "node:assert/strict";
 import { describe, it } from "node:test";
 import { LeadStatus } from "@prisma/client";
-import { createLead, listLeads, updateLead } from "./lead.service.js";
+import { convertLeadToSeller, createLead, listLeads, updateLead } from "./lead.service.js";
 
 const now = new Date("2026-05-08T09:30:00.000Z");
 
 function makeLeadClient() {
   const state = {
     leads: [] as any[],
+    merchants: [] as any[],
+    users: [] as any[],
     auditLogs: [] as any[]
   };
 
   const client = {
+    $transaction: async (callback: any) => callback(client),
     lead: {
       create: async ({ data }: any) => {
         const lead = {
@@ -38,6 +41,40 @@ function makeLeadClient() {
         if (!lead) throw new Error("LEAD_NOT_FOUND");
         Object.assign(lead, data, { updatedAt: now });
         return lead;
+      }
+    },
+    merchant: {
+      findUnique: async ({ where }: any) => {
+        if (where.id) return state.merchants.find((merchant) => merchant.id === where.id) ?? null;
+        if (where.email) return state.merchants.find((merchant) => merchant.email === where.email) ?? null;
+        return null;
+      },
+      create: async ({ data }: any) => {
+        const merchant = {
+          id: `merchant_${state.merchants.length + 1}`,
+          createdAt: now,
+          updatedAt: now,
+          ...data
+        };
+        state.merchants.push(merchant);
+        return merchant;
+      }
+    },
+    user: {
+      findUnique: async ({ where }: any) => {
+        if (where.email) return state.users.find((user) => user.email === where.email) ?? null;
+        if (where.id) return state.users.find((user) => user.id === where.id) ?? null;
+        return null;
+      },
+      create: async ({ data }: any) => {
+        const user = {
+          id: `user_${state.users.length + 1}`,
+          createdAt: now,
+          updatedAt: now,
+          ...data
+        };
+        state.users.push(user);
+        return user;
       }
     },
     auditLog: {
@@ -102,7 +139,7 @@ describe("leads", () => {
 
     assert.equal(result?.lead.status, LeadStatus.CONTACTED);
     assert.equal(result?.lead.notes, "Called founder");
-    assert.equal(state.auditLogs.length, 1);
+    assert.equal(state.auditLogs.length, 2);
     assert.equal(state.auditLogs[0]?.action, "ADMIN_LEAD_STATUS_CHANGED");
     assert.deepEqual(state.auditLogs[0]?.metadata, {
       from: LeadStatus.NEW,
@@ -110,6 +147,7 @@ describe("leads", () => {
       email: "lead@example.com",
       businessName: "Store"
     });
+    assert.equal(state.auditLogs[1]?.action, "ADMIN_LEAD_NOTES_UPDATED");
   });
 
   it("returns null when the lead does not exist", async () => {
@@ -120,5 +158,31 @@ describe("leads", () => {
     }, client);
 
     assert.equal(result, null);
+  });
+
+  it("converts a lead into a seller merchant and user idempotently", async () => {
+    const { client, state } = makeLeadClient();
+    await createLead({
+      name: "Founder",
+      businessName: "Skymax Store",
+      phone: "9876543210",
+      email: "FOUNDER@EXAMPLE.COM"
+    }, client);
+
+    const first = await convertLeadToSeller({ id: "lead_1", actorId: "admin_1" }, client);
+    const second = await convertLeadToSeller({ id: "lead_1", actorId: "admin_1" }, client);
+
+    assert.equal(first?.lead.status, LeadStatus.CONVERTED);
+    assert.equal(first?.lead.merchantId, "merchant_1");
+    assert.equal(first?.merchant.email, "founder@example.com");
+    assert.equal(first?.user.email, "founder@example.com");
+    assert.equal(first?.user.role, "OWNER");
+    assert.equal(first?.user.userType, "EXTERNAL_MERCHANT");
+    assert.equal((first?.user as any).passwordHash, undefined);
+    assert.equal(second?.reusedMerchant, true);
+    assert.equal(second?.reusedUser, true);
+    assert.equal(state.merchants.length, 1);
+    assert.equal(state.users.length, 1);
+    assert.equal(state.auditLogs.at(-1)?.action, "LEAD_CONVERTED_TO_SELLER");
   });
 });

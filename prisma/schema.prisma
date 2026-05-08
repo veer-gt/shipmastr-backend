@@ -325,6 +325,7 @@ model Merchant {
   updatedAt DateTime @updatedAt
 
   users     User[]
+  leads     Lead[]
   orders    Order[]
   auditLogs AuditLog[]
 }
@@ -1434,6 +1435,7 @@ model Lead {
   businessName     String
   phone            String
   email            String
+  merchantId       String?
   monthlyShipments String?
   currentProvider  String?
   biggestIssue     String?
@@ -1442,8 +1444,11 @@ model Lead {
   createdAt        DateTime   @default(now())
   updatedAt        DateTime   @updatedAt
 
+  merchant Merchant? @relation(fields: [merchantId], references: [id], onDelete: SetNull)
+
   @@index([email])
   @@index([phone])
+  @@index([merchantId])
   @@index([status])
   @@index([createdAt])
 }

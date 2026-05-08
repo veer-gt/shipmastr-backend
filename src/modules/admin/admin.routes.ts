@@ -4,7 +4,7 @@ import { Router } from "express";
 import { z } from "zod";
 import { prisma } from "../../lib/prisma.js";
 import { HttpError } from "../../lib/httpError.js";
-import { listLeads, updateLead } from "../leads/lead.service.js";
+import { convertLeadToSeller, listLeads, updateLead } from "../leads/lead.service.js";
 
 export const adminRouter = Router();
 
@@ -464,6 +464,21 @@ adminRouter.patch("/leads/:id", async (req, res) => {
   }
 
   res.json(result);
+});
+
+adminRouter.post("/leads/:id/convert", async (req, res) => {
+  const input: Parameters<typeof convertLeadToSeller>[0] = {
+    id: req.params.id
+  };
+  if (req.auth?.userId) input.actorId = req.auth.userId;
+
+  const result = await convertLeadToSeller(input);
+
+  if (!result) {
+    throw new HttpError(404, "LEAD_NOT_FOUND");
+  }
+
+  res.json({ ok: true, ...result });
 });
 
 adminRouter.use((_req, _res, next) => {
