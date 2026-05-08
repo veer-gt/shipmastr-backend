@@ -239,6 +239,14 @@ enum NewsletterSubscriberStatus {
   UNSUBSCRIBED
 }
 
+enum LeadStatus {
+  NEW
+  CONTACTED
+  QUALIFIED
+  CONVERTED
+  LOST
+}
+
 enum TrustTier {
   NEW
   WATCHLIST
@@ -1418,6 +1426,26 @@ model NewsletterSubscriber {
   @@index([source])
   @@index([subscribedAt])
   @@index([unsubscribeToken])
+}
+
+model Lead {
+  id               String     @id @default(uuid())
+  name             String
+  businessName     String
+  phone            String
+  email            String
+  monthlyShipments String?
+  currentProvider  String?
+  biggestIssue     String?
+  notes            String?
+  status           LeadStatus @default(NEW)
+  createdAt        DateTime   @default(now())
+  updatedAt        DateTime   @updatedAt
+
+  @@index([email])
+  @@index([phone])
+  @@index([status])
+  @@index([createdAt])
 }
 
 model MerchantMetrics {
