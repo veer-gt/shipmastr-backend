@@ -6,6 +6,14 @@ import { prisma } from "../../lib/prisma.js";
 import { HttpError } from "../../lib/httpError.js";
 import { convertLeadToSeller, listLeads, updateLead } from "../leads/lead.service.js";
 import { createSellerInvite } from "../auth/password-reset.service.js";
+import {
+  adminFirstShipmentPatchSchema,
+  notFoundFirstShipmentRequest
+} from "../firstShipmentRequest/first-shipment-request.routes.js";
+import {
+  listAdminFirstShipmentRequests,
+  updateFirstShipmentRequest
+} from "../firstShipmentRequest/first-shipment-request.service.js";
 
 export const adminRouter = Router();
 
@@ -489,6 +497,28 @@ adminRouter.post("/users/:id/invite", async (req, res) => {
   if (req.auth?.userId) input.actorId = req.auth.userId;
 
   res.json(await createSellerInvite(input));
+});
+
+adminRouter.get("/first-shipment-requests", async (_req, res) => {
+  res.json(await listAdminFirstShipmentRequests());
+});
+
+adminRouter.patch("/first-shipment-requests/:id", async (req, res) => {
+  const body = adminFirstShipmentPatchSchema.parse(req.body);
+  const patch: Parameters<typeof updateFirstShipmentRequest>[0]["patch"] = {};
+  if (body.status !== undefined) patch.status = body.status;
+  if (body.notes !== undefined) patch.notes = body.notes;
+
+  const input: Parameters<typeof updateFirstShipmentRequest>[0] = {
+    id: req.params.id,
+    patch
+  };
+  if (req.auth?.userId) input.actorId = req.auth.userId;
+
+  const result = await updateFirstShipmentRequest(input);
+  if (!result) throw notFoundFirstShipmentRequest();
+
+  res.json({ request: result });
 });
 
 adminRouter.use((_req, _res, next) => {

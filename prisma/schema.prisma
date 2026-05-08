@@ -280,6 +280,15 @@ enum PasswordResetPurpose {
   RESET
 }
 
+enum FirstShipmentRequestStatus {
+  NEW
+  REVIEWING
+  APPROVED
+  SCHEDULED
+  COMPLETED
+  CANCELLED
+}
+
 enum CourierEventType {
   PICKUP_SCHEDULED
   PICKED_UP
@@ -350,6 +359,7 @@ model Merchant {
 
   users     User[]
   leads     Lead[]
+  firstShipmentRequests FirstShipmentRequest[]
   orders    Order[]
   auditLogs AuditLog[]
 }
@@ -977,6 +987,7 @@ model User {
 
   merchant Merchant @relation(fields: [merchantId], references: [id], onDelete: Cascade)
   passwordResetTokens PasswordResetToken[]
+  firstShipmentRequests FirstShipmentRequest[]
 
   @@index([firebaseUid])
 }
@@ -996,6 +1007,34 @@ model PasswordResetToken {
   @@index([purpose])
   @@index([expiresAt])
   @@index([usedAt])
+}
+
+model FirstShipmentRequest {
+  id              String                     @id @default(uuid())
+  merchantId      String
+  requesterUserId String
+  pickupName      String
+  pickupPhone     String
+  pickupAddress   String
+  pickupPincode   String
+  deliveryCity    String
+  deliveryPincode String
+  packageWeight   Int
+  paymentMode     PaymentMode
+  codAmount       Int                        @default(0)
+  notes           String?
+  status          FirstShipmentRequestStatus @default(NEW)
+  createdAt       DateTime                   @default(now())
+  updatedAt       DateTime                   @updatedAt
+
+  merchant  Merchant @relation(fields: [merchantId], references: [id], onDelete: Cascade)
+  requester User     @relation(fields: [requesterUserId], references: [id], onDelete: Restrict)
+
+  @@index([merchantId])
+  @@index([requesterUserId])
+  @@index([status])
+  @@index([paymentMode])
+  @@index([createdAt])
 }
 
 model Order {
