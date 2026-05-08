@@ -275,6 +275,13 @@ enum MerchantOnboardingStepStatus {
   BLOCKED
 }
 
+enum MerchantAdminStatus {
+  NEW
+  ONBOARDING
+  READY_TO_SHIP
+  BLOCKED
+}
+
 enum PasswordResetPurpose {
   INVITE
   RESET
@@ -354,6 +361,8 @@ model Merchant {
   bankStatus          MerchantOnboardingStepStatus @default(PENDING)
   firstShipmentStatus MerchantOnboardingStepStatus @default(PENDING)
   onboardingNotes     String?
+  adminStatus         MerchantAdminStatus          @default(NEW)
+  adminNotes          String?
   createdAt           DateTime                     @default(now())
   updatedAt           DateTime                     @updatedAt
 
@@ -362,6 +371,9 @@ model Merchant {
   firstShipmentRequests FirstShipmentRequest[]
   orders    Order[]
   auditLogs AuditLog[]
+
+  @@index([adminStatus])
+  @@index([onboardingStatus])
 }
 
 model CourierPartner {

@@ -1,4 +1,4 @@
-import { LeadStatus, OrderStatus, Prisma } from "@prisma/client";
+import { LeadStatus, MerchantAdminStatus, OrderStatus, Prisma } from "@prisma/client";
 import bcrypt from "bcryptjs";
 import { Router } from "express";
 import { z } from "zod";
@@ -14,6 +14,11 @@ import {
   listAdminFirstShipmentRequests,
   updateFirstShipmentRequest
 } from "../firstShipmentRequest/first-shipment-request.service.js";
+import {
+  getAdminSellerDetail,
+  listAdminSellers,
+  updateAdminSeller
+} from "./services/admin-seller.service.js";
 
 export const adminRouter = Router();
 
@@ -91,6 +96,18 @@ const leadPatchSchema = z.object({
   notes: z.string().trim().max(1200).optional().or(z.literal(""))
 }).refine((body) => body.status !== undefined || body.notes !== undefined, {
   message: "status or notes is required"
+});
+
+const sellerPatchSchema = z.object({
+  adminStatus: z.nativeEnum(MerchantAdminStatus).optional(),
+  adminNotes: z.string().trim().max(2000).optional().nullable().or(z.literal("")),
+  onboardingNotes: z.string().trim().max(2000).optional().nullable().or(z.literal(""))
+}).refine((body) => (
+  body.adminStatus !== undefined ||
+  body.adminNotes !== undefined ||
+  body.onboardingNotes !== undefined
+), {
+  message: "adminStatus, adminNotes or onboardingNotes is required"
 });
 
 function zoneForLane(fromPincode: string, toPincode: string) {
@@ -497,6 +514,36 @@ adminRouter.post("/users/:id/invite", async (req, res) => {
   if (req.auth?.userId) input.actorId = req.auth.userId;
 
   res.json(await createSellerInvite(input));
+});
+
+adminRouter.get("/sellers", async (_req, res) => {
+  res.json(await listAdminSellers());
+});
+
+adminRouter.get("/sellers/:merchantId", async (req, res) => {
+  const result = await getAdminSellerDetail(req.params.merchantId);
+  if (!result) throw new HttpError(404, "SELLER_NOT_FOUND");
+
+  res.json(result);
+});
+
+adminRouter.patch("/sellers/:merchantId", async (req, res) => {
+  const body = sellerPatchSchema.parse(req.body);
+  const patch: Parameters<typeof updateAdminSeller>[0]["patch"] = {};
+  if (body.adminStatus !== undefined) patch.adminStatus = body.adminStatus;
+  if (body.adminNotes !== undefined) patch.adminNotes = body.adminNotes;
+  if (body.onboardingNotes !== undefined) patch.onboardingNotes = body.onboardingNotes;
+
+  const input: Parameters<typeof updateAdminSeller>[0] = {
+    merchantId: req.params.merchantId,
+    patch
+  };
+  if (req.auth?.userId) input.actorId = req.auth.userId;
+
+  const result = await updateAdminSeller(input);
+  if (!result) throw new HttpError(404, "SELLER_NOT_FOUND");
+
+  res.json(result);
 });
 
 adminRouter.get("/first-shipment-requests", async (_req, res) => {
