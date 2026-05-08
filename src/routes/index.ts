@@ -18,6 +18,7 @@ import { intelligenceOpsRouter, intelligenceRouter } from "../modules/intelligen
 import { journalRouter } from "../modules/journal/journal.routes.js";
 import { leadsRouter } from "../modules/leads/leads.routes.js";
 import { newsletterRouter } from "../modules/newsletter/newsletter.routes.js";
+import { onboardingRouter } from "../modules/onboarding/onboarding.routes.js";
 import { reconciliationRouter } from "../modules/reconciliation/reconciliation.routes.js";
 import { webhooksRouter } from "../modules/webhooks/webhooks.routes.js";
 import { tasksRouter } from "../modules/tasks/tasks.routes.js";
@@ -45,6 +46,7 @@ apiRouter.use("/imports", requireJwtAuth, importsRouter);
 apiRouter.use("/journal", journalRouter);
 apiRouter.use("/leads", leadsRouter);
 apiRouter.use("/newsletter", newsletterRouter);
+apiRouter.use("/onboarding", requireJwtAuth, onboardingRouter);
 apiRouter.use("/tracking", trackingRouter);
 apiRouter.use("/intelligence/ops", requireInternalSecret, intelligenceOpsRouter);
 apiRouter.use("/intelligence", requireJwtAuth, intelligenceRouter);

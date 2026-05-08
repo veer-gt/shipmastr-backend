@@ -81,7 +81,15 @@ export async function createLead(input: LeadCreateInput, client: Db = prisma) {
 
 export async function listLeads(input: { status?: LeadStatus } = {}, client: Db = prisma) {
   const query: Prisma.LeadFindManyArgs = {
-    orderBy: { createdAt: "desc" }
+    orderBy: { createdAt: "desc" },
+    include: {
+      merchant: {
+        select: {
+          id: true,
+          onboardingStatus: true
+        }
+      }
+    }
   };
 
   if (input.status) query.where = { status: input.status };

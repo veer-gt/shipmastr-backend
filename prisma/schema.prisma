@@ -262,6 +262,19 @@ enum UserRole {
   ADMIN
 }
 
+enum MerchantOnboardingStatus {
+  PENDING
+  IN_PROGRESS
+  READY_TO_SHIP
+}
+
+enum MerchantOnboardingStepStatus {
+  PENDING
+  IN_PROGRESS
+  COMPLETED
+  BLOCKED
+}
+
 enum CourierEventType {
   PICKUP_SCHEDULED
   PICKED_UP
@@ -317,12 +330,18 @@ enum WebhookStatus {
 }
 
 model Merchant {
-  id        String   @id @default(cuid())
-  name      String
-  email     String   @unique
-  phone     String?
-  createdAt DateTime @default(now())
-  updatedAt DateTime @updatedAt
+  id                  String                       @id @default(cuid())
+  name                String
+  email               String                       @unique
+  phone               String?
+  onboardingStatus    MerchantOnboardingStatus     @default(PENDING)
+  pickupAddressStatus MerchantOnboardingStepStatus @default(PENDING)
+  kycStatus           MerchantOnboardingStepStatus @default(PENDING)
+  bankStatus          MerchantOnboardingStepStatus @default(PENDING)
+  firstShipmentStatus MerchantOnboardingStepStatus @default(PENDING)
+  onboardingNotes     String?
+  createdAt           DateTime                     @default(now())
+  updatedAt           DateTime                     @updatedAt
 
   users     User[]
   leads     Lead[]
