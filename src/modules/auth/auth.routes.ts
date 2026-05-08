@@ -3,6 +3,7 @@ import bcrypt from "bcryptjs";
 import { randomInt } from "node:crypto";
 import jwt from "jsonwebtoken";
 import { z } from "zod";
+import { MerchantOnboardingStatus } from "@prisma/client";
 import { prisma } from "../../lib/prisma.js";
 import { env } from "../../config/env.js";
 import { HttpError } from "../../lib/httpError.js";
@@ -10,6 +11,7 @@ import { emailTemplates, sendTransactionalEmail } from "../../lib/email.js";
 import { dashboardPathForRole, normalizeAccountRole, UserRole } from "../../lib/accountRoles.js";
 import admin from "../../lib/firebase.js";
 import { changePasswordForAccount, type PasswordAccount } from "./change-password.service.js";
+import { requestPasswordReset, resetPasswordWithToken, verifyPasswordResetToken } from "./password-reset.service.js";
 
 export const authRouter = Router();
 
@@ -117,18 +119,25 @@ async function sendRegistrationCode(email: string, code: string) {
   });
 }
 
-function sellerUserResponse(user: { id: string; email: string; merchantId: string; role: string }, merchant: { id: string; name: string; phone?: string | null }) {
+function sellerUserResponse(
+  user: { id: string; email: string; merchantId: string; role: string },
+  merchant: { id: string; name: string; phone?: string | null; onboardingStatus?: MerchantOnboardingStatus | string | null }
+) {
   const role = normalizeAccountRole(user.role);
+  const dashboardPath = role === UserRole.SELLER && merchant.onboardingStatus !== MerchantOnboardingStatus.READY_TO_SHIP
+    ? "/seller/onboarding"
+    : dashboardPathForRole(role);
   return {
     id: user.id,
     email: user.email,
     businessName: merchant.name,
     merchantId: merchant.id,
     phoneNumber: merchant.phone || undefined,
+    onboardingStatus: merchant.onboardingStatus || MerchantOnboardingStatus.PENDING,
     plan: "Lite",
     role,
     accountType: role,
-    dashboardPath: dashboardPathForRole(role)
+    dashboardPath
   };
 }
 
@@ -273,9 +282,14 @@ authRouter.post("/register/verify-code", async (req, res) => {
     ...accountTemplate
   });
 
+  const responseUser = sellerUserResponse(user, merchant);
+
   res.status(201).json({
     token,
-    user: sellerUserResponse(user, merchant)
+    role: responseUser.role,
+    accountType: responseUser.accountType,
+    dashboardPath: responseUser.dashboardPath,
+    user: responseUser
   });
 });
 
@@ -310,16 +324,18 @@ authRouter.post("/register", async (req, res) => {
 
   const token = signSellerToken(user);
 
+  const responseUser = sellerUserResponse(user, merchant);
+
   res.status(201).json({
     token,
-    role: normalizeAccountRole(user.role),
-    accountType: normalizeAccountRole(user.role),
-    dashboardPath: dashboardPathForRole(user.role),
+    role: responseUser.role,
+    accountType: responseUser.accountType,
+    dashboardPath: responseUser.dashboardPath,
     merchant: {
       id: merchant.id,
       name: merchant.name
     },
-    user: sellerUserResponse(user, merchant)
+    user: responseUser
   });
 });
 
@@ -352,13 +368,14 @@ authRouter.post("/mobile", async (req, res) => {
   if (existingMerchant && existingMerchant.users[0]) {
     const user = existingMerchant.users[0];
     const token = signSellerToken(user);
+    const responseUser = sellerUserResponse(user, existingMerchant);
 
     return res.json({
       token,
-      role: normalizeAccountRole(user.role),
-      accountType: normalizeAccountRole(user.role),
-      dashboardPath: dashboardPathForRole(user.role),
-      user: sellerUserResponse(user, existingMerchant)
+      role: responseUser.role,
+      accountType: responseUser.accountType,
+      dashboardPath: responseUser.dashboardPath,
+      user: responseUser
     });
   }
 
@@ -384,12 +401,14 @@ authRouter.post("/mobile", async (req, res) => {
 
   const token = signSellerToken(user);
 
+  const responseUser = sellerUserResponse(user, merchant);
+
   return res.status(201).json({
     token,
-    role: normalizeAccountRole(user.role),
-    accountType: normalizeAccountRole(user.role),
-    dashboardPath: dashboardPathForRole(user.role),
-    user: sellerUserResponse(user, merchant)
+    role: responseUser.role,
+    accountType: responseUser.accountType,
+    dashboardPath: responseUser.dashboardPath,
+    user: responseUser
   });
 });
 
@@ -405,6 +424,23 @@ const loginSchema = z.object({
 const changePasswordSchema = z.object({
   currentPassword: z.string().min(1),
   newPassword: z.string().min(8)
+});
+
+const requestPasswordResetSchema = z.object({
+  email: z.string().trim().email()
+});
+
+const verifyResetTokenSchema = z.object({
+  token: z.string().trim().min(20)
+});
+
+const resetPasswordSchema = z.object({
+  token: z.string().trim().min(20),
+  newPassword: z.string().min(8).optional(),
+  new_password: z.string().min(8).optional()
+}).refine((body) => body.newPassword || body.new_password, {
+  path: ["newPassword"],
+  message: "newPassword is required"
 });
 
 function readAuthToken(req: Request) {
@@ -458,6 +494,29 @@ authRouter.post("/change-password", async (req, res) => {
   const account = resolvePasswordAccount(req);
   const result = await changePasswordForAccount(account, body);
   res.json(result);
+});
+
+authRouter.post("/request-password-reset", async (req, res) => {
+  const body = requestPasswordResetSchema.parse(req.body);
+  await requestPasswordReset(body);
+  res.json({ ok: true });
+});
+
+authRouter.post("/forgot-password", async (req, res) => {
+  const body = requestPasswordResetSchema.parse(req.body);
+  await requestPasswordReset(body);
+  res.json({ ok: true, message: "If an account exists, password reset instructions will be sent." });
+});
+
+authRouter.post("/verify-reset-token", async (req, res) => {
+  const body = verifyResetTokenSchema.parse(req.body);
+  res.json(await verifyPasswordResetToken(body));
+});
+
+authRouter.post("/reset-password", async (req, res) => {
+  const body = resetPasswordSchema.parse(req.body);
+  const newPassword = body.newPassword || body.new_password!;
+  res.json(await resetPasswordWithToken({ token: body.token, newPassword }));
 });
 
 authRouter.post("/login", async (req, res) => {
@@ -523,13 +582,14 @@ authRouter.post("/login", async (req, res) => {
   if (!valid) throw new HttpError(400, "INVALID_LOGIN");
 
   const token = signSellerToken(user);
+  const responseUser = sellerUserResponse(user, user.merchant);
 
   res.json({
     token,
-    role: normalizeAccountRole(user.role),
-    accountType: normalizeAccountRole(user.role),
-    dashboardPath: dashboardPathForRole(user.role),
-    user: sellerUserResponse(user, user.merchant)
+    role: responseUser.role,
+    accountType: responseUser.accountType,
+    dashboardPath: responseUser.dashboardPath,
+    user: responseUser
   });
 });
 
@@ -579,10 +639,11 @@ authRouter.get("/me", async (req, res) => {
       email: user.email,
       businessName: user.merchant.name,
       merchantId: user.merchantId,
+      onboardingStatus: user.merchant.onboardingStatus,
       plan: "Lite",
       role: normalizeAccountRole(user.role),
       accountType: normalizeAccountRole(user.role),
-      dashboardPath: dashboardPathForRole(user.role)
+      dashboardPath: sellerUserResponse(user, user.merchant).dashboardPath
     });
   } catch (err) {
     return res.status(401).json({ error: "Token is not valid" });

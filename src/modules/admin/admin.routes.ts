@@ -5,6 +5,7 @@ import { z } from "zod";
 import { prisma } from "../../lib/prisma.js";
 import { HttpError } from "../../lib/httpError.js";
 import { convertLeadToSeller, listLeads, updateLead } from "../leads/lead.service.js";
+import { createSellerInvite } from "../auth/password-reset.service.js";
 
 export const adminRouter = Router();
 
@@ -479,6 +480,15 @@ adminRouter.post("/leads/:id/convert", async (req, res) => {
   }
 
   res.json({ ok: true, ...result });
+});
+
+adminRouter.post("/users/:id/invite", async (req, res) => {
+  const input: Parameters<typeof createSellerInvite>[0] = {
+    userId: req.params.id
+  };
+  if (req.auth?.userId) input.actorId = req.auth.userId;
+
+  res.json(await createSellerInvite(input));
 });
 
 adminRouter.use((_req, _res, next) => {

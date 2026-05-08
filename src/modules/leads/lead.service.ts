@@ -86,7 +86,15 @@ export async function listLeads(input: { status?: LeadStatus } = {}, client: Db 
       merchant: {
         select: {
           id: true,
-          onboardingStatus: true
+          onboardingStatus: true,
+          users: {
+            take: 1,
+            orderBy: { createdAt: "asc" },
+            select: {
+              id: true,
+              email: true
+            }
+          }
         }
       }
     }

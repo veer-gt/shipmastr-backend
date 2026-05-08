@@ -275,6 +275,11 @@ enum MerchantOnboardingStepStatus {
   BLOCKED
 }
 
+enum PasswordResetPurpose {
+  INVITE
+  RESET
+}
+
 enum CourierEventType {
   PICKUP_SCHEDULED
   PICKED_UP
@@ -971,8 +976,26 @@ model User {
   updatedAt    DateTime @updatedAt
 
   merchant Merchant @relation(fields: [merchantId], references: [id], onDelete: Cascade)
+  passwordResetTokens PasswordResetToken[]
 
   @@index([firebaseUid])
+}
+
+model PasswordResetToken {
+  id        String               @id @default(uuid())
+  userId    String
+  tokenHash String               @unique
+  purpose   PasswordResetPurpose
+  expiresAt DateTime
+  usedAt    DateTime?
+  createdAt DateTime             @default(now())
+
+  user User @relation(fields: [userId], references: [id], onDelete: Cascade)
+
+  @@index([userId])
+  @@index([purpose])
+  @@index([expiresAt])
+  @@index([usedAt])
 }
 
 model Order {
