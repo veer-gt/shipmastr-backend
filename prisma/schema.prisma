@@ -491,6 +491,8 @@ model CourierPartner {
   operationalLocations CourierOperationalLocation[]
   serviceablePincodes CourierServiceablePincode[]
   pilotChecklist CourierPilotChecklistItem[]
+  developerCredentials CourierDeveloperCredential[]
+  apiEvents CourierApiEvent[]
 
   @@index([active])
   @@index([priority])
@@ -868,6 +870,7 @@ model CourierShipment {
   events               CourierEvent[]
   ndr                  CourierNdr?
   rto                  CourierRto?
+  apiEvents            CourierApiEvent[]
 
   @@index([courierId])
   @@index([courierId, status])
@@ -934,6 +937,9 @@ model CourierWebhookConfig {
   courierId String
   targetUrl String
   secret    String
+  secretRef String?
+  maskedSecret String?
+  signingMethod String @default("HMAC_SHA256")
   active    Boolean  @default(true)
   events    String[] @default([])
   createdAt DateTime @default(now())
@@ -943,6 +949,51 @@ model CourierWebhookConfig {
 
   @@index([courierId])
   @@index([active])
+  @@index([secretRef])
+}
+
+model CourierDeveloperCredential {
+  id             String   @id @default(cuid())
+  courierId      String
+  environment    String   @default("sandbox")
+  credentialType String
+  maskedValue    String
+  secretRef      String   @unique
+  status         String   @default("ACTIVE")
+  createdAt      DateTime @default(now())
+  updatedAt      DateTime @updatedAt
+
+  courier CourierPartner @relation(fields: [courierId], references: [id], onDelete: Cascade)
+
+  @@unique([courierId, environment, credentialType])
+  @@index([courierId])
+  @@index([environment])
+  @@index([credentialType])
+  @@index([status])
+}
+
+model CourierApiEvent {
+  id                String   @id @default(cuid())
+  courierId         String
+  courierShipmentId String?
+  eventType         String
+  externalEventId   String?
+  source            String   @default("INBOUND_COURIER")
+  status            String   @default("ACCEPTED")
+  signatureValid    Boolean  @default(false)
+  error             String?
+  rawPayload        Json?
+  createdAt         DateTime @default(now())
+
+  courier  CourierPartner    @relation(fields: [courierId], references: [id], onDelete: Cascade)
+  shipment CourierShipment?  @relation(fields: [courierShipmentId], references: [id], onDelete: SetNull)
+
+  @@index([courierId])
+  @@index([courierShipmentId])
+  @@index([eventType])
+  @@index([status])
+  @@index([createdAt])
+  @@index([externalEventId])
 }
 
 model CourierInvoice {

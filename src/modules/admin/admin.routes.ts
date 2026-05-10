@@ -32,6 +32,13 @@ import {
   updateCourierPilotChecklistItem,
   upsertCourierServiceablePincodes
 } from "../courierPilot/courier-pilot.service.js";
+import {
+  getAdminCourierDeveloperCredentials,
+  issueCourierDeveloperCredentials,
+  revokeCourierDeveloperCredentials,
+  rotateCourierDeveloperApiKey,
+  rotateCourierDeveloperSigningSecret
+} from "../courierDeveloper/courier-developer.service.js";
 import { getCourierActivationReadiness } from "../taxCompliance/tax-compliance.service.js";
 import {
   getAdminSellerDetail,
@@ -46,6 +53,19 @@ import {
 } from "./services/admin-onboarding-checklist.service.js";
 
 export const adminRouter = Router();
+
+async function courierDeveloperCredentialActor(userId: string) {
+  const user = await prisma.user.findUnique({
+    where: { id: userId },
+    select: { role: true, userType: true }
+  });
+
+  if (!user || user.userType !== "INTERNAL_SHIPMASTR" || !["MASTER_ADMIN", "COURIER_MANAGER"].includes(user.role)) {
+    throw new HttpError(403, "COURIER_DEVELOPER_CREDENTIAL_ADMIN_ONLY");
+  }
+
+  return user.role;
+}
 
 const courierSchema = z.object({
   name: z.string().trim().min(2),
@@ -338,6 +358,55 @@ adminRouter.patch("/couriers/:id", async (req, res) => {
 
 adminRouter.get("/couriers/:courierId/setup", async (req, res) => {
   res.json(await getCourierPilotSetup(req.params.courierId));
+});
+
+adminRouter.get("/couriers/:courierId/developer-credentials", async (req, res) => {
+  await courierDeveloperCredentialActor(req.auth!.userId);
+  res.json(await getAdminCourierDeveloperCredentials({ courierId: req.params.courierId }));
+});
+
+adminRouter.post("/couriers/:courierId/developer-credentials/issue", async (req, res) => {
+  const actorRole = await courierDeveloperCredentialActor(req.auth!.userId);
+  const result = await issueCourierDeveloperCredentials({
+    courierId: req.params.courierId,
+    actorId: req.auth!.userId,
+    actorRole
+  });
+
+  res.status(201).json(result);
+});
+
+adminRouter.post("/couriers/:courierId/developer-credentials/rotate-api-key", async (req, res) => {
+  const actorRole = await courierDeveloperCredentialActor(req.auth!.userId);
+  const result = await rotateCourierDeveloperApiKey({
+    courierId: req.params.courierId,
+    actorId: req.auth!.userId,
+    actorRole
+  });
+
+  res.json(result);
+});
+
+adminRouter.post("/couriers/:courierId/developer-credentials/rotate-signing-secret", async (req, res) => {
+  const actorRole = await courierDeveloperCredentialActor(req.auth!.userId);
+  const result = await rotateCourierDeveloperSigningSecret({
+    courierId: req.params.courierId,
+    actorId: req.auth!.userId,
+    actorRole
+  });
+
+  res.json(result);
+});
+
+adminRouter.post("/couriers/:courierId/developer-credentials/revoke", async (req, res) => {
+  const actorRole = await courierDeveloperCredentialActor(req.auth!.userId);
+  const result = await revokeCourierDeveloperCredentials({
+    courierId: req.params.courierId,
+    actorId: req.auth!.userId,
+    actorRole
+  });
+
+  res.json(result);
 });
 
 adminRouter.post("/couriers/:courierId/serviceable-pincodes", async (req, res) => {
