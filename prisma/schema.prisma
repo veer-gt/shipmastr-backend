@@ -333,6 +333,13 @@ enum CourierPartnerOnboardingStatus {
   REOPENED
 }
 
+enum CourierPartnerApplicationStatus {
+  PENDING_REVIEW
+  IN_REVIEW
+  CONVERTED
+  REJECTED
+}
+
 enum CourierSandboxVerificationStatus {
   PENDING
   IN_PROGRESS
@@ -490,6 +497,35 @@ model CourierPartner {
   @@index([gstin])
   @@index([serviceCode])
   @@index([bookingMode])
+}
+
+model CourierPartnerApplication {
+  id                         String                          @id @default(cuid())
+  companyName                String
+  contactName                String
+  phone                      String
+  email                      String
+  website                    String?
+  gstin                      String
+  registeredState            String
+  registeredCity             String
+  operationalStates          String[]                        @default([])
+  serviceablePincodesEstimate String
+  codSupported               Boolean
+  apiAvailable               Boolean
+  notes                      String?
+  status                     CourierPartnerApplicationStatus @default(PENDING_REVIEW)
+  convertedCourierId         String?
+  reviewedAt                 DateTime?
+  reviewedBy                 String?
+  createdAt                  DateTime                        @default(now())
+  updatedAt                  DateTime                        @updatedAt
+
+  @@index([status])
+  @@index([email])
+  @@index([gstin])
+  @@index([createdAt])
+  @@index([convertedCourierId])
 }
 
 model MerchantGstinRecord {
