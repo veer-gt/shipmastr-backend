@@ -1187,10 +1187,10 @@ export async function updateCourierOperationalLocation(input: {
 }
 
 export async function getCourierActivationReadiness(courierId: string, client: Db = prisma) {
-  const [courier, gstins, locations] = await Promise.all([
+  const [courier, gstins, locations, rateCardCount, serviceablePincodeCount] = await Promise.all([
     client.courierPartner.findUnique({
       where: { id: courierId },
-      select: { id: true, gstin: true }
+      select: { id: true, gstin: true, bookingMode: true }
     }),
     client.courierGstinRecord.findMany({
       where: { courierId },
@@ -1200,7 +1200,9 @@ export async function getCourierActivationReadiness(courierId: string, client: D
       where: { courierId },
       include: { linkedGstin: true },
       orderBy: [{ isDefault: "desc" }, { createdAt: "desc" }]
-    })
+    }),
+    client.rateCard.count({ where: { courierId } }),
+    client.courierServiceablePincode.count({ where: { courierId, active: true } })
   ]);
 
   const issues: Array<{
@@ -1262,10 +1264,34 @@ export async function getCourierActivationReadiness(courierId: string, client: D
     }
   }
 
+  if (!rateCardCount) {
+    issues.push({
+      code: "COURIER_RATE_CARD_REQUIRED",
+      message: "At least one courier rate card must exist before LIVE activation."
+    });
+  }
+
+  if (!serviceablePincodeCount) {
+    issues.push({
+      code: "COURIER_SERVICEABLE_PINCODES_REQUIRED",
+      message: "At least one active serviceable pincode must exist before LIVE activation."
+    });
+  }
+
+  if (!courier?.bookingMode) {
+    issues.push({
+      code: "COURIER_BOOKING_MODE_REQUIRED",
+      message: "Courier booking mode must be selected before LIVE activation."
+    });
+  }
+
   return {
     ready: issues.length === 0,
     issues,
     verifiedGstinCount: verifiedGstins.length,
-    approvedOfficeCount: approvedLocations.length
+    approvedOfficeCount: approvedLocations.length,
+    rateCardCount,
+    serviceablePincodeCount,
+    bookingMode: courier?.bookingMode || null
   };
 }

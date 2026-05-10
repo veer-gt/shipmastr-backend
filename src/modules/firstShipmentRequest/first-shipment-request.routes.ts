@@ -63,17 +63,27 @@ firstShipmentRequestRouter.post("/", async (req, res) => {
 export const adminFirstShipmentPatchSchema = z.object({
   status: z.nativeEnum(FirstShipmentRequestStatus).optional(),
   courierPreference: z.string().trim().max(120).optional().or(z.literal("")),
+  assignedCourierId: z.string().trim().max(120).optional().nullable().or(z.literal("")),
+  freightEstimate: z.coerce.number().int().min(0).optional().nullable().or(z.literal("")),
+  codAmount: z.coerce.number().int().min(0).optional().nullable().or(z.literal("")),
   awb: z.string().trim().max(80).optional().or(z.literal("")),
   trackingNumber: z.string().trim().max(120).optional().or(z.literal("")),
+  trackingUrl: z.string().trim().url().optional().nullable().or(z.literal("")),
+  opsNotes: z.string().trim().max(2000).optional().nullable().or(z.literal("")),
   notes: z.string().trim().max(1200).optional().or(z.literal(""))
 }).refine((body) => (
   body.status !== undefined ||
   body.courierPreference !== undefined ||
+  body.assignedCourierId !== undefined ||
+  body.freightEstimate !== undefined ||
+  body.codAmount !== undefined ||
   body.awb !== undefined ||
   body.trackingNumber !== undefined ||
+  body.trackingUrl !== undefined ||
+  body.opsNotes !== undefined ||
   body.notes !== undefined
 ), {
-  message: "status, courierPreference, awb, trackingNumber or notes is required"
+  message: "At least one first shipment admin field is required"
 });
 
 export function notFoundFirstShipmentRequest() {

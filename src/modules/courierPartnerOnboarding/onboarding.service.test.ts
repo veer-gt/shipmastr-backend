@@ -32,6 +32,7 @@ function makeOnboardingClient() {
       gstRate: 18,
       active: true,
       apiMode: "manual",
+      bookingMode: "manual",
       supportsCOD: true,
       supportsPrepaid: true,
       supportsPickup: true,
@@ -70,6 +71,8 @@ function makeOnboardingClient() {
     verificationItems: [] as any[],
     courierGstins: [] as any[],
     courierLocations: [] as any[],
+    rateCards: [] as any[],
+    serviceablePincodes: [] as any[],
     audits: [] as any[],
     auditLogs: [] as any[]
   };
@@ -126,6 +129,15 @@ function makeOnboardingClient() {
         };
         return state.courier;
       }
+    },
+    rateCard: {
+      count: async ({ where }: any) => state.rateCards.filter((row) => row.courierId === where.courierId).length
+    },
+    courierServiceablePincode: {
+      count: async ({ where }: any) => state.serviceablePincodes.filter((row) => (
+        row.courierId === where.courierId &&
+        (where.active === undefined || row.active === where.active)
+      )).length
     },
     courierGstinRecord: {
       findMany: async ({ where }: any) => (
@@ -536,6 +548,8 @@ describe("courier partner onboarding service", () => {
       createdAt: now,
       updatedAt: now
     });
+    state.rateCards.push({ id: "rate_1", courierId: "courier_1" });
+    state.serviceablePincodes.push({ id: "pincode_1", courierId: "courier_1", pincode: "400001", active: true });
 
     await setAdminCourierPartnerStatus({
       courierIdOrOnboardingId: "courier_1",

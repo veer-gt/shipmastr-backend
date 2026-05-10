@@ -28,6 +28,11 @@ function matchesWhere(item: any, where: any = {}) {
       return item[key] !== (value as { not: unknown }).not;
     }
 
+    if (value && typeof value === "object" && "notIn" in value) {
+      const list = (value as { notIn: unknown[] }).notIn;
+      return !list.includes(item[key]);
+    }
+
     return item[key] === value;
   });
 }
@@ -153,6 +158,31 @@ function makeClient() {
     }
   }];
 
+  const couriers = [{
+    id: "courier_manual",
+    name: "Northline Express",
+    code: "NLE",
+    active: true,
+    apiMode: "manual",
+    bookingMode: "manual",
+    supportsCOD: true,
+    updatedAt: newer,
+    _count: {
+      rateCards: 1,
+      serviceablePincodes: 2,
+      gstinRecords: 1,
+      operationalLocations: 1
+    }
+  }];
+
+  const courierShipments = [{
+    id: "shipment_pending",
+    courierId: "courier_manual",
+    status: "pickup_scheduled",
+    createdAt: newer,
+    updatedAt: newer
+  }];
+
   const model = (rows: any[]) => ({
     count: async ({ where }: any = {}) => rows.filter((row) => matchesWhere(row, where)).length,
     findMany: async ({ where, orderBy, take }: any = {}) => ordered(rows.filter((row) => matchesWhere(row, where)), orderBy).slice(0, take)
@@ -161,7 +191,9 @@ function makeClient() {
   return {
     lead: model(leads),
     merchant: model(merchants),
-    firstShipmentRequest: model(firstShipmentRequests)
+    firstShipmentRequest: model(firstShipmentRequests),
+    courierPartner: model(couriers),
+    courierShipment: model(courierShipments)
   } as any;
 }
 
@@ -176,6 +208,9 @@ describe("admin ops dashboard", () => {
     assert.equal(dashboard.counts.firstShipmentsByStatus.NEW, 1);
     assert.equal(dashboard.conversionHealth.totalLeads, 2);
     assert.equal(dashboard.conversionHealth.conversionRatePercent, 50);
+    assert.equal(dashboard.pilot.firstCourierSetup.totalCouriers, 1);
+    assert.equal(dashboard.pilot.firstCourierSetup.manualBookingCouriers, 1);
+    assert.equal(dashboard.pilot.manualShipmentsPending, 1);
 
     assert.equal(dashboard.latest.leads[0]?.id, "lead_new");
     assert.equal(dashboard.latest.sellers[0]?.id, "merchant_onboarding");

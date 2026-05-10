@@ -7,6 +7,7 @@ import {
   PaymentMode
 } from "@prisma/client";
 import {
+  convertFirstShipmentRequestToManualShipment,
   createFirstShipmentRequest,
   listSellerFirstShipmentRequests,
   updateFirstShipmentRequest
@@ -30,14 +31,28 @@ function makeClient() {
       updatedAt: now
     }] as any[],
     users: [{ id: "user_1", email: "seller@example.com", name: "Seller" }] as any[],
+    couriers: [{
+      id: "courier_1",
+      name: "Northline Express",
+      code: "NLE",
+      apiMode: "manual",
+      bookingMode: "manual"
+    }] as any[],
     requests: [] as any[],
+    shipments: [] as any[],
     auditLogs: [] as any[]
   };
 
   const withInclude = (request: any) => ({
     ...request,
     merchant: state.merchants.find((merchant) => merchant.id === request.merchantId),
-    requester: state.users.find((user) => user.id === request.requesterUserId)
+    requester: state.users.find((user) => user.id === request.requesterUserId),
+    manualShipment: state.shipments.find((shipment) => shipment.firstShipmentRequestId === request.id)
+      ? {
+        ...state.shipments.find((shipment) => shipment.firstShipmentRequestId === request.id),
+        courier: state.couriers.find((courier) => courier.id === state.shipments.find((shipment) => shipment.firstShipmentRequestId === request.id)?.courierId)
+      }
+      : null
   });
 
   const client = {
@@ -80,6 +95,32 @@ function makeClient() {
         if (!merchant) throw new Error("MERCHANT_NOT_FOUND");
         Object.assign(merchant, data, { updatedAt: now });
         return merchant;
+      }
+    },
+    courierPartner: {
+      findUnique: async ({ where }: any) => state.couriers.find((courier) => courier.id === where.id) ?? null
+    },
+    courierShipment: {
+      create: async ({ data }: any) => {
+        const shipment = {
+          id: `shipment_${state.shipments.length + 1}`,
+          createdAt: now,
+          updatedAt: now,
+          ...data,
+          courier: state.couriers.find((courier) => courier.id === data.courierId),
+          events: data.events?.create ? [{ id: "event_1", ...data.events.create }] : []
+        };
+        state.shipments.push(shipment);
+        return shipment;
+      },
+      update: async ({ where, data }: any) => {
+        const shipment = state.shipments.find((item) => item.id === where.id);
+        if (!shipment) throw new Error("SHIPMENT_NOT_FOUND");
+        Object.assign(shipment, data, {
+          updatedAt: now,
+          courier: state.couriers.find((courier) => courier.id === data.courierId)
+        });
+        return shipment;
       }
     },
     auditLog: {
@@ -165,6 +206,43 @@ describe("first shipment requests", () => {
     assert.equal(state.merchants[0].firstShipmentStatus, MerchantOnboardingStepStatus.COMPLETED);
     assert.equal(state.auditLogs.some((log) => log.action === "FIRST_SHIPMENT_REQUEST_UPDATED"), true);
     assert.equal(state.auditLogs.at(-1)?.metadata.changed.awb, true);
+  });
+
+  it("converts a first shipment request into an audited manual courier shipment", async () => {
+    const { client, state } = makeClient();
+    await createFirstShipmentRequest({
+      merchantId: "merchant_1",
+      requesterUserId: "user_1",
+      pickupName: "Ops Seller",
+      pickupPhone: "9876543210",
+      pickupAddress: "Warehouse 1, Mumbai",
+      pickupPincode: "400001",
+      deliveryCity: "Pune",
+      deliveryPincode: "411001",
+      packageWeight: 750,
+      paymentMode: PaymentMode.COD,
+      codAmount: 129900,
+      notes: null
+    }, client);
+
+    const result = await convertFirstShipmentRequestToManualShipment({
+      requestId: "fsr_1",
+      actorId: "admin_1",
+      courierId: "courier_1",
+      awbNumber: "qa-awb-1001",
+      freightEstimate: 8500,
+      codAmount: 129900,
+      status: "pickup_scheduled",
+      trackingUrl: "https://track.example/qa-awb-1001",
+      opsNotes: "Booked by phone with courier ops"
+    }, client);
+
+    assert.equal(result?.shipment.awbNumber, "QA-AWB-1001");
+    assert.equal(result?.shipment.freightEstimate, 8500);
+    assert.equal(result?.request.status, FirstShipmentRequestStatus.AWB_ADDED);
+    assert.equal(result?.request.assignedCourierId, "courier_1");
+    assert.equal(state.shipments.length, 1);
+    assert.equal(state.auditLogs.some((log) => log.action === "FIRST_SHIPMENT_MANUAL_SHIPMENT_CREATED"), true);
   });
 
   it("blocks onboarding when manual first shipment is RTO or cancelled", async () => {

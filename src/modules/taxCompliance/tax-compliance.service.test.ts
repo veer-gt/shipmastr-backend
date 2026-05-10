@@ -37,10 +37,13 @@ function makeTaxClient() {
     courier: {
       id: "courier_1",
       name: "Northline Express",
-      gstin: "27AAPFU0939F1ZV"
+      gstin: "27AAPFU0939F1ZV",
+      bookingMode: "manual"
     },
     courierGstins: [] as any[],
     courierLocations: [] as any[],
+    rateCards: [] as any[],
+    serviceablePincodes: [] as any[],
     auditLogs: [] as any[]
   };
 
@@ -134,6 +137,12 @@ function makeTaxClient() {
     },
     courierPartner: {
       findUnique: async ({ where }: any) => where.id === state.courier.id ? state.courier : null
+    },
+    rateCard: {
+      count: async ({ where }: any) => state.rateCards.filter((row) => matchesWhere(row, where)).length
+    },
+    courierServiceablePincode: {
+      count: async ({ where }: any) => state.serviceablePincodes.filter((row) => matchesWhere(row, where)).length
     },
     courierGstinRecord: {
       findMany: async ({ where }: any) => sortByCreatedDesc(state.courierGstins.filter((row) => matchesWhere(row, where))),
@@ -519,13 +528,15 @@ describe("pickup-state GSTIN tax compliance", () => {
     assert.equal(state.auditLogs.some((log) => log.action === "COURIER_GSTIN_LEGAL_TRADE_NAME_MISMATCH_HOLD"), true);
   });
 
-  it("reports courier activation readiness only after verified GSTIN and approved same-state office", async () => {
-    const { client } = makeTaxClient();
+  it("reports courier activation readiness only after compliance and pilot setup are complete", async () => {
+    const { client, state } = makeTaxClient();
 
     let readiness = await getCourierActivationReadiness("courier_1", client);
     assert.equal(readiness.ready, false);
     assert.equal(readiness.issues.some((issue) => issue.code === "COURIER_VERIFIED_GSTIN_REQUIRED"), true);
     assert.equal(readiness.issues.some((issue) => issue.code === "COURIER_APPROVED_OPERATIONAL_OFFICE_REQUIRED"), true);
+    assert.equal(readiness.issues.some((issue) => issue.code === "COURIER_RATE_CARD_REQUIRED"), true);
+    assert.equal(readiness.issues.some((issue) => issue.code === "COURIER_SERVICEABLE_PINCODES_REQUIRED"), true);
 
     const gstin = await createCourierGstinRecord({
       courierId: "courier_1",
@@ -548,11 +559,15 @@ describe("pickup-state GSTIN tax compliance", () => {
       actorId: "admin_1",
       patch: { status: PickupPointStatus.APPROVED }
     }, client);
+    state.rateCards.push({ id: "rate_1", courierId: "courier_1" });
+    state.serviceablePincodes.push({ id: "pincode_1", courierId: "courier_1", active: true, pincode: "400001" });
 
     readiness = await getCourierActivationReadiness("courier_1", client);
     assert.equal(readiness.ready, true);
     assert.equal(readiness.verifiedGstinCount, 1);
     assert.equal(readiness.approvedOfficeCount, 1);
+    assert.equal(readiness.rateCardCount, 1);
+    assert.equal(readiness.serviceablePincodeCount, 1);
   });
 
   it("blocks courier operational locations when courier has no base GSTIN", async () => {

@@ -461,6 +461,7 @@ model CourierPartner {
   gstRate             Int      @default(18)
   active              Boolean  @default(true)
   apiMode             String   @default("manual")
+  bookingMode         String   @default("manual")
   supportsCOD         Boolean  @default(true)
   supportsPrepaid     Boolean  @default(true)
   supportsPickup      Boolean  @default(true)
@@ -481,11 +482,14 @@ model CourierPartner {
   sandboxVerificationChecklist CourierSandboxVerificationChecklistItem[]
   gstinRecords CourierGstinRecord[]
   operationalLocations CourierOperationalLocation[]
+  serviceablePincodes CourierServiceablePincode[]
+  pilotChecklist CourierPilotChecklistItem[]
 
   @@index([active])
   @@index([priority])
   @@index([gstin])
   @@index([serviceCode])
+  @@index([bookingMode])
 }
 
 model MerchantGstinRecord {
@@ -639,6 +643,26 @@ model RateCard {
   @@index([minWeight, maxWeight])
 }
 
+model CourierServiceablePincode {
+  id               String   @id @default(cuid())
+  courierId        String
+  pincode          String
+  supportsPickup   Boolean  @default(true)
+  supportsDelivery Boolean  @default(true)
+  supportsCOD      Boolean  @default(true)
+  active           Boolean  @default(true)
+  notes            String?
+  createdAt        DateTime @default(now())
+  updatedAt        DateTime @updatedAt
+
+  courier CourierPartner @relation(fields: [courierId], references: [id], onDelete: Cascade)
+
+  @@unique([courierId, pincode])
+  @@index([courierId])
+  @@index([pincode])
+  @@index([active])
+}
+
 model CourierUser {
   id           String    @id @default(cuid())
   courierId    String
@@ -761,9 +785,32 @@ model CourierSandboxVerificationChecklistItem {
   @@index([verifiedBy])
 }
 
+model CourierPilotChecklistItem {
+  id          String                            @id @default(cuid())
+  courierId   String
+  itemKey     String
+  label       String
+  status      CourierSandboxVerificationStatus @default(PENDING)
+  owner       String?
+  notes       String?
+  evidenceUrl String?
+  verifiedAt  DateTime?
+  verifiedBy  String?
+  createdAt   DateTime                          @default(now())
+  updatedAt   DateTime                          @updatedAt
+
+  courier CourierPartner @relation(fields: [courierId], references: [id], onDelete: Cascade)
+
+  @@unique([courierId, itemKey])
+  @@index([courierId])
+  @@index([status])
+  @@index([verifiedBy])
+}
+
 model CourierShipment {
   id                   String      @id @default(cuid())
   courierId            String
+  firstShipmentRequestId String?    @unique
   orderId              String?
   awbNumber            String      @unique
   fromPincode          String
@@ -772,18 +819,23 @@ model CourierShipment {
   weightGrams          Int?
   paymentMode          PaymentMode @default(PREPAID)
   codAmount            Int         @default(0)
+  freightEstimate      Int?
+  trackingUrl          String?
+  opsNotes             String?
   lastEvent            String?
   expectedDeliveryDate DateTime?
   createdAt            DateTime    @default(now())
   updatedAt            DateTime    @updatedAt
 
-  courier CourierPartner @relation(fields: [courierId], references: [id], onDelete: Cascade)
-  events  CourierEvent[]
-  ndr     CourierNdr?
-  rto     CourierRto?
+  courier              CourierPartner       @relation(fields: [courierId], references: [id], onDelete: Cascade)
+  firstShipmentRequest FirstShipmentRequest? @relation(fields: [firstShipmentRequestId], references: [id], onDelete: SetNull)
+  events               CourierEvent[]
+  ndr                  CourierNdr?
+  rto                  CourierRto?
 
   @@index([courierId])
   @@index([courierId, status])
+  @@index([firstShipmentRequestId])
   @@index([orderId])
 }
 
@@ -1425,22 +1477,31 @@ model FirstShipmentRequest {
   paymentMode     PaymentMode
   codAmount       Int                        @default(0)
   courierPreference String?
+  assignedCourierId String?
+  freightEstimate Int?
   awb             String?
   trackingNumber  String?
+  trackingUrl     String?
+  opsNotes        String?
   notes           String?
   status          FirstShipmentRequestStatus @default(NEW)
+  adminApprovedAt DateTime?
+  adminApprovedBy String?
   createdAt       DateTime                   @default(now())
   updatedAt       DateTime                   @updatedAt
 
-  merchant  Merchant @relation(fields: [merchantId], references: [id], onDelete: Cascade)
-  requester User     @relation(fields: [requesterUserId], references: [id], onDelete: Restrict)
+  merchant       Merchant          @relation(fields: [merchantId], references: [id], onDelete: Cascade)
+  requester      User              @relation(fields: [requesterUserId], references: [id], onDelete: Restrict)
+  manualShipment CourierShipment?
 
   @@index([merchantId])
   @@index([requesterUserId])
+  @@index([assignedCourierId])
   @@index([status])
   @@index([paymentMode])
   @@index([awb])
   @@index([trackingNumber])
+  @@index([adminApprovedAt])
   @@index([createdAt])
 }
 

@@ -61,6 +61,10 @@ const firstShipmentSelect = {
   courierPreference: true,
   awb: true,
   trackingNumber: true,
+  assignedCourierId: true,
+  freightEstimate: true,
+  trackingUrl: true,
+  opsNotes: true,
   notes: true,
   status: true,
   createdAt: true,
@@ -80,6 +84,25 @@ const firstShipmentSelect = {
     }
   }
 } satisfies Prisma.FirstShipmentRequestSelect;
+
+const courierPilotSelect = {
+  id: true,
+  name: true,
+  code: true,
+  active: true,
+  apiMode: true,
+  bookingMode: true,
+  supportsCOD: true,
+  updatedAt: true,
+  _count: {
+    select: {
+      rateCards: true,
+      serviceablePincodes: true,
+      gstinRecords: true,
+      operationalLocations: true
+    }
+  }
+} satisfies Prisma.CourierPartnerSelect;
 
 async function countByValues<T extends string>(
   values: readonly T[],
@@ -105,7 +128,12 @@ export async function buildAdminOpsDashboard(client: Db = prisma) {
     latestFirstShipmentRequests,
     urgentLeads,
     sellersNeedingAction,
-    firstShipmentsNeedingReview
+    firstShipmentsNeedingReview,
+    courierSetupQueue,
+    totalCouriers,
+    liveCouriers,
+    manualBookingCouriers,
+    manualShipmentsPending
   ] = await Promise.all([
     countByValues(leadStatuses, (status) => client.lead.count({ where: { status } })),
     countByValues(merchantAdminStatuses, (status) => client.merchant.count({ where: { adminStatus: status } })),
@@ -157,6 +185,21 @@ export async function buildAdminOpsDashboard(client: Db = prisma) {
       },
       take: 5,
       orderBy: { createdAt: "desc" }
+    }),
+    client.courierPartner.findMany({
+      select: courierPilotSelect,
+      take: 5,
+      orderBy: { updatedAt: "desc" }
+    }),
+    client.courierPartner.count(),
+    client.courierPartner.count({ where: { apiMode: "live", active: true } }),
+    client.courierPartner.count({ where: { bookingMode: "manual" } }),
+    client.courierShipment.count({
+      where: {
+        status: {
+          notIn: ["delivered", "cancelled", "rto", "DELIVERED", "CANCELLED", "RTO"]
+        }
+      }
     })
   ]);
 
@@ -170,6 +213,19 @@ export async function buildAdminOpsDashboard(client: Db = prisma) {
       sellersByAdminStatus,
       sellersByOnboardingStatus,
       firstShipmentsByStatus
+    },
+    pilot: {
+      firstCourierSetup: {
+        totalCouriers,
+        liveCouriers,
+        manualBookingCouriers,
+        setupQueue: courierSetupQueue
+      },
+      firstSellerPilot: {
+        sellersNeedingAction: sellersNeedingAction.length,
+        firstShipmentsNeedingReview: firstShipmentsNeedingReview.length
+      },
+      manualShipmentsPending
     },
     latest: {
       leads: latestLeads,

@@ -1,4 +1,13 @@
-import { AdminOnboardingChecklistItemStatus, LeadStatus, MerchantAdminStatus, OrderStatus, Prisma, SellerKycStatus } from "@prisma/client";
+import {
+  AdminOnboardingChecklistItemStatus,
+  CourierSandboxVerificationStatus,
+  FirstShipmentRequestStatus,
+  LeadStatus,
+  MerchantAdminStatus,
+  OrderStatus,
+  Prisma,
+  SellerKycStatus
+} from "@prisma/client";
 import bcrypt from "bcryptjs";
 import { Router } from "express";
 import { z } from "zod";
@@ -13,9 +22,17 @@ import {
   notFoundFirstShipmentRequest
 } from "../firstShipmentRequest/first-shipment-request.routes.js";
 import {
+  convertFirstShipmentRequestToManualShipment,
   listAdminFirstShipmentRequests,
   updateFirstShipmentRequest
 } from "../firstShipmentRequest/first-shipment-request.service.js";
+import {
+  deleteCourierServiceablePincode,
+  getCourierPilotSetup,
+  updateCourierPilotChecklistItem,
+  upsertCourierServiceablePincodes
+} from "../courierPilot/courier-pilot.service.js";
+import { getCourierActivationReadiness } from "../taxCompliance/tax-compliance.service.js";
 import {
   getAdminSellerDetail,
   listAdminSellers,
@@ -40,6 +57,7 @@ const courierSchema = z.object({
   gstRate: z.coerce.number().default(18),
   active: z.boolean().default(true),
   apiMode: z.enum(["manual", "mock", "live"]).default("manual"),
+  bookingMode: z.enum(["manual", "api", "hybrid"]).default("manual"),
   supportsCOD: z.boolean().default(true),
   supportsPrepaid: z.boolean().default(true),
   supportsPickup: z.boolean().default(true),
@@ -74,6 +92,10 @@ const courierShipmentSchema = z.object({
   weightGrams: z.number().int().positive().optional(),
   paymentMode: z.enum(["PREPAID", "COD", "prepaid", "cod"]).default("PREPAID"),
   codAmount: z.number().int().min(0).default(0),
+  freightEstimate: z.number().int().min(0).optional(),
+  trackingUrl: z.string().trim().url().optional().or(z.literal("")),
+  opsNotes: z.string().trim().max(2000).optional().or(z.literal("")),
+  firstShipmentRequestId: z.string().trim().optional().or(z.literal("")),
   expectedDeliveryDate: z.string().trim().optional()
 });
 
@@ -91,6 +113,43 @@ const rateCardSchema = z.object({
 }).refine((body) => body.maxWeight >= body.minWeight, {
   path: ["maxWeight"],
   message: "maxWeight must be greater than or equal to minWeight"
+});
+
+const rateCardBulkSchema = z.object({
+  rateCards: z.array(rateCardSchema).min(1).max(200)
+});
+
+const serviceablePincodeSchema = z.object({
+  pincodes: z.array(z.string()).min(1).max(500),
+  supportsPickup: z.boolean().default(true),
+  supportsDelivery: z.boolean().default(true),
+  supportsCOD: z.boolean().default(true),
+  active: z.boolean().default(true),
+  notes: z.string().trim().max(1200).optional().or(z.literal(""))
+});
+
+const courierPilotChecklistPatchSchema = z.object({
+  status: z.nativeEnum(CourierSandboxVerificationStatus).optional(),
+  owner: z.string().trim().max(160).optional().nullable().or(z.literal("")),
+  notes: z.string().trim().max(2500).optional().nullable().or(z.literal("")),
+  evidenceUrl: z.string().trim().url().optional().nullable().or(z.literal(""))
+}).refine((body) => (
+  body.status !== undefined ||
+  body.owner !== undefined ||
+  body.notes !== undefined ||
+  body.evidenceUrl !== undefined
+), {
+  message: "At least one pilot checklist field is required"
+});
+
+const manualShipmentFromRequestSchema = z.object({
+  courierId: z.string().trim().min(1),
+  awbNumber: z.string().trim().min(4).max(80),
+  freightEstimate: z.number().int().min(0).optional(),
+  codAmount: z.number().int().min(0).optional(),
+  status: z.string().trim().min(2).max(80).default("pickup_scheduled"),
+  trackingUrl: z.string().trim().url().optional().or(z.literal("")),
+  opsNotes: z.string().trim().max(2000).optional().or(z.literal(""))
 });
 
 const serviceabilitySchema = z.object({
@@ -188,6 +247,22 @@ adminRouter.post("/couriers", async (req, res) => {
       trackingUrlTemplate: body.trackingUrlTemplate || null
     }
   });
+
+  await prisma.auditLog.create({
+    data: {
+      actorId: req.auth!.userId,
+      action: "ADMIN_COURIER_CREATED",
+      entityType: "courier_partner",
+      entityId: courier.id,
+      metadata: {
+        courierId: courier.id,
+        code: courier.code,
+        apiMode: courier.apiMode,
+        bookingMode: courier.bookingMode
+      }
+    }
+  });
+
   res.status(201).json({ courier });
 });
 
@@ -212,17 +287,95 @@ adminRouter.patch("/couriers/:id", async (req, res) => {
   }
   if (body.active !== undefined) data.active = body.active;
   if (body.apiMode !== undefined) data.apiMode = body.apiMode;
+  if (body.bookingMode !== undefined) data.bookingMode = body.bookingMode;
   if (body.supportsCOD !== undefined) data.supportsCOD = body.supportsCOD;
   if (body.supportsPrepaid !== undefined) data.supportsPrepaid = body.supportsPrepaid;
   if (body.supportsPickup !== undefined) data.supportsPickup = body.supportsPickup;
   if (body.priority !== undefined) data.priority = body.priority;
   if (body.trackingUrlTemplate !== undefined) data.trackingUrlTemplate = body.trackingUrlTemplate || null;
 
+  if (body.apiMode === "live") {
+    const readiness = await getCourierActivationReadiness(req.params.id);
+    if (!readiness.ready) {
+      await prisma.auditLog.create({
+        data: {
+          actorId: req.auth!.userId,
+          action: "ADMIN_COURIER_LIVE_ACTIVATION_BLOCKED",
+          entityType: "courier_partner",
+          entityId: req.params.id,
+          metadata: {
+            courierId: req.params.id,
+            issues: readiness.issues
+          }
+        }
+      });
+      throw new HttpError(400, readiness.issues[0]?.code || "COURIER_NOT_READY_FOR_LIVE");
+    }
+  }
+
   const courier = await prisma.courierPartner.update({
     where: { id: req.params.id },
     data
   });
+
+  await prisma.auditLog.create({
+    data: {
+      actorId: req.auth!.userId,
+      action: body.apiMode === "live" ? "ADMIN_COURIER_LIVE_ACTIVATED" : "ADMIN_COURIER_UPDATED",
+      entityType: "courier_partner",
+      entityId: courier.id,
+      metadata: {
+        courierId: courier.id,
+        apiMode: courier.apiMode,
+        bookingMode: courier.bookingMode,
+        active: courier.active
+      }
+    }
+  });
+
   res.json({ courier });
+});
+
+adminRouter.get("/couriers/:courierId/setup", async (req, res) => {
+  res.json(await getCourierPilotSetup(req.params.courierId));
+});
+
+adminRouter.post("/couriers/:courierId/serviceable-pincodes", async (req, res) => {
+  const body = serviceablePincodeSchema.parse(req.body);
+  const records = await upsertCourierServiceablePincodes({
+    courierId: req.params.courierId,
+    actorId: req.auth!.userId,
+    patch: body
+  });
+
+  res.status(201).json({ serviceablePincodes: records });
+});
+
+adminRouter.delete("/couriers/:courierId/serviceable-pincodes/:pincodeId", async (req, res) => {
+  const record = await deleteCourierServiceablePincode({
+    courierId: req.params.courierId,
+    pincodeId: req.params.pincodeId,
+    actorId: req.auth!.userId
+  });
+
+  res.json({ serviceablePincode: record });
+});
+
+adminRouter.patch("/couriers/:courierId/pilot-checklist/:itemKey", async (req, res) => {
+  const body = courierPilotChecklistPatchSchema.parse(req.body);
+  const item = await updateCourierPilotChecklistItem({
+    courierId: req.params.courierId,
+    itemKey: req.params.itemKey,
+    actorId: req.auth!.userId,
+    patch: {
+      ...(body.status !== undefined ? { status: body.status } : {}),
+      ...(body.owner !== undefined ? { owner: body.owner || null } : {}),
+      ...(body.notes !== undefined ? { notes: body.notes || null } : {}),
+      ...(body.evidenceUrl !== undefined ? { evidenceUrl: body.evidenceUrl || null } : {})
+    }
+  });
+
+  res.json({ item });
 });
 
 adminRouter.get("/courier-users", async (_req, res) => {
@@ -344,7 +497,48 @@ adminRouter.post("/rate-cards", async (req, res) => {
     data: body,
     include: { courier: true }
   });
+
+  await prisma.auditLog.create({
+    data: {
+      actorId: req.auth!.userId,
+      action: "ADMIN_RATE_CARD_CREATED",
+      entityType: "rate_card",
+      entityId: rateCard.id,
+      metadata: {
+        courierId: rateCard.courierId,
+        zone: rateCard.zone,
+        minWeight: rateCard.minWeight,
+        maxWeight: rateCard.maxWeight
+      }
+    }
+  });
+
   res.status(201).json({ rateCard });
+});
+
+adminRouter.post("/rate-cards/bulk", async (req, res) => {
+  const body = rateCardBulkSchema.parse(req.body);
+  const rateCards = await prisma.$transaction(body.rateCards.map((rateCard) => (
+    prisma.rateCard.create({
+      data: rateCard,
+      include: { courier: true }
+    })
+  )));
+
+  const courierIds = [...new Set(rateCards.map((rateCard) => rateCard.courierId))];
+  await prisma.auditLog.create({
+    data: {
+      actorId: req.auth!.userId,
+      action: "ADMIN_RATE_CARDS_BULK_CREATED",
+      entityType: "rate_card",
+      metadata: {
+        rateCardCount: rateCards.length,
+        courierIds
+      }
+    }
+  });
+
+  res.status(201).json({ rateCards });
 });
 
 adminRouter.post("/serviceability/check", async (req, res) => {
@@ -359,7 +553,20 @@ adminRouter.post("/serviceability/check", async (req, res) => {
       maxWeight: { gte: weightGrams },
       courier: {
         active: true,
-        ...(paymentMode === "COD" ? { supportsCOD: true } : { supportsPrepaid: true })
+        ...(paymentMode === "COD" ? { supportsCOD: true } : { supportsPrepaid: true }),
+        AND: [
+          { serviceablePincodes: { some: { pincode: body.fromPincode, active: true, supportsPickup: true } } },
+          {
+            serviceablePincodes: {
+              some: {
+                pincode: body.toPincode,
+                active: true,
+                supportsDelivery: true,
+                ...(paymentMode === "COD" ? { supportsCOD: true } : {})
+              }
+            }
+          }
+        ]
       },
       OR: [{ zone }, { zone: "standard" }]
     },
@@ -403,6 +610,11 @@ adminRouter.get("/shipments", async (_req, res) => {
         toPincode: shipment.toPincode,
         weightGrams: shipment.weightGrams,
         paymentMode: shipment.paymentMode,
+        codAmount: shipment.codAmount,
+        freightEstimate: shipment.freightEstimate,
+        trackingUrl: shipment.trackingUrl,
+        opsNotes: shipment.opsNotes,
+        firstShipmentRequestId: shipment.firstShipmentRequestId,
         lastEvent: shipment.lastEvent || shipment.events[0]?.remarks || null,
         createdAt: shipment.createdAt
       }))
@@ -436,6 +648,7 @@ adminRouter.post("/shipments", async (req, res) => {
     data: {
       courierId: body.courierId,
       awbNumber: body.awbNumber.toUpperCase(),
+      firstShipmentRequestId: body.firstShipmentRequestId || null,
       orderId: body.orderId || null,
       fromPincode: body.fromPincode,
       toPincode: body.toPincode,
@@ -443,6 +656,9 @@ adminRouter.post("/shipments", async (req, res) => {
       weightGrams: body.weightGrams || null,
       paymentMode: body.paymentMode.toUpperCase() as "PREPAID" | "COD",
       codAmount: body.codAmount,
+      freightEstimate: body.freightEstimate ?? null,
+      trackingUrl: body.trackingUrl || null,
+      opsNotes: body.opsNotes || null,
       expectedDeliveryDate: body.expectedDeliveryDate ? new Date(body.expectedDeliveryDate) : null,
       lastEvent: "Shipment assigned to courier",
       events: {
@@ -467,7 +683,11 @@ adminRouter.post("/shipments", async (req, res) => {
       metadata: {
         courierId: shipment.courierId,
         awbNumber: shipment.awbNumber,
-        orderId: shipment.orderId
+        orderId: shipment.orderId,
+        firstShipmentRequestId: shipment.firstShipmentRequestId,
+        freightEstimate: shipment.freightEstimate,
+        codAmount: shipment.codAmount,
+        status: shipment.status
       }
     }
   });
@@ -658,8 +878,13 @@ adminRouter.patch("/first-shipment-requests/:id", async (req, res) => {
   const patch: Parameters<typeof updateFirstShipmentRequest>[0]["patch"] = {};
   if (body.status !== undefined) patch.status = body.status;
   if (body.courierPreference !== undefined) patch.courierPreference = body.courierPreference;
+  if (body.assignedCourierId !== undefined) patch.assignedCourierId = body.assignedCourierId || null;
+  if (body.freightEstimate !== undefined) patch.freightEstimate = body.freightEstimate === "" ? null : body.freightEstimate;
+  if (body.codAmount !== undefined) patch.codAmount = body.codAmount === "" ? null : body.codAmount;
   if (body.awb !== undefined) patch.awb = body.awb;
   if (body.trackingNumber !== undefined) patch.trackingNumber = body.trackingNumber;
+  if (body.trackingUrl !== undefined) patch.trackingUrl = body.trackingUrl || null;
+  if (body.opsNotes !== undefined) patch.opsNotes = body.opsNotes || null;
   if (body.notes !== undefined) patch.notes = body.notes;
 
   const input: Parameters<typeof updateFirstShipmentRequest>[0] = {
@@ -672,6 +897,23 @@ adminRouter.patch("/first-shipment-requests/:id", async (req, res) => {
   if (!result) throw notFoundFirstShipmentRequest();
 
   res.json({ request: result });
+});
+
+adminRouter.post("/first-shipment-requests/:id/manual-shipment", async (req, res) => {
+  const body = manualShipmentFromRequestSchema.parse(req.body);
+  const result = await convertFirstShipmentRequestToManualShipment({
+    requestId: req.params.id,
+    actorId: req.auth!.userId,
+    courierId: body.courierId,
+    awbNumber: body.awbNumber,
+    freightEstimate: body.freightEstimate,
+    codAmount: body.codAmount,
+    status: body.status,
+    trackingUrl: body.trackingUrl || null,
+    opsNotes: body.opsNotes || null
+  });
+
+  res.status(201).json(result);
 });
 
 adminRouter.use((_req, _res, next) => {
