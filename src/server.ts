@@ -32,7 +32,15 @@ app.use(
       return cb(null, false);
     },
     methods: ["GET", "HEAD", "POST", "PUT", "PATCH", "DELETE", "OPTIONS"],
-    allowedHeaders: ["Content-Type", "Authorization", "X-Auth-Token", "X-Journal-Secret"],
+    allowedHeaders: [
+      "Content-Type",
+      "Authorization",
+      "X-Auth-Token",
+      "X-Journal-Secret",
+      "X-Shipmastr-Courier-Key",
+      "X-Shipmastr-Signature",
+      "X-Shipmastr-Timestamp"
+    ],
     credentials: true
   })
 );

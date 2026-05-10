@@ -1,7 +1,6 @@
 import { PaymentMode, Prisma } from "@prisma/client";
 import bcrypt from "bcryptjs";
 import jwt from "jsonwebtoken";
-import { randomBytes } from "node:crypto";
 import { Router } from "express";
 import rateLimit from "express-rate-limit";
 import { z } from "zod";
@@ -12,6 +11,15 @@ import { HttpError } from "../../lib/httpError.js";
 import { logger } from "../../lib/logger.js";
 import { prisma } from "../../lib/prisma.js";
 import { requireCourierJwt } from "../../middleware/jwtAuth.js";
+import {
+  authenticateInboundCourierSignature,
+  getCourierDeveloperProfile,
+  getCourierWebhookConfig,
+  ingestCourierApiEvent,
+  listCourierApiEvents,
+  recordRejectedCourierApiEvent,
+  upsertCourierWebhookConfig
+} from "../courierDeveloper/courier-developer.service.js";
 
 export const courierRouter = Router();
 
@@ -81,6 +89,37 @@ const webhookSchema = z.object({
   events: z.array(z.string().trim().min(1)).default([])
 });
 
+const trackingEventSchema = z.object({
+  eventId: z.string().trim().optional(),
+  status: z.string().trim().min(2),
+  eventType: z.string().trim().optional(),
+  location: z.string().trim().optional(),
+  remarks: z.string().trim().optional(),
+  description: z.string().trim().optional(),
+  occurredAt: z.string().trim().optional(),
+  metadata: z.unknown().optional()
+}).passthrough();
+
+const inboundNdrEventSchema = z.object({
+  eventId: z.string().trim().optional(),
+  reason: z.string().trim().min(2),
+  actionRequired: z.string().trim().min(2),
+  nextAttemptDate: z.string().trim().optional(),
+  remarks: z.string().trim().optional(),
+  location: z.string().trim().optional(),
+  metadata: z.unknown().optional()
+}).passthrough();
+
+const inboundRtoEventSchema = z.object({
+  eventId: z.string().trim().optional(),
+  rtoStatus: z.string().trim().min(2).default("rto_initiated"),
+  reason: z.string().trim().min(2),
+  expectedReturnDate: z.string().trim().optional(),
+  remarks: z.string().trim().optional(),
+  location: z.string().trim().optional(),
+  metadata: z.unknown().optional()
+}).passthrough();
+
 function signCourierToken(user: { id: string; courierId: string; role: string }) {
   return jwt.sign(
     {
@@ -97,6 +136,38 @@ function courierId(req: import("express").Request) {
   const id = req.auth?.courierId;
   if (!id) throw new HttpError(401, "COURIER_TOKEN_REQUIRED");
   return id;
+}
+
+function readInboundApiKey(req: import("express").Request) {
+  const headerKey = req.header("x-shipmastr-courier-key");
+  if (headerKey) return headerKey.trim();
+
+  const authorization = req.header("authorization") || "";
+  if (authorization.toLowerCase().startsWith("bearer ")) {
+    return authorization.slice(7).trim();
+  }
+
+  return "";
+}
+
+async function authorizeInboundCourierEvent(req: import("express").Request, eventType: string) {
+  const auth = await authenticateInboundCourierSignature({
+    apiKey: readInboundApiKey(req),
+    signature: req.header("x-shipmastr-signature") || req.header("shipmastr-signature") || undefined,
+    rawBody: req.rawBody || Buffer.from(JSON.stringify(req.body || {}))
+  });
+
+  if (!auth.ok) {
+    await recordRejectedCourierApiEvent({
+      courierId: auth.courierId,
+      eventType,
+      error: auth.error,
+      rawPayload: req.body
+    });
+    throw new HttpError(401, auth.error);
+  }
+
+  return auth;
 }
 
 function assertTransition(currentStatus: string, nextStatus: string) {
@@ -336,6 +407,45 @@ courierRouter.post("/auth/login", courierLoginLimiter, async (req, res) => {
   });
 });
 
+courierRouter.post("/shipments/:id/tracking-events", courierWriteLimiter, async (req, res) => {
+  const body = trackingEventSchema.parse(req.body);
+  const auth = await authorizeInboundCourierEvent(req, "tracking");
+  const result = await ingestCourierApiEvent({
+    courierId: auth.courierId,
+    shipmentId: String(req.params.id),
+    eventType: "tracking",
+    payload: body
+  });
+
+  res.status(202).json(result);
+});
+
+courierRouter.post("/shipments/:id/ndr-events", courierWriteLimiter, async (req, res) => {
+  const body = inboundNdrEventSchema.parse(req.body);
+  const auth = await authorizeInboundCourierEvent(req, "ndr");
+  const result = await ingestCourierApiEvent({
+    courierId: auth.courierId,
+    shipmentId: String(req.params.id),
+    eventType: "ndr",
+    payload: body
+  });
+
+  res.status(202).json(result);
+});
+
+courierRouter.post("/shipments/:id/rto-events", courierWriteLimiter, async (req, res) => {
+  const body = inboundRtoEventSchema.parse(req.body);
+  const auth = await authorizeInboundCourierEvent(req, "rto");
+  const result = await ingestCourierApiEvent({
+    courierId: auth.courierId,
+    shipmentId: String(req.params.id),
+    eventType: "rto",
+    payload: body
+  });
+
+  res.status(202).json(result);
+});
+
 courierRouter.use(requireCourierJwt);
 
 courierRouter.get("/me", async (req, res) => {
@@ -382,6 +492,39 @@ courierRouter.get("/shipments", async (req, res) => {
       publicTracking: publicShipment(shipment)
     }))
   });
+});
+
+courierRouter.get("/developer-profile", async (req, res) => {
+  res.json(await getCourierDeveloperProfile({
+    courierId: courierId(req),
+    actorId: req.auth!.userId
+  }));
+});
+
+courierRouter.get("/webhook-config", async (req, res) => {
+  res.json(await getCourierWebhookConfig({
+    courierId: courierId(req),
+    actorId: req.auth!.userId
+  }));
+});
+
+courierRouter.post("/webhook-config", courierWriteLimiter, async (req, res) => {
+  const body = webhookSchema.parse(req.body);
+  const result = await upsertCourierWebhookConfig({
+    courierId: courierId(req),
+    actorId: req.auth!.userId,
+    targetUrl: body.targetUrl,
+    active: body.active,
+    events: body.events
+  });
+
+  res.status(201).json(result);
+});
+
+courierRouter.get("/api-events", async (req, res) => {
+  res.json(await listCourierApiEvents({
+    courierId: courierId(req)
+  }));
 });
 
 courierRouter.patch("/shipments/:id/status", courierWriteLimiter, async (req, res) => {
@@ -569,43 +712,23 @@ courierRouter.patch("/rto/:id", courierWriteLimiter, async (req, res) => {
 });
 
 courierRouter.get("/webhooks", async (req, res) => {
-  const configs = await prisma.courierWebhookConfig.findMany({
-    where: { courierId: courierId(req) },
-    orderBy: { createdAt: "desc" }
-  });
-
-  res.json({
-    docs: {
-      authentication: "Shipmastr signs outbound courier webhook payloads with the configured shared secret.",
-      events: allowedStatuses
-    },
-    configs: configs.map(cleanWebhookConfig)
-  });
+  res.json(await getCourierWebhookConfig({
+    courierId: courierId(req),
+    actorId: req.auth!.userId
+  }));
 });
 
 courierRouter.post("/webhooks", courierWriteLimiter, async (req, res) => {
   const body = webhookSchema.parse(req.body);
-  const config = await prisma.courierWebhookConfig.create({
-    data: {
-      courierId: courierId(req),
-      targetUrl: body.targetUrl,
-      active: body.active,
-      events: body.events,
-      secret: randomBytes(24).toString("hex")
-    }
+  const result = await upsertCourierWebhookConfig({
+    courierId: courierId(req),
+    actorId: req.auth!.userId,
+    targetUrl: body.targetUrl,
+    active: body.active,
+    events: body.events
   });
 
-  await prisma.auditLog.create({
-    data: {
-      actorId: req.auth!.userId,
-      action: "COURIER_WEBHOOK_CONFIG_CREATED",
-      entityType: "courier_webhook_config",
-      entityId: config.id,
-      metadata: { courierId: courierId(req), targetUrl: body.targetUrl, events: body.events }
-    }
-  });
-
-  res.status(201).json({ config: cleanWebhookConfig(config) });
+  res.status(201).json(result);
 });
 
 courierRouter.get("/scorecard", async (req, res) => {
