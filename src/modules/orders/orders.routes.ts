@@ -4,10 +4,38 @@ import { z } from "zod";
 import { prisma } from "../../lib/prisma.js";
 import { HttpError } from "../../lib/httpError.js";
 import { requireIdempotency } from "../../middleware/idempotency.js";
+import { updateAddressFingerprint } from "../intelligence/address-intelligence.service.js";
+import { approveAutonomousAction, handleOrderCreatedAutonomy, rejectAutonomousAction } from "../intelligence/autonomous-action.service.js";
+import { decideCodEligibility } from "../intelligence/cod-decision.service.js";
+import { getConsigneeDecision, updateConsigneeProfileFromOrder } from "../intelligence/consignee-intelligence.service.js";
+import { recommendCourierForOrder } from "../intelligence/courier-performance.service.js";
+import { updateMerchantTrustProfile } from "../intelligence/merchant-trust.service.js";
+import { updateBuyerBehaviourProfile, updateCodBehaviourProfile, updateMerchantMetrics } from "../intelligence/metrics.service.js";
+import {
+  createOrderDataSignals,
+  createOrderIntelligenceSnapshot,
+  createShipmentDetailsForOrder
+} from "../intelligence/order-intelligence.service.js";
+import { createPredictionOutcome } from "../intelligence/prediction-outcome.service.js";
+import { buildSellerSafeOrderDecision } from "../intelligence/seller-safe-decision.service.js";
 import { scoreOrder } from "../risk/risk.service.js";
 
 export const ordersRouter = Router();
 
+const codDecisionRank = {
+ ALLOW_COD: 0,
+ REQUIRE_OTP: 1,
+ PREPAID_ONLY: 2,
+ MANUAL_REVIEW: 3
+} as const;
+
+function stricterCodDecision(left: keyof typeof codDecisionRank, right: keyof typeof codDecisionRank) {
+ return codDecisionRank[left] >= codDecisionRank[right] ? left : right;
+}
+
+function riskReasons(value: unknown) {
+ return Array.isArray(value) ? value.map((reason) => String(reason)) : [];
+}
 
 const createOrderSchema = z.object({
  externalOrderId:z.string(),
@@ -21,7 +49,42 @@ const createOrderSchema = z.object({
  orderValue:z.number(),
  codAmount:z.number().default(0),
  paymentMode:z.enum(["PREPAID","COD"]),
- weightGrams:z.number().optional()
+ weightGrams:z.number().optional(),
+ skuId:z.string().optional(),
+ productCategory:z.string().optional(),
+ itemCount:z.number().int().positive().optional(),
+ productTitle:z.string().optional(),
+ productTitleNormalized:z.string().optional(),
+ salesChannel:z.string().optional(),
+ storePlatform:z.string().optional(),
+ utmSource:z.string().optional(),
+ utmMedium:z.string().optional(),
+ utmCampaign:z.string().optional(),
+ campaignId:z.string().optional(),
+ couponCode:z.string().optional(),
+ discountAmount:z.number().optional(),
+ discountPercent:z.number().optional(),
+ otpVerified:z.boolean().optional(),
+ whatsappConfirmed:z.boolean().optional(),
+ callConfirmed:z.boolean().optional(),
+ failedOtpAttempts:z.number().int().nonnegative().optional(),
+ sellerProcessingTimeMinutes:z.number().int().nonnegative().optional(),
+ shippingChargeToSeller:z.number().optional(),
+ courierCostToShipmastr:z.number().optional(),
+ codFeeCharged:z.number().optional(),
+ codFeeCost:z.number().optional(),
+ rtoCost:z.number().optional(),
+ netMargin:z.number().optional(),
+ marginAfterRto:z.number().optional(),
+ promisedPickupDate:z.coerce.date().optional(),
+ promisedDeliveryDate:z.coerce.date().optional(),
+ declaredWeight:z.number().optional(),
+ chargedWeight:z.number().optional(),
+ courierMeasuredWeight:z.number().optional(),
+ weightDisputeRaised:z.boolean().optional(),
+ manualEditCount:z.number().int().nonnegative().optional(),
+ addressEditedAfterCreation:z.boolean().optional(),
+ paymentModeChangedAfterCreation:z.boolean().optional()
 });
 
 ordersRouter.post(
@@ -51,6 +114,97 @@ async(req,res)=>{
      });
 
      const risk = await scoreOrder(order.id, tx);
+     const scoredOrder = { ...order, status: "RISK_SCORED" as const };
+     const codDecision = await decideCodEligibility(order, tx);
+
+     await updateAddressFingerprint(order, tx);
+     await updateBuyerBehaviourProfile(order, tx);
+     await updateCodBehaviourProfile(order, tx);
+     await updateConsigneeProfileFromOrder(scoredOrder, tx);
+
+     const [consigneeDecision, metrics, merchantTrust] = await Promise.all([
+       getConsigneeDecision(scoredOrder, tx),
+       updateMerchantMetrics(order.merchantId, tx),
+       updateMerchantTrustProfile(order.merchantId, tx)
+     ]);
+     const finalCodDecision = stricterCodDecision(consigneeDecision.codDecision, codDecision.decision);
+     const shipmentDecision = risk.decision === "BLOCK"
+       ? "DO_NOT_SHIP"
+       : risk.decision === "HOLD"
+         ? "HOLD"
+         : risk.decision === "VERIFY" && consigneeDecision.shipmentDecision === "SHIP"
+           ? "VERIFY_BEFORE_SHIP"
+           : consigneeDecision.shipmentDecision;
+     const combinedReasons = [
+       ...riskReasons(risk.reasons),
+       ...codDecision.reasons,
+       ...consigneeDecision.reasons
+     ];
+
+     const merchantReasons = Array.isArray(merchantTrust.reasons) ? merchantTrust.reasons.map((reason) => String(reason)) : [];
+     const overallRiskScore = Math.max(consigneeDecision.overallRiskScore, codDecision.score, risk.score);
+     const [shipmentDetails, courierRecommendation] = await Promise.all([
+       createShipmentDetailsForOrder(order, tx),
+       recommendCourierForOrder(order.id, tx)
+     ]);
+
+     await createOrderDataSignals(order, body, tx);
+     await createOrderIntelligenceSnapshot({
+       order,
+       buyerPhoneHash: consigneeDecision.phoneHash,
+       addressHash: consigneeDecision.addressHash,
+       consigneeScore: consigneeDecision.score,
+       consigneeTier: consigneeDecision.tier,
+       consigneeLabel: consigneeDecision.label,
+       consigneeReasons: consigneeDecision.reasons,
+       merchantTrustScore: merchantTrust.trustScore,
+       merchantTrustTier: merchantTrust.tier,
+       merchantReasons,
+       courierId: courierRecommendation?.courierId ?? null,
+       courierScore: courierRecommendation?.score ?? null,
+       courierReasons: Array.isArray(courierRecommendation?.reasons)
+         ? courierRecommendation.reasons.map((reason) => String(reason))
+         : [],
+       addressConfidenceScore: consigneeDecision.addressConfidenceScore,
+       pincodeRiskScore: consigneeDecision.pincodeRiskScore,
+       codRiskScore: consigneeDecision.codRiskScore,
+       rtoRiskScore: consigneeDecision.rtoRiskScore,
+       fraudRiskScore: consigneeDecision.fraudRiskScore,
+       overallRiskScore,
+       codDecision: finalCodDecision,
+       shipmentDecision,
+       riskReasons: combinedReasons,
+       signals: body
+     }, tx);
+     await createPredictionOutcome({
+       orderId: order.id,
+       merchantId: order.merchantId,
+       predictedConsigneeTier: consigneeDecision.tier,
+       predictedCodDecision: finalCodDecision,
+       predictedShipmentDecision: shipmentDecision,
+       predictedRtoRiskScore: consigneeDecision.rtoRiskScore,
+       predictedCourierId: courierRecommendation?.courierId ?? null
+     }, tx);
+     await handleOrderCreatedAutonomy(order.id, tx);
+
+     await tx.riskDecision.create({
+       data: {
+        merchantId: order.merchantId,
+        orderId: order.id,
+        phoneHash: codDecision.phoneHash,
+        addressHash: codDecision.addressHash,
+        riskLevel: codDecision.riskLevel,
+        decision: codDecision.riskDecision,
+        codDecision: codDecision.decision,
+        riskScore: codDecision.score,
+        addressConfidence: risk.addressConfidence,
+        reasons: codDecision.reasons,
+        metadata: {
+          source: "order_created",
+          legacyRiskDecision: risk.decision
+        }
+       }
+     });
 
      await tx.auditLog.create({
        data: {
@@ -62,12 +216,16 @@ async(req,res)=>{
         metadata: {
           externalOrderId: order.externalOrderId,
           riskScore: risk.score,
-          riskDecision: risk.decision
+          riskDecision: risk.decision,
+          codDecision: codDecision.decision
         }
        }
      });
 
-     return { order, risk };
+     return {
+       order,
+       decision: await buildSellerSafeOrderDecision(order.id, order.merchantId, tx)
+     };
    });
 
    res.status(201).json(result);
@@ -82,13 +240,70 @@ async(req,res)=>{
  }
 });
 
+ordersRouter.get("/:orderId/automation", async (req, res) => {
+ const decision = await buildSellerSafeOrderDecision(req.params.orderId, req.auth!.merchantId);
+
+ res.json({ automation: decision.automation });
+});
+
+ordersRouter.get("/:orderId/communications", async (req, res) => {
+ const decision = await buildSellerSafeOrderDecision(req.params.orderId, req.auth!.merchantId);
+
+ res.json({ communications: decision.communications });
+});
+
+ordersRouter.get("/:orderId/decision", async (req, res) => {
+ const decision = await buildSellerSafeOrderDecision(req.params.orderId, req.auth!.merchantId);
+
+ res.json({ decision });
+});
+
+ordersRouter.get("/:orderId/intelligence-summary", async (req, res) => {
+ const decision = await buildSellerSafeOrderDecision(req.params.orderId, req.auth!.merchantId);
+
+ res.json({
+   intelligenceSummary: {
+    shipmentStatus: decision.shipmentStatus,
+    awb: decision.awb,
+    trackingNumber: decision.trackingNumber,
+    buyerTierLabel: decision.buyerTierLabel,
+    codDecision: decision.codDecision,
+    shipmentDecision: decision.shipmentDecision,
+    automationStatus: decision.automationStatus,
+    pendingRequiredAction: decision.pendingRequiredAction,
+    courierRecommendation: decision.courierRecommendation,
+    shortReasons: decision.shortReasons,
+    sellerMessage: decision.sellerMessage
+   }
+ });
+});
+
+ordersRouter.post("/:orderId/automation/:actionId/approve", async (req, res) => {
+ const action = await approveAutonomousAction({
+   orderId: req.params.orderId,
+   actionId: req.params.actionId,
+   merchantId: req.auth!.merchantId,
+   approvedBy: req.auth!.userId
+ });
+
+ res.json({ action });
+});
+
+ordersRouter.post("/:orderId/automation/:actionId/reject", async (req, res) => {
+ const result = await rejectAutonomousAction({
+   orderId: req.params.orderId,
+   actionId: req.params.actionId,
+   merchantId: req.auth!.merchantId,
+   actorId: req.auth!.userId
+ });
+
+ res.json({ rejected: result.count });
+});
+
 ordersRouter.get("/",async(req,res)=>{
  const orders=await prisma.order.findMany({
    where:{
     merchantId:req.auth!.merchantId
-   },
-   include:{
-     riskScores:true
    },
    orderBy:{
      createdAt:"desc"
@@ -103,12 +318,9 @@ ordersRouter.get("/:id",async(req,res)=>{
    where:{
     id:req.params.id,
     merchantId:req.auth!.merchantId
-   },
-   include:{
-    riskScores:true,
-    webhookEvents:true
    }
  });
+ const decision = await buildSellerSafeOrderDecision(order.id, order.merchantId);
 
- res.json({order});
+ res.json({order, decision});
 });

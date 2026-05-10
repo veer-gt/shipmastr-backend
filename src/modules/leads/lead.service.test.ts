@@ -1,7 +1,16 @@
 import assert from "node:assert/strict";
 import { describe, it } from "node:test";
 import { LeadStatus } from "@prisma/client";
-import { convertLeadToSeller, createLead, listLeads, updateLead } from "./lead.service.js";
+import {
+  convertLeadToSeller,
+  createLead,
+  listLeads,
+  updateLead
+} from "./lead.service.js";
+import {
+  processLeadNotificationTask,
+  sendLeadSubmittedNotification
+} from "../tasks/email-task.service.js";
 
 const now = new Date("2026-05-08T09:30:00.000Z");
 
@@ -89,6 +98,73 @@ function makeLeadClient() {
   return { client: client as any, state };
 }
 
+function makeLead(overrides: Record<string, unknown> = {}) {
+  return {
+    id: "lead_1",
+    name: "Founder",
+    businessName: "Skymax Store",
+    phone: "9876543210",
+    email: "founder@example.com",
+    merchantId: null,
+    monthlyShipments: "500-1000",
+    currentProvider: null,
+    biggestIssue: "COD reconciliation",
+    notes: "Wants early access",
+    status: LeadStatus.NEW,
+    createdAt: now,
+    updatedAt: now,
+    ...overrides
+  } as any;
+}
+
+function makeLogSink() {
+  const events: string[] = [];
+  const payloads: any[] = [];
+  const log = {
+    info: (_payload: unknown, message: string) => {
+      payloads.push(_payload);
+      events.push(message);
+    },
+    warn: (_payload: unknown, message: string) => {
+      payloads.push(_payload);
+      events.push(message);
+    }
+  };
+
+  return { events, payloads, log };
+}
+
+async function withEmailEnv<T>(values: NodeJS.ProcessEnv, callback: () => T | Promise<T>): Promise<T> {
+  const keys = [
+    "SMTP_HOST",
+    "SMTP_PORT",
+    "SMTP_SECURE",
+    "SMTP_USER",
+    "SMTP_PASS",
+    "EMAIL_FROM",
+    "EMAIL_FROM_NAME",
+    "SMTP_REPLY_TO",
+    "ADMIN_EMAIL"
+  ];
+  const previous = new Map(keys.map((key) => [key, process.env[key]]));
+
+  try {
+    for (const key of keys) {
+      delete process.env[key];
+    }
+    Object.assign(process.env, values);
+    return await callback();
+  } finally {
+    for (const [key, value] of previous) {
+      if (value === undefined) {
+        delete process.env[key];
+      } else {
+        process.env[key] = value;
+      }
+    }
+  }
+}
+
 describe("leads", () => {
   it("creates a normalized seller lead", async () => {
     const { client, state } = makeLeadClient();
@@ -108,6 +184,265 @@ describe("leads", () => {
     assert.equal(state.leads[0]?.businessName, "Skymax Store");
     assert.equal(state.leads[0]?.currentProvider, null);
     assert.equal(state.leads[0]?.status, LeadStatus.NEW);
+  });
+
+  it("enqueues a lead notification task after creating a lead", async () => {
+    const { client } = makeLeadClient();
+    const { events, payloads, log } = makeLogSink();
+    const enqueued: string[] = [];
+
+    const result = await createLead({
+      name: "Founder",
+      businessName: "Notify Store",
+      phone: "9876543210",
+      email: "founder@example.com"
+    }, client, {
+      enqueueLeadNotification: async (leadId) => {
+        enqueued.push(leadId);
+        return { status: "created" };
+      },
+      log
+    });
+
+    assert.deepEqual(result, { ok: true, leadId: "lead_1" });
+    assert.deepEqual(enqueued, ["lead_1"]);
+    assert.deepEqual(events, [
+      "lead_created",
+      "lead_email_task_enqueue_attempted",
+      "lead_email_task_enqueued"
+    ]);
+    assert.deepEqual(payloads[0]?.leadNotification, { leadId: "lead_1" });
+    assert.deepEqual(payloads[1]?.leadNotification, { leadId: "lead_1" });
+    assert.deepEqual(payloads[2]?.leadNotification, {
+      leadId: "lead_1",
+      status: "enqueued",
+      taskStatus: "created"
+    });
+  });
+
+  it("does not call SMTP email helpers while creating a lead", async () => {
+    const { client } = makeLeadClient();
+    const { events, log } = makeLogSink();
+    const enqueued: string[] = [];
+
+    const result = await withEmailEnv({
+      SMTP_HOST: "smtp.gmail.com",
+      SMTP_PORT: "465",
+      SMTP_SECURE: "true",
+      SMTP_USER: "noreply@shipmastr.com",
+      SMTP_PASS: "configured-secret",
+      EMAIL_FROM: "noreply@shipmastr.com",
+      EMAIL_FROM_NAME: "Shipmastr",
+      SMTP_REPLY_TO: "no-reply@shipmastr.com",
+      ADMIN_EMAIL: "admin@example.com"
+    }, () => createLead({
+        name: "Founder",
+        businessName: "Queue Only Store",
+        phone: "9876543210",
+        email: "queue-only@example.com"
+      }, client, {
+        enqueueLeadNotification: async (leadId) => {
+          enqueued.push(leadId);
+          return { status: "created" };
+        },
+        log
+      })
+    );
+
+    assert.deepEqual(result, { ok: true, leadId: "lead_1" });
+    assert.deepEqual(enqueued, ["lead_1"]);
+    assert.deepEqual(events, [
+      "lead_created",
+      "lead_email_task_enqueue_attempted",
+      "lead_email_task_enqueued"
+    ]);
+  });
+
+  it("returns the created lead when task enqueue fails", async () => {
+    const { client, state } = makeLeadClient();
+    const { events, payloads, log } = makeLogSink();
+
+    const result = await createLead({
+      name: "Founder",
+      businessName: "Soft Fail Store",
+      phone: "9876543210",
+      email: "softfail@example.com"
+    }, client, {
+      enqueueLeadNotification: async () => {
+        throw new Error("CLOUD_TASKS_ENQUEUE_FAILED");
+      },
+      log
+    });
+
+    assert.deepEqual(result, { ok: true, leadId: "lead_1" });
+    assert.equal(state.leads.length, 1);
+    assert.equal(state.leads[0]?.email, "softfail@example.com");
+    assert.deepEqual(events, [
+      "lead_created",
+      "lead_email_task_enqueue_attempted",
+      "lead_email_task_enqueue_failed"
+    ]);
+    assert.deepEqual(payloads[2]?.leadNotification, {
+      leadId: "lead_1",
+      status: "enqueue_failed",
+      error: "CLOUD_TASKS_ENQUEUE_FAILED"
+    });
+  });
+
+  it("createLead calls the enqueue function only", async () => {
+    const { client } = makeLeadClient();
+    const enqueued: string[] = [];
+
+    const result = await createLead({
+      name: "Founder",
+      businessName: "Enqueue Only Store",
+      phone: "9876543210",
+      email: "enqueue-only@example.com"
+    }, client, {
+      enqueueLeadNotification: async (leadId) => {
+        enqueued.push(leadId);
+        return { status: "created" };
+      }
+    });
+
+    assert.deepEqual(result, { ok: true, leadId: "lead_1" });
+    assert.deepEqual(enqueued, ["lead_1"]);
+  });
+
+  it("calls admin email when SMTP config exists", async () => {
+    const { events, payloads, log } = makeLogSink();
+    let sentInput: any = null;
+
+    const result = await withEmailEnv({
+      SMTP_HOST: "smtp.gmail.com",
+      SMTP_PORT: "465",
+      SMTP_SECURE: "true",
+      SMTP_USER: "noreply@shipmastr.com",
+      SMTP_PASS: "configured-secret",
+      EMAIL_FROM: "noreply@shipmastr.com",
+      EMAIL_FROM_NAME: "Shipmastr",
+      SMTP_REPLY_TO: "no-reply@shipmastr.com",
+      ADMIN_EMAIL: "admin@example.com"
+    }, () => sendLeadSubmittedNotification(makeLead(), {
+        sendEmail: async (input) => {
+          sentInput = input;
+          return {} as any;
+        },
+        log
+      })
+    );
+
+    assert.deepEqual(result, { status: "sent" });
+    assert.equal(sentInput.to, "admin@example.com");
+    assert.equal(sentInput.type, "lead-submitted");
+    assert.equal(sentInput.metadata.leadId, "lead_1");
+    assert.match(sentInput.text, /Skymax Store/);
+    assert.match(sentInput.text, /Wants early access/);
+    assert.deepEqual(events, [
+      "lead_notification_email_attempted",
+      "lead_notification_email_sent"
+    ]);
+    assert.deepEqual(payloads[0]?.leadNotification, {
+      leadId: "lead_1",
+      emailConfigured: true,
+      smtpHostConfigured: true,
+      smtpPortConfigured: true,
+      smtpUserConfigured: true,
+      smtpPassConfigured: true,
+      emailFromConfigured: true,
+      adminEmailConfigured: true
+    });
+  });
+
+  it("skips admin email only when a required SMTP var is missing", async () => {
+    const { events, payloads, log } = makeLogSink();
+    let sendCalled = false;
+
+    const result = await withEmailEnv({
+      SMTP_HOST: "smtp.gmail.com",
+      SMTP_PORT: "465",
+      SMTP_SECURE: "true",
+      SMTP_USER: "noreply@shipmastr.com",
+      EMAIL_FROM: "noreply@shipmastr.com",
+      EMAIL_FROM_NAME: "Shipmastr",
+      SMTP_REPLY_TO: "no-reply@shipmastr.com",
+      ADMIN_EMAIL: "admin@example.com"
+    }, () => sendLeadSubmittedNotification(makeLead(), {
+        sendEmail: async () => {
+          sendCalled = true;
+          return {} as any;
+        },
+        log
+      })
+    );
+
+    assert.deepEqual(result, { status: "skipped" });
+    assert.equal(sendCalled, false);
+    assert.deepEqual(events, [
+      "lead_notification_email_attempted",
+      "lead_notification_email_skipped_smtp_not_configured"
+    ]);
+    assert.deepEqual(payloads[0]?.leadNotification, {
+      leadId: "lead_1",
+      emailConfigured: false,
+      smtpHostConfigured: true,
+      smtpPortConfigured: true,
+      smtpUserConfigured: true,
+      smtpPassConfigured: false,
+      emailFromConfigured: true,
+      adminEmailConfigured: true
+    });
+  });
+
+  it("processes a lead notification task and sends the admin email", async () => {
+    const { client } = makeLeadClient();
+    const { log } = makeLogSink();
+    let sentInput: any = null;
+
+    await createLead({
+      name: "Founder",
+      businessName: "Task Store",
+      phone: "9876543210",
+      email: "task@example.com",
+      notes: "Needs callback"
+    }, client, {
+      enqueueLeadNotification: async () => {}
+    });
+
+    const result = await withEmailEnv({
+      SMTP_HOST: "smtp.gmail.com",
+      SMTP_PORT: "465",
+      SMTP_SECURE: "true",
+      SMTP_USER: "noreply@shipmastr.com",
+      SMTP_PASS: "configured-secret",
+      EMAIL_FROM: "noreply@shipmastr.com",
+      EMAIL_FROM_NAME: "Shipmastr",
+      SMTP_REPLY_TO: "no-reply@shipmastr.com",
+      ADMIN_EMAIL: "admin@example.com"
+    }, () => processLeadNotificationTask({ leadId: "lead_1" }, client, {
+        sendEmail: async (input) => {
+          sentInput = input;
+          return {} as any;
+        },
+        log
+      })
+    );
+
+    assert.deepEqual(result, { ok: true, status: "sent" });
+    assert.equal(sentInput.to, "admin@example.com");
+    assert.equal(sentInput.metadata.leadId, "lead_1");
+    assert.match(sentInput.text, /Task Store/);
+    assert.match(sentInput.text, /Needs callback/);
+  });
+
+  it("handles a lead notification task for a missing lead safely", async () => {
+    const { client } = makeLeadClient();
+    const { events, log } = makeLogSink();
+
+    const result = await processLeadNotificationTask({ leadId: "missing_lead" }, client, { log });
+
+    assert.deepEqual(result, { ok: true, status: "missing_lead" });
+    assert.deepEqual(events, ["lead_notification_email_missing_lead"]);
   });
 
   it("lists leads newest first and filters by status", async () => {

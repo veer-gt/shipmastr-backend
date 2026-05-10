@@ -1,10 +1,12 @@
 import type { Request, Response, NextFunction } from "express";
 import admin from "../lib/firebase.js";
+import { normalizeAccountRole } from "../lib/accountRoles.js";
 import { prisma } from "../lib/prisma.js";
 
 export type AuthUser = {
   userId: string;
   merchantId: string;
+  courierId?: string;
   role: string;
   firebaseUid?: string;
   email?: string | null;
@@ -55,12 +57,33 @@ export async function requireFirebaseAuth(
   const phone = decoded.phone_number || null;
 
   try {
-    const user = email
+    let user = await prisma.user.findUnique({
+      where: { firebaseUid },
+      include: { merchant: true },
+    });
+
+    if (!user && email) {
+      const emailMatchedUser = await prisma.user.findUnique({
+        where: { email },
+        include: { merchant: true },
+      });
+
+      user = emailMatchedUser && !emailMatchedUser.firebaseUid
+        ? await prisma.user.update({
+            where: { id: emailMatchedUser.id },
+            data: { firebaseUid },
+            include: { merchant: true },
+          })
+        : emailMatchedUser;
+    }
+
+    const fallbackUser = !user && email
       ? await prisma.user.findUnique({
           where: { email },
           include: { merchant: true },
         })
       : null;
+    user = user || fallbackUser;
 
     if (!user) {
       return res.status(403).json({
@@ -71,12 +94,9 @@ export async function requireFirebaseAuth(
     }
 
     (req as any).user = {
-      id: user.id,
       firebaseUid,
       email: user.email,
-      phone,
-      role: user.role,
-      merchantId: user.merchantId,
+      phone
     };
 
     (req as any).auth = {
@@ -84,7 +104,7 @@ export async function requireFirebaseAuth(
       firebaseUid,
       email: user.email,
       phone,
-      role: user.role,
+      role: normalizeAccountRole(user.role),
       merchantId: user.merchantId,
     };
 

@@ -2,10 +2,14 @@ import {
   MerchantAdminStatus,
   MerchantOnboardingStatus,
   MerchantOnboardingStepStatus,
+  SellerKycStatus,
   type Merchant,
   type Prisma
 } from "@prisma/client";
 import { prisma } from "../../../lib/prisma.js";
+import { normalizeOptionalGstin } from "../../../lib/gstin.js";
+import { HttpError } from "../../../lib/httpError.js";
+import { redactPanText } from "../../../lib/pan.js";
 import { audit } from "../../audit/audit.service.js";
 import { buildMerchantOnboardingProjection } from "../../onboarding/onboarding.service.js";
 
@@ -58,14 +62,88 @@ const sellerInclude = {
 type SellerMerchant = Prisma.MerchantGetPayload<{ include: typeof sellerInclude }>;
 
 export type AdminSellerPatch = {
+  gstin?: string | null;
   adminStatus?: MerchantAdminStatus;
   adminNotes?: string | null;
   onboardingNotes?: string | null;
+  sellerKycStatus?: SellerKycStatus;
+  sellerKycChecklist?: unknown;
+  sellerKycNotes?: string | null;
 };
 
+const sellerKycChecklistStatuses = new Set(["PENDING", "IN_PROGRESS", "COMPLETED", "BLOCKED"]);
+
+export const sellerKycChecklistDefinitions = [
+  { key: "gstinPan", label: "GSTIN/PAN" },
+  { key: "pickupAddress", label: "Pickup address" },
+  { key: "contact", label: "Contact" },
+  { key: "bankRemittance", label: "Bank/remittance" },
+  { key: "businessProof", label: "Business proof" },
+  { key: "riskNotes", label: "Risk notes" }
+] as const;
+
+function isRecord(value: unknown): value is Record<string, unknown> {
+  return Boolean(value && typeof value === "object" && !Array.isArray(value));
+}
+
 function cleanOptional(value?: string | null) {
-  const next = value?.trim();
-  return next ? next : null;
+  return redactPanText(value);
+}
+
+function cleanChecklistText(value: unknown) {
+  if (typeof value !== "string") return null;
+  return redactPanText(value);
+}
+
+function cleanChecklistStatus(value: unknown, fallback = "PENDING") {
+  if (typeof value !== "string") return fallback;
+  return sellerKycChecklistStatuses.has(value) ? value : fallback;
+}
+
+export function normalizeSellerKycChecklist(value: unknown) {
+  const source = isRecord(value) ? value : {};
+
+  return sellerKycChecklistDefinitions.map((definition) => {
+    const rawEntry = source[definition.key];
+    const entry: Record<string, unknown> = isRecord(rawEntry) ? rawEntry : {};
+
+    return {
+      key: definition.key,
+      label: definition.label,
+      status: cleanChecklistStatus(entry.status),
+      owner: cleanChecklistText(entry.owner),
+      notes: cleanChecklistText(entry.notes),
+      evidenceUrl: cleanChecklistText(entry.evidenceUrl),
+      verifiedAt: cleanChecklistText(entry.verifiedAt),
+      verifiedBy: cleanChecklistText(entry.verifiedBy)
+    };
+  });
+}
+
+function serializeSellerKycChecklist(entries: ReturnType<typeof normalizeSellerKycChecklist>) {
+  return Object.fromEntries(entries.map(({ key, label: _label, ...entry }) => [key, entry])) as Prisma.InputJsonObject;
+}
+
+function mergeSellerKycChecklist(existing: unknown, patch: unknown) {
+  const current = normalizeSellerKycChecklist(existing);
+  if (!isRecord(patch)) return serializeSellerKycChecklist(current);
+
+  const merged = current.map((entry) => {
+    const patchEntry = patch[entry.key];
+    if (!isRecord(patchEntry)) return entry;
+
+    return {
+      ...entry,
+      status: cleanChecklistStatus(patchEntry.status, entry.status),
+      owner: "owner" in patchEntry ? cleanChecklistText(patchEntry.owner) : entry.owner,
+      notes: "notes" in patchEntry ? cleanChecklistText(patchEntry.notes) : entry.notes,
+      evidenceUrl: "evidenceUrl" in patchEntry ? cleanChecklistText(patchEntry.evidenceUrl) : entry.evidenceUrl,
+      verifiedAt: "verifiedAt" in patchEntry ? cleanChecklistText(patchEntry.verifiedAt) : entry.verifiedAt,
+      verifiedBy: "verifiedBy" in patchEntry ? cleanChecklistText(patchEntry.verifiedBy) : entry.verifiedBy
+    };
+  });
+
+  return serializeSellerKycChecklist(merged);
 }
 
 export function deriveSellerBadgeStatus(merchant: Pick<
@@ -114,6 +192,9 @@ function sellerSummary(merchant: SellerMerchant) {
     name: merchant.name,
     email: merchant.email,
     phone: merchant.phone,
+    gstin: merchant.gstin,
+    panMasked: merchant.panMasked,
+    sellerKycStatus: merchant.sellerKycStatus,
     adminStatus: merchant.adminStatus,
     sellerStatus,
     adminNotes: merchant.adminNotes,
@@ -139,6 +220,13 @@ function sellerDetail(merchant: SellerMerchant) {
       name: merchant.name,
       email: merchant.email,
       phone: merchant.phone,
+      gstin: merchant.gstin,
+      panMasked: merchant.panMasked,
+      sellerKycStatus: merchant.sellerKycStatus,
+      sellerKycChecklist: normalizeSellerKycChecklist(merchant.sellerKycChecklist),
+      sellerKycNotes: merchant.sellerKycNotes,
+      sellerKycReviewedAt: merchant.sellerKycReviewedAt,
+      sellerKycReviewedBy: merchant.sellerKycReviewedBy,
       adminStatus: merchant.adminStatus,
       sellerStatus,
       adminNotes: merchant.adminNotes,
@@ -150,6 +238,14 @@ function sellerDetail(merchant: SellerMerchant) {
     sourceLead,
     leads: merchant.leads,
     onboarding: buildMerchantOnboardingProjection(merchant).onboarding,
+    kycReview: {
+      status: merchant.sellerKycStatus,
+      checklist: normalizeSellerKycChecklist(merchant.sellerKycChecklist),
+      notes: merchant.sellerKycNotes,
+      reviewedAt: merchant.sellerKycReviewedAt,
+      reviewedBy: merchant.sellerKycReviewedBy,
+      taxIdPresent: Boolean(merchant.gstin || merchant.panMasked)
+    },
     firstShipmentRequests: merchant.firstShipmentRequests
   };
 }
@@ -186,9 +282,24 @@ export async function updateAdminSeller(input: {
   if (!existing) return null;
 
   const data: Prisma.MerchantUpdateInput = {};
+  const nextGstin = input.patch.gstin !== undefined ? normalizeOptionalGstin(input.patch.gstin) : existing.gstin;
+  if (input.patch.gstin !== undefined) data.gstin = nextGstin;
   if (input.patch.adminStatus !== undefined) data.adminStatus = input.patch.adminStatus;
   if (input.patch.adminNotes !== undefined) data.adminNotes = cleanOptional(input.patch.adminNotes);
   if (input.patch.onboardingNotes !== undefined) data.onboardingNotes = cleanOptional(input.patch.onboardingNotes);
+  if (input.patch.sellerKycChecklist !== undefined) {
+    data.sellerKycChecklist = mergeSellerKycChecklist(existing.sellerKycChecklist, input.patch.sellerKycChecklist);
+  }
+  if (input.patch.sellerKycNotes !== undefined) data.sellerKycNotes = cleanOptional(input.patch.sellerKycNotes);
+  if (input.patch.sellerKycStatus !== undefined) {
+    if (input.patch.sellerKycStatus === SellerKycStatus.VERIFIED && !nextGstin && !existing.panMasked) {
+      throw new HttpError(400, "SELLER_KYC_TAX_ID_REQUIRED");
+    }
+
+    data.sellerKycStatus = input.patch.sellerKycStatus;
+    data.sellerKycReviewedAt = new Date();
+    if (input.actorId) data.sellerKycReviewedBy = input.actorId;
+  }
 
   const merchant = await client.merchant.update({
     where: { id: input.merchantId },
@@ -204,11 +315,21 @@ export async function updateAdminSeller(input: {
     metadata: {
       before: {
         adminStatus: existing.adminStatus,
+        gstin: existing.gstin,
+        panMasked: existing.panMasked,
+        sellerKycStatus: existing.sellerKycStatus,
+        sellerKycChecklist: normalizeSellerKycChecklist(existing.sellerKycChecklist),
+        sellerKycNotes: existing.sellerKycNotes,
         adminNotes: existing.adminNotes,
         onboardingNotes: existing.onboardingNotes
       },
       after: {
         adminStatus: merchant.adminStatus,
+        gstin: merchant.gstin,
+        panMasked: merchant.panMasked,
+        sellerKycStatus: merchant.sellerKycStatus,
+        sellerKycChecklist: normalizeSellerKycChecklist(merchant.sellerKycChecklist),
+        sellerKycNotes: merchant.sellerKycNotes,
         adminNotes: merchant.adminNotes,
         onboardingNotes: merchant.onboardingNotes
       }

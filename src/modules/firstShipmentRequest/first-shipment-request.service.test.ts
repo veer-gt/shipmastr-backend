@@ -107,14 +107,22 @@ describe("first shipment requests", () => {
       pickupPincode: "400001",
       deliveryCity: "Pune",
       deliveryPincode: "411001",
+      buyerName: "Buyer One",
+      buyerPhone: "9123456789",
+      buyerAddress: "Buyer address, Pune",
+      packageDescription: "T-shirt test parcel",
       packageWeight: 750,
       paymentMode: PaymentMode.COD,
       codAmount: 129900,
+      courierPreference: "Manual Delhivery check",
       notes: "Handle manually"
     }, client);
 
     assert.equal(request.status, FirstShipmentRequestStatus.NEW);
     assert.equal(request.merchantId, "merchant_1");
+    assert.equal(request.buyerName, "Buyer One");
+    assert.equal(request.packageDescription, "T-shirt test parcel");
+    assert.equal(request.courierPreference, "Manual Delhivery check");
     assert.equal(state.merchants[0].firstShipmentStatus, MerchantOnboardingStepStatus.IN_PROGRESS);
     assert.equal(state.auditLogs.some((log) => log.action === "FIRST_SHIPMENT_REQUEST_CREATED"), true);
 
@@ -122,7 +130,7 @@ describe("first shipment requests", () => {
     assert.equal(listed.latestRequest?.id, request.id);
   });
 
-  it("updates admin status and completes onboarding when completed", async () => {
+  it("updates admin status and completes onboarding when delivered", async () => {
     const { client, state } = makeClient();
     await createFirstShipmentRequest({
       merchantId: "merchant_1",
@@ -142,13 +150,49 @@ describe("first shipment requests", () => {
       id: "fsr_1",
       actorId: "admin_1",
       patch: {
-        status: FirstShipmentRequestStatus.COMPLETED,
-        notes: "Pickup completed"
+        status: FirstShipmentRequestStatus.DELIVERED,
+        awb: "QA123456789",
+        trackingNumber: "TRK123456789",
+        courierPreference: "Manual Blue Dart",
+        notes: "Delivered in dry run"
       }
     }, client);
 
-    assert.equal(updated?.status, FirstShipmentRequestStatus.COMPLETED);
+    assert.equal(updated?.status, FirstShipmentRequestStatus.DELIVERED);
+    assert.equal(updated?.awb, "QA123456789");
+    assert.equal(updated?.trackingNumber, "TRK123456789");
+    assert.equal(updated?.courierPreference, "Manual Blue Dart");
     assert.equal(state.merchants[0].firstShipmentStatus, MerchantOnboardingStepStatus.COMPLETED);
     assert.equal(state.auditLogs.some((log) => log.action === "FIRST_SHIPMENT_REQUEST_UPDATED"), true);
+    assert.equal(state.auditLogs.at(-1)?.metadata.changed.awb, true);
+  });
+
+  it("blocks onboarding when manual first shipment is RTO or cancelled", async () => {
+    const { client, state } = makeClient();
+    await createFirstShipmentRequest({
+      merchantId: "merchant_1",
+      requesterUserId: "user_1",
+      pickupName: "Ops Seller",
+      pickupPhone: "9876543210",
+      pickupAddress: "Warehouse 1, Mumbai",
+      pickupPincode: "400001",
+      deliveryCity: "Pune",
+      deliveryPincode: "411001",
+      packageWeight: 750,
+      paymentMode: PaymentMode.PREPAID,
+      notes: null
+    }, client);
+
+    const updated = await updateFirstShipmentRequest({
+      id: "fsr_1",
+      actorId: "admin_1",
+      patch: {
+        status: FirstShipmentRequestStatus.RTO,
+        notes: "Manual courier returned shipment"
+      }
+    }, client);
+
+    assert.equal(updated?.status, FirstShipmentRequestStatus.RTO);
+    assert.equal(state.merchants[0].firstShipmentStatus, MerchantOnboardingStepStatus.BLOCKED);
   });
 });

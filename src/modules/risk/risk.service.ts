@@ -1,10 +1,10 @@
-import type { Order, Prisma, RiskDecision, RiskLevel } from "@prisma/client";
+import type { LegacyRiskDecision, Order, Prisma, RiskLevel } from "@prisma/client";
 import { prisma } from "../../lib/prisma.js";
 
 type RiskResult = {
   score: number;
   level: RiskLevel;
-  decision: RiskDecision;
+  decision: LegacyRiskDecision;
   addressConfidence: number;
   reasons: string[];
 };
@@ -80,7 +80,7 @@ export function calculateRisk(
  addressConfidence=clamp(addressConfidence);
 
  let level:RiskLevel="LOW";
- let decision:RiskDecision="SHIP";
+ let decision:LegacyRiskDecision="SHIP";
 
  if(score>=75){
    level="CRITICAL";

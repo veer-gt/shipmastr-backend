@@ -5,7 +5,7 @@ import compression from "compression";
 import rateLimit from "express-rate-limit";
 import { pinoHttp } from "pino-http";
 
-import { env, corsOrigins } from "./config/env.js";
+import { allowedCorsOrigins, env } from "./config/env.js";
 import { logger } from "./lib/logger.js";
 import { apiRouter } from "./routes/index.js";
 import { errorHandler } from "./middleware/error.js";
@@ -28,9 +28,12 @@ app.use(compression());
 app.use(
   cors({
     origin: (origin, cb) => {
-      if (!origin || corsOrigins.includes(origin)) return cb(null, true);
-      return cb(new Error("CORS"));
-    }
+      if (!origin || allowedCorsOrigins.includes(origin)) return cb(null, true);
+      return cb(null, false);
+    },
+    methods: ["GET", "HEAD", "POST", "PUT", "PATCH", "DELETE", "OPTIONS"],
+    allowedHeaders: ["Content-Type", "Authorization", "X-Auth-Token", "X-Journal-Secret"],
+    credentials: true
   })
 );
 
@@ -56,6 +59,7 @@ app.get("/", (_req, res) => {
 });
 
 app.use("/api", apiRouter);
+app.use("/v1", apiRouter);
 
 app.use(errorHandler);
 

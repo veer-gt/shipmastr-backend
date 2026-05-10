@@ -1,5 +1,7 @@
 import { Router } from "express";
 import { z } from "zod";
+import { emailTemplates, sendTransactionalEmail, trackingUrl } from "../../lib/email.js";
+import { prisma } from "../../lib/prisma.js";
 
 export const shipmentsRouter = Router();
 
@@ -31,17 +33,17 @@ const createShipmentSchema = z.object({
   orderId: z.string().optional(),
   carrier: z.string().optional(),
   fromPincode: z.string().optional(),
-  toPincode: z.string().optional()
+  toPincode: z.string().optional(),
+  expectedDeliveryDate: z.string().optional()
 });
 
 shipmentsRouter.get("/", (_req, res) => {
   res.json([demoShipment]);
 });
 
-shipmentsRouter.post("/", (req, res) => {
+shipmentsRouter.post("/", async (req, res) => {
   const body = createShipmentSchema.parse(req.body);
-
-  res.status(201).json({
+  const shipment = {
     ...demoShipment,
     carrier: body.carrier || demoShipment.carrier,
     fromPincode: body.fromPincode || demoShipment.fromPincode,
@@ -49,6 +51,34 @@ shipmentsRouter.post("/", (req, res) => {
     order: {
       ...demoShipment.order,
       orderId: body.orderId || demoShipment.order.orderId
-    }
+    },
+    expectedDeliveryDate: body.expectedDeliveryDate || null
+  };
+
+  const merchant = await prisma.merchant.findUnique({
+    where: { id: req.auth!.merchantId }
   });
+
+  if (merchant?.email) {
+    const template = emailTemplates.shipmentCreated({
+      orderId: shipment.order.orderId,
+      awbNumber: shipment.awbNumber,
+      carrier: shipment.carrier,
+      trackingUrl: trackingUrl(shipment.awbNumber),
+      expectedDeliveryDate: shipment.expectedDeliveryDate
+    });
+
+    await sendTransactionalEmail({
+      to: merchant.email,
+      type: "shipment-created",
+      metadata: {
+        merchantId: merchant.id,
+        orderId: shipment.order.orderId,
+        awbNumber: shipment.awbNumber
+      },
+      ...template
+    });
+  }
+
+  res.status(201).json(shipment);
 });

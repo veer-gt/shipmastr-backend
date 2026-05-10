@@ -1,0 +1,59 @@
+<!doctype html>
+<html>
+  <head>
+    <meta charset="utf-8" />
+    <title>Shipmastr Firebase Token Test</title>
+  </head>
+  <body>
+    <h2>Shipmastr Firebase Token Test</h2>
+    <button id="login">Login with Google</button>
+    <button id="copy">Copy ID Token</button>
+    <pre id="out" style="white-space: pre-wrap; word-break: break-all;"></pre>
+
+    <script type="module">
+      import { initializeApp } from "https://www.gstatic.com/firebasejs/10.13.2/firebase-app.js";
+      import {
+        getAuth,
+        GoogleAuthProvider,
+        signInWithPopup
+      } from "https://www.gstatic.com/firebasejs/10.13.2/firebase-auth.js";
+
+      const firebaseConfig = {
+        apiKey: "AIzaSyCjalWKgXs9zS5us7pF-1EQcX0haa-VyO0",
+        authDomain: "shipmastr-core-prod.firebaseapp.com",
+        projectId: "shipmastr-core-prod",
+        storageBucket: "shipmastr-core-prod.firebasestorage.app",
+        messagingSenderId: "525178961393",
+        appId: "1:525178961393:web:a27628f5e078dc6bc05850"
+      };
+
+      const app = initializeApp(firebaseConfig);
+      const auth = getAuth(app);
+      const provider = new GoogleAuthProvider();
+
+      let latestToken = "";
+
+      document.getElementById("login").onclick = async () => {
+        try {
+          const result = await signInWithPopup(auth, provider);
+          latestToken = await result.user.getIdToken();
+
+          document.getElementById("out").textContent =
+            "Logged in as: " + result.user.email + "\n\nTOKEN:\n" + latestToken;
+        } catch (err) {
+          document.getElementById("out").textContent =
+            "ERROR:\n" + (err?.message || String(err));
+        }
+      };
+
+      document.getElementById("copy").onclick = async () => {
+        if (!latestToken) {
+          alert("Login first");
+          return;
+        }
+        await navigator.clipboard.writeText(latestToken);
+        alert("Token copied");
+      };
+    </script>
+  </body>
+</html>

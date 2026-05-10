@@ -19,14 +19,22 @@ export type FirstShipmentRequestInput = {
   pickupPincode: string;
   deliveryCity: string;
   deliveryPincode: string;
+  buyerName?: string | null;
+  buyerPhone?: string | null;
+  buyerAddress?: string | null;
+  packageDescription?: string | null;
   packageWeight: number;
   paymentMode: PaymentMode;
   codAmount?: number;
+  courierPreference?: string | null;
   notes?: string | null;
 };
 
 export type FirstShipmentRequestPatch = {
   status?: FirstShipmentRequestStatus;
+  courierPreference?: string | null;
+  awb?: string | null;
+  trackingNumber?: string | null;
   notes?: string | null;
 };
 
@@ -40,8 +48,11 @@ function cleanOptional(value?: string | null) {
 }
 
 function onboardingStatusForRequest(status: FirstShipmentRequestStatus) {
-  if (status === FirstShipmentRequestStatus.COMPLETED) return MerchantOnboardingStepStatus.COMPLETED;
-  if (status === FirstShipmentRequestStatus.CANCELLED) return MerchantOnboardingStepStatus.BLOCKED;
+  if (status === FirstShipmentRequestStatus.DELIVERED) return MerchantOnboardingStepStatus.COMPLETED;
+  if (status === FirstShipmentRequestStatus.CANCELLED || status === FirstShipmentRequestStatus.RTO) {
+    return MerchantOnboardingStepStatus.BLOCKED;
+  }
+
   return MerchantOnboardingStepStatus.IN_PROGRESS;
 }
 
@@ -76,9 +87,14 @@ async function createInClient(input: FirstShipmentRequestInput, client: Db) {
       pickupPincode: clean(input.pickupPincode),
       deliveryCity: clean(input.deliveryCity),
       deliveryPincode: clean(input.deliveryPincode),
+      buyerName: cleanOptional(input.buyerName),
+      buyerPhone: cleanOptional(input.buyerPhone),
+      buyerAddress: cleanOptional(input.buyerAddress),
+      packageDescription: cleanOptional(input.packageDescription),
       packageWeight: input.packageWeight,
       paymentMode: input.paymentMode,
       codAmount: input.paymentMode === PaymentMode.COD ? input.codAmount ?? 0 : 0,
+      courierPreference: cleanOptional(input.courierPreference),
       notes: cleanOptional(input.notes),
       status: FirstShipmentRequestStatus.NEW
     },
@@ -101,8 +117,10 @@ async function createInClient(input: FirstShipmentRequestInput, client: Db) {
     entityId: request.id,
     metadata: {
       paymentMode: request.paymentMode,
+      buyerPincode: request.deliveryPincode,
       deliveryPincode: request.deliveryPincode,
-      packageWeight: request.packageWeight
+      packageWeight: request.packageWeight,
+      courierPreference: request.courierPreference
     }
   }, client).catch(() => undefined);
 
@@ -153,6 +171,9 @@ async function updateInClient(input: {
 
   const data: Prisma.FirstShipmentRequestUpdateInput = {};
   if (input.patch.status !== undefined) data.status = input.patch.status;
+  if (input.patch.courierPreference !== undefined) data.courierPreference = cleanOptional(input.patch.courierPreference);
+  if (input.patch.awb !== undefined) data.awb = cleanOptional(input.patch.awb);
+  if (input.patch.trackingNumber !== undefined) data.trackingNumber = cleanOptional(input.patch.trackingNumber);
   if (input.patch.notes !== undefined) data.notes = cleanOptional(input.patch.notes);
 
   const request = await client.firstShipmentRequest.update({
@@ -181,7 +202,13 @@ async function updateInClient(input: {
     metadata: {
       fromStatus: existing.status,
       toStatus: request.status,
-      notesUpdated: input.patch.notes !== undefined
+      changed: {
+        status: input.patch.status !== undefined && existing.status !== request.status,
+        courierPreference: input.patch.courierPreference !== undefined && existing.courierPreference !== request.courierPreference,
+        awb: input.patch.awb !== undefined && existing.awb !== request.awb,
+        trackingNumber: input.patch.trackingNumber !== undefined && existing.trackingNumber !== request.trackingNumber,
+        notes: input.patch.notes !== undefined
+      }
     }
   };
   if (input.actorId) auditInput.actorId = input.actorId;

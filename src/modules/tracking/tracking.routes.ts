@@ -1,5 +1,6 @@
 import { Router } from "express";
 import admin from "../../lib/firebase.js";
+import { prisma } from "../../lib/prisma.js";
 
 export const trackingRouter = Router();
 
@@ -59,20 +60,77 @@ function normalizedResponse(lookupType: "awb" | "order" | "mobile") {
   };
 }
 
-trackingRouter.get("/awb/:awbNumber", (req, res) => {
+function normalizeCourierShipment(shipment: Awaited<ReturnType<typeof findCourierShipmentByAwb>>) {
+  if (!shipment) return null;
+
+  return {
+    shipment: {
+      awbNumber: shipment.awbNumber,
+      status: shipment.status,
+      carrier: shipment.courier.name,
+      fromPincode: shipment.fromPincode,
+      toPincode: shipment.toPincode,
+      labelUrl: null,
+      createdAt: shipment.createdAt,
+      events: shipment.events.map((event) => ({
+        status: event.status,
+        location: event.location || "",
+        timestamp: event.createdAt,
+        description: event.remarks || event.eventType
+      }))
+    },
+    order: {
+      orderId: shipment.orderId || shipment.awbNumber,
+      customerName: "Shipmastr shipment",
+      customerPhone: ""
+    }
+  };
+}
+
+async function findCourierShipmentByAwb(awbNumber: string) {
+  return prisma.courierShipment.findUnique({
+    where: { awbNumber },
+    include: {
+      courier: true,
+      events: { orderBy: { createdAt: "asc" } }
+    }
+  });
+}
+
+async function findCourierShipmentByOrder(orderId: string) {
+  return prisma.courierShipment.findFirst({
+    where: { orderId },
+    include: {
+      courier: true,
+      events: { orderBy: { createdAt: "asc" } }
+    }
+  });
+}
+
+trackingRouter.get("/awb/:awbNumber", async (req, res) => {
   const awbNumber = req.params.awbNumber?.trim();
   if (invalidLookup(awbNumber)) {
     return res.status(400).json({ success: false, error: "Invalid lookup value" });
+  }
+
+  const courierShipment = normalizeCourierShipment(await findCourierShipmentByAwb(awbNumber!));
+  if (courierShipment) {
+    return res.json({ success: true, lookupType: "awb", ...courierShipment });
   }
 
   if (awbNumber !== demoShipment.awbNumber) return notFound(res);
   return res.json(normalizedResponse("awb"));
 });
 
-trackingRouter.get("/order/:orderId", (req, res) => {
+trackingRouter.get("/order/:orderId", async (req, res) => {
   const orderId = req.params.orderId?.trim();
   if (invalidLookup(orderId)) {
     return res.status(400).json({ success: false, error: "Invalid lookup value" });
+  }
+
+  const courierShipment = normalizeCourierShipment(await findCourierShipmentByOrder(orderId!));
+  if (courierShipment) {
+    return res.json({ success: true, lookupType: "order", ...courierShipment });
   }
 
   if (orderId !== demoOrder.orderId) return notFound(res);

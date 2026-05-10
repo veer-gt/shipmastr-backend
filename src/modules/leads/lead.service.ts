@@ -1,6 +1,8 @@
 import { randomUUID } from "node:crypto";
 import bcrypt from "bcryptjs";
 import { LeadStatus, type Prisma } from "@prisma/client";
+import { createEmailCloudTask } from "../../lib/cloudTasks.js";
+import { logger } from "../../lib/logger.js";
 import { prisma } from "../../lib/prisma.js";
 import { audit } from "../audit/audit.service.js";
 
@@ -28,6 +30,16 @@ export type LeadCreateInput = {
 export type LeadPatchInput = {
   status?: LeadStatus;
   notes?: string | null;
+};
+
+type LeadNotificationLogger = {
+  info(payload: unknown, message: string): void;
+  warn(payload: unknown, message: string): void;
+};
+
+type LeadCreateOptions = {
+  enqueueLeadNotification?: (leadId: string) => Promise<unknown>;
+  log?: LeadNotificationLogger;
 };
 
 export type LeadConversionResult = {
@@ -68,10 +80,64 @@ function normalizeLead(input: LeadCreateInput) {
   };
 }
 
-export async function createLead(input: LeadCreateInput, client: Db = prisma) {
+function safeErrorMessage(err: unknown) {
+  return err instanceof Error ? err.message.slice(0, 160) : "UNKNOWN_EMAIL_ERROR";
+}
+
+export async function enqueueLeadNotificationTask(leadId: string) {
+  return createEmailCloudTask({
+    taskId: `lead-email-${leadId}`,
+    payload: { leadId }
+  });
+}
+
+export async function createLead(
+  input: LeadCreateInput,
+  client: Db = prisma,
+  options: LeadCreateOptions = {}
+) {
+  const log = options.log ?? logger;
   const lead = await client.lead.create({
     data: normalizeLead(input)
   });
+
+  log.info({
+    message: "lead_created",
+    leadNotification: {
+      leadId: lead.id
+    }
+  }, "lead_created");
+
+  const enqueueLeadNotification = options.enqueueLeadNotification ?? enqueueLeadNotificationTask;
+  log.info({
+    message: "lead_email_task_enqueue_attempted",
+    leadNotification: {
+      leadId: lead.id
+    }
+  }, "lead_email_task_enqueue_attempted");
+
+  try {
+    const enqueueResult = await enqueueLeadNotification(lead.id);
+    log.info({
+      message: "lead_email_task_enqueued",
+      leadNotification: {
+        leadId: lead.id,
+        status: "enqueued",
+        taskStatus: typeof enqueueResult === "object" && enqueueResult && "status" in enqueueResult
+          ? String((enqueueResult as { status?: unknown }).status)
+          : "enqueued"
+      }
+    }, "lead_email_task_enqueued");
+  } catch (err) {
+    log.warn({
+      message: "lead_email_task_enqueue_failed",
+      leadNotification: {
+        leadId: lead.id,
+        status: "enqueue_failed",
+        error: safeErrorMessage(err)
+      }
+    }, "lead_email_task_enqueue_failed");
+  }
 
   return {
     ok: true,

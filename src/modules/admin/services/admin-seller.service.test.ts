@@ -6,7 +6,8 @@ import {
   MerchantAdminStatus,
   MerchantOnboardingStatus,
   MerchantOnboardingStepStatus,
-  PaymentMode
+  PaymentMode,
+  SellerKycStatus
 } from "@prisma/client";
 import { deriveSellerBadgeStatus, getAdminSellerDetail, listAdminSellers, updateAdminSeller } from "./admin-seller.service.js";
 
@@ -19,12 +20,22 @@ function makeClient() {
       name: "Skymax Store",
       email: "seller@example.com",
       phone: "9876543210",
+      gstin: null,
+      panEncrypted: null,
+      panIv: null,
+      panAuthTag: null,
+      panMasked: null,
       onboardingStatus: MerchantOnboardingStatus.IN_PROGRESS,
       pickupAddressStatus: MerchantOnboardingStepStatus.COMPLETED,
       kycStatus: MerchantOnboardingStepStatus.PENDING,
       bankStatus: MerchantOnboardingStepStatus.PENDING,
       firstShipmentStatus: MerchantOnboardingStepStatus.IN_PROGRESS,
       onboardingNotes: null,
+      sellerKycStatus: SellerKycStatus.NOT_STARTED,
+      sellerKycChecklist: {},
+      sellerKycNotes: null,
+      sellerKycReviewedAt: null,
+      sellerKycReviewedBy: null,
       adminStatus: MerchantAdminStatus.NEW,
       adminNotes: null,
       createdAt: now,
@@ -142,6 +153,7 @@ describe("admin seller service", () => {
       actorId: "admin_1",
       patch: {
         adminStatus: MerchantAdminStatus.BLOCKED,
+        gstin: "27aapfu0939f1zv",
         adminNotes: "KYC issue",
         onboardingNotes: "Waiting on documents"
       }
@@ -149,7 +161,79 @@ describe("admin seller service", () => {
 
     assert.equal(result?.merchant.adminStatus, MerchantAdminStatus.BLOCKED);
     assert.equal(result?.merchant.sellerStatus, MerchantAdminStatus.BLOCKED);
+    assert.equal(result?.merchant.gstin, "27AAPFU0939F1ZV");
     assert.equal(state.auditLogs[0]?.action, "ADMIN_SELLER_UPDATED");
+  });
+
+  it("shows masked PAN only on admin seller detail", async () => {
+    const { client, state } = makeClient();
+    state.merchants[0].panEncrypted = "encrypted-pan";
+    state.merchants[0].panIv = "iv";
+    state.merchants[0].panAuthTag = "tag";
+    state.merchants[0].panMasked = "*****1234F";
+
+    const detail = await getAdminSellerDetail("merchant_1", client);
+
+    assert.equal(detail?.merchant.panMasked, "*****1234F");
+    assert.equal(JSON.stringify(detail).includes("encrypted-pan"), false);
+    assert.equal(JSON.stringify(detail).includes("ABCDE1234F"), false);
+  });
+
+  it("updates seller KYC review with redacted audit metadata", async () => {
+    const { client, state } = makeClient();
+    state.merchants[0].panMasked = "*****1234F";
+
+    const result = await updateAdminSeller({
+      merchantId: "merchant_1",
+      actorId: "admin_1",
+      patch: {
+        sellerKycStatus: SellerKycStatus.VERIFIED,
+        sellerKycChecklist: {
+          gstinPan: { status: "COMPLETED", owner: "Ops", notes: "Checked ABCDE1234F" },
+          bankRemittance: { status: "IN_PROGRESS", notes: "Waiting on bank proof" }
+        },
+        sellerKycNotes: "Risk reviewed for ABCDE1234F"
+      }
+    }, client);
+
+    assert.equal(result?.merchant.sellerKycStatus, SellerKycStatus.VERIFIED);
+    assert.equal(result?.kycReview.reviewedBy, "admin_1");
+    assert.equal(result?.kycReview.checklist[0]?.notes, "Checked [redacted-pan]");
+    assert.equal(result?.kycReview.notes, "Risk reviewed for [redacted-pan]");
+    assert.equal(JSON.stringify(state.auditLogs).includes("ABCDE1234F"), false);
+  });
+
+  it("blocks admin KYC verification when GSTIN and PAN are both missing", async () => {
+    const { client } = makeClient();
+
+    await assert.rejects(
+      () => updateAdminSeller({
+        merchantId: "merchant_1",
+        actorId: "admin_1",
+        patch: { sellerKycStatus: SellerKycStatus.VERIFIED }
+      }, client),
+      /SELLER_KYC_TAX_ID_REQUIRED/
+    );
+  });
+
+  it("accepts blank admin GSTIN and rejects invalid provided GSTIN", async () => {
+    const { client } = makeClient();
+
+    const result = await updateAdminSeller({
+      merchantId: "merchant_1",
+      actorId: "admin_1",
+      patch: { gstin: "" }
+    }, client);
+
+    assert.equal(result?.merchant.gstin, null);
+    await assert.rejects(
+      () => updateAdminSeller({
+        merchantId: "merchant_1",
+        actorId: "admin_1",
+        patch: { gstin: "bad-gstin" }
+      }, client),
+      /INVALID_GSTIN/
+    );
   });
 
   it("derives blocked and ready seller badges from onboarding state", () => {

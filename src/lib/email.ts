@@ -1,5 +1,4 @@
 import nodemailer from "nodemailer";
-import { env } from "../config/env.js";
 import { HttpError } from "./httpError.js";
 import { logger } from "./logger.js";
 
@@ -7,7 +6,9 @@ export type TransactionalEmailType =
   | "verify-email"
   | "account-created"
   | "seller-invite"
+  | "courier-invite"
   | "password-reset"
+  | "lead-submitted"
   | "wallet-created"
   | "shipment-created"
   | "shipment-status-update"
@@ -42,14 +43,50 @@ export type SendJournalEmailInput = {
 const footerText = "This is an automated Shipmastr notification. Please do not reply to this email.";
 const footerHtml = `<p style="margin-top:24px;color:#6b7280;font-size:12px;">${footerText}</p>`;
 
-function smtpDiagnostics(err?: SmtpError) {
+export type TransactionalEmailConfigStatus = {
+  smtpHostConfigured: boolean;
+  smtpPortConfigured: boolean;
+  smtpUserConfigured: boolean;
+  smtpPassConfigured: boolean;
+  emailFromConfigured: boolean;
+};
+
+function readProcessEnvString(key: string) {
+  const value = process.env[key];
+  return typeof value === "string" ? value.trim() : "";
+}
+
+function readProcessEnvBoolean(key: string, fallback: boolean) {
+  const value = readProcessEnvString(key).toLowerCase();
+  if (!value) return fallback;
+  return ["1", "true", "yes", "on"].includes(value);
+}
+
+export function getTransactionalEmailConfigStatus(source: NodeJS.ProcessEnv = process.env): TransactionalEmailConfigStatus {
+  const read = (key: string) => {
+    const value = source[key];
+    return typeof value === "string" ? value.trim() : "";
+  };
+
   return {
-    SMTP_HOST: Boolean(env.SMTP_HOST?.trim()),
-    SMTP_PORT: Boolean(env.SMTP_PORT),
-    SMTP_USER: Boolean(env.SMTP_USER?.trim()),
-    SMTP_FROM: Boolean(env.SMTP_FROM?.trim()),
-    SMTP_REPLY_TO: Boolean(env.SMTP_REPLY_TO?.trim()),
-    SMTP_PASS: Boolean(env.SMTP_PASS),
+    smtpHostConfigured: Boolean(read("SMTP_HOST")),
+    smtpPortConfigured: Boolean(read("SMTP_PORT")),
+    smtpUserConfigured: Boolean(read("SMTP_USER")),
+    smtpPassConfigured: Boolean(source.SMTP_PASS),
+    emailFromConfigured: Boolean(read("EMAIL_FROM"))
+  };
+}
+
+function smtpDiagnostics(err?: SmtpError) {
+  const status = getTransactionalEmailConfigStatus();
+  return {
+    SMTP_HOST: status.smtpHostConfigured,
+    SMTP_PORT: status.smtpPortConfigured,
+    SMTP_USER: status.smtpUserConfigured,
+    SMTP_FROM: Boolean(readProcessEnvString("SMTP_FROM")),
+    EMAIL_FROM: status.emailFromConfigured,
+    SMTP_REPLY_TO: Boolean(readProcessEnvString("SMTP_REPLY_TO")),
+    SMTP_PASS: status.smtpPassConfigured,
     errorCode: err?.code,
     errorCommand: err?.command,
     errorResponseCode: err?.responseCode,
@@ -95,26 +132,55 @@ function normalizeSendResult(result: unknown) {
 }
 
 function getSmtpConfig() {
-  const host = env.SMTP_HOST?.trim();
-  const user = env.SMTP_USER?.trim();
-  const pass = env.SMTP_PASS;
-  const from = env.SMTP_FROM?.trim();
-  const replyTo = env.SMTP_REPLY_TO?.trim() || "no-reply@shipmastr.com";
+  const host = readProcessEnvString("SMTP_HOST");
+  const portValue = readProcessEnvString("SMTP_PORT");
+  const port = Number.parseInt(portValue, 10);
+  const user = readProcessEnvString("SMTP_USER");
+  const pass = process.env.SMTP_PASS;
+  const fromEmail = readProcessEnvString("EMAIL_FROM");
+  const fromName = readProcessEnvString("EMAIL_FROM_NAME") || "Shipmastr";
+  const from = fromEmail ? `${fromName} <${fromEmail}>` : undefined;
+  const replyTo = readProcessEnvString("SMTP_REPLY_TO") || "no-reply@shipmastr.com";
 
-  if (!host || !user || !pass || !from) {
+  if (!host || !Number.isFinite(port) || !user || !pass || !from) {
     logger.warn({ smtp: smtpDiagnostics() }, "SMTP config missing");
     throw new HttpError(503, "SMTP_NOT_CONFIGURED");
   }
 
   return {
     host,
-    port: env.SMTP_PORT || 587,
-    secure: env.SMTP_SECURE,
+    port,
+    secure: readProcessEnvBoolean("SMTP_SECURE", true),
     user,
     pass,
     from,
     replyTo
   };
+}
+
+export function isTransactionalEmailConfigured() {
+  const status = getTransactionalEmailConfigStatus();
+  return isTransactionalEmailConfiguredFromStatus(status);
+}
+
+export function isTransactionalEmailConfiguredFromStatus(status?: TransactionalEmailConfigStatus) {
+  const configStatus = status ?? getTransactionalEmailConfigStatus();
+  return Boolean(
+    configStatus.smtpHostConfigured &&
+    configStatus.smtpPortConfigured &&
+    configStatus.smtpUserConfigured &&
+    configStatus.smtpPassConfigured &&
+    configStatus.emailFromConfigured
+  );
+}
+
+function escapeHtml(value: unknown) {
+  return String(value ?? "")
+    .replace(/&/g, "&amp;")
+    .replace(/</g, "&lt;")
+    .replace(/>/g, "&gt;")
+    .replace(/"/g, "&quot;")
+    .replace(/'/g, "&#39;");
 }
 
 export async function sendTransactionalEmail(input: SendTransactionalEmailInput) {
@@ -297,6 +363,20 @@ export const emailTemplates = {
     };
   },
 
+  courierInvite({ inviteLink, courierName, contactName }: { inviteLink: string; courierName: string; contactName: string }) {
+    return {
+      subject: "Your Shipmastr courier integration portal is ready",
+      text: [
+        `Hi ${contactName},`,
+        `Shipmastr has created the courier integration workspace for ${courierName}.`,
+        "Set your password and submit the API, commercial, serviceability, COD, webhook, and escalation details here:",
+        inviteLink,
+        "Manual booking remains active until sandbox credentials are verified."
+      ].join("\n"),
+      html: `<p>Hi ${escapeHtml(contactName)},</p><p>Shipmastr has created the courier integration workspace for <strong>${escapeHtml(courierName)}</strong>.</p><p><a href="${inviteLink}">Set your password</a> and submit the required integration details.</p><p>Manual booking remains active until sandbox credentials are verified.</p>`
+    };
+  },
+
   passwordReset({ resetLink, businessName }: { resetLink: string; businessName: string }) {
     return {
       subject: "Reset your Shipmastr password",
@@ -307,6 +387,42 @@ export const emailTemplates = {
         "If you did not request this, you can ignore this email."
       ].join("\n"),
       html: `<p>Password reset requested for <strong>${businessName}</strong>.</p><p><a href="${resetLink}">Set a new password</a>.</p><p>If you did not request this, you can ignore this email.</p>`
+    };
+  },
+
+  leadSubmitted(input: {
+    businessName: string;
+    name: string;
+    email: string;
+    phone: string;
+    monthlyShipments?: string | null;
+    biggestIssue?: string | null;
+    notes?: string | null;
+  }) {
+    const rows = [
+      ["Business", input.businessName],
+      ["Name", input.name],
+      ["Email", input.email],
+      ["Phone", input.phone],
+      ["Monthly shipments", input.monthlyShipments || "Not shared"],
+      ["Biggest issue", input.biggestIssue || "Not shared"],
+      ["Notes", input.notes || "Not shared"]
+    ];
+
+    return {
+      subject: `New Shipmastr demo request: ${input.businessName}`,
+      text: [
+        "New Shipmastr request-demo lead received.",
+        ...rows.map(([label, value]) => `${label}: ${value}`)
+      ].join("\n"),
+      html: [
+        "<p>New Shipmastr request-demo lead received.</p>",
+        "<table cellpadding=\"8\" cellspacing=\"0\" style=\"border-collapse:collapse;border:1px solid #e5e7eb;\">",
+        ...rows.map(([label, value]) => (
+          `<tr><td style="border:1px solid #e5e7eb;color:#6b7280;"><strong>${escapeHtml(label)}</strong></td><td style="border:1px solid #e5e7eb;">${escapeHtml(value)}</td></tr>`
+        )),
+        "</table>"
+      ].join("")
     };
   },
 

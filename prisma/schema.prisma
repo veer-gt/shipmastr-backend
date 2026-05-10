@@ -282,17 +282,76 @@ enum MerchantAdminStatus {
   BLOCKED
 }
 
+enum SellerKycStatus {
+  NOT_STARTED
+  DETAILS_SUBMITTED
+  UNDER_REVIEW
+  VERIFIED
+  REJECTED
+  REOPENED
+}
+
+enum AccountGstinVerificationStatus {
+  PENDING
+  PENDING_REVIEW
+  VERIFIED
+  HOLD
+  REJECTED
+  NEEDS_REVIEW
+}
+
+enum PickupPointStatus {
+  PENDING
+  PENDING_REVIEW
+  APPROVED
+  REJECTED
+  REQUIRE_STATE_GSTIN
+  BLOCKED
+  HOLD
+}
+
+enum AdminOnboardingChecklistItemStatus {
+  PENDING
+  IN_PROGRESS
+  DONE
+  BLOCKED
+}
+
 enum PasswordResetPurpose {
   INVITE
   RESET
 }
 
+enum CourierPartnerOnboardingStatus {
+  DRAFT
+  SUBMITTED
+  IN_REVIEW
+  SANDBOX_TESTING
+  PROD_READY
+  LIVE
+  BLOCKED
+  REOPENED
+}
+
+enum CourierSandboxVerificationStatus {
+  PENDING
+  IN_PROGRESS
+  PASSED
+  FAILED
+  BLOCKED
+}
+
 enum FirstShipmentRequestStatus {
   NEW
   REVIEWING
-  APPROVED
-  SCHEDULED
-  COMPLETED
+  READY_TO_BOOK
+  BOOKED_MANUALLY
+  AWB_ADDED
+  PICKED_UP
+  IN_TRANSIT
+  DELIVERED
+  NDR
+  RTO
   CANCELLED
 }
 
@@ -355,12 +414,22 @@ model Merchant {
   name                String
   email               String                       @unique
   phone               String?
+  gstin               String?
+  panEncrypted        String?
+  panIv               String?
+  panAuthTag          String?
+  panMasked           String?
   onboardingStatus    MerchantOnboardingStatus     @default(PENDING)
   pickupAddressStatus MerchantOnboardingStepStatus @default(PENDING)
   kycStatus           MerchantOnboardingStepStatus @default(PENDING)
   bankStatus          MerchantOnboardingStepStatus @default(PENDING)
   firstShipmentStatus MerchantOnboardingStepStatus @default(PENDING)
   onboardingNotes     String?
+  sellerKycStatus     SellerKycStatus              @default(NOT_STARTED)
+  sellerKycChecklist  Json                         @default("{}")
+  sellerKycNotes      String?
+  sellerKycReviewedAt DateTime?
+  sellerKycReviewedBy String?
   adminStatus         MerchantAdminStatus          @default(NEW)
   adminNotes          String?
   createdAt           DateTime                     @default(now())
@@ -371,15 +440,25 @@ model Merchant {
   firstShipmentRequests FirstShipmentRequest[]
   orders    Order[]
   auditLogs AuditLog[]
+  gstinRecords MerchantGstinRecord[]
+  pickupPoints MerchantPickupPoint[]
 
   @@index([adminStatus])
   @@index([onboardingStatus])
+  @@index([gstin])
+  @@index([panMasked])
+  @@index([sellerKycStatus])
 }
 
 model CourierPartner {
   id                  String   @id @default(cuid())
   name                String
   code                String   @unique
+  gstin               String?
+  serviceCodeType     String   @default("SAC")
+  serviceCode         String   @default("996812")
+  serviceDescription  String   @default("Courier services")
+  gstRate             Int      @default(18)
   active              Boolean  @default(true)
   apiMode             String   @default("manual")
   supportsCOD         Boolean  @default(true)
@@ -397,9 +476,144 @@ model CourierPartner {
   invoices       CourierInvoice[]
   financePolicies CourierFinancePolicy[]
   penalties       CourierPenalty[]
+  onboarding      CourierPartnerOnboarding?
+  onboardingSecrets CourierPartnerSecret[]
+  sandboxVerificationChecklist CourierSandboxVerificationChecklistItem[]
+  gstinRecords CourierGstinRecord[]
+  operationalLocations CourierOperationalLocation[]
 
   @@index([active])
   @@index([priority])
+  @@index([gstin])
+  @@index([serviceCode])
+}
+
+model MerchantGstinRecord {
+  id                 String                         @id @default(cuid())
+  merchantId         String
+  gstin              String
+  legalName          String?
+  tradeName          String?
+  registrationStatus String?
+  registeredAddress  String?
+  registeredState    String
+  registeredPincode  String?
+  verificationStatus AccountGstinVerificationStatus @default(PENDING)
+  verifiedAt         DateTime?
+  verifiedBy         String?
+  rejectedAt         DateTime?
+  rejectedBy         String?
+  rejectionReason    String?
+  createdAt          DateTime                       @default(now())
+  updatedAt          DateTime                       @updatedAt
+
+  merchant     Merchant              @relation(fields: [merchantId], references: [id], onDelete: Cascade)
+  pickupPoints MerchantPickupPoint[]
+
+  @@unique([merchantId, gstin])
+  @@index([merchantId])
+  @@index([registeredState])
+  @@index([verificationStatus])
+  @@index([merchantId, registeredState, verificationStatus])
+}
+
+model MerchantPickupPoint {
+  id            String            @id @default(cuid())
+  merchantId    String
+  linkedGstinId String?
+  label         String
+  contactName   String
+  phone         String
+  addressLine1  String
+  addressLine2  String?
+  city          String
+  state         String
+  pincode       String
+  status        PickupPointStatus @default(PENDING)
+  isDefault     Boolean           @default(false)
+  blockerReason String?
+  approvedAt    DateTime?
+  approvedBy    String?
+  rejectedAt    DateTime?
+  rejectedBy    String?
+  rejectionReason String?
+  createdAt     DateTime          @default(now())
+  updatedAt     DateTime          @updatedAt
+
+  merchant    Merchant              @relation(fields: [merchantId], references: [id], onDelete: Cascade)
+  linkedGstin MerchantGstinRecord?  @relation(fields: [linkedGstinId], references: [id], onDelete: SetNull)
+
+  @@index([merchantId])
+  @@index([linkedGstinId])
+  @@index([state])
+  @@index([status])
+  @@index([merchantId, state, status])
+  @@index([merchantId, isDefault])
+}
+
+model CourierGstinRecord {
+  id                 String                         @id @default(cuid())
+  courierId          String
+  gstin              String
+  legalName          String?
+  tradeName          String?
+  registrationStatus String?
+  registeredAddress  String?
+  registeredState    String
+  registeredPincode  String?
+  verificationStatus AccountGstinVerificationStatus @default(PENDING_REVIEW)
+  source             String?
+  verifiedAt         DateTime?
+  verifiedBy         String?
+  rejectedAt         DateTime?
+  rejectedBy         String?
+  rejectionReason    String?
+  createdAt          DateTime                       @default(now())
+  updatedAt          DateTime                       @updatedAt
+
+  courier              CourierPartner              @relation(fields: [courierId], references: [id], onDelete: Cascade)
+  operationalLocations CourierOperationalLocation[]
+
+  @@unique([courierId, gstin])
+  @@index([courierId])
+  @@index([registeredState])
+  @@index([verificationStatus])
+  @@index([courierId, registeredState, verificationStatus])
+}
+
+model CourierOperationalLocation {
+  id            String            @id @default(cuid())
+  courierId     String
+  linkedGstinId String?
+  label         String
+  contactName   String
+  phone         String
+  email         String?
+  addressLine1  String
+  addressLine2  String?
+  city          String
+  state         String
+  pincode       String
+  status        PickupPointStatus @default(PENDING_REVIEW)
+  isDefault     Boolean           @default(false)
+  blockerReason String?
+  approvedAt    DateTime?
+  approvedBy    String?
+  rejectedAt    DateTime?
+  rejectedBy    String?
+  rejectionReason String?
+  createdAt     DateTime          @default(now())
+  updatedAt     DateTime          @updatedAt
+
+  courier      CourierPartner      @relation(fields: [courierId], references: [id], onDelete: Cascade)
+  linkedGstin  CourierGstinRecord? @relation(fields: [linkedGstinId], references: [id], onDelete: SetNull)
+
+  @@index([courierId])
+  @@index([linkedGstinId])
+  @@index([state])
+  @@index([status])
+  @@index([courierId, state, status])
+  @@index([courierId, isDefault])
 }
 
 model RateCard {
@@ -438,9 +652,113 @@ model CourierUser {
   updatedAt    DateTime  @updatedAt
 
   courier CourierPartner @relation(fields: [courierId], references: [id], onDelete: Cascade)
+  passwordResetTokens PasswordResetToken[]
 
   @@index([courierId])
   @@index([active])
+}
+
+model CourierPartnerOnboarding {
+  id              String                         @id @default(cuid())
+  courierId       String                         @unique
+  status          CourierPartnerOnboardingStatus @default(DRAFT)
+  companyLegal    Json                           @default("{}")
+  commercial      Json                           @default("{}")
+  serviceability  Json                           @default("{}")
+  codRemittance   Json                           @default("{}")
+  api             Json                           @default("{}")
+  webhookSecurity Json                           @default("{}")
+  escalation      Json                           @default("{}")
+  changeRequest   String?
+  submittedAt     DateTime?
+  reviewedAt      DateTime?
+  createdAt       DateTime                       @default(now())
+  updatedAt       DateTime                       @updatedAt
+
+  courier     CourierPartner @relation(fields: [courierId], references: [id], onDelete: Cascade)
+  credentials CourierPartnerCredential[]
+  audits      CourierPartnerOnboardingAudit[]
+
+  @@index([status])
+  @@index([updatedAt])
+}
+
+model CourierPartnerCredential {
+  id            String   @id @default(cuid())
+  onboardingId  String
+  courierId     String
+  environment   String
+  fieldKey      String
+  label         String
+  maskedValue   String
+  secretRef     String
+  secretStatus  String   @default("STORED")
+  providedAt    DateTime @default(now())
+  updatedAt     DateTime @updatedAt
+
+  onboarding CourierPartnerOnboarding @relation(fields: [onboardingId], references: [id], onDelete: Cascade)
+
+  @@unique([onboardingId, environment, fieldKey])
+  @@index([courierId])
+  @@index([secretRef])
+}
+
+model CourierPartnerSecret {
+  id             String   @id @default(cuid())
+  courierId      String
+  secretRef      String   @unique
+  encryptedValue String
+  iv             String
+  authTag        String
+  algorithm      String   @default("aes-256-gcm")
+  keyVersion     String   @default("app-secret-pepper-v1")
+  createdAt      DateTime @default(now())
+  updatedAt      DateTime @updatedAt
+
+  courier CourierPartner @relation(fields: [courierId], references: [id], onDelete: Cascade)
+
+  @@index([courierId])
+}
+
+model CourierPartnerOnboardingAudit {
+  id           String   @id @default(cuid())
+  onboardingId String
+  courierId    String
+  actorType    String
+  actorId      String?
+  action       String
+  metadata     Json?
+  createdAt    DateTime @default(now())
+
+  onboarding CourierPartnerOnboarding @relation(fields: [onboardingId], references: [id], onDelete: Cascade)
+
+  @@index([onboardingId])
+  @@index([courierId])
+  @@index([actorType])
+  @@index([action])
+  @@index([createdAt])
+}
+
+model CourierSandboxVerificationChecklistItem {
+  id          String                           @id @default(cuid())
+  courierId   String
+  itemKey     String
+  label       String
+  status      CourierSandboxVerificationStatus @default(PENDING)
+  owner       String?
+  notes       String?
+  evidenceUrl String?
+  verifiedAt  DateTime?
+  verifiedBy  String?
+  createdAt   DateTime                         @default(now())
+  updatedAt   DateTime                         @updatedAt
+
+  courier CourierPartner @relation(fields: [courierId], references: [id], onDelete: Cascade)
+
+  @@unique([courierId, itemKey])
+  @@index([courierId])
+  @@index([status])
+  @@index([verifiedBy])
 }
 
 model CourierShipment {
@@ -985,6 +1303,71 @@ model PaymentBlockNote {
   @@index([createdAt])
 }
 
+model AdminOnboardingChecklist {
+  id        String   @id @default(uuid())
+  key       String   @unique
+  title     String
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+
+  items  AdminOnboardingChecklistItem[]
+  audits AdminOnboardingChecklistAudit[]
+
+  @@index([key])
+  @@index([createdAt])
+}
+
+model AdminOnboardingChecklistItem {
+  id            String                              @id @default(uuid())
+  checklistId   String
+  itemKey       String
+  title         String
+  prompt        String
+  position      Int
+  status        AdminOnboardingChecklistItemStatus @default(PENDING)
+  owner         String?
+  notes         String?
+  dueDate       DateTime?
+  blockerReason String?
+  completedAt   DateTime?
+  updatedBy     String?
+  createdAt     DateTime                            @default(now())
+  updatedAt     DateTime                            @updatedAt
+
+  checklist AdminOnboardingChecklist @relation(fields: [checklistId], references: [id], onDelete: Cascade)
+  audits    AdminOnboardingChecklistAudit[]
+
+  @@unique([checklistId, itemKey])
+  @@index([checklistId])
+  @@index([itemKey])
+  @@index([status])
+  @@index([updatedBy])
+  @@index([dueDate])
+  @@index([updatedAt])
+}
+
+model AdminOnboardingChecklistAudit {
+  id          String   @id @default(uuid())
+  checklistId String
+  itemId      String?
+  itemKey     String?
+  actorId     String
+  action      String
+  oldValues   Json?
+  newValues   Json?
+  createdAt   DateTime @default(now())
+
+  checklist AdminOnboardingChecklist      @relation(fields: [checklistId], references: [id], onDelete: Cascade)
+  item      AdminOnboardingChecklistItem? @relation(fields: [itemId], references: [id], onDelete: SetNull)
+
+  @@index([checklistId])
+  @@index([itemId])
+  @@index([itemKey])
+  @@index([actorId])
+  @@index([action])
+  @@index([createdAt])
+}
+
 model User {
   id           String   @id @default(cuid())
   merchantId   String
@@ -1006,16 +1389,19 @@ model User {
 
 model PasswordResetToken {
   id        String               @id @default(uuid())
-  userId    String
+  userId    String?
+  courierUserId String?
   tokenHash String               @unique
   purpose   PasswordResetPurpose
   expiresAt DateTime
   usedAt    DateTime?
   createdAt DateTime             @default(now())
 
-  user User @relation(fields: [userId], references: [id], onDelete: Cascade)
+  user User? @relation(fields: [userId], references: [id], onDelete: Cascade)
+  courierUser CourierUser? @relation(fields: [courierUserId], references: [id], onDelete: Cascade)
 
   @@index([userId])
+  @@index([courierUserId])
   @@index([purpose])
   @@index([expiresAt])
   @@index([usedAt])
@@ -1031,9 +1417,16 @@ model FirstShipmentRequest {
   pickupPincode   String
   deliveryCity    String
   deliveryPincode String
+  buyerName       String?
+  buyerPhone      String?
+  buyerAddress    String?
+  packageDescription String?
   packageWeight   Int
   paymentMode     PaymentMode
   codAmount       Int                        @default(0)
+  courierPreference String?
+  awb             String?
+  trackingNumber  String?
   notes           String?
   status          FirstShipmentRequestStatus @default(NEW)
   createdAt       DateTime                   @default(now())
@@ -1046,6 +1439,8 @@ model FirstShipmentRequest {
   @@index([requesterUserId])
   @@index([status])
   @@index([paymentMode])
+  @@index([awb])
+  @@index([trackingNumber])
   @@index([createdAt])
 }
 

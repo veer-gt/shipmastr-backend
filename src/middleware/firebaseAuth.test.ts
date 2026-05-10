@@ -131,7 +131,7 @@ describe("requireFirebaseAuth", () => {
     });
     assert.equal(result.req.auth?.userId, "user_1");
     assert.equal(result.req.auth?.merchantId, "merchant_1");
-    assert.equal(result.req.auth?.role, "OWNER");
+    assert.equal(result.req.auth?.role, "SELLER");
     assert.equal(result.req.auth?.firebaseUid, "firebase-user-1");
   });
 

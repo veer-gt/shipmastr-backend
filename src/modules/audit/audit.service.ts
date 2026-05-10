@@ -1,6 +1,8 @@
 import type { Prisma } from "@prisma/client";
 import { prisma } from "../../lib/prisma.js";
 
+type Db = Prisma.TransactionClient | typeof prisma;
+
 export async function audit(input: {
   merchantId?: string;
   actorId?: string;
@@ -8,7 +10,7 @@ export async function audit(input: {
   entityType: string;
   entityId?: string;
   metadata?: unknown;
-}) {
+}, client: Db = prisma) {
   const data: Prisma.AuditLogUncheckedCreateInput = {
     action: input.action,
     entityType: input.entityType
@@ -21,7 +23,7 @@ export async function audit(input: {
     data.metadata = input.metadata as Prisma.InputJsonValue;
   }
 
-  return prisma.auditLog.create({
+  return client.auditLog.create({
     data
   });
 }

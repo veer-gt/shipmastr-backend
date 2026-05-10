@@ -3,6 +3,7 @@ import bcrypt from "bcryptjs";
 import { PasswordResetPurpose, type Prisma } from "@prisma/client";
 import { env } from "../../config/env.js";
 import { HttpError } from "../../lib/httpError.js";
+import { logger } from "../../lib/logger.js";
 import { prisma } from "../../lib/prisma.js";
 import { audit } from "../audit/audit.service.js";
 import { emailTemplates, sendTransactionalEmail } from "../../lib/email.js";
@@ -36,6 +37,14 @@ export function buildPasswordResetLink(token: string) {
   return `${frontendBaseUrl()}/reset-password?token=${encodeURIComponent(token)}`;
 }
 
+export function buildCourierPasswordResetLink(token: string) {
+  return `${frontendBaseUrl()}/courier/login?reset=${encodeURIComponent(token)}`;
+}
+
+export function buildCourierInviteLink(token: string) {
+  return `${frontendBaseUrl()}/courier/login?invite=${encodeURIComponent(token)}`;
+}
+
 function maskEmail(email: string) {
   const [local = "", domain = ""] = email.split("@");
   if (!local || !domain) return "seller account";
@@ -44,20 +53,27 @@ function maskEmail(email: string) {
 }
 
 async function createPasswordToken(input: {
-  userId: string;
+  userId?: string;
+  courierUserId?: string;
   purpose: PasswordResetPurpose;
   expiresAt: Date;
 }, client: Db = prisma) {
+  if (!input.userId && !input.courierUserId) {
+    throw new HttpError(400, "PASSWORD_TOKEN_ACCOUNT_REQUIRED");
+  }
+
   const token = createRawToken();
   const tokenHash = hashPasswordResetToken(token);
+  const data: Prisma.PasswordResetTokenUncheckedCreateInput = {
+    tokenHash,
+    purpose: input.purpose,
+    expiresAt: input.expiresAt
+  };
+  if (input.userId) data.userId = input.userId;
+  if (input.courierUserId) data.courierUserId = input.courierUserId;
 
   await client.passwordResetToken.create({
-    data: {
-      userId: input.userId,
-      tokenHash,
-      purpose: input.purpose,
-      expiresAt: input.expiresAt
-    }
+    data
   });
 
   return token;
@@ -70,6 +86,9 @@ async function findValidToken(token: string, client: Db = prisma) {
     include: {
       user: {
         include: { merchant: true }
+      },
+      courierUser: {
+        include: { courier: true }
       }
     }
   });
@@ -82,31 +101,68 @@ export async function requestPasswordReset(input: { email: string }, client: Db 
     include: { merchant: true }
   });
 
-  if (!user) {
+  if (user) {
+    const token = await createPasswordToken({
+      userId: user.id,
+      purpose: PasswordResetPurpose.RESET,
+      expiresAt: new Date(Date.now() + RESET_TOKEN_TTL_MS)
+    }, client);
+    const resetLink = buildPasswordResetLink(token);
+
+    await audit({
+      merchantId: user.merchantId,
+      actorId: user.id,
+      action: "PASSWORD_RESET_REQUESTED",
+      entityType: "user",
+      entityId: user.id,
+      metadata: { email: user.email }
+    }, client).catch(() => undefined);
+
+    const template = emailTemplates.passwordReset({ resetLink, businessName: user.merchant.name });
+    await sendTransactionalEmail({
+      to: user.email,
+      type: "password-reset",
+      metadata: { userId: user.id, merchantId: user.merchantId },
+      ...template
+    }).catch(() => undefined);
+
+    return { ok: true };
+  }
+
+  const courierUser = await client.courierUser.findUnique({
+    where: { email },
+    include: { courier: true }
+  });
+
+  if (!courierUser) {
     return { ok: true };
   }
 
   const token = await createPasswordToken({
-    userId: user.id,
+    courierUserId: courierUser.id,
     purpose: PasswordResetPurpose.RESET,
     expiresAt: new Date(Date.now() + RESET_TOKEN_TTL_MS)
   }, client);
-  const resetLink = buildPasswordResetLink(token);
+  const resetLink = buildCourierPasswordResetLink(token);
 
-  await audit({
-    merchantId: user.merchantId,
-    actorId: user.id,
-    action: "PASSWORD_RESET_REQUESTED",
-    entityType: "user",
-    entityId: user.id,
-    metadata: { email: user.email }
-  }, client).catch(() => undefined);
+  await client.auditLog.create({
+    data: {
+      actorId: courierUser.id,
+      action: "COURIER_PASSWORD_RESET_REQUESTED",
+      entityType: "courier_user",
+      entityId: courierUser.id,
+      metadata: {
+        courierId: courierUser.courierId,
+        email: courierUser.email
+      }
+    }
+  }).catch(() => undefined);
 
-  const template = emailTemplates.passwordReset({ resetLink, businessName: user.merchant.name });
+  const template = emailTemplates.passwordReset({ resetLink, businessName: courierUser.courier.name });
   await sendTransactionalEmail({
-    to: user.email,
+    to: courierUser.email,
     type: "password-reset",
-    metadata: { userId: user.id, merchantId: user.merchantId },
+    metadata: { courierUserId: courierUser.id, courierId: courierUser.courierId },
     ...template
   }).catch(() => undefined);
 
@@ -116,12 +172,15 @@ export async function requestPasswordReset(input: { email: string }, client: Db 
 export async function verifyPasswordResetToken(input: { token: string }, client: Db = prisma) {
   const record = await findValidToken(input.token, client);
   const valid = Boolean(record && !record.usedAt && record.expiresAt.getTime() > Date.now());
+  const account = valid && record?.courierUser ? "COURIER" : valid && record?.user ? "SELLER" : undefined;
+  const email = record?.courierUser?.email || record?.user?.email;
 
   return {
     ok: true,
     valid,
-    email: valid && record ? maskEmail(record.user.email) : undefined,
-    purpose: valid && record ? record.purpose : undefined
+    email: valid && email ? maskEmail(email) : undefined,
+    purpose: valid && record ? record.purpose : undefined,
+    accountType: account
   };
 }
 
@@ -137,31 +196,40 @@ export async function resetPasswordWithToken(input: {
   const passwordHash = await bcrypt.hash(input.newPassword, 12);
   const now = new Date();
 
-  if ("$transaction" in client && typeof (client as typeof prisma).$transaction === "function") {
-    await (client as typeof prisma).$transaction(async (tx) => {
-      await tx.user.update({
-        where: { id: record.userId },
+  const completeReset = async (tx: Db) => {
+    if (record.courierUserId) {
+      await tx.courierUser.update({
+        where: { id: record.courierUserId },
         data: { passwordHash }
       });
       await tx.passwordResetToken.update({
         where: { id: record.id },
         data: { usedAt: now }
       });
-      await audit({
-        merchantId: record.user.merchantId,
-        actorId: record.userId,
-        action: "PASSWORD_RESET_COMPLETED",
-        entityType: "user",
-        entityId: record.userId,
-        metadata: { purpose: record.purpose }
-      }, tx).catch(() => undefined);
-    });
-  } else {
-    await client.user.update({
+      await tx.auditLog.create({
+        data: {
+          actorId: record.courierUserId,
+          action: "COURIER_PASSWORD_RESET_COMPLETED",
+          entityType: "courier_user",
+          entityId: record.courierUserId,
+          metadata: {
+            purpose: record.purpose,
+            courierId: record.courierUser?.courierId || null
+          }
+        }
+      }).catch(() => undefined);
+      return;
+    }
+
+    if (!record.userId || !record.user) {
+      throw new HttpError(400, "INVALID_OR_EXPIRED_RESET_TOKEN");
+    }
+
+    await tx.user.update({
       where: { id: record.userId },
       data: { passwordHash }
     });
-    await client.passwordResetToken.update({
+    await tx.passwordResetToken.update({
       where: { id: record.id },
       data: { usedAt: now }
     });
@@ -172,7 +240,13 @@ export async function resetPasswordWithToken(input: {
       entityType: "user",
       entityId: record.userId,
       metadata: { purpose: record.purpose }
-    }, client).catch(() => undefined);
+    }, tx).catch(() => undefined);
+  };
+
+  if ("$transaction" in client && typeof (client as typeof prisma).$transaction === "function") {
+    await (client as typeof prisma).$transaction(async (tx) => completeReset(tx));
+  } else {
+    await completeReset(client);
   }
 
   return { ok: true };
@@ -220,7 +294,26 @@ export async function createSellerInvite(input: {
     type: "seller-invite",
     metadata: { userId: user.id, merchantId: user.merchantId },
     ...template
-  }).then(() => ({ emailSent: true })).catch(() => ({ emailSent: false }));
+  }).then(() => {
+    logger.info({
+      sellerInviteEmail: {
+        userId: user.id,
+        merchantId: user.merchantId,
+        status: "sent"
+      }
+    }, "Seller invite email sent");
+    return { emailSent: true };
+  }).catch((err) => {
+    logger.info({
+      sellerInviteEmail: {
+        userId: user.id,
+        merchantId: user.merchantId,
+        status: "manual_link",
+        error: err instanceof Error ? err.message : "EMAIL_SEND_FAILED"
+      }
+    }, "Seller invite email skipped");
+    return { emailSent: false };
+  });
 
   return {
     ok: true,
@@ -231,6 +324,83 @@ export async function createSellerInvite(input: {
       email: user.email,
       merchantId: user.merchantId,
       businessName: user.merchant.name
+    }
+  };
+}
+
+export async function createCourierInvite(input: {
+  courierUserId: string;
+  actorId?: string | undefined;
+}, client: Db = prisma) {
+  const courierUser = await client.courierUser.findUnique({
+    where: { id: input.courierUserId },
+    include: { courier: true }
+  });
+
+  if (!courierUser) throw new HttpError(404, "COURIER_USER_NOT_FOUND");
+
+  const token = await createPasswordToken({
+    courierUserId: courierUser.id,
+    purpose: PasswordResetPurpose.INVITE,
+    expiresAt: new Date(Date.now() + INVITE_TOKEN_TTL_MS)
+  }, client);
+  const inviteLink = buildCourierInviteLink(token);
+
+  const auditData: Prisma.AuditLogUncheckedCreateInput = {
+    action: "COURIER_INVITE_CREATED",
+    entityType: "courier_user",
+    entityId: courierUser.id,
+    metadata: {
+      courierId: courierUser.courierId,
+      email: courierUser.email
+    }
+  };
+  if (input.actorId) auditData.actorId = input.actorId;
+
+  await client.auditLog.create({
+    data: auditData
+  }).catch(() => undefined);
+
+  const template = emailTemplates.courierInvite({
+    inviteLink,
+    courierName: courierUser.courier.name,
+    contactName: courierUser.name
+  });
+  const emailResult = await sendTransactionalEmail({
+    to: courierUser.email,
+    type: "courier-invite",
+    metadata: { courierUserId: courierUser.id, courierId: courierUser.courierId },
+    ...template
+  }).then(() => {
+    logger.info({
+      courierInviteEmail: {
+        courierUserId: courierUser.id,
+        courierId: courierUser.courierId,
+        status: "sent"
+      }
+    }, "Courier invite email sent");
+    return { emailSent: true };
+  }).catch((err) => {
+    logger.info({
+      courierInviteEmail: {
+        courierUserId: courierUser.id,
+        courierId: courierUser.courierId,
+        status: "manual_link",
+        error: err instanceof Error ? err.message : "EMAIL_SEND_FAILED"
+      }
+    }, "Courier invite email skipped");
+    return { emailSent: false };
+  });
+
+  return {
+    ok: true,
+    inviteLink,
+    emailSent: emailResult.emailSent,
+    user: {
+      id: courierUser.id,
+      email: courierUser.email,
+      courierId: courierUser.courierId,
+      courierName: courierUser.courier.name
     }
   };
 }

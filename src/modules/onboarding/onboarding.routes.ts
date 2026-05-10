@@ -10,12 +10,16 @@ export const onboardingRouter = Router();
 
 const onboardingPatchSchema = z.object({
   merchantId: z.string().trim().min(1).optional(),
+  gstin: z.string().trim().max(15).nullable().optional().or(z.literal("")),
+  pan: z.string().trim().max(10).nullable().optional().or(z.literal("")),
   pickupAddressStatus: z.nativeEnum(MerchantOnboardingStepStatus).optional(),
   kycStatus: z.nativeEnum(MerchantOnboardingStepStatus).optional(),
   bankStatus: z.nativeEnum(MerchantOnboardingStepStatus).optional(),
   firstShipmentStatus: z.nativeEnum(MerchantOnboardingStepStatus).optional(),
   onboardingNotes: z.string().trim().max(2000).nullable().optional()
 }).refine((body) => (
+  body.gstin !== undefined ||
+  body.pan !== undefined ||
   body.pickupAddressStatus !== undefined ||
   body.kycStatus !== undefined ||
   body.bankStatus !== undefined ||
@@ -82,6 +86,8 @@ onboardingRouter.patch("/", async (req, res) => {
   });
 
   const patch: Parameters<typeof updateMerchantOnboarding>[0]["patch"] = {};
+  if (body.gstin !== undefined) patch.gstin = body.gstin;
+  if (body.pan !== undefined) patch.pan = body.pan;
   if (body.pickupAddressStatus !== undefined) patch.pickupAddressStatus = body.pickupAddressStatus;
   if (body.kycStatus !== undefined) patch.kycStatus = body.kycStatus;
   if (body.bankStatus !== undefined) patch.bankStatus = body.bankStatus;

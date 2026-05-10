@@ -4,7 +4,7 @@
   "description": "",
   "main": "dist/server.js",
   "scripts": {
-    "test": "npm run build && node --test dist/**/*.test.js",
+    "test": "npm run build && node --test \"dist/**/*.test.js\"",
     "dev": "tsx watch src/server.ts",
     "build": "tsc",
     "start": "node dist/server.js",
@@ -18,17 +18,23 @@
   "type": "module",
   "dependencies": {
     "@prisma/client": "^6.15.0",
+    "@types/multer": "^2.1.0",
+    "@types/nodemailer": "^8.0.0",
     "bcryptjs": "^3.0.3",
     "compression": "^1.8.1",
     "cors": "^2.8.6",
+    "csv-parse": "^6.2.1",
     "dotenv": "^17.4.2",
     "express": "^5.2.1",
     "express-rate-limit": "^8.4.1",
     "firebase-admin": "^13.8.0",
     "helmet": "^8.1.0",
     "jsonwebtoken": "^9.0.3",
+    "multer": "^2.1.1",
+    "nodemailer": "^8.0.7",
     "pino": "^10.3.1",
     "pino-http": "^11.0.0",
+    "read-excel-file": "^9.0.9",
     "zod": "^4.3.6"
   },
   "devDependencies": {

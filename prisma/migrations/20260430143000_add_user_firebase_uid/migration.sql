@@ -1,0 +1,1 @@
+-- No-op migration retained to keep the production migration history complete.

@@ -1,8 +1,10 @@
-import { LeadStatus, MerchantAdminStatus, OrderStatus, Prisma } from "@prisma/client";
+import { AdminOnboardingChecklistItemStatus, LeadStatus, MerchantAdminStatus, OrderStatus, Prisma, SellerKycStatus } from "@prisma/client";
 import bcrypt from "bcryptjs";
 import { Router } from "express";
 import { z } from "zod";
 import { prisma } from "../../lib/prisma.js";
+import { normalizeCourierServiceTaxClassification } from "../../lib/courierServiceTax.js";
+import { normalizeOptionalGstin, normalizeRequiredGstin } from "../../lib/gstin.js";
 import { HttpError } from "../../lib/httpError.js";
 import { convertLeadToSeller, listLeads, updateLead } from "../leads/lead.service.js";
 import { createSellerInvite } from "../auth/password-reset.service.js";
@@ -19,12 +21,23 @@ import {
   listAdminSellers,
   updateAdminSeller
 } from "./services/admin-seller.service.js";
+import { buildAdminOpsDashboard } from "./services/admin-ops-dashboard.service.js";
+import {
+  getAdminOnboardingChecklistAudit,
+  getOrInitAdminOnboardingChecklist,
+  patchAdminOnboardingChecklistItem
+} from "./services/admin-onboarding-checklist.service.js";
 
 export const adminRouter = Router();
 
 const courierSchema = z.object({
   name: z.string().trim().min(2),
   code: z.string().trim().min(2),
+  gstin: z.string().trim().max(15),
+  serviceCodeType: z.literal("SAC").default("SAC"),
+  serviceCode: z.enum(["996811", "996812", "996813", "996819"]).default("996812"),
+  serviceDescription: z.string().trim().optional().or(z.literal("")),
+  gstRate: z.coerce.number().default(18),
   active: z.boolean().default(true),
   apiMode: z.enum(["manual", "mock", "live"]).default("manual"),
   supportsCOD: z.boolean().default(true),
@@ -99,15 +112,41 @@ const leadPatchSchema = z.object({
 });
 
 const sellerPatchSchema = z.object({
+  gstin: z.string().trim().max(15).optional().nullable().or(z.literal("")),
   adminStatus: z.nativeEnum(MerchantAdminStatus).optional(),
+  sellerKycStatus: z.nativeEnum(SellerKycStatus).optional(),
+  sellerKycChecklist: z.record(z.string(), z.unknown()).optional(),
+  sellerKycNotes: z.string().trim().max(2500).optional().nullable().or(z.literal("")),
   adminNotes: z.string().trim().max(2000).optional().nullable().or(z.literal("")),
   onboardingNotes: z.string().trim().max(2000).optional().nullable().or(z.literal(""))
 }).refine((body) => (
+  body.gstin !== undefined ||
   body.adminStatus !== undefined ||
+  body.sellerKycStatus !== undefined ||
+  body.sellerKycChecklist !== undefined ||
+  body.sellerKycNotes !== undefined ||
   body.adminNotes !== undefined ||
   body.onboardingNotes !== undefined
 ), {
-  message: "adminStatus, adminNotes or onboardingNotes is required"
+  message: "At least one seller admin field is required"
+});
+
+const adminOnboardingPatchSchema = z.object({
+  status: z.nativeEnum(AdminOnboardingChecklistItemStatus).optional(),
+  owner: z.string().trim().max(160).optional().nullable().or(z.literal("")),
+  notes: z.string().trim().max(2500).optional().nullable().or(z.literal("")),
+  dueDate: z.coerce.date().optional().nullable().or(z.literal("")),
+  blockerReason: z.string().trim().max(1000).optional().nullable().or(z.literal("")),
+  completedAt: z.coerce.date().optional().nullable().or(z.literal(""))
+}).refine((body) => (
+  body.status !== undefined ||
+  body.owner !== undefined ||
+  body.notes !== undefined ||
+  body.dueDate !== undefined ||
+  body.blockerReason !== undefined ||
+  body.completedAt !== undefined
+), {
+  message: "At least one checklist item field is required"
 });
 
 function zoneForLane(fromPincode: string, toPincode: string) {
@@ -136,10 +175,16 @@ adminRouter.get("/couriers", async (_req, res) => {
 
 adminRouter.post("/couriers", async (req, res) => {
   const body = courierSchema.parse(req.body);
+  const serviceTax = normalizeCourierServiceTaxClassification(body);
   const courier = await prisma.courierPartner.create({
     data: {
       ...body,
       code: body.code.toUpperCase(),
+      gstin: normalizeRequiredGstin(body.gstin),
+      serviceCodeType: serviceTax.serviceCodeType,
+      serviceCode: serviceTax.serviceCode,
+      serviceDescription: serviceTax.serviceDescription,
+      gstRate: serviceTax.gstRate,
       trackingUrlTemplate: body.trackingUrlTemplate || null
     }
   });
@@ -152,6 +197,19 @@ adminRouter.patch("/couriers/:id", async (req, res) => {
 
   if (body.name !== undefined) data.name = body.name;
   if (body.code !== undefined) data.code = body.code.toUpperCase();
+  if (body.gstin !== undefined) data.gstin = normalizeRequiredGstin(body.gstin);
+  if (
+    body.serviceCodeType !== undefined ||
+    body.serviceCode !== undefined ||
+    body.serviceDescription !== undefined ||
+    body.gstRate !== undefined
+  ) {
+    const serviceTax = normalizeCourierServiceTaxClassification(body);
+    data.serviceCodeType = serviceTax.serviceCodeType;
+    data.serviceCode = serviceTax.serviceCode;
+    data.serviceDescription = serviceTax.serviceDescription;
+    data.gstRate = serviceTax.gstRate;
+  }
   if (body.active !== undefined) data.active = body.active;
   if (body.apiMode !== undefined) data.apiMode = body.apiMode;
   if (body.supportsCOD !== undefined) data.supportsCOD = body.supportsCOD;
@@ -471,6 +529,47 @@ adminRouter.get("/leads", async (req, res) => {
   res.json(await listLeads(query.status ? { status: query.status as LeadStatus } : {}));
 });
 
+adminRouter.get("/ops-dashboard", async (_req, res) => {
+  res.json(await buildAdminOpsDashboard());
+});
+
+adminRouter.get("/onboarding", async (req, res) => {
+  const checklist = await getOrInitAdminOnboardingChecklist(req.auth!.userId);
+  res.json(checklist);
+});
+
+adminRouter.post("/onboarding/init", async (req, res) => {
+  const checklist = await getOrInitAdminOnboardingChecklist(req.auth!.userId);
+  res.status(201).json(checklist);
+});
+
+adminRouter.patch("/onboarding/items/:itemKey", async (req, res) => {
+  const params = z.object({ itemKey: z.string().trim().min(1) }).parse(req.params);
+  const body = adminOnboardingPatchSchema.parse(req.body);
+  const patch: Parameters<typeof patchAdminOnboardingChecklistItem>[0]["patch"] = {};
+
+  if (body.status !== undefined) patch.status = body.status;
+  if (body.owner !== undefined) patch.owner = body.owner || null;
+  if (body.notes !== undefined) patch.notes = body.notes || null;
+  if (body.dueDate !== undefined) patch.dueDate = body.dueDate === "" ? null : body.dueDate;
+  if (body.blockerReason !== undefined) patch.blockerReason = body.blockerReason || null;
+  if (body.completedAt !== undefined) patch.completedAt = body.completedAt === "" ? null : body.completedAt;
+
+  const result = await patchAdminOnboardingChecklistItem({
+    actorId: req.auth!.userId,
+    itemKey: params.itemKey,
+    patch
+  });
+
+  if (!result) throw new HttpError(404, "ADMIN_ONBOARDING_ITEM_NOT_FOUND");
+
+  res.json(result);
+});
+
+adminRouter.get("/onboarding/audit", async (_req, res) => {
+  res.json(await getAdminOnboardingChecklistAudit());
+});
+
 adminRouter.patch("/leads/:id", async (req, res) => {
   const body = leadPatchSchema.parse(req.body);
   const patch: { status?: LeadStatus; notes?: string } = {};
@@ -530,7 +629,11 @@ adminRouter.get("/sellers/:merchantId", async (req, res) => {
 adminRouter.patch("/sellers/:merchantId", async (req, res) => {
   const body = sellerPatchSchema.parse(req.body);
   const patch: Parameters<typeof updateAdminSeller>[0]["patch"] = {};
+  if (body.gstin !== undefined) patch.gstin = body.gstin;
   if (body.adminStatus !== undefined) patch.adminStatus = body.adminStatus;
+  if (body.sellerKycStatus !== undefined) patch.sellerKycStatus = body.sellerKycStatus;
+  if (body.sellerKycChecklist !== undefined) patch.sellerKycChecklist = body.sellerKycChecklist;
+  if (body.sellerKycNotes !== undefined) patch.sellerKycNotes = body.sellerKycNotes;
   if (body.adminNotes !== undefined) patch.adminNotes = body.adminNotes;
   if (body.onboardingNotes !== undefined) patch.onboardingNotes = body.onboardingNotes;
 
@@ -554,6 +657,9 @@ adminRouter.patch("/first-shipment-requests/:id", async (req, res) => {
   const body = adminFirstShipmentPatchSchema.parse(req.body);
   const patch: Parameters<typeof updateFirstShipmentRequest>[0]["patch"] = {};
   if (body.status !== undefined) patch.status = body.status;
+  if (body.courierPreference !== undefined) patch.courierPreference = body.courierPreference;
+  if (body.awb !== undefined) patch.awb = body.awb;
+  if (body.trackingNumber !== undefined) patch.trackingNumber = body.trackingNumber;
   if (body.notes !== undefined) patch.notes = body.notes;
 
   const input: Parameters<typeof updateFirstShipmentRequest>[0] = {

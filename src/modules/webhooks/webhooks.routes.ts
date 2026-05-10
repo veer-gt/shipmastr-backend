@@ -1,8 +1,21 @@
 import { OrderStatus, Prisma } from "@prisma/client";
 import { Router } from "express";
 import { z } from "zod";
+import { emailTemplates, sendTransactionalEmail, trackingUrl } from "../../lib/email.js";
 import { HttpError } from "../../lib/httpError.js";
 import { prisma } from "../../lib/prisma.js";
+import { getCarrierAdapter } from "../carrierAdapters/carrier-adapter.factory.js";
+import { applyCarrierTrackingUpdate } from "../carrierAdapters/carrier-tracking.service.js";
+import { updateAddressFingerprint } from "../intelligence/address-intelligence.service.js";
+import { handleWebhookAutonomy } from "../intelligence/autonomous-action.service.js";
+import { updateConsigneeProfileFromWebhook } from "../intelligence/consignee-intelligence.service.js";
+import { updateCourierPerformanceFromWebhook } from "../intelligence/courier-performance.service.js";
+import { addressHash, phoneHash } from "../intelligence/fingerprint.js";
+import { updateMerchantTrustProfile } from "../intelligence/merchant-trust.service.js";
+import { updateMerchantMetrics } from "../intelligence/metrics.service.js";
+import { updateOrderDataSignalsFromWebhook, updateShipmentDetailsFromWebhook } from "../intelligence/order-intelligence.service.js";
+import { createSlaBreach, logOperationalEvent } from "../intelligence/operational-reliability.service.js";
+import { actualOutcomeFromCarrier, evaluatePredictionOutcome } from "../intelligence/prediction-outcome.service.js";
 import { verifyWebhookSignature } from "./webhook.security.js";
 
 export const webhooksRouter = Router();
@@ -12,15 +25,53 @@ const schema = z.object({
   eventType: z.string(),
   merchantId: z.string().optional(),
   orderId: z.string().optional(),
-  externalOrderId: z.string().optional()
+  externalOrderId: z.string().optional(),
+  awbNumber: z.string().optional(),
+  trackingNumber: z.string().optional(),
+  latestEvent: z.string().optional(),
+  description: z.string().optional()
 }).passthrough();
 
 const statusByEventType: Record<string, OrderStatus> = {
   "shipment.delivered": "DELIVERED",
   "shipment.ndr": "NDR",
   "shipment.rto": "RTO",
-  "shipment.shipped": "SHIPPED"
+  "shipment.shipped": "SHIPPED",
+  "shipment.cancelled": "CANCELLED",
+  "shipment.lost": "CANCELLED"
 };
+
+function courierEventType(eventType: string) {
+  const value = eventType.toLowerCase();
+  if (value.includes("delivered")) return "DELIVERED" as const;
+  if (value.includes("ndr")) return "NDR" as const;
+  if (value.includes("rto")) return "RTO" as const;
+  if (value.includes("lost")) return "LOST" as const;
+  if (value.includes("cancel")) return "CANCELLED" as const;
+  if (value.includes("pickup")) return "PICKED_UP" as const;
+  if (value.includes("ofd") || value.includes("out_for_delivery")) return "OUT_FOR_DELIVERY" as const;
+  return "IN_TRANSIT" as const;
+}
+
+function ndrReasonFromPayload(body: Record<string, unknown>) {
+  const reason = String(body.reason || body.ndrReason || "").toLowerCase();
+  if (reason.includes("reachable") || reason.includes("phone")) return "CUSTOMER_NOT_REACHABLE" as const;
+  if (reason.includes("address")) return "ADDRESS_ISSUE" as const;
+  if (reason.includes("refused")) return "CUSTOMER_REFUSED" as const;
+  if (reason.includes("payment")) return "PAYMENT_ISSUE" as const;
+  if (reason.includes("reschedule")) return "RESCHEDULE_REQUESTED" as const;
+  return "OTHER" as const;
+}
+
+function rtoReasonFromPayload(body: Record<string, unknown>) {
+  const reason = String(body.reason || body.rtoReason || "").toLowerCase();
+  if (reason.includes("refused")) return "CUSTOMER_REFUSED" as const;
+  if (reason.includes("address")) return "ADDRESS_INCOMPLETE" as const;
+  if (reason.includes("reachable") || reason.includes("phone")) return "CUSTOMER_UNREACHABLE" as const;
+  if (reason.includes("courier")) return "COURIER_ISSUE" as const;
+  if (reason.includes("failed")) return "FAILED_DELIVERY" as const;
+  return "OTHER" as const;
+}
 
 webhooksRouter.post(
   "/carrier",
@@ -34,7 +85,17 @@ webhooksRouter.post(
       throw new HttpError(401, "INVALID_WEBHOOK_SIGNATURE");
     }
 
-    const body = schema.parse(req.body);
+    const headers: Record<string, string | undefined> = {};
+    const signatureHeader = req.header("x-shipmastr-signature") ?? undefined;
+    const courierProviderHeader = req.header("x-courier-provider") ?? undefined;
+    if (signatureHeader) headers["x-shipmastr-signature"] = signatureHeader;
+    if (courierProviderHeader) headers["x-courier-provider"] = courierProviderHeader;
+
+    const normalizedWebhook = await getCarrierAdapter().parseWebhook(req.body, {
+      headers,
+      receivedAt: new Date()
+    });
+    const body = schema.parse(normalizedWebhook);
 
     const existing = await prisma.webhookEvent.findUnique({
       where: {
@@ -54,7 +115,8 @@ webhooksRouter.post(
 
     const order = body.orderId
       ? await prisma.order.findUnique({
-          where: { id: body.orderId }
+          where: { id: body.orderId },
+          include: { merchant: true }
         })
       : body.externalOrderId && body.merchantId
         ? await prisma.order.findUnique({
@@ -63,11 +125,13 @@ webhooksRouter.post(
                 merchantId: body.merchantId,
                 externalOrderId: body.externalOrderId
               }
-            }
+            },
+            include: { merchant: true }
           })
         : null;
 
     const mappedStatus = statusByEventType[body.eventType];
+    const actualOutcome = actualOutcomeFromCarrier(body.eventType);
 
     const result = await prisma.$transaction(async (tx) => {
       const event = await tx.webhookEvent.create({
@@ -82,11 +146,39 @@ webhooksRouter.post(
         }
       });
 
+      await applyCarrierTrackingUpdate({
+        awbNumber: body.awbNumber ?? null,
+        trackingNumber: body.trackingNumber ?? null,
+        orderId: order?.id ?? body.orderId ?? body.externalOrderId ?? null,
+        status: normalizedWebhook.status,
+        eventType: body.eventType,
+        latestEvent: body.latestEvent ?? body.description ?? body.eventType,
+        location: normalizedWebhook.location ?? null,
+        rawPayload: body as Record<string, unknown>
+      }, tx);
+
       if (order && mappedStatus) {
         await tx.order.update({
           where: { id: order.id },
           data: { status: mappedStatus }
         });
+
+        await updateShipmentDetailsFromWebhook({ order, payload: body, status: mappedStatus }, tx);
+        await updateOrderDataSignalsFromWebhook({ orderId: order.id, payload: body, status: mappedStatus }, tx);
+        if (actualOutcome !== "PENDING") {
+          await evaluatePredictionOutcome(order.id, actualOutcome, tx);
+        }
+        await handleWebhookAutonomy({
+          orderId: order.id,
+          merchantId: order.merchantId,
+          eventType: body.eventType,
+          reason: typeof body.reason === "string" ? body.reason : typeof body.ndrReason === "string" ? body.ndrReason : null,
+          phoneHash: phoneHash(order.buyerPhone),
+          buyerConfirmed: body.buyerConfirmed === true
+        }, tx);
+
+        await updateAddressFingerprint({ ...order, status: mappedStatus }, tx);
+        await updateConsigneeProfileFromWebhook({ ...order, status: mappedStatus }, mappedStatus, tx);
 
         await tx.auditLog.create({
           data: {
@@ -101,10 +193,102 @@ webhooksRouter.post(
             }
           }
         });
+
+        const pHash = phoneHash(order.buyerPhone);
+        const aHash = addressHash(order);
+
+        if (mappedStatus === "NDR") {
+          await tx.ndrEvent.create({
+            data: {
+              merchantId: order.merchantId,
+              orderId: order.id,
+              courierId: typeof body.courierId === "string" ? body.courierId : null,
+              pincode: order.pincode,
+              phoneHash: pHash,
+              addressHash: aHash,
+              reason: ndrReasonFromPayload(body),
+              actionRequired: String(body.actionRequired || "Review reattempt action"),
+              metadata: { eventType: body.eventType, externalId: body.externalId }
+            }
+          });
+        }
+
+        if (mappedStatus === "RTO") {
+          await tx.rtoEvent.create({
+            data: {
+              merchantId: order.merchantId,
+              orderId: order.id,
+              courierId: typeof body.courierId === "string" ? body.courierId : null,
+              pincode: order.pincode,
+              phoneHash: pHash,
+              addressHash: aHash,
+              reason: rtoReasonFromPayload(body),
+              metadata: { eventType: body.eventType, externalId: body.externalId }
+            }
+          });
+        }
+
+        await updateCourierPerformanceFromWebhook({ ...event, order }, tx);
+        await updateMerchantMetrics(order.merchantId, tx);
+        await updateMerchantTrustProfile(order.merchantId, tx);
+        await logOperationalEvent({
+          merchantId: order.merchantId,
+          orderId: order.id,
+          eventType: courierEventType(body.eventType),
+          status: mappedStatus,
+          metadata: { externalId: body.externalId, eventType: body.eventType }
+        }, tx);
+      }
+
+      if (!order) {
+        await logOperationalEvent({
+          eventType: courierEventType(body.eventType),
+          status: "webhook_order_unmatched",
+          severity: "MEDIUM",
+          metadata: { externalId: body.externalId, eventType: body.eventType }
+        }, tx);
+
+        await createSlaBreach({
+          breachType: "WEBHOOK_DELAYED",
+          severity: "MEDIUM",
+          metadata: { reason: "Carrier webhook did not match an order", externalId: body.externalId }
+        }, tx);
       }
 
       return event;
     });
+
+    if (order?.merchant?.email && mappedStatus) {
+      const awbNumber = body.awbNumber || body.trackingNumber || body.externalId;
+      const latestEvent = body.latestEvent || body.description || body.eventType;
+      const template = mappedStatus === "NDR"
+        ? emailTemplates.ndrUpdate({
+            orderId: order.externalOrderId,
+            awbNumber,
+            latestEvent,
+            trackingUrl: trackingUrl(awbNumber)
+          })
+        : emailTemplates.shipmentStatusUpdate({
+            orderId: order.externalOrderId,
+            awbNumber,
+            currentStatus: mappedStatus,
+            latestEvent,
+            trackingUrl: trackingUrl(awbNumber)
+          });
+
+      await sendTransactionalEmail({
+        to: order.merchant.email,
+        type: mappedStatus === "NDR" ? "ndr-update" : "shipment-status-update",
+        metadata: {
+          merchantId: order.merchantId,
+          orderId: order.externalOrderId,
+          awbNumber,
+          status: mappedStatus,
+          eventType: body.eventType
+        },
+        ...template
+      });
+    }
 
     res.json({
       ok: true,
