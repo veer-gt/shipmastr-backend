@@ -24,6 +24,7 @@ import {
   courierPayables,
   sellerSettlements
 } from "./seller-settlements.service.js";
+import { getVasActionCenter } from "../vas/vas.service.js";
 
 export const financeRouter = Router();
 
@@ -411,6 +412,17 @@ financeRouter.get("/seller-settlements", async (req, res) => {
   const settlements = await sellerSettlements(req.auth!.merchantId);
 
   res.json({ settlements });
+});
+
+financeRouter.get("/products", async (req, res) => {
+  const actionCenter = await getVasActionCenter(req.auth!.merchantId);
+
+  res.set({
+    "Cache-Control": "no-store, no-cache, max-age=0, must-revalidate",
+    "Pragma": "no-cache",
+    "Expires": "0"
+  });
+  res.json(actionCenter);
 });
 
 financeRouter.post("/payment-approval", async (req, res) => {
