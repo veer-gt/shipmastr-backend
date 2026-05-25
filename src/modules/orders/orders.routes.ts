@@ -4,6 +4,7 @@ import { z } from "zod";
 import { prisma } from "../../lib/prisma.js";
 import { HttpError } from "../../lib/httpError.js";
 import { requireIdempotency } from "../../middleware/idempotency.js";
+import { emitAutomationEvent } from "../automation/autopilot.service.js";
 import { updateAddressFingerprint } from "../intelligence/address-intelligence.service.js";
 import { approveAutonomousAction, handleOrderCreatedAutonomy, rejectAutonomousAction } from "../intelligence/autonomous-action.service.js";
 import { decideCodEligibility } from "../intelligence/cod-decision.service.js";
@@ -29,12 +30,149 @@ const codDecisionRank = {
  MANUAL_REVIEW: 3
 } as const;
 
+type OrderAutomationDecision = Awaited<ReturnType<typeof buildSellerSafeOrderDecision>>;
+
 function stricterCodDecision(left: keyof typeof codDecisionRank, right: keyof typeof codDecisionRank) {
  return codDecisionRank[left] >= codDecisionRank[right] ? left : right;
 }
 
 function riskReasons(value: unknown) {
  return Array.isArray(value) ? value.map((reason) => String(reason)) : [];
+}
+
+function codShieldRiskTier(decision: Pick<OrderAutomationDecision, "codDecision" | "shipmentDecision" | "automationStatus">) {
+ if (decision.codDecision === "PREPAID_ONLY" || decision.shipmentDecision === "DO_NOT_SHIP") return "HIGH";
+ if (decision.codDecision === "MANUAL_REVIEW" || decision.automationStatus === "INTERNAL_REVIEW") return "HIGH";
+ if (decision.codDecision === "REQUIRE_OTP" || decision.automationStatus === "OTP_SENT") return "MEDIUM";
+ if (decision.automationStatus === "ADDRESS_CORRECTION_SENT") return "MEDIUM";
+ return "LOW";
+}
+
+function recommendedCodShieldAction(decision: Pick<OrderAutomationDecision, "codDecision" | "automationStatus" | "pendingRequiredAction">) {
+ if (decision.pendingRequiredAction === "BUYER_ADDRESS_CONFIRMATION" || decision.automationStatus === "ADDRESS_CORRECTION_SENT") {
+   return "Confirm buyer address before shipment.";
+ }
+
+ if (decision.codDecision === "PREPAID_ONLY" || decision.automationStatus === "PREPAID_LINK_SENT") {
+   return "Request prepaid conversion before shipping this COD order.";
+ }
+
+ if (decision.codDecision === "REQUIRE_OTP" || decision.automationStatus === "OTP_SENT") {
+   return "Confirm buyer intent before releasing the COD shipment.";
+ }
+
+ if (decision.pendingRequiredAction === "SELLER_APPROVAL_REQUIRED") {
+   return "Ask the seller to approve this order before shipment.";
+ }
+
+ return "Monitor this order and proceed only after required checks clear.";
+}
+
+function sellerSafeRiskSummary(decision: Pick<OrderAutomationDecision, "sellerMessage" | "shortReasons">) {
+ return [
+   decision.sellerMessage,
+   ...decision.shortReasons
+ ].filter(Boolean).slice(0, 4);
+}
+
+export function buildOrderAutomationPayloads(
+ order: {
+   id: string;
+   merchantId: string;
+   externalOrderId: string;
+   buyerName: string;
+   buyerPhone: string;
+   addressLine1: string;
+   addressLine2: string | null;
+   city: string;
+   state: string;
+   pincode: string;
+   orderValue: number;
+   codAmount: number;
+   paymentMode: string;
+ },
+ decision: OrderAutomationDecision
+) {
+ const basePayload = {
+   orderId: order.id,
+   externalOrderId: order.externalOrderId,
+   orderValue: order.orderValue,
+   codAmount: order.codAmount,
+   paymentMode: order.paymentMode,
+   buyerContact: {
+     name: order.buyerName,
+     phone: order.buyerPhone
+   },
+   destination: {
+     city: order.city,
+     state: order.state,
+     pincode: order.pincode
+   },
+   codDecision: decision.codDecision,
+   shipmentDecision: decision.shipmentDecision,
+   automationStatus: decision.automationStatus,
+   pendingRequiredAction: decision.pendingRequiredAction,
+   riskTier: codShieldRiskTier(decision),
+   sellerSafeRiskSummary: sellerSafeRiskSummary(decision),
+   recommendedAction: recommendedCodShieldAction(decision)
+ };
+
+ return {
+   orderCreated: basePayload,
+   codRiskHigh: {
+     ...basePayload,
+     eventIntent: "COD_SHIELD_REVIEW"
+   },
+   addressConfirmation: {
+     ...basePayload,
+     eventIntent: "ADDRESS_CONFIRMATION",
+     shippingAddress: {
+       line1: order.addressLine1,
+       line2: order.addressLine2,
+       city: order.city,
+       state: order.state,
+       pincode: order.pincode
+     }
+   }
+ };
+}
+
+export function buildOrderAutomationEvents(order: Parameters<typeof buildOrderAutomationPayloads>[0], decision: OrderAutomationDecision) {
+ const payloads = buildOrderAutomationPayloads(order, decision);
+ const events = [
+   {
+     merchantId: order.merchantId,
+     eventKey: "order.created",
+     source: "orders-api",
+     sourceId: order.id,
+     idempotencyKey: `order.created:${order.id}`,
+     payload: payloads.orderCreated
+   }
+ ];
+
+ if (decision.codDecision !== "ALLOW_COD") {
+   events.push({
+     merchantId: order.merchantId,
+     eventKey: "order.cod_risk_high",
+     source: "orders-api",
+     sourceId: order.id,
+     idempotencyKey: `order.cod_risk_high:${order.id}`,
+     payload: payloads.codRiskHigh
+   });
+ }
+
+ if (decision.automation.timeline.some((action) => action.actionType === "SEND_ADDRESS_CORRECTION_LINK")) {
+   events.push({
+     merchantId: order.merchantId,
+     eventKey: "order.address_confirmation_required",
+     source: "orders-api",
+     sourceId: order.id,
+     idempotencyKey: `order.address_confirmation_required:${order.id}`,
+     payload: payloads.addressConfirmation
+   });
+ }
+
+ return events;
 }
 
 const createOrderSchema = z.object({
@@ -227,6 +365,24 @@ async(req,res)=>{
        decision: await buildSellerSafeOrderDecision(order.id, order.merchantId, tx)
      };
    });
+
+   const eventsToEmit = buildOrderAutomationEvents(result.order, result.decision)
+     .map((event) => emitAutomationEvent(event));
+
+   void Promise.all(eventsToEmit).catch((error) =>
+     prisma.auditLog.create({
+       data: {
+         merchantId: result.order.merchantId,
+         actorId: req.auth!.userId,
+         action: "automation.order_event_emit_failed",
+         entityType: "Order",
+         entityId: result.order.id,
+         metadata: {
+           error: error instanceof Error ? error.message : "Unknown automation event failure"
+         }
+       }
+     }).catch(() => undefined)
+   );
 
    res.status(201).json(result);
  } catch (err) {

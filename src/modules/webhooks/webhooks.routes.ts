@@ -17,8 +17,29 @@ import { updateOrderDataSignalsFromWebhook, updateShipmentDetailsFromWebhook } f
 import { createSlaBreach, logOperationalEvent } from "../intelligence/operational-reliability.service.js";
 import { actualOutcomeFromCarrier, evaluatePredictionOutcome } from "../intelligence/prediction-outcome.service.js";
 import { verifyWebhookSignature } from "./webhook.security.js";
+import {
+  AutomationCallbackError,
+  buildNdrRecoveryAutomationEvent,
+  emitAutomationEvent,
+  handleWhatsappProviderCallback,
+  verifyWhatsappProviderSignature
+} from "../automation/autopilot.service.js";
 
 export const webhooksRouter = Router();
+
+const whatsappProviderCallbackSchema = z.object({
+  providerMessageId: z.string().min(1),
+  merchantId: z.string().min(1).optional(),
+  provider: z.string().min(1).optional(),
+  status: z.string().min(1).optional(),
+  eventType: z.string().min(1).optional(),
+  sender: z.string().min(1).optional(),
+  recipient: z.string().min(1).optional(),
+  templateKey: z.string().min(1).optional(),
+  failureReason: z.string().min(1).optional(),
+  buyerMessage: z.string().min(1).optional(),
+  metadata: z.record(z.string(), z.any()).optional()
+});
 
 const schema = z.object({
   externalId: z.string(),
@@ -72,6 +93,46 @@ function rtoReasonFromPayload(body: Record<string, unknown>) {
   if (reason.includes("failed")) return "FAILED_DELIVERY" as const;
   return "OTHER" as const;
 }
+
+webhooksRouter.post("/whatsapp/provider", async (req, res) => {
+  const rawBody = req.rawBody ?? Buffer.from(JSON.stringify(req.body));
+  const signature = req.header("x-whatsapp-signature") ??
+    req.header("x-provider-signature") ??
+    req.header("x-hub-signature-256") ??
+    req.header("x-shipmastr-signature") ??
+    undefined;
+
+  if (!verifyWhatsappProviderSignature({ body: rawBody, signature })) {
+    throw new HttpError(401, "INVALID_WHATSAPP_PROVIDER_SIGNATURE");
+  }
+
+  const body = whatsappProviderCallbackSchema.parse(req.body);
+
+  try {
+    const result = await handleWhatsappProviderCallback(body);
+    res.json({
+      ok: true,
+      communication: {
+        id: result.communication.id,
+        merchantId: result.communication.merchantId,
+        channel: result.communication.channel,
+        templateKey: result.communication.templateKey,
+        status: result.communication.status,
+        provider: result.communication.provider,
+        providerMessageId: result.communication.providerMessageId,
+        deliveredAt: result.communication.deliveredAt,
+        readAt: result.communication.readAt,
+        failedAt: result.communication.failedAt
+      },
+      optOutRecorded: Boolean(result.optOut)
+    });
+  } catch (error) {
+    if (error instanceof AutomationCallbackError) {
+      throw new HttpError(error.status, error.message);
+    }
+    throw error;
+  }
+});
 
 webhooksRouter.post(
   "/carrier",
@@ -145,6 +206,7 @@ webhooksRouter.post(
           ...(order?.id ? { orderId: order.id } : {})
         }
       });
+      let ndrEvent: { id: string } | null = null;
 
       await applyCarrierTrackingUpdate({
         awbNumber: body.awbNumber ?? null,
@@ -198,7 +260,7 @@ webhooksRouter.post(
         const aHash = addressHash(order);
 
         if (mappedStatus === "NDR") {
-          await tx.ndrEvent.create({
+          ndrEvent = await tx.ndrEvent.create({
             data: {
               merchantId: order.merchantId,
               orderId: order.id,
@@ -255,8 +317,48 @@ webhooksRouter.post(
         }, tx);
       }
 
-      return event;
+      return { event, ndrEvent };
     });
+
+    if (order && mappedStatus === "NDR" && result.ndrEvent) {
+      const automationEvent = buildNdrRecoveryAutomationEvent({
+        merchantId: order.merchantId,
+        orderId: order.id,
+        externalOrderId: order.externalOrderId,
+        shipmentId: typeof body.shipmentId === "string" ? body.shipmentId : undefined,
+        awb: body.awbNumber,
+        trackingNumber: body.trackingNumber,
+        ndrEventId: result.ndrEvent.id,
+        courierPartnerId: typeof body.courierId === "string" ? body.courierId : undefined,
+        courierPartnerName: typeof body.courierName === "string"
+          ? body.courierName
+          : typeof body.courierPartnerName === "string"
+            ? body.courierPartnerName
+            : undefined,
+        buyerName: order.buyerName,
+        buyerPhone: order.buyerPhone,
+        ndrReason: ndrReasonFromPayload(body),
+        attemptCount: typeof body.attemptCount === "number" ? body.attemptCount : undefined,
+        city: order.city,
+        state: order.state,
+        pincode: order.pincode
+      });
+
+      void emitAutomationEvent(automationEvent).catch((error) =>
+        prisma.auditLog.create({
+          data: {
+            merchantId: order.merchantId,
+            action: "automation.ndr_event_emit_failed",
+            entityType: "NdrEvent",
+            entityId: result.ndrEvent?.id || null,
+            metadata: {
+              error: error instanceof Error ? error.message : "Unknown automation event failure",
+              eventKey: "shipment.ndr_created"
+            }
+          }
+        }).catch(() => undefined)
+      );
+    }
 
     if (order?.merchant?.email && mappedStatus) {
       const awbNumber = body.awbNumber || body.trackingNumber || body.externalId;
@@ -292,7 +394,7 @@ webhooksRouter.post(
 
     res.json({
       ok: true,
-      eventId: result.id,
+      eventId: result.event.id,
       status: mappedStatus ?? null,
       orderMatched: Boolean(order)
     });
