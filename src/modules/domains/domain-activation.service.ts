@@ -351,6 +351,7 @@ function summarizeActivationWorkflow(input: {
   const workflowState = workflowStateForMerchantDomain(input.merchantDomain);
   const dnsInstructions = dnsInstructionsFromRecords(input.merchantDomain?.validationRecords);
   const providerSetupStarted = workflowIndicatesProviderSetupStarted(workflowState) || hasProviderSetupStarted(input);
+  const dnsInstructionsVisible = dnsInstructions.available && providerSetupStarted;
   const approved =
     workflowState === "ADMIN_APPROVED" ||
     workflowState === "PROVIDER_SETUP_READY" ||
@@ -362,7 +363,7 @@ function summarizeActivationWorkflow(input: {
       ? "NEEDS_ATTENTION"
       : input.activationState === "LIVE"
         ? "ACTIVE"
-        : dnsInstructions.available
+        : dnsInstructionsVisible
           ? "DNS_INSTRUCTIONS_AVAILABLE"
           : workflowState === "PROVIDER_SETUP_STARTED"
             ? "PROVIDER_SETUP_STARTED"
@@ -379,8 +380,9 @@ function summarizeActivationWorkflow(input: {
     providerSetupStarted,
     providerActionsAllowed: approved && !rejected,
     providerGateReason: approved ? null : "Approve this domain request before provider setup actions.",
-    dnsInstructionsAvailable: dnsInstructions.available,
-    dnsInstructions: dnsInstructions.available ? dnsInstructions : null,
+    dnsInstructionsAvailable: dnsInstructionsVisible,
+    dnsInstructionsPending: providerSetupStarted && !dnsInstructions.available,
+    dnsInstructions: dnsInstructionsVisible ? dnsInstructions : null,
     note: typeof workflowRecord(input.merchantDomain?.validationRecords).note === "string"
       ? workflowRecord(input.merchantDomain?.validationRecords).note
       : null,
@@ -1218,14 +1220,18 @@ export async function getAdminDomainDnsInstructions(input: { domain: string; cli
   const { normalizedDomain, merchantDomain } = await getMerchantDomainForAdminAction(input.domain, client);
   const instructions = dnsInstructionsFromRecords(merchantDomain.validationRecords);
   const workflowState = workflowStateForMerchantDomain(merchantDomain);
+  const providerSetupStarted = workflowIndicatesProviderSetupStarted(workflowState);
+  const available = instructions.available && providerSetupStarted;
   return {
     domain: normalizedDomain,
-    available: instructions.available && workflowIndicatesProviderSetupStarted(workflowState),
+    available,
     workflowState,
-    instructions: instructions.available && workflowIndicatesProviderSetupStarted(workflowState) ? instructions : null,
-    nextAction: instructions.available
+    instructions: available ? instructions : null,
+    nextAction: available
       ? "Share these connection instructions with the merchant or operator."
-      : "DNS instructions are not available until provider setup has explicitly started."
+      : providerSetupStarted
+        ? "Provider setup has started. DNS instructions are pending preparation."
+        : "DNS instructions are not available until provider setup has explicitly started."
   };
 }
 

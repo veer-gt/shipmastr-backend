@@ -392,10 +392,23 @@ function dnsInstructionsFromRecords(value: Prisma.JsonValue | null | undefined) 
   };
 }
 
+function workflowIndicatesProviderSetupStarted(state: string) {
+  return [
+    "PROVIDER_SETUP_STARTED",
+    "DNS_INSTRUCTIONS_AVAILABLE",
+    "DNS_VALIDATED",
+    "SSL_PENDING",
+    "ACTIVE",
+    "CONNECTED",
+    "LIVE"
+  ].includes(state);
+}
+
 export function mapMerchantDomainLifecycleStatus(input: MerchantDomainStatusInput): MerchantDomainLifecycleStatus {
   const rawStatus = String(input.status || "").toUpperCase();
   const workflowState = workflowStateFromRecords(input.validationRecords);
   const dnsInstructions = dnsInstructionsFromRecords(input.validationRecords);
+  const providerSetupStarted = workflowIndicatesProviderSetupStarted(workflowState);
 
   const directLifecycleStatuses = new Set<string>([
     "REQUESTED",
@@ -429,7 +442,8 @@ export function mapMerchantDomainLifecycleStatus(input: MerchantDomainStatusInpu
 
   if (workflowState === "REJECTED" || workflowState === "NEEDS_ATTENTION") return "NEEDS_ATTENTION";
   if (workflowState === "DNS_VALIDATED") return "DNS_VALIDATED";
-  if (workflowState === "DNS_INSTRUCTIONS_AVAILABLE" || dnsInstructions.available) return "DNS_INSTRUCTIONS_AVAILABLE";
+  if (dnsInstructions.available && providerSetupStarted) return "DNS_INSTRUCTIONS_AVAILABLE";
+  if (workflowState === "DNS_INSTRUCTIONS_AVAILABLE") return "PROVIDER_SETUP_STARTED";
   if (workflowState === "PROVIDER_SETUP_STARTED") return "PROVIDER_SETUP_STARTED";
   if (workflowState === "PROVIDER_SETUP_READY") return "PROVIDER_SETUP_READY";
   if (workflowState === "ADMIN_APPROVED" || workflowState === "APPROVED") return "ADMIN_APPROVED";
@@ -514,12 +528,14 @@ export function buildMerchantDomainStatusView(input: MerchantDomainStatusInput):
   const status = mapMerchantDomainLifecycleStatus(input);
   const copy = MERCHANT_COPY[status];
   const dnsInstructions = dnsInstructionsFromRecords(input.validationRecords);
+  const workflowState = workflowStateFromRecords(input.validationRecords);
+  const showDnsInstructions = dnsInstructions.available && workflowIndicatesProviderSetupStarted(workflowState);
   return {
     domain: input.domain,
     status,
     ...copy,
     updatedAt: input.updatedAt || input.lastCheckedAt || null,
-    ...(dnsInstructions.available ? { dnsInstructions } : {}),
+    ...(showDnsInstructions ? { dnsInstructions } : {}),
     progressSteps: buildProgressSteps(status)
   };
 }

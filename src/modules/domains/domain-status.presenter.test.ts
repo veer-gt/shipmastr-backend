@@ -70,6 +70,23 @@ describe("domain status presenter", () => {
     assert.equal(withInstructions.status, "DNS_INSTRUCTIONS_AVAILABLE");
     assert.equal(withInstructions.dnsInstructions?.available, true);
     assert.equal(withInstructions.dnsInstructions?.records?.[0]?.type, "CNAME");
+
+    const recordsBeforeSetup = buildMerchantDomainStatusView({
+      domain: "brand.in",
+      status: DomainStatus.APPROVAL_REQUIRED,
+      validationRecords: {
+        requestStatus: "APPROVED",
+        activationWorkflow: { state: "ADMIN_APPROVED" },
+        dnsInstructions: {
+          available: true,
+          summary: "Prepared early by mistake.",
+          records: [{ type: "CNAME", name: "www", value: "storefront-origin.shipmastr.com", ttl: "default" }]
+        }
+      }
+    });
+
+    assert.equal(recordsBeforeSetup.status, "ADMIN_APPROVED");
+    assert.equal(recordsBeforeSetup.dnsInstructions, undefined);
   });
 
   it("has friendly copy and next action for every merchant lifecycle status", () => {

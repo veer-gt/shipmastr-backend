@@ -412,6 +412,7 @@ describe("admin domain activation workflow", () => {
 
     const beforeInstructions = await getAdminDomainDnsInstructions({ domain: "merchant-smoke-test.example.in", client });
     assert.equal(beforeInstructions.available, false);
+    assert.match(beforeInstructions.nextAction, /not available until provider setup/i);
 
     const result = await startAdminDomainProviderSetup({
       domain: "merchant-smoke-test.example.in",
@@ -443,6 +444,51 @@ describe("admin domain activation workflow", () => {
     assert.equal(state.events[0]?.eventType, "DOMAIN_PROVIDER_SETUP_STARTED");
     assert.equal(state.events[0]?.payload.providerMutation, false);
     assert.equal(state.events[0]?.payload.dnsChanged, false);
+  });
+
+  it("keeps provider-started domains in a pending-instructions state when records are missing", async () => {
+    const { client, state, now } = makeActivationClient();
+    state.merchantDomains.set("merchant-smoke-test.example.in", {
+      id: "merchant_domain_requested",
+      merchantId: "merchant_1",
+      storefrontId: "storefront_1",
+      domain: "merchant-smoke-test.example.in",
+      normalizedDomain: "merchant-smoke-test.example.in",
+      status: DomainStatus.APPROVAL_REQUIRED,
+      provider: "MANUAL",
+      source: "EXTERNAL_CONNECTED",
+      validationRecords: {
+        requestStatus: "APPROVED",
+        intent: "CONNECT_EXISTING_DOMAIN",
+        activationWorkflow: { state: "ADMIN_APPROVED" }
+      },
+      cloudflareCustomHostnameId: null,
+      cloudflareCustomHostnameStatus: null,
+      dnsValidationStatus: null,
+      sslStatus: null,
+      lastCheckedAt: now,
+      updatedAt: now
+    });
+
+    const result = await startAdminDomainProviderSetup({
+      domain: "merchant-smoke-test.example.in",
+      confirmDomain: "merchant-smoke-test.example.in",
+      actorId: "admin_1",
+      note: "Start controlled setup.",
+      client
+    });
+
+    const instructions = await getAdminDomainDnsInstructions({ domain: "merchant-smoke-test.example.in", client });
+    assert.equal(result.activationState, "PROVIDER_SETUP_STARTED");
+    assert.equal(result.workflow.providerSetupStarted, true);
+    assert.equal(result.workflow.dnsInstructionsAvailable, false);
+    assert.equal(result.workflow.dnsInstructionsPending, true);
+    assert.equal(instructions.available, false);
+    assert.equal(instructions.instructions, null);
+    assert.match(instructions.nextAction, /pending preparation/i);
+    assert.equal(state.events[0]?.payload.providerMutation, false);
+    assert.equal(state.events[0]?.payload.cloudflareMutation, false);
+    assert.equal(state.events[0]?.payload.workerRouteChanged, false);
   });
 
   it("links a storefront with an exact db-only upsert and audit event", async () => {
@@ -598,6 +644,7 @@ describe("admin domain activation workflow", () => {
     assert.equal(result.nextAction.actionKey, "ADMIN_REVIEW");
     assert.equal(result.dbMapping.exists, false);
     assert.equal(result.warnings.includes("STOREFRONT_DOMAIN_ROW_MISSING"), true);
+    assert.equal(JSON.stringify(state.merchantDomains.get("merchant-smoke-test.example.in")?.validationRecords || {}).includes("dnsInstructions"), false);
     assert.equal(state.events.length, 0);
     assert.equal(state.auditLogs.length, 1);
     assert.equal(state.auditLogs[0]?.action, "DOMAIN_STATUS_CHECKED");

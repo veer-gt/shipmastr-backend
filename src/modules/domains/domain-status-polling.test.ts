@@ -153,6 +153,7 @@ describe("domain status polling", () => {
           assert.equal(args.data.status, DomainStatus.REQUESTED);
           assert.equal(args.data.validationRecords.polling.merchantStatus, "REVIEW_REQUIRED");
           assert.notEqual(args.data.validationRecords.polling.merchantStatus, "DNS_VALIDATION_PENDING");
+          assert.equal("dnsInstructions" in args.data.validationRecords, false);
           return { id: "domain_requested" };
         }
       },
