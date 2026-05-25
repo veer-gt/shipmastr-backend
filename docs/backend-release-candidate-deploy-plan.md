@@ -4,9 +4,12 @@ Status: BACKEND_RELEASE_CANDIDATE_AFTER_BUCKET_SPLIT
 
 ## Release Summary
 
-Backend HEAD is f174248, tagged:
+Backend release candidate tag:
 - BACKEND_RELEASE_CANDIDATE_AFTER_BUCKET_SPLIT
-- LOGGER_NEWSLETTER_CLEANUP_TESTS_READY
+
+Confirm the exact commit before any live operation:
+- git rev-parse --short HEAD
+- git tag --points-at HEAD
 
 This release includes bucket-split backend work for domains/storefronts, VAS, audit/auth/local-admin, autopilot, NDR, returns, settings, and logger/newsletter tests.
 
@@ -52,12 +55,24 @@ Commands:
 
 Do not run until approved.
 
-Command:
-- gcloud builds submit . --project shipmastr-core-prod --config cloudbuild.migrate.yaml
+Status-only image build command:
+- gcloud builds submit . --project shipmastr-core-prod --config cloudbuild.migrate-status.yaml
 
-Use the approved migration image/job path with production DATABASE_URL from Secret Manager to check migration status first.
+The status-only image uses Dockerfile.migrate-status and defaults to:
+- npx prisma migrate status --schema prisma/schema.prisma
+
+Use the approved Cloud Run job/container path with production DATABASE_URL from Secret Manager to check migration status first. Do not print DATABASE_URL.
+
+Do not use cloudbuild.migrate.yaml for status checks. Dockerfile.migrate defaults to:
+- npx prisma migrate deploy
 
 Only run prisma migrate deploy after explicit approval.
+
+Status decision tree:
+1. Up to date: proceed to staging deploy approval.
+2. Pending migrations: stop, list pending migrations, and request explicit migrate deploy approval.
+3. Failed migration: stop and inspect _prisma_migrations through the approved DB/admin path.
+4. Divergent history: stop and prepare a reviewed reconciliation plan. Do not use db push, migrate reset, or manual production edits.
 
 ## Backend Deploy
 
