@@ -61,12 +61,12 @@ describe("newsletter subscribers", () => {
   it("subscribes and normalizes email in the Cloud Run source of truth", async () => {
     const { client, state } = makeNewsletterClient();
     const result = await subscribeNewsletter({
-      email: " MC3454@GMAIL.COM ",
+      email: " MERCHANT@EXAMPLE.COM ",
       source: "manual-test"
     }, client);
 
     assert.equal(result.status, "SUBSCRIBED");
-    assert.equal(result.email, "mc3454@gmail.com");
+    assert.equal(result.email, "merchant@example.com");
     assert.equal(state.subscribers[0]?.source, "manual-test");
     assert.match(result.unsubscribeUrl, /^https:\/\/www\.shipmastr\.com\/api\/newsletter\/unsubscribe\?token=/);
   });
