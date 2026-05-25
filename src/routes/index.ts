@@ -5,6 +5,7 @@ import { requireInternalSecret } from "../middleware/internal.js";
 import { requireAdminJwt, requireCourierJwt, requireJwtAuth } from "../middleware/jwtAuth.js";
 import { adminRouter } from "../modules/admin/admin.routes.js";
 import { automationCallbacksRouter, automationCommunicationsRouter, automationRouter } from "../modules/automation/automation.routes.js";
+import { auditRouter } from "../modules/audit/audit.routes.js";
 import { authRouter } from "../modules/auth/auth.routes.js";
 import { codRemittancesRouter } from "../modules/codRemittances/cod-remittances.routes.js";
 import { adminCourierPartnerApplicationRouter, courierPartnerApplicationRouter } from "../modules/courierPartnerApplications/courier-partner-application.routes.js";
@@ -48,6 +49,7 @@ apiRouter.use("/admin/tax-compliance", requireAdminJwt, adminTaxComplianceRouter
 apiRouter.use("/admin/domains", requireAdminJwt, adminDomainsRouter);
 apiRouter.use("/admin/storefronts", requireAdminJwt, adminStorefrontsRouter);
 apiRouter.use("/admin", requireAdminJwt, adminRouter);
+apiRouter.use("/audit", requireJwtAuth, auditRouter);
 apiRouter.use("/automation/callbacks", automationCallbacksRouter);
 apiRouter.use("/automation/communications", requireInternalSecret, automationCommunicationsRouter);
 apiRouter.use("/automation", requireJwtAuth, automationRouter);
