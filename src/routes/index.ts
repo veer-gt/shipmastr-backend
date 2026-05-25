@@ -27,6 +27,7 @@ import { ndrRouter } from "../modules/ndr/ndr.routes.js";
 import { newsletterRouter } from "../modules/newsletter/newsletter.routes.js";
 import { onboardingRouter } from "../modules/onboarding/onboarding.routes.js";
 import { reconciliationRouter } from "../modules/reconciliation/reconciliation.routes.js";
+import { returnsRouter } from "../modules/returns/returns.routes.js";
 import { adminStorefrontsRouter, publicStorefrontsRouter, storefrontsRouter } from "../modules/storefronts/storefronts.routes.js";
 import { adminTaxComplianceRouter, courierTaxComplianceRouter, sellerTaxComplianceRouter } from "../modules/taxCompliance/tax-compliance.routes.js";
 import { vasRouter } from "../modules/vas/vas.routes.js";
@@ -77,6 +78,8 @@ apiRouter.use("/intelligence/ops", requireInternalSecret, intelligenceOpsRouter)
 apiRouter.use("/intelligence", requireJwtAuth, intelligenceRouter);
 apiRouter.use("/orders", requireJwtAuth, ordersRouter);
 apiRouter.use("/reconciliation", requireJwtAuth, reconciliationRouter);
+apiRouter.use("/returns", requireJwtAuth, returnsRouter);
+apiRouter.use("/reverse-logistics", requireJwtAuth, returnsRouter);
 apiRouter.use("/shipments", requireJwtAuth, shipmentsRouter);
 apiRouter.use("/storefronts", publicStorefrontsRouter);
 apiRouter.use("/vas", requireJwtAuth, vasRouter);
