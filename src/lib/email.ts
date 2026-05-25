@@ -12,7 +12,14 @@ export type TransactionalEmailType =
   | "wallet-created"
   | "shipment-created"
   | "shipment-status-update"
-  | "ndr-update";
+  | "ndr-update"
+  | "domain-payment-received"
+  | "domain-registration-started"
+  | "domain-registered"
+  | "domain-renewal-reminder"
+  | "domain-ekyc-pending"
+  | "domain-verification-required"
+  | "domain-live";
 
 export type JournalEmailLogPrefix = "journal_test_email_send" | "journal_email_send";
 

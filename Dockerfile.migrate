@@ -9,5 +9,7 @@ RUN npm ci
 
 COPY prisma ./prisma
 COPY prisma.config.ts ./
+RUN npx prisma generate
+COPY scripts ./scripts
 
 CMD ["npx", "prisma", "migrate", "deploy"]
