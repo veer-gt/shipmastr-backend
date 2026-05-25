@@ -46,8 +46,8 @@ function makeClient() {
       merchantId: "merchant_1",
       email: "seller@example.com",
       name: "Seller",
-      role: "OWNER",
-      userType: "EXTERNAL_MERCHANT",
+      role: "SELLER_OWNER",
+      userType: "SELLER_ACCOUNT",
       createdAt: now,
       updatedAt: now
     }] as any[],

@@ -134,7 +134,7 @@ describe("password reset tokens", () => {
     assert.equal(state.auditLogs[0]?.action, "PASSWORD_RESET_COMPLETED");
   });
 
-  it("creates courier invite tokens and verifies them as courier accounts", async () => {
+  it("creates Courier Partner invite tokens and verifies them as Courier Partner accounts", async () => {
     const { client, state } = makePasswordResetClient();
 
     const result = await createCourierInvite({ courierUserId: "courier_user_1", actorId: "admin_1" }, client);
@@ -147,7 +147,7 @@ describe("password reset tokens", () => {
 
     const verified = await verifyPasswordResetToken({ token }, client);
     assert.equal(verified.valid, true);
-    assert.equal(verified.accountType, "COURIER");
+    assert.equal(verified.accountType, "COURIER_PARTNER");
     assert.equal(verified.email?.includes("ops@courier.example"), false);
   });
 

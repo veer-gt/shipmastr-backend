@@ -117,7 +117,7 @@ describe("requireFirebaseAuth", () => {
       firebaseUid: "firebase-user-1",
       email: "owner@merchant.test",
       merchantId: "merchant_1",
-      role: "OWNER",
+      role: "SELLER_OWNER",
       merchant: { id: "merchant_1" },
     }));
 

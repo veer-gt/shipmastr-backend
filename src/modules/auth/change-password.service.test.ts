@@ -75,7 +75,7 @@ describe("changePasswordForAccount", () => {
     assert.equal(state.auditLogs[0]?.merchantId, "merchant_1");
   });
 
-  it("changes a courier password without requiring merchant scope", async () => {
+  it("changes a Courier Partner password without requiring merchant scope", async () => {
     const { client, state } = makeClient();
     const result = await changePasswordForAccount(
       { kind: "COURIER", userId: "courier_user_1", courierId: "courier_1" },

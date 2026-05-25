@@ -511,8 +511,8 @@ describe("leads", () => {
     assert.equal(first?.lead.merchantId, "merchant_1");
     assert.equal(first?.merchant.email, "founder@example.com");
     assert.equal(first?.user.email, "founder@example.com");
-    assert.equal(first?.user.role, "OWNER");
-    assert.equal(first?.user.userType, "EXTERNAL_MERCHANT");
+    assert.equal(first?.user.role, "SELLER_OWNER");
+    assert.equal(first?.user.userType, "SELLER_ACCOUNT");
     assert.equal((first?.user as any).passwordHash, undefined);
     assert.equal(second?.reusedMerchant, true);
     assert.equal(second?.reusedUser, true);

@@ -8,7 +8,7 @@ import { prisma } from "../../lib/prisma.js";
 import { env } from "../../config/env.js";
 import { HttpError } from "../../lib/httpError.js";
 import { emailTemplates, sendTransactionalEmail } from "../../lib/email.js";
-import { dashboardPathForRole, normalizeAccountRole, UserRole } from "../../lib/accountRoles.js";
+import { ActorType, actorTypeForAccount, canonicalRoleForAccount, dashboardPathForRole, normalizeAccountRole, UserRole } from "../../lib/accountRoles.js";
 import admin from "../../lib/firebase.js";
 import { changePasswordForAccount, type PasswordAccount } from "./change-password.service.js";
 import { requestPasswordReset, resetPasswordWithToken, verifyPasswordResetToken } from "./password-reset.service.js";
@@ -120,13 +120,23 @@ async function sendRegistrationCode(email: string, code: string) {
 }
 
 function sellerUserResponse(
-  user: { id: string; email: string; merchantId: string; role: string },
+  user: { id: string; email: string; merchantId: string; role: string; userType?: string | null },
   merchant: { id: string; name: string; phone?: string | null; onboardingStatus?: MerchantOnboardingStatus | string | null }
 ) {
   const role = normalizeAccountRole(user.role);
-  const dashboardPath = role === UserRole.SELLER && merchant.onboardingStatus !== MerchantOnboardingStatus.READY_TO_SHIP
+  const actorType = actorTypeForAccount({
+    role: user.role,
+    userType: user.userType,
+    onboardingStatus: merchant.onboardingStatus
+  });
+  const canonicalRole = canonicalRoleForAccount({
+    role: user.role,
+    userType: user.userType,
+    onboardingStatus: merchant.onboardingStatus
+  });
+  const dashboardPath = role === UserRole.SELLER && actorType !== ActorType.MERCHANT && merchant.onboardingStatus !== MerchantOnboardingStatus.READY_TO_SHIP
     ? "/seller/onboarding"
-    : dashboardPathForRole(role);
+    : dashboardPathForRole(canonicalRole, { onboardingStatus: merchant.onboardingStatus, userType: user.userType, accountType: actorType });
   return {
     id: user.id,
     email: user.email,
@@ -135,8 +145,11 @@ function sellerUserResponse(
     phoneNumber: merchant.phone || undefined,
     onboardingStatus: merchant.onboardingStatus || MerchantOnboardingStatus.PENDING,
     plan: "Lite",
-    role,
-    accountType: role,
+    role: canonicalRole,
+    accountType: actorType,
+    authRole: role,
+    actorType,
+    canonicalRole,
     dashboardPath
   };
 }
@@ -149,12 +162,15 @@ function courierUserResponse(
     id: user.id,
     name: user.name,
     email: user.email,
-    role: UserRole.COURIER,
-    accountType: UserRole.COURIER,
+    role: UserRole.COURIER_ADMIN,
+    accountType: ActorType.COURIER_PARTNER,
+    authRole: UserRole.COURIER,
+    actorType: ActorType.COURIER_PARTNER,
+    canonicalRole: UserRole.COURIER_ADMIN,
     courierId: user.courierId,
     courierName: courier.name,
     courierCode: courier.code,
-    dashboardPath: dashboardPathForRole(UserRole.COURIER)
+    dashboardPath: dashboardPathForRole(UserRole.COURIER_ADMIN)
   };
 }
 
@@ -264,7 +280,9 @@ authRouter.post("/register/verify-code", async (req, res) => {
       data: {
         merchantId: merchant.id,
         email,
-        passwordHash: pending.passwordHash
+        passwordHash: pending.passwordHash,
+        role: UserRole.SELLER_OWNER,
+        userType: "SELLER_ACCOUNT"
       }
     });
 
@@ -318,6 +336,8 @@ authRouter.post("/register", async (req, res) => {
       merchantId: merchant.id,
       email,
       passwordHash,
+      role: UserRole.SELLER_OWNER,
+      userType: "SELLER_ACCOUNT",
       ...(body.name ? { name: body.name } : {})
     }
   });
@@ -557,11 +577,15 @@ authRouter.post("/login", async (req, res) => {
       data: { lastLoginAt: new Date() }
     });
 
-    const courierRole = UserRole.COURIER;
+    const courierRole = UserRole.COURIER_ADMIN;
+    const courierActorType = ActorType.COURIER_PARTNER;
     return res.json({
       token: signCourierToken(courierUser),
       role: courierRole,
-      accountType: courierRole,
+      accountType: courierActorType,
+      authRole: UserRole.COURIER,
+      actorType: courierActorType,
+      canonicalRole: courierRole,
       dashboardPath: dashboardPathForRole(courierRole),
       user: courierUserResponse(courierUser, courierUser.courier)
     });
@@ -641,8 +665,11 @@ authRouter.get("/me", async (req, res) => {
       merchantId: user.merchantId,
       onboardingStatus: user.merchant.onboardingStatus,
       plan: "Lite",
-      role: normalizeAccountRole(user.role),
-      accountType: normalizeAccountRole(user.role),
+      role: sellerUserResponse(user, user.merchant).role,
+      accountType: sellerUserResponse(user, user.merchant).accountType,
+      authRole: normalizeAccountRole(user.role),
+      actorType: sellerUserResponse(user, user.merchant).actorType,
+      canonicalRole: sellerUserResponse(user, user.merchant).canonicalRole,
       dashboardPath: sellerUserResponse(user, user.merchant).dashboardPath
     });
   } catch (err) {

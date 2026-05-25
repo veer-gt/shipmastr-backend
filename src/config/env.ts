@@ -3,6 +3,15 @@ import { z } from "zod";
 
 dotenv.config();
 
+const envBoolean = (defaultValue: boolean) => z.preprocess((value) => {
+  if (typeof value === "string") {
+    const normalized = value.trim().toLowerCase();
+    if (["true", "1", "yes", "on"].includes(normalized)) return true;
+    if (["false", "0", "no", "off", ""].includes(normalized)) return false;
+  }
+  return value;
+}, z.boolean().default(defaultValue));
+
 const schema = z.object({
   NODE_ENV: z.enum(["development", "test", "production"]).default("development"),
   APP_ENV: z.enum(["development", "test", "staging", "production"]).default("production"),
@@ -11,6 +20,7 @@ const schema = z.object({
   JWT_SECRET: z.string().min(32),
   APP_SECRET_PEPPER: z.string().min(16),
   WEBHOOK_SECRET: z.string().min(32),
+  SHIPMASTR_INTERNAL_SECRET: z.string().min(32).optional(),
   CORS_ORIGINS: z.string().default(""),
   SMTP_HOST: z.string().optional(),
   SMTP_PORT: z.coerce.number().optional(),
@@ -26,6 +36,8 @@ const schema = z.object({
   JOURNAL_EMAIL_FROM: z.string().optional(),
   EMAIL_FROM: z.string().email().optional(),
   EMAIL_FROM_NAME: z.string().optional(),
+  DOMAIN_EMAIL_FROM_NAME: z.string().default("Shipmastr"),
+  DOMAIN_EMAIL_FROM_ADDRESS: z.string().email().default("noreply@shipmastr.com"),
   NEWSLETTER_SECRET: z.string().optional(),
   JOURNAL_ADMIN_TOKEN: z.string().optional(),
   EMAIL_SPF_VERIFIED: z.coerce.boolean().default(false),
@@ -36,8 +48,37 @@ const schema = z.object({
   CLOUD_TASKS_LOCATION: z.string().default("asia-south1"),
   EMAIL_QUEUE_NAME: z.string().default("shipmastr-email-queue"),
   TASK_HANDLER_URL: z.string().url().optional(),
+  N8N_AUTOPILOT_ENABLED: z.coerce.boolean().default(false),
+  N8N_AUTOPILOT_DISPATCH_URL: z.string().url().optional(),
+  N8N_AUTOPILOT_WORKFLOW_URLS: z.string().optional(),
+  N8N_AUTOPILOT_SIGNING_SECRET: z.string().min(32).optional(),
+  N8N_AUTOPILOT_TIMEOUT_MS: z.coerce.number().int().min(1000).max(30000).default(8000),
+  RESELLERCLUB_BASE_URL: z.string().url().optional(),
+  RESELLERCLUB_AUTH_USERID: z.string().optional(),
+  RESELLERCLUB_API_KEY: z.string().optional(),
+  RESELLERCLUB_CUSTOMER_ID: z.string().optional(),
+  RESELLERCLUB_REG_CONTACT_ID: z.string().optional(),
+  RESELLERCLUB_ADMIN_CONTACT_ID: z.string().optional(),
+  RESELLERCLUB_TECH_CONTACT_ID: z.string().optional(),
+  RESELLERCLUB_BILLING_CONTACT_ID: z.string().optional(),
+  RESELLERCLUB_IN_NAMESERVER_PARAMS_VERIFIED: envBoolean(false),
+  CLOUDFLARE_AUTH_MODE: z.enum(["api_token", "global_key"]).default("api_token"),
+  CLOUDFLARE_AUTH_EMAIL: z.string().optional(),
+  CLOUDFLARE_GLOBAL_API_KEY: z.string().optional(),
+  CLOUDFLARE_API_TOKEN: z.string().optional(),
+  CLOUDFLARE_ZONE_ID: z.string().optional(),
+  CLOUDFLARE_CUSTOM_METADATA_ENABLED: envBoolean(false),
+  ALLOW_CLOUDFLARE_ADMIN_MUTATIONS: envBoolean(false),
+  ALLOW_APEX_DOMAIN_AUTOMATION: envBoolean(false),
+  SHIPMASTR_INTERNAL_PROVISIONING_SECRET: z.string().min(16).optional(),
+  SHIPMASTR_DOMAIN_PROVIDER_MODE: z.enum(["mock", "sandbox", "live"]).default("mock"),
+  ALLOW_RESELLERCLUB_AVAILABILITY_CHECK: envBoolean(false),
+  RESELLERCLUB_DEBUG_SAFE: envBoolean(false),
+  ALLOW_RESELLERCLUB_BASE_MATRIX: envBoolean(false),
+  ALLOW_LIVE_DOMAIN_REGISTRATION: envBoolean(false),
   COMM_PROVIDER: z.enum(["mock", "whatsapp", "sms"]).default("mock"),
   WHATSAPP_PROVIDER: z.enum(["mock", "gupshup", "interakt", "wati", "aisensy"]).default("mock"),
+  WHATSAPP_PROVIDER_WEBHOOK_SECRET: z.string().min(16).optional(),
   SMS_PROVIDER: z.enum(["mock", "msg91", "twilio"]).default("mock"),
   CARRIER_PROVIDER: z.enum(["manual", "mock"]).default("manual"),
   CARRIER_API_BASE_URL: z.string().optional(),

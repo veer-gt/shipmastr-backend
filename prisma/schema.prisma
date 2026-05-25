@@ -257,9 +257,28 @@ enum TrustTier {
 }
 
 enum UserRole {
+  MASTER_ADMIN
+  ADMIN
+  OPS_MANAGER
+  FINANCE_MANAGER
+  RISK_MANAGER
+  COURIER_MANAGER
+  MANAGER
+  SUPPORT_AGENT
+  SUPPORT_STAFF
+  MERCHANT
+  EXTERNAL_MERCHANT
+  EXTERNAL_COURIER
   SELLER
   COURIER
-  ADMIN
+  MERCHANT_OWNER
+  MERCHANT_STAFF
+  SELLER_OWNER
+  SELLER_STAFF
+  COURIER_ADMIN
+  COURIER_OPS
+  OWNER
+  STAFF
 }
 
 enum MerchantOnboardingStatus {
@@ -416,6 +435,79 @@ enum WebhookStatus {
   DUPLICATE
 }
 
+enum AutomationEventStatus {
+  QUEUED
+  PROCESSING
+  DISPATCHED
+  PROCESSED
+  FAILED
+  CANCELLED
+}
+
+enum AutomationWorkflowStatus {
+  ACTIVE
+  PAUSED
+}
+
+enum AutomationCampaignStatus {
+  DRAFT
+  SCHEDULED
+  RUNNING
+  PAUSED
+  COMPLETED
+}
+
+enum AutomationAlertStatus {
+  OPEN
+  ACKNOWLEDGED
+  RESOLVED
+}
+
+enum AutomationUsageType {
+  N8N_EXECUTION
+  MESSAGE_ATTEMPT
+  MESSAGE_SENT
+  MESSAGE_FAILED
+}
+
+enum DomainProvider {
+  RESELLERCLUB
+  CLOUDFLARE
+  MANUAL
+}
+
+enum MerchantDomainSource {
+  PURCHASED_THROUGH_SHIPMASTR
+  EXTERNAL_CONNECTED
+}
+
+enum DomainStatus {
+  REQUESTED
+  SEARCHED
+  AVAILABLE
+  UNAVAILABLE
+  PAYMENT_REQUIRED
+  APPROVAL_REQUIRED
+  REGISTERING
+  REGISTERED
+  DNS_PENDING
+  CLOUDFLARE_PENDING
+  SSL_PENDING
+  ACTIVE
+  FAILED
+  SUSPENDED
+  EXPIRED
+  RENEWAL_DUE
+}
+
+enum DomainProvisioningStatus {
+  PENDING
+  PROCESSING
+  SUCCEEDED
+  FAILED
+  SKIPPED
+}
+
 model Merchant {
   id                  String                       @id @default(cuid())
   name                String
@@ -449,12 +541,146 @@ model Merchant {
   auditLogs AuditLog[]
   gstinRecords MerchantGstinRecord[]
   pickupPoints MerchantPickupPoint[]
+  domains MerchantDomain[]
+  storefronts Storefront[]
+  domainProvisioningEvents DomainProvisioningEvent[]
 
   @@index([adminStatus])
   @@index([onboardingStatus])
   @@index([gstin])
   @@index([panMasked])
   @@index([sellerKycStatus])
+}
+
+model Storefront {
+  id         String   @id @default(cuid())
+  merchantId String
+  name       String
+  createdAt  DateTime @default(now())
+  updatedAt  DateTime @updatedAt
+
+  merchant Merchant @relation(fields: [merchantId], references: [id], onDelete: Cascade)
+  domains  StorefrontDomain[]
+  settings StorefrontSettings?
+
+  @@index([merchantId])
+}
+
+model StorefrontDomain {
+  id                         String       @id @default(cuid())
+  storefrontId               String
+  domain                     String       @unique
+  status                     DomainStatus @default(REQUESTED)
+  isPrimary                  Boolean      @default(false)
+  verificationStatus         String?
+  dnsTarget                  String?
+  cloudflareCustomHostnameId String?
+  sslStatus                  String?
+  failureReason              String?
+  lastCheckedAt              DateTime?
+  createdAt                  DateTime     @default(now())
+  updatedAt                  DateTime     @updatedAt
+
+  storefront Storefront @relation(fields: [storefrontId], references: [id], onDelete: Cascade)
+  events     DomainProvisioningEvent[]
+
+  @@index([storefrontId])
+  @@index([status])
+}
+
+model StorefrontSettings {
+  id          String   @id @default(cuid())
+  storefrontId String   @unique
+  themeJson    Json
+  createdAt    DateTime @default(now())
+  updatedAt    DateTime @updatedAt
+
+  storefront Storefront @relation(fields: [storefrontId], references: [id], onDelete: Cascade)
+}
+
+model DomainProduct {
+  id                      String         @id @default(cuid())
+  tld                     String
+  provider                DomainProvider @default(RESELLERCLUB)
+  registrationPricePaise  Int
+  renewalPricePaise       Int
+  transferPricePaise      Int            @default(0)
+  currency                String         @default("INR")
+  isActive                Boolean        @default(true)
+  createdAt               DateTime       @default(now())
+  updatedAt               DateTime       @updatedAt
+
+  @@unique([tld, provider])
+  @@index([provider])
+  @@index([isActive])
+}
+
+model MerchantDomain {
+  id                         String               @id @default(cuid())
+  merchantId                 String
+  storefrontId               String?
+  domain                     String
+  normalizedDomain           String               @unique
+  source                     MerchantDomainSource
+  provider                   DomainProvider       @default(RESELLERCLUB)
+  status                     DomainStatus         @default(SEARCHED)
+  isPrimary                  Boolean              @default(false)
+  resellerClubEntityId       String?
+  resellerClubOrderId        String?
+  cloudflareCustomHostnameId String?
+  sslStatus                  String?
+  validationRecords          Json?
+  expiresAt                  DateTime?
+  autoRenew                  Boolean              @default(true)
+  lastCheckedAt              DateTime?
+  createdAt                  DateTime             @default(now())
+  updatedAt                  DateTime             @updatedAt
+
+  merchant Merchant @relation(fields: [merchantId], references: [id], onDelete: Cascade)
+  events   DomainProvisioningEvent[]
+
+  @@index([merchantId])
+  @@index([storefrontId])
+  @@index([status])
+  @@index([provider])
+  @@index([resellerClubEntityId])
+  @@index([cloudflareCustomHostnameId])
+  @@index([expiresAt])
+  @@index([createdAt])
+}
+
+model DomainProvisioningEvent {
+  id                String                    @id @default(cuid())
+  merchantId        String?
+  merchantDomainId  String?
+  storefrontDomainId String?
+  storefrontId      String?
+  provider          DomainProvider
+  eventType         String
+  status            DomainProvisioningStatus
+  payload           Json?
+  requestPayload    Json?
+  responsePayload   Json?
+  safeMessage       String?
+  internalError     String?
+  providerReferenceId String?
+  idempotencyKey    String?
+  createdAt         DateTime                  @default(now())
+
+  merchant       Merchant?       @relation(fields: [merchantId], references: [id], onDelete: SetNull)
+  merchantDomain MerchantDomain? @relation(fields: [merchantDomainId], references: [id], onDelete: SetNull)
+  storefrontDomain StorefrontDomain? @relation(fields: [storefrontDomainId], references: [id], onDelete: SetNull)
+
+  @@unique([idempotencyKey])
+  @@index([merchantId])
+  @@index([merchantDomainId])
+  @@index([storefrontDomainId])
+  @@index([storefrontId])
+  @@index([provider])
+  @@index([eventType])
+  @@index([status])
+  @@index([providerReferenceId])
+  @@index([createdAt])
 }
 
 model CourierPartner {
@@ -1514,8 +1740,8 @@ model User {
   firebaseUid  String?  @unique
   passwordHash String
   name         String?
-  userType     String   @default("EXTERNAL_MERCHANT")
-  role         String   @default("OWNER")
+  userType     String   @default("SELLER_ACCOUNT")
+  role         UserRole @default(SELLER_OWNER)
   createdAt    DateTime @default(now())
   updatedAt    DateTime @updatedAt
 
@@ -2014,6 +2240,327 @@ model AuditLog {
 
   @@index([merchantId])
   @@index([action])
+}
+
+model AutomationEvent {
+  id                String                @id @default(cuid())
+  merchantId        String
+  eventKey          String
+  status            AutomationEventStatus @default(QUEUED)
+  source            String                @default("shipmastr")
+  sourceId          String?
+  idempotencyKey    String
+  payload           Json                  @default("{}")
+  contextSnapshot   Json?
+  dispatchResult    Json?
+  error             String?
+  attempts          Int                   @default(0)
+  nextAttemptAt     DateTime?
+  processedAt       DateTime?
+  failedAt          DateTime?
+  createdAt         DateTime              @default(now())
+  updatedAt         DateTime              @updatedAt
+
+  @@unique([merchantId, idempotencyKey])
+  @@index([merchantId])
+  @@index([eventKey])
+  @@index([status])
+  @@index([idempotencyKey])
+  @@index([merchantId, eventKey, createdAt])
+  @@index([merchantId, status, createdAt])
+  @@index([nextAttemptAt])
+  @@index([createdAt])
+}
+
+model AutomationPreference {
+  id                      String   @id @default(cuid())
+  merchantId              String   @unique
+  autopilotEnabled        Boolean  @default(true)
+  notificationsEnabled    Boolean  @default(true)
+  codShieldEnabled        Boolean  @default(true)
+  ndrRescueEnabled        Boolean  @default(true)
+  marketingEnabled        Boolean  @default(false)
+  courierControlEnabled   Boolean  @default(true)
+  financeControlEnabled   Boolean  @default(true)
+  buyerIntelligenceEnabled Boolean @default(true)
+  whatsappEnabled         Boolean  @default(true)
+  smsEnabled              Boolean  @default(true)
+  emailEnabled            Boolean  @default(true)
+  quietHoursStart         String   @default("21:00")
+  quietHoursEnd           String   @default("09:00")
+  timezone                String   @default("Asia/Kolkata")
+  dailyBuyerMessageCap    Int      @default(3)
+  weeklyBuyerMessageCap   Int      @default(8)
+  metadata                Json     @default("{}")
+  createdAt               DateTime @default(now())
+  updatedAt               DateTime @updatedAt
+
+  @@index([merchantId])
+  @@index([createdAt])
+}
+
+model AutomationWorkflowSetting {
+  id             String                   @id @default(cuid())
+  merchantId     String
+  key            String
+  status         AutomationWorkflowStatus @default(ACTIVE)
+  channelOrder   String[]                 @default(["WHATSAPP", "SMS", "EMAIL"])
+  frequencyCap   Int?
+  retryLimit     Int                      @default(3)
+  quietHoursMode String                   @default("respect")
+  settings       Json                     @default("{}")
+  createdAt      DateTime                 @default(now())
+  updatedAt      DateTime                 @updatedAt
+
+  @@unique([merchantId, key])
+  @@index([merchantId])
+  @@index([key])
+  @@index([status])
+  @@index([createdAt])
+}
+
+model AutomationTemplate {
+  id             String   @id @default(cuid())
+  merchantId     String?
+  key            String
+  channel        String
+  name           String
+  subject        String?
+  body           String
+  variables      String[] @default([])
+  locale         String   @default("en-IN")
+  active         Boolean  @default(true)
+  systemTemplate Boolean  @default(false)
+  createdAt      DateTime @default(now())
+  updatedAt      DateTime @updatedAt
+
+  @@unique([merchantId, key, channel])
+  @@index([merchantId])
+  @@index([key])
+  @@index([channel])
+  @@index([active])
+  @@index([createdAt])
+}
+
+model AutomationOptOut {
+  id         String    @id @default(cuid())
+  merchantId String
+  channel    String
+  subject    String
+  reason     String?
+  optedOutAt DateTime  @default(now())
+  expiresAt  DateTime?
+  metadata   Json      @default("{}")
+
+  @@unique([merchantId, channel, subject])
+  @@index([merchantId])
+  @@index([channel])
+  @@index([subject])
+  @@index([optedOutAt])
+}
+
+model AutomationFrequencyLedger {
+  id         String   @id @default(cuid())
+  merchantId String
+  subject    String
+  channel    String
+  windowKey  String
+  count      Int      @default(0)
+  resetAt    DateTime
+  createdAt  DateTime @default(now())
+  updatedAt  DateTime @updatedAt
+
+  @@unique([merchantId, subject, channel, windowKey])
+  @@index([merchantId])
+  @@index([subject])
+  @@index([channel])
+  @@index([resetAt])
+  @@index([createdAt])
+}
+
+model CommunicationLog {
+  id                String   @id @default(cuid())
+  merchantId        String
+  eventId           String?
+  campaignId        String?
+  idempotencyKey    String?
+  channel           String
+  recipient         String
+  templateKey       String?
+  status            String   @default("QUEUED")
+  provider          String?
+  providerMessageId String?
+  renderedMessage   String?
+  metadata          Json     @default("{}")
+  sentAt            DateTime?
+  deliveredAt       DateTime?
+  readAt            DateTime?
+  failedAt          DateTime?
+  createdAt         DateTime @default(now())
+  updatedAt         DateTime @updatedAt
+
+  @@unique([merchantId, idempotencyKey])
+  @@index([merchantId])
+  @@index([eventId])
+  @@index([campaignId])
+  @@index([idempotencyKey])
+  @@index([channel])
+  @@index([status])
+  @@index([providerMessageId])
+  @@index([createdAt])
+}
+
+model MarketingCampaign {
+  id              String                   @id @default(cuid())
+  merchantId      String
+  key             String
+  name            String
+  campaignType    String
+  status          AutomationCampaignStatus @default(DRAFT)
+  audienceId      String?
+  channelOrder    String[]                 @default(["WHATSAPP", "SMS", "EMAIL"])
+  templateKey     String?
+  scheduleAt      DateTime?
+  budgetLimitPaise Int?
+  sentCount       Int                      @default(0)
+  clickedCount    Int                      @default(0)
+  convertedCount  Int                      @default(0)
+  recoveredRevenuePaise Int                @default(0)
+  settings        Json                     @default("{}")
+  createdAt       DateTime                 @default(now())
+  updatedAt       DateTime                 @updatedAt
+
+  @@unique([merchantId, key])
+  @@index([merchantId])
+  @@index([campaignType])
+  @@index([status])
+  @@index([scheduleAt])
+  @@index([createdAt])
+}
+
+model MarketingAudienceSegment {
+  id          String   @id @default(cuid())
+  merchantId  String
+  key         String
+  name        String
+  description String?
+  rules       Json     @default("{}")
+  buyerCount  Int      @default(0)
+  active      Boolean  @default(true)
+  createdAt   DateTime @default(now())
+  updatedAt   DateTime @updatedAt
+
+  @@unique([merchantId, key])
+  @@index([merchantId])
+  @@index([active])
+  @@index([createdAt])
+}
+
+model MerchantChannelCredential {
+  id              String   @id @default(cuid())
+  merchantId      String
+  channel         String
+  provider        String
+  label           String
+  credentialRef   String
+  status          String   @default("ACTIVE")
+  lastVerifiedAt  DateTime?
+  metadata        Json     @default("{}")
+  createdAt       DateTime @default(now())
+  updatedAt       DateTime @updatedAt
+
+  @@unique([merchantId, channel, provider, label])
+  @@index([merchantId])
+  @@index([channel])
+  @@index([status])
+  @@index([createdAt])
+}
+
+model BuyerIntelligenceEvent {
+  id          String   @id @default(cuid())
+  merchantId  String
+  buyerKey    String
+  eventKey    String
+  orderId     String?
+  riskTier    String?
+  score       Int?
+  reasons     String[] @default([])
+  metadata    Json     @default("{}")
+  createdAt   DateTime @default(now())
+
+  @@index([merchantId])
+  @@index([buyerKey])
+  @@index([eventKey])
+  @@index([riskTier])
+  @@index([createdAt])
+}
+
+model CourierOpsAlert {
+  id          String                @id @default(cuid())
+  merchantId  String
+  alertKey    String
+  courierId   String?
+  awb         String?
+  severity    String                @default("MEDIUM")
+  status      AutomationAlertStatus @default(OPEN)
+  summary     String
+  actionHint  String?
+  metadata    Json                  @default("{}")
+  resolvedAt  DateTime?
+  createdAt   DateTime              @default(now())
+  updatedAt   DateTime              @updatedAt
+
+  @@index([merchantId])
+  @@index([alertKey])
+  @@index([courierId])
+  @@index([awb])
+  @@index([status])
+  @@index([createdAt])
+}
+
+model FinanceAutomationAlert {
+  id          String                @id @default(cuid())
+  merchantId  String
+  alertKey    String
+  severity    String                @default("MEDIUM")
+  status      AutomationAlertStatus @default(OPEN)
+  amountPaise Int?
+  dueAt       DateTime?
+  summary     String
+  actionHint  String?
+  metadata    Json                  @default("{}")
+  resolvedAt  DateTime?
+  createdAt   DateTime              @default(now())
+  updatedAt   DateTime              @updatedAt
+
+  @@index([merchantId])
+  @@index([alertKey])
+  @@index([status])
+  @@index([dueAt])
+  @@index([createdAt])
+}
+
+model AutomationUsageMeter {
+  id          String              @id @default(cuid())
+  merchantId  String
+  monthKey    String
+  usageType   AutomationUsageType
+  eventKey    String              @default("ALL")
+  workflowKey String              @default("ALL")
+  channel     String              @default("ALL")
+  count       Int                 @default(0)
+  metadata    Json                @default("{}")
+  createdAt   DateTime            @default(now())
+  updatedAt   DateTime            @updatedAt
+
+  @@unique([merchantId, monthKey, usageType, eventKey, workflowKey, channel])
+  @@index([merchantId])
+  @@index([monthKey])
+  @@index([usageType])
+  @@index([eventKey])
+  @@index([workflowKey])
+  @@index([channel])
+  @@index([createdAt])
 }
 
 model JournalPost {

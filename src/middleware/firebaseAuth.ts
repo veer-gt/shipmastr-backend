@@ -89,7 +89,7 @@ export async function requireFirebaseAuth(
       return res.status(403).json({
         error: "USER_NOT_ONBOARDED",
         message:
-          "Firebase login is valid, but no Shipmastr merchant account is linked to this user.",
+          "Firebase login is valid, but no Shipmastr Merchant or Seller account is linked to this user.",
       });
     }
 

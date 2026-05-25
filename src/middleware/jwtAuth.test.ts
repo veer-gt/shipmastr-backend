@@ -119,7 +119,7 @@ describe("requireAdminJwt", () => {
     mockUserFindUnique(async () => ({
       id: "user_1",
       merchantId: "merchant_1",
-      userType: "EXTERNAL_MERCHANT",
+      userType: "SELLER_ACCOUNT",
       role: "ADMIN"
     }));
 

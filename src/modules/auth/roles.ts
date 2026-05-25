@@ -1,5 +1,8 @@
 export const UserType = {
   INTERNAL_SHIPMASTR: "INTERNAL_SHIPMASTR",
+  MERCHANT_ACCOUNT: "MERCHANT_ACCOUNT",
+  SELLER_ACCOUNT: "SELLER_ACCOUNT",
+  COURIER_PARTNER: "COURIER_PARTNER",
   EXTERNAL_COURIER: "EXTERNAL_COURIER",
   EXTERNAL_MERCHANT: "EXTERNAL_MERCHANT",
 } as const;
@@ -14,6 +17,12 @@ export const UserRole = {
   MANAGER: "MANAGER",
   SUPPORT_AGENT: "SUPPORT_AGENT",
   SUPPORT_STAFF: "SUPPORT_STAFF",
+  MERCHANT_OWNER: "MERCHANT_OWNER",
+  MERCHANT_STAFF: "MERCHANT_STAFF",
+  SELLER_OWNER: "SELLER_OWNER",
+  SELLER_STAFF: "SELLER_STAFF",
+  COURIER_ADMIN: "COURIER_ADMIN",
+  COURIER_OPS: "COURIER_OPS",
   OWNER: "OWNER",
   STAFF: "STAFF",
 } as const;
@@ -33,6 +42,8 @@ export const ROLE_MATRIX = {
   ],
 
   EXTERNAL_COURIER: [
+    "COURIER_ADMIN",
+    "COURIER_OPS",
     "ADMIN",
     "OPS_MANAGER",
     "MANAGER",
@@ -41,6 +52,8 @@ export const ROLE_MATRIX = {
   ],
 
   EXTERNAL_MERCHANT: [
+    "SELLER_OWNER",
+    "SELLER_STAFF",
     "ADMIN",
     "OPS_MANAGER",
     "MANAGER",
@@ -48,6 +61,30 @@ export const ROLE_MATRIX = {
     "SUPPORT_STAFF",
     "OWNER",
     "STAFF",
+  ],
+
+  MERCHANT_ACCOUNT: [
+    "MERCHANT_OWNER",
+    "MERCHANT_STAFF",
+    "OWNER",
+    "STAFF",
+  ],
+
+  SELLER_ACCOUNT: [
+    "SELLER_OWNER",
+    "SELLER_STAFF",
+    "OWNER",
+    "STAFF",
+  ],
+
+  COURIER_PARTNER: [
+    "COURIER_ADMIN",
+    "COURIER_OPS",
+    "ADMIN",
+    "OPS_MANAGER",
+    "MANAGER",
+    "SUPPORT_AGENT",
+    "SUPPORT_STAFF",
   ],
 } as const;
 
@@ -108,6 +145,50 @@ export const ROLE_PERMISSIONS = {
     "orders.view_limited",
     "shipments.view_limited",
     "tickets.view",
+  ],
+
+  MERCHANT_OWNER: [
+    "account.manage_own",
+    "users.manage_own",
+    "orders.manage_own",
+    "shipments.create_own",
+    "cod.view_own",
+    "billing.view_own",
+  ],
+
+  MERCHANT_STAFF: [
+    "orders.manage_assigned",
+    "shipments.create_own",
+    "cod.view_limited",
+  ],
+
+  SELLER_OWNER: [
+    "account.manage_own",
+    "users.manage_own",
+    "orders.manage_own",
+    "shipments.create_own",
+    "cod.view_own",
+    "billing.view_own",
+  ],
+
+  SELLER_STAFF: [
+    "orders.manage_assigned",
+    "shipments.create_own",
+    "cod.view_limited",
+  ],
+
+  COURIER_ADMIN: [
+    "orders.view",
+    "shipments.manage",
+    "ndr.manage",
+    "rto.review",
+    "pickup.manage",
+  ],
+
+  COURIER_OPS: [
+    "orders.view_limited",
+    "shipments.view_limited",
+    "tickets.manage",
   ],
 
   OWNER: [

@@ -277,8 +277,8 @@ async function convertLeadInClient(input: {
         email,
         passwordHash,
         name: lead.name,
-        role: "OWNER",
-        userType: "EXTERNAL_MERCHANT"
+        role: "SELLER_OWNER",
+        userType: "SELLER_ACCOUNT"
       }
     });
   }

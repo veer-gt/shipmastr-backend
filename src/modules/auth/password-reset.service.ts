@@ -172,7 +172,7 @@ export async function requestPasswordReset(input: { email: string }, client: Db 
 export async function verifyPasswordResetToken(input: { token: string }, client: Db = prisma) {
   const record = await findValidToken(input.token, client);
   const valid = Boolean(record && !record.usedAt && record.expiresAt.getTime() > Date.now());
-  const account = valid && record?.courierUser ? "COURIER" : valid && record?.user ? "SELLER" : undefined;
+  const account = valid && record?.courierUser ? "COURIER_PARTNER" : valid && record?.user ? "SELLER" : undefined;
   const email = record?.courierUser?.email || record?.user?.email;
 
   return {
