@@ -1,7 +1,7 @@
 import assert from "node:assert/strict";
 import { readFileSync } from "node:fs";
 import { describe, it } from "node:test";
-import { DomainProvider, DomainProvisioningStatus, DomainStatus } from "@prisma/client";
+import { DomainProvider, DomainProvisioningStatus, DomainStatus, MerchantDomainSource } from "@prisma/client";
 import { requireInternalSecret } from "../../middleware/internal.js";
 import { HttpError } from "../../lib/httpError.js";
 import {
@@ -21,6 +21,7 @@ import {
   createDomainPurchaseIntent,
   getAdminDomainDiagnostics,
   getMerchantDomain,
+  listAdminDomains,
   recordDomainProvisioningEvent,
   requestMerchantDomainActivation,
   searchMerchantDomain,
@@ -140,6 +141,108 @@ describe("Shipmastr Domains white-label module", () => {
     assert.match(domainRoutes, /adminDomainsRouter\.post\("\/:domain\/approve"/);
     assert.match(domainRoutes, /adminDomainsRouter\.post\("\/:domain\/reject"/);
     assert.match(domainRoutes, /adminDomainsRouter\.post\("\/:domain\/start-provider-setup"/);
+  });
+
+  it("uses safe admin queue labels for manual DNS and real provider states", async () => {
+    const now = new Date("2026-05-26T04:30:00.000Z");
+    const row = (domain: string, overrides: Record<string, unknown> = {}) => ({
+      id: `domain_${domain}`,
+      merchantId: "merchant_1",
+      storefrontId: "storefront_1",
+      domain,
+      normalizedDomain: domain,
+      source: MerchantDomainSource.EXTERNAL_CONNECTED,
+      provider: DomainProvider.MANUAL,
+      status: DomainStatus.REQUESTED,
+      isPrimary: false,
+      sslStatus: null,
+      validationRecords: {
+        requestStatus: "PENDING_REVIEW",
+        intent: "CONNECT_EXISTING_DOMAIN"
+      },
+      expiresAt: null,
+      autoRenew: true,
+      lastCheckedAt: now,
+      createdAt: now,
+      updatedAt: now,
+      merchant: { id: "merchant_1", name: "Skymax", email: "ops@example.test" },
+      ...overrides
+    });
+
+    const result = await listAdminDomains({
+      client: makeClient({
+        merchantDomain: {
+          findMany: async () => [
+            row("request-only.example.in"),
+            row("approved.example.in", {
+              status: DomainStatus.APPROVAL_REQUIRED,
+              validationRecords: {
+                requestStatus: "APPROVED",
+                activationWorkflow: { state: "ADMIN_APPROVED" }
+              }
+            }),
+            row("manual-instructions.example.in", {
+              status: DomainStatus.CLOUDFLARE_PENDING,
+              provider: DomainProvider.CLOUDFLARE,
+              validationRecords: {
+                requestStatus: "PROVIDER_SETUP_STARTED",
+                activationWorkflow: { state: "DNS_INSTRUCTIONS_AVAILABLE", providerSetupStarted: true },
+                dnsInstructions: {
+                  available: true,
+                  records: [{ type: "CNAME", name: "manual-instructions.example.in", value: "storefront-origin.shipmastr.com" }]
+                }
+              }
+            }),
+            row("manual-pending.example.in", {
+              status: DomainStatus.CLOUDFLARE_PENDING,
+              provider: DomainProvider.CLOUDFLARE,
+              validationRecords: {
+                requestStatus: "PROVIDER_SETUP_STARTED",
+                activationWorkflow: { state: "PROVIDER_SETUP_STARTED", providerSetupStarted: true }
+              }
+            }),
+            row("cf-pending.example.in", {
+              status: DomainStatus.CLOUDFLARE_PENDING,
+              provider: DomainProvider.CLOUDFLARE,
+              cloudflareCustomHostnameId: "cfh_123",
+              validationRecords: { customHostnameId: "cfh_123" }
+            }),
+            row("dns-pending.example.in", {
+              status: DomainStatus.CLOUDFLARE_PENDING,
+              provider: DomainProvider.CLOUDFLARE,
+              cloudflareCustomHostnameId: "cfh_456",
+              dnsValidationStatus: "pending",
+              validationRecords: { customHostnameId: "cfh_456", txtName: "_cf-custom-hostname.dns-pending.example.in" }
+            }),
+            row("active.example.in", {
+              status: DomainStatus.ACTIVE,
+              provider: DomainProvider.CLOUDFLARE,
+              cloudflareCustomHostnameId: "cfh_active",
+              sslStatus: "active"
+            }),
+            row("failed.example.in", {
+              status: DomainStatus.FAILED,
+              validationRecords: {
+                activationWorkflow: { state: "NEEDS_ATTENTION" }
+              }
+            })
+          ]
+        }
+      }) as any
+    });
+
+    const byDomain = Object.fromEntries(result.domains.map((domain: any) => [domain.domain, domain]));
+    assert.equal(byDomain["request-only.example.in"].queueLabel, "Review Required");
+    assert.equal(byDomain["approved.example.in"].queueLabel, "Approved");
+    assert.equal(byDomain["manual-instructions.example.in"].queueLabel, "DNS Instructions Available");
+    assert.equal(byDomain["manual-instructions.example.in"].queueHasCloudflareEvidence, false);
+    assert.equal(byDomain["manual-pending.example.in"].queueLabel, "DNS Instructions Pending");
+    assert.equal(byDomain["manual-pending.example.in"].queueHasCloudflareEvidence, false);
+    assert.equal(byDomain["cf-pending.example.in"].queueLabel, "Cloudflare Pending");
+    assert.equal(byDomain["cf-pending.example.in"].queueHasCloudflareEvidence, true);
+    assert.equal(byDomain["dns-pending.example.in"].queueLabel, "DNS Validation Pending");
+    assert.equal(byDomain["active.example.in"].queueLabel, "Active");
+    assert.equal(byDomain["failed.example.in"].queueLabel, "Needs Attention");
   });
 
   it("normalizes merchant request hostnames, blocks apex by default, and rejects platform canaries", () => {

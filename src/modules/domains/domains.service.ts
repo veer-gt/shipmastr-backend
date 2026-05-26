@@ -150,6 +150,115 @@ function safeDomain(row: DomainRow) {
   };
 }
 
+function jsonRecord(value: unknown): Record<string, unknown> {
+  return value && typeof value === "object" && !Array.isArray(value) ? value as Record<string, unknown> : {};
+}
+
+function jsonArray(value: unknown): Record<string, unknown>[] {
+  return Array.isArray(value)
+    ? value.filter((item): item is Record<string, unknown> => Boolean(item && typeof item === "object" && !Array.isArray(item)))
+    : [];
+}
+
+function adminQueueWorkflowState(value: unknown) {
+  const record = jsonRecord(value);
+  const workflow = jsonRecord(record.activationWorkflow);
+  return String(workflow.state || record.workflowState || record.requestStatus || "").toUpperCase();
+}
+
+function adminQueueHasDnsInstructions(value: unknown) {
+  const instructions = jsonRecord(jsonRecord(value).dnsInstructions);
+  return instructions.available === true || jsonArray(instructions.records).length > 0;
+}
+
+function adminQueueWorkflowSetupStarted(state: string) {
+  return [
+    "PROVIDER_SETUP_STARTED",
+    "DNS_INSTRUCTIONS_AVAILABLE",
+    "DNS_VALIDATED",
+    "SSL_PENDING",
+    "ACTIVE",
+    "CONNECTED",
+    "LIVE"
+  ].includes(state);
+}
+
+function adminQueueHasCloudflareEvidence(row: Record<string, unknown>) {
+  const validationRecords = jsonRecord(row.validationRecords);
+  const polling = jsonRecord(validationRecords.polling);
+  return Boolean(
+    row.cloudflareCustomHostnameId ||
+    row.cloudflareCustomHostnameStatus ||
+    validationRecords.customHostnameId ||
+    validationRecords.txtName ||
+    validationRecords.txtValue ||
+    validationRecords.txtRecordName ||
+    validationRecords.ownershipTxtName ||
+    validationRecords.ownershipTxtValue ||
+    validationRecords.ownership_verification ||
+    validationRecords.ownership_verification_http ||
+    validationRecords.verification_records ||
+    polling.customHostnameId ||
+    polling.cloudflareStatus
+  );
+}
+
+const ADMIN_QUEUE_LABELS: Record<string, string> = {
+  REVIEW_REQUIRED: "Review Required",
+  ADMIN_APPROVED: "Approved",
+  DNS_INSTRUCTIONS_PENDING: "DNS Instructions Pending",
+  DNS_INSTRUCTIONS_AVAILABLE: "DNS Instructions Available",
+  CLOUDFLARE_PENDING: "Cloudflare Pending",
+  DNS_VALIDATION_PENDING: "DNS Validation Pending",
+  ACTIVE: "Active",
+  NEEDS_ATTENTION: "Needs Attention"
+};
+
+function buildAdminQueueStatus(row: Record<string, unknown>) {
+  const status = String(row.status || "").toUpperCase();
+  const workflowState = adminQueueWorkflowState(row.validationRecords);
+  const setupStarted = adminQueueWorkflowSetupStarted(workflowState);
+  const dnsInstructionsAvailable = adminQueueHasDnsInstructions(row.validationRecords) && setupStarted;
+  const hasCloudflareEvidence = adminQueueHasCloudflareEvidence(row);
+  const dnsValidationStatus = String(row.dnsValidationStatus || "").toLowerCase();
+  const sslStatus = String(row.sslStatus || "").toLowerCase();
+
+  let queueStatus = status || "REVIEW_REQUIRED";
+
+  if (status === DomainStatus.ACTIVE || sslStatus === "active") {
+    queueStatus = "ACTIVE";
+  } else if (status === DomainStatus.FAILED || status === DomainStatus.SUSPENDED || workflowState === "NEEDS_ATTENTION" || workflowState === "REJECTED") {
+    queueStatus = "NEEDS_ATTENTION";
+  } else if (dnsInstructionsAvailable) {
+    queueStatus = "DNS_INSTRUCTIONS_AVAILABLE";
+  } else if (setupStarted || workflowState === "DNS_INSTRUCTIONS_AVAILABLE") {
+    queueStatus = "DNS_INSTRUCTIONS_PENDING";
+  } else if (hasCloudflareEvidence && status === DomainStatus.CLOUDFLARE_PENDING) {
+    queueStatus = dnsValidationStatus.includes("pending") ? "DNS_VALIDATION_PENDING" : "CLOUDFLARE_PENDING";
+  } else if (hasCloudflareEvidence && dnsValidationStatus.includes("pending")) {
+    queueStatus = "DNS_VALIDATION_PENDING";
+  } else if (workflowState === "ADMIN_APPROVED" || workflowState === "PROVIDER_SETUP_READY" || status === DomainStatus.APPROVAL_REQUIRED) {
+    queueStatus = "ADMIN_APPROVED";
+  } else if (workflowState === "ADMIN_REVIEW_REQUIRED" || workflowState === "PENDING_REVIEW" || status === DomainStatus.REQUESTED) {
+    queueStatus = "REVIEW_REQUIRED";
+  }
+
+  return {
+    queueStatus,
+    queueLabel: ADMIN_QUEUE_LABELS[queueStatus] || merchantDomainStatusLabel(queueStatus as DomainStatus),
+    queueDetail: hasCloudflareEvidence
+      ? "Provider evidence recorded"
+      : setupStarted
+        ? "Manual setup"
+        : queueStatus === "ADMIN_APPROVED"
+          ? "Awaiting setup"
+          : queueStatus === "REVIEW_REQUIRED"
+            ? "Admin review"
+            : "Lifecycle active",
+    queueHasCloudflareEvidence: hasCloudflareEvidence
+  };
+}
+
 const DOMAIN_STATUS_RANK: Partial<Record<DomainStatus, number>> = {
   [DomainStatus.SEARCHED]: 0,
   [DomainStatus.AVAILABLE]: 0,
@@ -860,7 +969,13 @@ export async function listAdminDomains(input: {
     }
   });
 
-  return { domains: rows, count: rows.length };
+  return {
+    domains: rows.map((row) => ({
+      ...row,
+      ...buildAdminQueueStatus(row as Record<string, unknown>)
+    })),
+    count: rows.length
+  };
 }
 
 export async function getAdminDomainDiagnostics(input: {
