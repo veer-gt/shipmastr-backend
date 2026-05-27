@@ -9,6 +9,7 @@ import {
   getStorefrontByDomain,
   listAdminStorefrontDomainEvents,
   listAdminStorefrontDomains,
+  listAdminStorefronts,
   updateAdminStorefrontDomainStatus,
   updateAdminStorefrontSettings,
   type StorefrontLookupClient
@@ -119,6 +120,11 @@ export const lookupPublicStorefront = createPublicStorefrontLookupHandler();
 
 storefrontsRouter.get("/:domain", lookupInternalStorefront);
 publicStorefrontsRouter.get("/lookup", lookupPublicStorefront);
+
+adminStorefrontsRouter.get("/", async (req, res) => {
+  const result = await listAdminStorefronts();
+  sendNoStoreJson(res, result);
+});
 
 adminStorefrontsRouter.post("/", async (req, res) => {
   const body = createStorefrontSchema.parse(req.body);

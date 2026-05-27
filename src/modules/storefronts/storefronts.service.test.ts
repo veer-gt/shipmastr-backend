@@ -10,6 +10,7 @@ import {
   getStorefrontByDomain,
   listAdminStorefrontDomainEvents,
   listAdminStorefrontDomains,
+  listAdminStorefronts,
   normalizeStorefrontDomain,
   redactStorefrontEventPayload,
   storefrontTestFixtures,
@@ -167,6 +168,11 @@ function makeAdminStorefrontClient() {
       },
       async findUnique({ where, include, select }: any) {
         return storefrontRow(where.id, include, select);
+      },
+      async findMany({ include }: any) {
+        return Array.from(state.storefronts.keys())
+          .map((id) => storefrontRow(id, include))
+          .sort((a, b) => (b as any).createdAt.getTime() - (a as any).createdAt.getTime());
       }
     },
     storefrontSettings: {
@@ -219,7 +225,16 @@ function makeAdminStorefrontClient() {
           failureReason: null,
           lastCheckedAt: null,
           createdAt: now(),
-          updatedAt: now()
+          updatedAt: now(),
+          cloudflareId: "cf_123_secret",
+          customHostnameId: "hostname_secret",
+          resellerClubId: "club_secret",
+          providerId: "provider_secret",
+          txtRecord: "txt_record_secret",
+          txtValue: "txt_value_secret",
+          token: "token_secret",
+          secret: "secret_secret",
+          rawPayload: "raw_payload_secret"
         };
         state.domains.set(id, row);
         return row;
@@ -265,6 +280,7 @@ describe("internal storefront renderer lookup", () => {
     assert.match(routes, /apiRouter\.use\("\/admin\/storefronts", requireAdminJwt, adminStorefrontsRouter\);/);
     assert.match(storefrontRoutes, /storefrontsRouter\.get\("\/:domain", lookupInternalStorefront\);/);
     assert.match(storefrontRoutes, /publicStorefrontsRouter\.get\("\/lookup", lookupPublicStorefront\);/);
+    assert.match(storefrontRoutes, /adminStorefrontsRouter\.get\("\/", async \(req, res\) =>/);
     assert.match(storefrontRoutes, /adminStorefrontsRouter\.get\("\/:id\/domains"/);
     assert.match(storefrontRoutes, /adminStorefrontsRouter\.get\("\/:id\/domains\/:domainId\/events"/);
   });
@@ -739,5 +755,62 @@ describe("admin storefront management", () => {
         bearer: "[redacted]"
       }
     });
+  });
+
+  it("lists all admin storefronts ordered by creation date desc", async () => {
+    const { client, state } = makeAdminStorefrontClient();
+
+    const first = await createAdminStorefront({
+      merchantId: "merchant_1",
+      name: "Store One",
+      themeJson: adminThemeJson,
+      client
+    });
+
+    const second = await createAdminStorefront({
+      merchantId: "merchant_1",
+      name: "Store Two",
+      themeJson: adminThemeJson,
+      client
+    });
+
+    // Make second storefront created after first storefront to test desc sorting
+    state.storefronts.get(second.id).createdAt = new Date("2026-05-19T10:05:00.000Z");
+
+    await addAdminStorefrontDomain({
+      id: first.id,
+      domain: "brandexample.com",
+      isPrimary: true,
+      client
+    });
+
+    const storefronts = await listAdminStorefronts({ client });
+
+    assert.equal(storefronts.length, 2);
+    assert.equal(storefronts[0]!.name, "Store Two");
+    assert.equal(storefronts[1]!.name, "Store One");
+    assert.ok(storefronts[0]!.settings);
+
+    // Check that domain was returned for first storefront (which is storefronts[1] because of createdAt desc sorting)
+    assert.equal(storefronts[1]!.domains.length, 1);
+    const domain = storefronts[1]!.domains[0]!;
+    assert.equal(domain.domain, "brandexample.com");
+
+    // Negative assertions for sensitive fields
+    const sensitiveKeys = [
+      "cloudflareId",
+      "customHostnameId",
+      "resellerClubId",
+      "providerId",
+      "txtRecord",
+      "txtValue",
+      "token",
+      "secret",
+      "rawPayload"
+    ];
+
+    for (const key of sensitiveKeys) {
+      assert.equal(key in domain, false, `Domain object should not contain sensitive key: ${key}`);
+    }
   });
 });

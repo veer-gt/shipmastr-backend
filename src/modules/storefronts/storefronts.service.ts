@@ -739,3 +739,36 @@ export async function getStorefrontByDomain(
     })
   };
 }
+
+export async function listAdminStorefronts(input?: { client?: DbClient }) {
+  const client = input?.client || prisma;
+  const storefronts = await client.storefront.findMany({
+    orderBy: { createdAt: "desc" },
+    include: {
+      settings: true,
+      domains: {
+        orderBy: [
+          { isPrimary: "desc" },
+          { createdAt: "asc" }
+        ]
+      }
+    }
+  });
+
+  return storefronts.map((sf) => ({
+    id: sf.id,
+    merchantId: sf.merchantId,
+    name: sf.name,
+    settings: sf.settings
+      ? {
+          id: sf.settings.id,
+          themeJson: validateThemeJson(sf.settings.themeJson, { storefrontId: sf.id }),
+          updatedAt: sf.settings.updatedAt
+        }
+      : null,
+    domains: (sf.domains || []).map(safeStorefrontDomain),
+    createdAt: sf.createdAt,
+    updatedAt: sf.updatedAt
+  }));
+}
+
