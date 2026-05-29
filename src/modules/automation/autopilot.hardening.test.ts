@@ -46,6 +46,7 @@ import {
   buildOrderAutomationEvents,
   buildOrderAutomationPayloads
 } from "../orders/orders.routes.js";
+import { validateAutomationSmokeCallbackBody } from "./automation.routes.js";
 
 const now = new Date("2026-05-14T10:00:00.000Z");
 
@@ -55,6 +56,8 @@ const originalEnv = {
   n8nWorkflowUrls: env.N8N_AUTOPILOT_WORKFLOW_URLS,
   n8nSigningSecret: env.N8N_AUTOPILOT_SIGNING_SECRET,
   n8nTimeout: env.N8N_AUTOPILOT_TIMEOUT_MS,
+  smokeCallbacksEnabled: env.SHIPMASTR_AUTOMATION_SMOKE_CALLBACKS_ENABLED,
+  internalProvisioningSecret: env.SHIPMASTR_INTERNAL_PROVISIONING_SECRET,
   internalSecret: env.SHIPMASTR_INTERNAL_SECRET,
   whatsappWebhookSecret: env.WHATSAPP_PROVIDER_WEBHOOK_SECRET
 };
@@ -82,12 +85,23 @@ function resetEnv() {
   (env as any).N8N_AUTOPILOT_WORKFLOW_URLS = originalEnv.n8nWorkflowUrls;
   (env as any).N8N_AUTOPILOT_SIGNING_SECRET = originalEnv.n8nSigningSecret;
   (env as any).N8N_AUTOPILOT_TIMEOUT_MS = originalEnv.n8nTimeout;
+  (env as any).SHIPMASTR_AUTOMATION_SMOKE_CALLBACKS_ENABLED = originalEnv.smokeCallbacksEnabled;
+  (env as any).SHIPMASTR_INTERNAL_PROVISIONING_SECRET = originalEnv.internalProvisioningSecret;
   (env as any).SHIPMASTR_INTERNAL_SECRET = originalEnv.internalSecret;
   (env as any).WHATSAPP_PROVIDER_WEBHOOK_SECRET = originalEnv.whatsappWebhookSecret;
 }
 
 function createAutomationTestHmac(secret: string, body: string) {
   return createHmac("sha256", secret).update(body).digest("hex");
+}
+
+const callbackSecret = "shipmastr-internal-callback-secret-min-32";
+
+function configureCallbackTestEnv(smokeCallbacksEnabled = true) {
+  (env as any).SHIPMASTR_AUTOMATION_SMOKE_CALLBACKS_ENABLED = smokeCallbacksEnabled;
+  (env as any).SHIPMASTR_INTERNAL_PROVISIONING_SECRET = undefined;
+  (env as any).SHIPMASTR_INTERNAL_SECRET = callbackSecret;
+  (env as any).N8N_AUTOPILOT_SIGNING_SECRET = undefined;
 }
 
 function makePreference(overrides: Record<string, unknown> = {}) {
@@ -4268,6 +4282,21 @@ describe("Autopilot hardening", () => {
     assert.match(automationRoutes, /runFakeScanReviewSmoke/);
   });
 
+  it("wires the env-gated internal smoke callback route without weakening production callback", () => {
+    const routes = readFileSync("src/routes/index.ts", "utf8");
+    const automationRoutes = readFileSync("src/modules/automation/automation.routes.ts", "utf8");
+    const envSource = readFileSync("src/config/env.ts", "utf8");
+
+    assert.match(routes, /apiRouter\.use\("\/internal\/automation", requireInternalSecret, internalAutomationRouter\)/);
+    assert.match(automationRoutes, /internalAutomationRouter\.post\("\/callback\/smoke"/);
+    assert.match(automationRoutes, /SHIPMASTR_AUTOMATION_SMOKE_CALLBACKS_ENABLED/);
+    assert.match(automationRoutes, /AUTOMATION_SMOKE_CALLBACK_DISABLED/);
+    assert.match(automationRoutes, /verifySignedAutomationCallback/);
+    assert.match(automationRoutes, /startsWith\("SMOKE_"\)/);
+    assert.match(automationRoutes, /SMOKE_CALLBACK_OTP_CODE_REJECTED/);
+    assert.match(envSource, /SHIPMASTR_AUTOMATION_SMOKE_CALLBACKS_ENABLED:\s*envBoolean\(false\)/);
+  });
+
   it("wires merchant, internal, and admin automation routes through scoped auth", () => {
     const routes = readFileSync("src/routes/index.ts", "utf8");
     const automationRoutes = readFileSync("src/modules/automation/automation.routes.ts", "utf8");
@@ -4299,8 +4328,103 @@ describe("Autopilot hardening", () => {
       () => requireInternalSecret(makeReq() as any, {} as any, () => nextCalls.push("next")),
       /UNAUTHORIZED_INTERNAL_TASK/
     );
+    assert.throws(
+      () => requireInternalSecret(makeReq("wrong-secret") as any, {} as any, () => nextCalls.push("next")),
+      /UNAUTHORIZED_INTERNAL_TASK/
+    );
     requireInternalSecret(makeReq(env.SHIPMASTR_INTERNAL_SECRET || env.WEBHOOK_SECRET) as any, {} as any, () => nextCalls.push("next"));
     assert.deepEqual(nextCalls, ["next"]);
+  });
+
+  it("keeps production automation callback strict for unknown real events", async () => {
+    configureCallbackTestEnv(true);
+    mockPrismaMethod("automationEvent", "findUnique", async () => null);
+
+    await assert.rejects(
+      handleAutomationCallback({ eventId: "real_unknown_event", status: "PROCESSED" }),
+      (error: unknown) => error instanceof AutomationCallbackError &&
+        error.status === 404 &&
+        error.message === "AUTOMATION_EVENT_NOT_FOUND"
+    );
+  });
+
+  it("keeps the smoke callback route behind an explicit disabled-by-default env gate", () => {
+    configureCallbackTestEnv(false);
+
+    assert.equal(env.SHIPMASTR_AUTOMATION_SMOKE_CALLBACKS_ENABLED, false);
+  });
+
+  it("accepts valid synthetic smoke callback body shape", () => {
+    configureCallbackTestEnv(true);
+    const body = { synthetic: true, eventId: "SMOKE_SM_11_COD_RISK_HIGH", event: { id: "SMOKE_SM_11_COD_RISK_HIGH" }, status: "PROCESSED" };
+    const result = validateAutomationSmokeCallbackBody(body);
+
+    assert.equal(result.ok, true);
+    assert.equal(result.eventId, "SMOKE_SM_11_COD_RISK_HIGH");
+  });
+
+  it("rejects smoke callbacks with non-SMOKE event IDs", () => {
+    configureCallbackTestEnv(true);
+    const body = { synthetic: true, eventId: "REAL_EVENT", event: { id: "REAL_EVENT" }, status: "PROCESSED" };
+    const result = validateAutomationSmokeCallbackBody(body);
+
+    assert.equal(result.ok, false);
+    assert.equal(result.error, "INVALID_SMOKE_CALLBACK_EVENT_ID");
+  });
+
+  it("rejects smoke callbacks with missing or bad timestamp", () => {
+    configureCallbackTestEnv(true);
+    const body = { synthetic: true, eventId: "SMOKE_BAD_TIMESTAMP", event: { id: "SMOKE_BAD_TIMESTAMP" }, status: "PROCESSED" };
+    const bodyText = JSON.stringify(body);
+
+    assert.equal(verifyAutomationSignature({
+      body: bodyText,
+      signature: createAutomationSignature(bodyText, new Date().toISOString())
+    }), false);
+    assert.equal(verifyAutomationSignature({
+      body: bodyText,
+      timestamp: "not-a-date",
+      signature: createAutomationSignature(bodyText, "not-a-date")
+    }), false);
+  });
+
+  it("rejects smoke callbacks with missing or bad signature", () => {
+    configureCallbackTestEnv(true);
+    const body = { synthetic: true, eventId: "SMOKE_BAD_SIGNATURE", event: { id: "SMOKE_BAD_SIGNATURE" }, status: "PROCESSED" };
+    const bodyText = JSON.stringify(body);
+    const timestamp = new Date().toISOString();
+
+    assert.equal(verifyAutomationSignature({ body: bodyText, timestamp }), false);
+    assert.equal(verifyAutomationSignature({ body: bodyText, timestamp, signature: "bad-signature" }), false);
+  });
+
+  it("rejects smoke callbacks when the signed body is tampered", () => {
+    configureCallbackTestEnv(true);
+    const signedBody = { synthetic: true, eventId: "SMOKE_SIGNED", event: { id: "SMOKE_SIGNED" }, status: "PROCESSED" };
+    const tamperedBody = { synthetic: true, eventId: "SMOKE_TAMPERED", event: { id: "SMOKE_TAMPERED" }, status: "PROCESSED" };
+    const timestamp = new Date().toISOString();
+    const signature = createAutomationSignature(JSON.stringify(signedBody), timestamp);
+
+    assert.equal(verifyAutomationSignature({
+      body: JSON.stringify(tamperedBody),
+      timestamp,
+      signature
+    }), false);
+  });
+
+  it("rejects OTP code fields in smoke callback payloads", () => {
+    configureCallbackTestEnv(true);
+    const body = {
+      synthetic: true,
+      eventId: "SMOKE_OTP_REJECTED",
+      event: { id: "SMOKE_OTP_REJECTED" },
+      status: "PROCESSED",
+      result: { otpCode: "123456" }
+    };
+    const result = validateAutomationSmokeCallbackBody(body);
+
+    assert.equal(result.ok, false);
+    assert.equal(result.error, "SMOKE_CALLBACK_OTP_CODE_REJECTED");
   });
 
   it("keeps order creation automation emission non-blocking", () => {
