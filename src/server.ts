@@ -7,6 +7,7 @@ import { pinoHttp } from "pino-http";
 
 import { allowedCorsOrigins, env } from "./config/env.js";
 import { logger } from "./lib/logger.js";
+import { codDashboardRouter } from "./modules/codDashboard/cod-dashboard.routes.js";
 import { apiRouter } from "./routes/index.js";
 import { errorHandler } from "./middleware/error.js";
 
@@ -66,6 +67,7 @@ app.get("/", (_req, res) => {
   res.json({ ok: true });
 });
 
+app.use("/cod", codDashboardRouter);
 app.use("/api", apiRouter);
 app.use("/v1", apiRouter);
 

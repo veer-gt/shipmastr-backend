@@ -9,6 +9,7 @@ import { adminAutomationRouter, automationCallbacksRouter, automationCommunicati
 import { auditRouter } from "../modules/audit/audit.routes.js";
 import { authRouter } from "../modules/auth/auth.routes.js";
 import { codRemittancesRouter } from "../modules/codRemittances/cod-remittances.routes.js";
+import { codDashboardRouter } from "../modules/codDashboard/cod-dashboard.routes.js";
 import { adminCourierPartnerApplicationRouter, courierPartnerApplicationRouter } from "../modules/courierPartnerApplications/courier-partner-application.routes.js";
 import { adminCourierPartnerRouter, courierOnboardingRouter } from "../modules/courierPartnerOnboarding/onboarding.routes.js";
 import { courierRouter } from "../modules/courier/courier.routes.js";
@@ -58,6 +59,7 @@ apiRouter.use("/audit", requireJwtAuth, auditRouter);
 apiRouter.use("/automation/callbacks", automationCallbacksRouter);
 apiRouter.use("/automation/communications", requireInternalSecret, automationCommunicationsRouter);
 apiRouter.use("/automation", requireJwtAuth, requireReadyMerchantAutopilotAccess, automationRouter);
+apiRouter.use("/cod", codDashboardRouter);
 apiRouter.use("/cod-remittances", requireJwtAuth, codRemittancesRouter);
 apiRouter.use("/courier/onboarding", requireCourierJwt, courierOnboardingRouter);
 apiRouter.use("/courier/tax-compliance", requireCourierJwt, courierTaxComplianceRouter);
