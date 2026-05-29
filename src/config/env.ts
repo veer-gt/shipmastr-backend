@@ -53,6 +53,7 @@ const schema = z.object({
   N8N_AUTOPILOT_WORKFLOW_URLS: z.string().optional(),
   N8N_AUTOPILOT_SIGNING_SECRET: z.string().min(32).optional(),
   N8N_AUTOPILOT_TIMEOUT_MS: z.coerce.number().int().min(1000).max(30000).default(8000),
+  SHIPMASTR_AUTOMATION_SMOKE_CALLBACKS_ENABLED: envBoolean(false),
   RESELLERCLUB_BASE_URL: z.string().url().optional(),
   RESELLERCLUB_AUTH_USERID: z.string().optional(),
   RESELLERCLUB_API_KEY: z.string().optional(),

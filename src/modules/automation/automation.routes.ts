@@ -1,5 +1,6 @@
 import { Router, type Request, type Response } from "express";
 import { z } from "zod";
+import { env } from "../../config/env.js";
 import { prisma } from "../../lib/prisma.js";
 import {
   handleProviderDeliveryCallback,
@@ -242,6 +243,60 @@ function verifySignedAutomationCallback(req: Request, res: Response) {
   }
 
   return true;
+}
+
+export function automationSmokeCallbackEventId(body: unknown) {
+  if (!body || typeof body !== "object" || Array.isArray(body)) return undefined;
+  const candidate = body as Record<string, unknown>;
+  if (typeof candidate.eventId === "string") return candidate.eventId;
+  const event = candidate.event;
+  if (event && typeof event === "object" && !Array.isArray(event)) {
+    const eventRecord = event as Record<string, unknown>;
+    if (typeof eventRecord.id === "string") return eventRecord.id;
+  }
+  return undefined;
+}
+
+export function containsAutomationSmokeOtpCodeField(value: unknown): boolean {
+  if (!value || typeof value !== "object") return false;
+  if (Array.isArray(value)) return value.some((item) => containsAutomationSmokeOtpCodeField(item));
+
+  return Object.entries(value as Record<string, unknown>).some(([key, fieldValue]) => {
+    const normalizedKey = key.replace(/[_\-\s]/g, "").toLowerCase();
+    if (["otp", "otpcode", "onetimepassword", "onetimepasscode", "passcode"].includes(normalizedKey)) {
+      return true;
+    }
+    return containsAutomationSmokeOtpCodeField(fieldValue);
+  });
+}
+
+const smokeCallbackSchema = z.object({
+  synthetic: z.literal(true),
+  eventId: z.string().min(1).optional(),
+  event: z.object({
+    id: z.string().min(1)
+  }).optional(),
+  status: z.enum(["PROCESSED", "FAILED"]).optional(),
+  result: metadataSchema.optional(),
+  communication: metadataSchema.optional()
+}).passthrough();
+
+export function validateAutomationSmokeCallbackBody(input: unknown) {
+  const parsed = smokeCallbackSchema.safeParse(input ?? {});
+  if (!parsed.success) {
+    return { ok: false as const, status: 400, error: "INVALID_SMOKE_CALLBACK_BODY" };
+  }
+
+  const eventId = automationSmokeCallbackEventId(parsed.data);
+  if (!eventId || !eventId.startsWith("SMOKE_")) {
+    return { ok: false as const, status: 400, error: "INVALID_SMOKE_CALLBACK_EVENT_ID" };
+  }
+
+  if (containsAutomationSmokeOtpCodeField(parsed.data)) {
+    return { ok: false as const, status: 400, error: "SMOKE_CALLBACK_OTP_CODE_REJECTED" };
+  }
+
+  return { ok: true as const, eventId };
 }
 
 automationRouter.get("/overview", async (req, res) => {
@@ -1204,6 +1259,27 @@ internalAutomationRouter.get("/merchant-context/:merchantId", async (req, res) =
   const context = await getMerchantAutomationContext(params.merchantId);
 
   res.json(context);
+});
+
+internalAutomationRouter.post("/callback/smoke", async (req, res) => {
+  if (!env.SHIPMASTR_AUTOMATION_SMOKE_CALLBACKS_ENABLED) {
+    return res.status(403).json({ error: "AUTOMATION_SMOKE_CALLBACK_DISABLED" });
+  }
+
+  if (!verifySignedAutomationCallback(req, res)) return;
+
+  const validation = validateAutomationSmokeCallbackBody(req.body);
+  if (!validation.ok) {
+    return res.status(validation.status).json({ error: validation.error });
+  }
+
+  res.status(202).json({
+    ok: true,
+    synthetic: true,
+    eventId: validation.eventId,
+    status: "ACCEPTED",
+    receivedAt: new Date().toISOString()
+  });
 });
 
 internalAutomationRouter.post("/callback", async (req, res) => {
