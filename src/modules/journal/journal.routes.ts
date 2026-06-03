@@ -3,6 +3,7 @@ import { z } from "zod";
 
 import { HttpError } from "../../lib/httpError.js";
 import { sendJournalEmail } from "../../lib/email.js";
+import { logger } from "../../lib/logger.js";
 import { requireJournalAdmin } from "./journal-auth.js";
 import { getJournalEmailConfig } from "./journal-email.service.js";
 import { validateJournalPost } from "./journal.guardrails.js";
@@ -27,6 +28,10 @@ const sendTestEmailSchema = z.object({
   text: z.string().trim().min(1).max(10000),
   html: z.string().trim().min(1).max(20000)
 });
+
+function safeRouteErrorName(error: unknown) {
+  return error instanceof Error ? error.name : "UnknownError";
+}
 
 journalRouter.get("/email-config", async (_req, res) => {
   res.json(await getJournalEmailConfig());
@@ -80,11 +85,29 @@ journalRouter.post("/validate", (req, res) => {
 journalRouter.post("/run-daily", async (req, res) => {
   requireJournalAdmin(req);
   const options = publishOptionsSchema.parse(req.body);
-  res.json(await runDailyJournalAutopublish({
-    ...(options.mode === undefined ? {} : { mode: options.mode }),
-    ...(options.publish === undefined ? {} : { publish: options.publish }),
-    ...(options.sendEmail === undefined ? {} : { sendEmail: options.sendEmail })
-  }));
+  try {
+    res.json(await runDailyJournalAutopublish({
+      ...(options.mode === undefined ? {} : { mode: options.mode }),
+      ...(options.publish === undefined ? {} : { publish: options.publish }),
+      ...(options.sendEmail === undefined ? {} : { sendEmail: options.sendEmail })
+    }));
+  } catch (error) {
+    logger.error(
+      {
+        message: "journal_daily_run_failed",
+        journal: {
+          errorName: safeRouteErrorName(error)
+        }
+      },
+      "journal_daily_run_failed"
+    );
+
+    res.status(500).json({
+      ok: false,
+      status: "JOURNAL_DAILY_RUN_FAILED",
+      error: "JOURNAL_DAILY_RUN_FAILED"
+    });
+  }
 });
 
 journalRouter.post("/publish", async (req, res) => {

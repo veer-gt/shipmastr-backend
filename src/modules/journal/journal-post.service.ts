@@ -80,6 +80,14 @@ type EmailSendResult = {
   response: string | null;
 };
 
+type JournalEmailDelivery = {
+  emailSent: boolean;
+  recipientCount: number;
+  skippedReason?: string;
+  emailFailureCount?: number;
+  results: EmailSendResult[];
+};
+
 type RunDailyOptions = {
   mode?: string;
   publish?: boolean;
@@ -469,8 +477,37 @@ function replaceUnsubscribeToken(value: string, unsubscribeUrl: string) {
   return value.replaceAll("{{unsubscribeUrl}}", unsubscribeUrl);
 }
 
-async function sendPostToSubscribers(post: GeneratedJournalPost, record: JournalPostRecord, deps: Required<Pick<JournalPostDependencies, "loadSubscribers" | "sendEmail" | "getEmailConfig">>) {
-  const subscribers = await deps.loadSubscribers();
+function safeEmailFailureCode(error: unknown, fallback: string) {
+  const message = error instanceof Error ? error.message : "";
+  return /^[A-Z0-9_]{3,80}$/.test(message) ? message : fallback;
+}
+
+async function sendPostToSubscribers(post: GeneratedJournalPost, record: JournalPostRecord, deps: Required<Pick<JournalPostDependencies, "loadSubscribers" | "sendEmail" | "getEmailConfig">>): Promise<JournalEmailDelivery> {
+  let subscribers: JournalSubscriber[];
+  try {
+    subscribers = await deps.loadSubscribers();
+  } catch (error) {
+    logger.warn(
+      {
+        message: "journal_email_subscriber_load_failed",
+        journalEmail: {
+          postId: record.id,
+          slug: record.slug,
+          error: safeEmailFailureCode(error, "NEWSLETTER_SUBSCRIBER_LOAD_FAILED")
+        }
+      },
+      "journal_email_subscriber_load_failed"
+    );
+
+    return {
+      emailSent: false,
+      recipientCount: 0,
+      skippedReason: "NEWSLETTER_SUBSCRIBER_LOAD_FAILED",
+      emailFailureCount: 1,
+      results: []
+    };
+  }
+
   logger.info(
     {
       message: "journal_email_recipient_count",
@@ -492,38 +529,83 @@ async function sendPostToSubscribers(post: GeneratedJournalPost, record: Journal
     };
   }
 
-  const config = await deps.getEmailConfig();
+  let config: Awaited<ReturnType<typeof getJournalEmailConfig>>;
+  try {
+    config = await deps.getEmailConfig();
+  } catch (error) {
+    logger.warn(
+      {
+        message: "journal_email_config_unavailable",
+        journalEmail: {
+          postId: record.id,
+          slug: record.slug,
+          recipientCount: subscribers.length,
+          error: safeEmailFailureCode(error, "JOURNAL_EMAIL_CONFIG_UNAVAILABLE")
+        }
+      },
+      "journal_email_config_unavailable"
+    );
+
+    return {
+      emailSent: false,
+      recipientCount: subscribers.length,
+      skippedReason: "JOURNAL_EMAIL_CONFIG_UNAVAILABLE",
+      emailFailureCount: 1,
+      results: []
+    };
+  }
+
   if (!config.ready) {
     return {
       emailSent: false,
       recipientCount: subscribers.length,
       skippedReason: "JOURNAL_EMAIL_NOT_READY",
-      missing: config.missing,
       results: [] as EmailSendResult[]
     };
   }
 
   const results: EmailSendResult[] = [];
+  let emailFailureCount = 0;
   for (const subscriber of subscribers) {
-    const result = await deps.sendEmail({
-      to: subscriber.email,
-      subject: post.emailVersion.subject,
-      text: replaceUnsubscribeToken(post.emailVersion.plainTextBody, subscriber.unsubscribeUrl),
-      html: replaceUnsubscribeToken(post.emailVersion.htmlBody, subscriber.unsubscribeUrl),
-      logPrefix: "journal_email_send",
-      metadata: {
-        source: "journal-daily-autopublish",
-        postId: record.id,
-        slug: record.slug,
-        subscriberId: subscriber.id
-      }
-    });
-    results.push(result);
+    try {
+      const result = await deps.sendEmail({
+        to: subscriber.email,
+        subject: post.emailVersion.subject,
+        text: replaceUnsubscribeToken(post.emailVersion.plainTextBody, subscriber.unsubscribeUrl),
+        html: replaceUnsubscribeToken(post.emailVersion.htmlBody, subscriber.unsubscribeUrl),
+        logPrefix: "journal_email_send",
+        metadata: {
+          source: "journal-daily-autopublish",
+          postId: record.id,
+          slug: record.slug,
+          subscriberId: subscriber.id
+        }
+      });
+      results.push(result);
+    } catch (error) {
+      emailFailureCount += 1;
+      logger.warn(
+        {
+          message: "journal_email_send_failed",
+          journalEmail: {
+            postId: record.id,
+            slug: record.slug,
+            subscriberId: subscriber.id,
+            error: safeEmailFailureCode(error, "JOURNAL_EMAIL_SEND_FAILED")
+          }
+        },
+        "journal_email_send_failed"
+      );
+    }
   }
 
+  const sentCount = results.length;
   return {
-    emailSent: results.length > 0,
+    emailSent: sentCount > 0,
     recipientCount: subscribers.length,
+    ...(emailFailureCount > 0 ? { emailFailureCount } : {}),
+    ...(sentCount === 0 && emailFailureCount > 0 ? { skippedReason: "JOURNAL_EMAIL_SEND_FAILED" } : {}),
+    ...(sentCount > 0 && emailFailureCount > 0 ? { skippedReason: "JOURNAL_EMAIL_SEND_PARTIAL_FAILURE" } : {}),
     results
   };
 }
@@ -682,6 +764,7 @@ export async function runDailyJournalAutopublish(options: RunDailyOptions = {}, 
     emailSent: email.emailSent,
     recipientCount: email.recipientCount,
     emailSkippedReason: "skippedReason" in email ? email.skippedReason : undefined,
+    emailFailureCount: email.emailFailureCount,
     requested,
     failedChecks: [],
     post: publicPost(published)
