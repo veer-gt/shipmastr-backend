@@ -59,5 +59,11 @@
     "prisma": "^6.15.0",
     "tsx": "^4.21.0",
     "typescript": "^6.0.3"
+  },
+  "overrides": {
+    "uuid": "^11.1.1",
+    "gaxios": "^7.1.0",
+    "teeny-request": "^10.1.0",
+    "retry-request": "^8.0.0"
   }
 }
