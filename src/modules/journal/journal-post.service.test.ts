@@ -88,6 +88,13 @@ function readyConfig() {
   } as any;
 }
 
+function notReadyConfig() {
+  return {
+    ready: false,
+    missing: ["SMTP_HOST", "SMTP_PASS"]
+  } as any;
+}
+
 describe("journal autopublish Postgres store", () => {
   it("renders the premium Gmail-safe Journal email template", () => {
     const post = generateDailyJournalPost(now);
@@ -192,6 +199,89 @@ describe("journal autopublish Postgres store", () => {
     assert.equal(result.published, true);
     assert.equal(result.emailSent, true);
     assert.deepEqual(sentTo, ["seller@example.com"]);
+  });
+
+  it("publishes and skips email safely when there are no newsletter recipients", async () => {
+    const { client } = makeClient();
+    let emailCalls = 0;
+    const result = await runDailyJournalAutopublish({
+      publish: true,
+      sendEmail: true,
+      now
+    }, {
+      client,
+      storeMode: "postgres",
+      loadSubscribers: async () => [],
+      getEmailConfig: async () => readyConfig(),
+      sendEmail: async () => {
+        emailCalls += 1;
+        return { messageId: "msg_1", accepted: [], rejected: [], response: null };
+      }
+    });
+
+    assert.equal(result.status, "PUBLISHED");
+    assert.equal(result.published, true);
+    assert.equal(result.emailSent, false);
+    assert.equal(result.recipientCount, 0);
+    assert.equal(result.emailSkippedReason, "NO_ACTIVE_SUBSCRIBERS");
+    assert.equal(emailCalls, 0);
+  });
+
+  it("publishes and skips email safely when email config is not ready", async () => {
+    const { client } = makeClient();
+    let emailCalls = 0;
+    const result = await runDailyJournalAutopublish({
+      publish: true,
+      sendEmail: true,
+      now
+    }, {
+      client,
+      storeMode: "postgres",
+      loadSubscribers: async () => [{ email: "seller@example.com", unsubscribeUrl: "https://www.shipmastr.com/unsubscribe/test" }],
+      getEmailConfig: async () => notReadyConfig(),
+      sendEmail: async () => {
+        emailCalls += 1;
+        return { messageId: "msg_1", accepted: [], rejected: [], response: null };
+      }
+    });
+
+    const serialized = JSON.stringify(result);
+    assert.equal(result.status, "PUBLISHED");
+    assert.equal(result.published, true);
+    assert.equal(result.emailSent, false);
+    assert.equal(result.recipientCount, 1);
+    assert.equal(result.emailSkippedReason, "JOURNAL_EMAIL_NOT_READY");
+    assert.equal(emailCalls, 0);
+    assert.doesNotMatch(serialized, /seller@example\.com/);
+    assert.doesNotMatch(serialized, /SMTP_PASS/);
+  });
+
+  it("converts email send failures into a safe skipped-email result", async () => {
+    const { client } = makeClient();
+    const result = await runDailyJournalAutopublish({
+      publish: true,
+      sendEmail: true,
+      now
+    }, {
+      client,
+      storeMode: "postgres",
+      loadSubscribers: async () => [{ id: "subscriber_1", email: "seller@example.com", unsubscribeUrl: "https://www.shipmastr.com/unsubscribe/test" }],
+      getEmailConfig: async () => readyConfig(),
+      sendEmail: async () => {
+        throw new Error("provider secret response should not leak");
+      }
+    });
+
+    const serialized = JSON.stringify(result);
+    assert.equal(result.status, "PUBLISHED");
+    assert.equal(result.published, true);
+    assert.equal(result.emailSent, false);
+    assert.equal(result.recipientCount, 1);
+    assert.equal(result.emailSkippedReason, "JOURNAL_EMAIL_SEND_FAILED");
+    assert.equal(result.emailFailureCount, 1);
+    assert.doesNotMatch(serialized, /seller@example\.com/);
+    assert.doesNotMatch(serialized, /secret response/);
+    assert.doesNotMatch(serialized, /provider/);
   });
 
   it("does not send email for draft-only runs", async () => {
