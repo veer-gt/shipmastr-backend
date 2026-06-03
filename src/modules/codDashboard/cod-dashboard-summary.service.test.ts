@@ -1,6 +1,10 @@
 import assert from "node:assert/strict";
 import { describe, it } from "node:test";
-import { buildCodDashboardApiResponse, buildCodDashboardSummary } from "./cod-dashboard-summary.service.js";
+import {
+  buildCodDashboardApiResponse,
+  buildCodDashboardSummary,
+  buildCodDashboardSummaryFromOrders
+} from "./cod-dashboard-summary.service.js";
 
 describe("COD dashboard summary API demo fallback", () => {
   it("returns dashboard-compatible API demo fallback data", () => {
@@ -48,6 +52,53 @@ describe("COD dashboard summary API demo fallback", () => {
     assert.equal(shippedDemoRow?.shipmentWeight?.chargeableWeightKg, 1.2);
     assert.equal(shippedDemoRow?.requiredActions.length, 0);
     assert.match(shippedDemoRow?.notes ?? "", /AWB persistence is visible/i);
+  });
+
+  it("maps persisted shipped COD orders with AWB and declared weight metadata", () => {
+    const summary = buildCodDashboardSummaryFromOrders([
+      {
+        id: "ord_real_1007",
+        externalOrderId: "COD-REAL-1007",
+        city: "Bengaluru",
+        state: "Karnataka",
+        orderValue: 1999,
+        codAmount: 1999,
+        paymentMode: "COD",
+        status: "SHIPPED",
+        shipmentDetails: {
+          awb: "AWB-REAL-1007",
+          courierId: "courier_demo",
+          carrierName: "Demo Courier",
+          weightGrams: 800,
+          volumetricWeight: "1.2",
+          shipmentStatus: "SHIPPED"
+        },
+        orderIntelligence: {
+          consigneeTier: "SILVER",
+          codDecision: "ALLOW_COD",
+          shipmentDecision: "SHIP",
+          courierId: "courier_demo"
+        }
+      }
+    ], "2026-05-29T12:00:00.000Z");
+    const shippedRow = summary.rows.find((row) => row.orderId === "COD-REAL-1007");
+    const json = JSON.stringify(summary);
+    const keys = collectKeys(summary);
+
+    assert.equal(summary.dataMode, "API_IN_MEMORY");
+    assert.equal(summary.shippedOrderSummary.totalRows, summary.rows.length);
+    assert.ok(summary.shippedOrderSummary.shippedRows >= 1);
+    assert.ok(summary.shippedOrderSummary.shippedWithAwb >= 1);
+    assert.ok(summary.shippedOrderSummary.shippedWithWeightMetadata >= 1);
+    assert.equal(shippedRow?.orderStatus, "SHIPPED");
+    assert.equal(shippedRow?.awbNumber, "AWB-REAL-1007");
+    assert.equal(shippedRow?.carrier, "Demo Courier");
+    assert.equal(shippedRow?.shipmentWeight?.deadWeightKg, 0.8);
+    assert.equal(shippedRow?.shipmentWeight?.volumetricWeightKg, 1.2);
+    assert.equal(shippedRow?.shipmentWeight?.chargeableWeightKg, 1.2);
+    assert.equal(keys.some((key) => /otpCode|secret|token|phone|email|addressLine|pincode/i.test(key)), false);
+    assert.equal(json.includes("9999999999"), false);
+    assert.equal(json.includes("buyer@example.com"), false);
   });
 
   it("does not expose OTP codes, secret fields, or raw buyer contact PII", () => {

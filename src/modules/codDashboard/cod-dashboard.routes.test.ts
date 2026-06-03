@@ -4,10 +4,10 @@ import type { Response } from "express";
 import { getCodDashboardSummaryHandler } from "./cod-dashboard.routes.js";
 
 describe("COD dashboard summary routes", () => {
-  it("returns 200-compatible JSON for the dashboard summary handler", () => {
+  it("returns 200-compatible JSON for the dashboard summary handler", async () => {
     const res = makeResponse();
 
-    getCodDashboardSummaryHandler({} as never, res as unknown as Response);
+    await getCodDashboardSummaryHandler({} as never, res as unknown as Response);
 
     assert.equal(res.statusCode, 200);
     assert.equal(res.body.success, true);
@@ -15,10 +15,10 @@ describe("COD dashboard summary routes", () => {
     assert.equal(res.body.data.api.summaryEndpoint, "GET /cod/dashboard/summary");
   });
 
-  it("keeps the read-only handler response safe", () => {
+  it("keeps the read-only handler response safe", async () => {
     const res = makeResponse();
 
-    getCodDashboardSummaryHandler({} as never, res as unknown as Response);
+    await getCodDashboardSummaryHandler({} as never, res as unknown as Response);
 
     const json = JSON.stringify(res.body);
     const keys = collectKeys(res.body);

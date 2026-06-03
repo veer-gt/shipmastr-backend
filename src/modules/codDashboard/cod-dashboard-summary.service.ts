@@ -113,6 +113,36 @@ export type CodDashboardApiResponse = {
   };
 };
 
+export type PersistedCodDashboardOrder = {
+  id: string;
+  externalOrderId?: string | null;
+  city?: string | null;
+  state?: string | null;
+  orderValue?: unknown;
+  codAmount?: unknown;
+  paymentMode?: string | null;
+  status?: string | null;
+  weightGrams?: unknown;
+  shipmentDetails?: {
+    awb?: string | null;
+    courierId?: string | null;
+    carrier?: string | null;
+    carrierName?: string | null;
+    weightGrams?: unknown;
+    deadWeightKg?: unknown;
+    volumetricWeight?: unknown;
+    volumetricWeightKg?: unknown;
+    chargeableWeightKg?: unknown;
+    shipmentStatus?: string | null;
+  } | null;
+  orderIntelligence?: {
+    consigneeTier?: string | null;
+    codDecision?: string | null;
+    shipmentDecision?: string | null;
+    courierId?: string | null;
+  } | null;
+};
+
 const ACTION_STATUSES: CodRequiredActionStatus[] = ["PENDING", "VERIFIED", "FAILED", "EXPIRED", "CANCELLED"];
 const EVENT_STATUSES: CodAutomationEventStatus[] = [
   "QUEUED",
@@ -285,6 +315,43 @@ export function buildCodDashboardSummary(generatedAt = new Date().toISOString())
   };
 }
 
+export function buildCodDashboardSummaryFromOrders(
+  orders: PersistedCodDashboardOrder[],
+  generatedAt = new Date().toISOString()
+): CodDashboardSummary {
+  const rows = orders
+    .filter((order) => !order.paymentMode || order.paymentMode === "COD")
+    .map(mapPersistedOrderToDashboardRow);
+
+  if (rows.length === 0) return buildCodDashboardSummary(generatedAt);
+
+  return {
+    dataMode: "API_IN_MEMORY",
+    sourceLabel: "Persisted COD order data",
+    generatedAt,
+    rows,
+    shippedOrderSummary: buildShippedOrderSummary(rows),
+    tierSummary: buildTierSummary(rows),
+    actionStatusCounts: countActionStatuses(rows),
+    automationEventStatusCounts: countEventStatuses(rows),
+    automationEvents: rows.map((row) => {
+      const workflowName = row.workflowSuggestions[0];
+
+      return {
+        ...(workflowName ? { workflowName } : {}),
+        status: row.automationEventStatus,
+        retryAvailable: row.retryAvailable
+      };
+    }),
+    api: codDashboardApiTargets(),
+    notes: [
+      "Persisted COD orders are shown only from authenticated merchant scope when durable data is available.",
+      "Buyer phone numbers, buyer emails, full buyer addresses, OTP codes, secrets, and tokens are not included.",
+      "Demo fallback data is returned when merchant scope or durable COD order rows are unavailable."
+    ]
+  };
+}
+
 export function buildCodDashboardApiResponse(generatedAt = new Date().toISOString()): CodDashboardApiResponse {
   return {
     success: true,
@@ -294,6 +361,219 @@ export function buildCodDashboardApiResponse(generatedAt = new Date().toISOStrin
       timestamp: generatedAt
     }
   };
+}
+
+export function buildCodDashboardApiResponseFromOrders(
+  orders: PersistedCodDashboardOrder[],
+  generatedAt = new Date().toISOString()
+): CodDashboardApiResponse {
+  return {
+    success: true,
+    data: buildCodDashboardSummaryFromOrders(orders, generatedAt),
+    meta: {
+      mode: "demo-preview",
+      timestamp: generatedAt
+    }
+  };
+}
+
+function mapPersistedOrderToDashboardRow(order: PersistedCodDashboardOrder): CodDashboardSummary["rows"][number] {
+  const orderStatus = normalizeOrderStatus(order.status ?? order.shipmentDetails?.shipmentStatus);
+  const buyerTier = normalizeBuyerTier(order.orderIntelligence?.consigneeTier);
+  const codDecision = normalizeCodDecision(order.orderIntelligence?.codDecision, orderStatus);
+  const requiredActions = requiredActionsFor(codDecision, orderStatus);
+  const workflowSuggestions = workflowSuggestionsFor(codDecision, requiredActions);
+  const automationEventStatus = automationStatusFor(codDecision, orderStatus, workflowSuggestions);
+  const shipmentWeight = shipmentWeightFor(order);
+  const awbNumber = cleanText(order.shipmentDetails?.awb);
+  const cityRegion = cityRegionFor(order.city, order.state);
+  const carrier = cleanText(order.shipmentDetails?.carrierName)
+    ?? cleanText(order.shipmentDetails?.carrier)
+    ?? cleanText(order.shipmentDetails?.courierId)
+    ?? cleanText(order.orderIntelligence?.courierId);
+
+  return {
+    orderId: cleanText(order.externalOrderId) ?? order.id,
+    buyerLabel: `Order ${cleanText(order.externalOrderId) ?? order.id}`,
+    ...(cityRegion ? { cityRegion } : {}),
+    buyerTier,
+    codDecision,
+    orderValueLabel: moneyLabel(order.codAmount ?? order.orderValue),
+    requiredActions,
+    workflowSuggestions,
+    automationEventStatus,
+    retryAvailable: automationEventStatus === "FAILED" || automationEventStatus === "RETRY_PENDING",
+    ...(orderStatus ? { orderStatus } : {}),
+    ...(awbNumber ? { awbNumber } : {}),
+    ...(carrier ? { carrier } : {}),
+    ...(shipmentWeight ? { shipmentWeight } : {}),
+    notes: notesForPersistedOrder({ orderStatus, awbNumber, shipmentWeight, codDecision }),
+    dataSource: "API_IN_MEMORY"
+  };
+}
+
+function normalizeBuyerTier(value: string | null | undefined): BuyerTier {
+  return value === "GOLD" || value === "SILVER" || value === "BRONZE" || value === "IRON" ? value : "SILVER";
+}
+
+function normalizeCodDecision(value: string | null | undefined, orderStatus?: CodOrderStatus): CodDecision {
+  if (
+    value === "ALLOW_COD" ||
+    value === "REQUIRE_OTP" ||
+    value === "HOLD_BEFORE_SHIP" ||
+    value === "PREPAID_ONLY" ||
+    value === "MANUAL_REVIEW" ||
+    value === "BLOCK_COD"
+  ) {
+    return value;
+  }
+
+  if (orderStatus === "SHIPPED" || orderStatus === "DELIVERED") return "ALLOW_COD";
+
+  return "MANUAL_REVIEW";
+}
+
+function normalizeOrderStatus(value: string | null | undefined): CodOrderStatus | undefined {
+  if (
+    value === "CREATED" ||
+    value === "RISK_SCORED" ||
+    value === "VERIFIED" ||
+    value === "HELD" ||
+    value === "READY_TO_SHIP" ||
+    value === "SHIPPED" ||
+    value === "DELIVERED" ||
+    value === "NDR" ||
+    value === "RTO" ||
+    value === "CANCELLED"
+  ) {
+    return value;
+  }
+
+  return undefined;
+}
+
+function requiredActionsFor(codDecision: CodDecision, orderStatus?: CodOrderStatus): CodDashboardActionRow[] {
+  if (orderStatus === "SHIPPED" || orderStatus === "DELIVERED" || orderStatus === "CANCELLED") return [];
+  if (codDecision === "REQUIRE_OTP") return [{ type: "OTP_BEFORE_SHIPMENT", status: "PENDING" }];
+  if (codDecision === "HOLD_BEFORE_SHIP") {
+    return [
+      { type: "OTP_BEFORE_SHIPMENT", status: "PENDING" },
+      { type: "ADDRESS_CONFIRMATION", status: "PENDING" }
+    ];
+  }
+  return [];
+}
+
+function workflowSuggestionsFor(
+  codDecision: CodDecision,
+  requiredActions: CodDashboardActionRow[]
+): CodAutomationWorkflowName[] {
+  const workflows = new Set<CodAutomationWorkflowName>();
+
+  if (codDecision === "REQUIRE_OTP" || codDecision === "MANUAL_REVIEW" || codDecision === "BLOCK_COD") {
+    workflows.add("SM_11_COD_RISK_HIGH");
+  }
+
+  if (requiredActions.some((action) => action.type === "ADDRESS_CONFIRMATION")) {
+    workflows.add("SM_12_ADDRESS_CONFIRMATION");
+  }
+
+  if (codDecision === "PREPAID_ONLY") {
+    workflows.add("SM_14_NDR_RECOVERY");
+  }
+
+  return [...workflows];
+}
+
+function automationStatusFor(
+  codDecision: CodDecision,
+  orderStatus: CodOrderStatus | undefined,
+  workflowSuggestions: CodAutomationWorkflowName[]
+): CodAutomationEventStatus {
+  if (orderStatus === "SHIPPED" || orderStatus === "DELIVERED" || workflowSuggestions.length === 0) return "SKIPPED";
+  if (codDecision === "MANUAL_REVIEW") return "SENT";
+  return "QUEUED";
+}
+
+function shipmentWeightFor(order: PersistedCodDashboardOrder): CodDashboardSummary["rows"][number]["shipmentWeight"] {
+  const shipment = order.shipmentDetails;
+  const deadWeightKg = numberFrom(shipment?.deadWeightKg) ?? kgFromGrams(shipment?.weightGrams ?? order.weightGrams);
+  const volumetricWeightKg = numberFrom(shipment?.volumetricWeightKg) ?? numberFrom(shipment?.volumetricWeight);
+  const chargeableWeightKg = numberFrom(shipment?.chargeableWeightKg)
+    ?? chargeableWeightFrom(deadWeightKg, volumetricWeightKg);
+
+  if (deadWeightKg === undefined && volumetricWeightKg === undefined && chargeableWeightKg === undefined) return undefined;
+
+  return {
+    ...(deadWeightKg !== undefined ? { deadWeightKg } : {}),
+    ...(volumetricWeightKg !== undefined ? { volumetricWeightKg } : {}),
+    ...(chargeableWeightKg !== undefined ? { chargeableWeightKg } : {})
+  };
+}
+
+function chargeableWeightFrom(deadWeightKg?: number, volumetricWeightKg?: number) {
+  if (deadWeightKg === undefined && volumetricWeightKg === undefined) return undefined;
+  return Math.max(deadWeightKg ?? 0, volumetricWeightKg ?? 0);
+}
+
+function notesForPersistedOrder(input: {
+  orderStatus: CodOrderStatus | undefined;
+  awbNumber: string | undefined;
+  shipmentWeight: CodDashboardSummary["rows"][number]["shipmentWeight"] | undefined;
+  codDecision: CodDecision;
+}) {
+  if (input.orderStatus === "SHIPPED" && input.awbNumber && input.shipmentWeight?.chargeableWeightKg !== undefined) {
+    return "Persisted AWB and declared shipment weight metadata are visible from the order record.";
+  }
+
+  if (input.orderStatus === "SHIPPED" && input.awbNumber) {
+    return "Persisted AWB is visible from the order record; declared weight metadata is not complete yet.";
+  }
+
+  if (input.codDecision === "REQUIRE_OTP") return "Persisted COD order requires OTP before shipment release.";
+  if (input.codDecision === "MANUAL_REVIEW") return "Persisted COD order is waiting for operator review.";
+  if (input.codDecision === "PREPAID_ONLY") return "Persisted COD order should be routed toward prepaid recovery.";
+
+  return "Persisted COD order is visible in the dashboard summary.";
+}
+
+function cityRegionFor(city: string | null | undefined, state: string | null | undefined) {
+  const parts = [cleanText(city), cleanText(state)].filter(Boolean);
+  return parts.length > 0 ? parts.join(", ") : undefined;
+}
+
+function cleanText(value: string | null | undefined) {
+  const clean = value?.trim();
+  return clean ? clean : undefined;
+}
+
+function moneyLabel(value: unknown) {
+  const amount = Math.round(numberFrom(value) ?? 0);
+  return `Rs ${amount.toLocaleString("en-IN")}`;
+}
+
+function kgFromGrams(value: unknown) {
+  const grams = numberFrom(value);
+  return grams === undefined ? undefined : roundKg(grams / 1000);
+}
+
+function numberFrom(value: unknown): number | undefined {
+  if (typeof value === "number" && Number.isFinite(value)) return roundKg(value);
+  if (typeof value === "bigint") return Number(value);
+  if (typeof value === "string" && value.trim()) {
+    const parsed = Number(value);
+    return Number.isFinite(parsed) ? roundKg(parsed) : undefined;
+  }
+  if (value && typeof value === "object" && "toNumber" in value && typeof value.toNumber === "function") {
+    const parsed = value.toNumber();
+    return Number.isFinite(parsed) ? roundKg(parsed) : undefined;
+  }
+
+  return undefined;
+}
+
+function roundKg(value: number) {
+  return Math.round(value * 100) / 100;
 }
 
 function buildTierSummary(rows: CodDashboardSummary["rows"]): CodDashboardSummary["tierSummary"] {
