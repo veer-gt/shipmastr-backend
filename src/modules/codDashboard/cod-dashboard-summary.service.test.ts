@@ -34,6 +34,22 @@ describe("COD dashboard summary API demo fallback", () => {
     assert.equal(summary.rows.some((row) => row.retryAvailable), true);
   });
 
+  it("surfaces AWB-generated shipped orders in the dashboard summary", () => {
+    const summary = buildCodDashboardSummary("2026-05-29T12:00:00.000Z");
+    const shippedDemoRow = summary.rows.find((row) => row.orderId === "COD-DEMO-1007");
+
+    assert.equal(summary.shippedOrderSummary.totalRows, summary.rows.length);
+    assert.ok(summary.shippedOrderSummary.shippedRows >= 1);
+    assert.ok(summary.shippedOrderSummary.shippedWithAwb >= 1);
+    assert.ok(summary.shippedOrderSummary.shippedWithWeightMetadata >= 1);
+    assert.equal(shippedDemoRow?.orderStatus, "SHIPPED");
+    assert.equal(shippedDemoRow?.awbNumber, "AWB-DEMO-1007");
+    assert.equal(shippedDemoRow?.carrier, "Demo Courier");
+    assert.equal(shippedDemoRow?.shipmentWeight?.chargeableWeightKg, 1.2);
+    assert.equal(shippedDemoRow?.requiredActions.length, 0);
+    assert.match(shippedDemoRow?.notes ?? "", /AWB persistence is visible/i);
+  });
+
   it("does not expose OTP codes, secret fields, or raw buyer contact PII", () => {
     const summary = buildCodDashboardSummary("2026-05-29T12:00:00.000Z");
     const keys = collectKeys(summary);

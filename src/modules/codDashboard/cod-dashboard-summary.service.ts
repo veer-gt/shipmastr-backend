@@ -27,6 +27,18 @@ export type CodAutomationEventStatus =
 
 export type CodDashboardDataMode = "API_IN_MEMORY" | "DEMO_FALLBACK";
 
+export type CodOrderStatus =
+  | "CREATED"
+  | "RISK_SCORED"
+  | "VERIFIED"
+  | "HELD"
+  | "READY_TO_SHIP"
+  | "SHIPPED"
+  | "DELIVERED"
+  | "NDR"
+  | "RTO"
+  | "CANCELLED";
+
 export type CodDashboardActionRow = {
   actionId?: string;
   type: CodRequiredActionType;
@@ -51,9 +63,23 @@ export type CodDashboardSummary = {
     automationEventStatus: CodAutomationEventStatus;
     retryAvailable: boolean;
     automationEventId?: string;
+    orderStatus?: CodOrderStatus;
+    awbNumber?: string;
+    carrier?: string;
+    shipmentWeight?: {
+      deadWeightKg?: number;
+      volumetricWeightKg?: number;
+      chargeableWeightKg?: number;
+    };
     notes: string;
     dataSource: CodDashboardDataMode;
   }>;
+  shippedOrderSummary: {
+    totalRows: number;
+    shippedRows: number;
+    shippedWithAwb: number;
+    shippedWithWeightMetadata: number;
+  };
   tierSummary: Array<{
     tier: BuyerTier;
     label: string;
@@ -207,6 +233,28 @@ export function buildCodDashboardSummary(generatedAt = new Date().toISOString())
       retryAvailable: false,
       notes: "Operator review remains visible after automation is sent.",
       dataSource: "DEMO_FALLBACK"
+    },
+    {
+      orderId: "COD-DEMO-1007",
+      buyerLabel: "Buyer 1007",
+      cityRegion: "Bengaluru, Karnataka",
+      buyerTier: "GOLD",
+      codDecision: "ALLOW_COD",
+      orderValueLabel: "Rs 1,999",
+      requiredActions: [],
+      workflowSuggestions: [],
+      automationEventStatus: "SKIPPED",
+      retryAvailable: false,
+      orderStatus: "SHIPPED",
+      awbNumber: "AWB-DEMO-1007",
+      carrier: "Demo Courier",
+      shipmentWeight: {
+        deadWeightKg: 0.8,
+        volumetricWeightKg: 1.2,
+        chargeableWeightKg: 1.2
+      },
+      notes: "AWB persistence is visible after shipment generation, including carrier and declared weight metadata.",
+      dataSource: "DEMO_FALLBACK"
     }
   ];
 
@@ -215,6 +263,7 @@ export function buildCodDashboardSummary(generatedAt = new Date().toISOString())
     sourceLabel: "API demo fallback data",
     generatedAt,
     rows,
+    shippedOrderSummary: buildShippedOrderSummary(rows),
     tierSummary: buildTierSummary(rows),
     actionStatusCounts: countActionStatuses(rows),
     automationEventStatusCounts: countEventStatuses(rows),
@@ -254,6 +303,21 @@ function buildTierSummary(rows: CodDashboardSummary["rows"]): CodDashboardSummar
     summary: TIER_COPY[tier].summary,
     count: rows.filter((row) => row.buyerTier === tier).length
   }));
+}
+
+export function buildShippedOrderSummary(rows: CodDashboardSummary["rows"]): CodDashboardSummary["shippedOrderSummary"] {
+  const shippedRows = rows.filter((row) => row.orderStatus === "SHIPPED");
+
+  return {
+    totalRows: rows.length,
+    shippedRows: shippedRows.length,
+    shippedWithAwb: shippedRows.filter((row) => Boolean(row.awbNumber)).length,
+    shippedWithWeightMetadata: shippedRows.filter((row) => (
+      row.shipmentWeight?.deadWeightKg !== undefined &&
+      row.shipmentWeight.volumetricWeightKg !== undefined &&
+      row.shipmentWeight.chargeableWeightKg !== undefined
+    )).length
+  };
 }
 
 function countActionStatuses(rows: CodDashboardSummary["rows"]) {
