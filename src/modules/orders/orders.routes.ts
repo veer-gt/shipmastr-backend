@@ -75,6 +75,49 @@ function sellerSafeRiskSummary(decision: Pick<OrderAutomationDecision, "sellerMe
  ].filter(Boolean).slice(0, 4);
 }
 
+function decimalToNumber(value: unknown) {
+ if (value === null || value === undefined) return null;
+ if (typeof value === "number") return Number.isFinite(value) ? value : null;
+ if (typeof value === "string") {
+   const numeric = Number(value);
+   return Number.isFinite(numeric) ? numeric : null;
+ }
+
+ if (typeof value === "object" && "toNumber" in value && typeof value.toNumber === "function") {
+   const numeric = value.toNumber();
+   return Number.isFinite(numeric) ? numeric : null;
+ }
+
+ const numeric = Number(value);
+ return Number.isFinite(numeric) ? numeric : null;
+}
+
+function kgFromGrams(value: unknown) {
+ const grams = decimalToNumber(value);
+ if (grams === null) return null;
+ return Math.round((grams / 1000) * 100) / 100;
+}
+
+function shipmentWeightSummary(input: {
+ weightGrams?: number | null;
+ shipmentDetails?: {
+   weightGrams?: number | null;
+   volumetricWeight?: unknown;
+ } | null;
+}) {
+ const deadWeightKg = kgFromGrams(input.shipmentDetails?.weightGrams ?? input.weightGrams);
+ const volumetricWeightKg = decimalToNumber(input.shipmentDetails?.volumetricWeight);
+ const chargeableWeightKg = [deadWeightKg, volumetricWeightKg]
+   .filter((value): value is number => value !== null && Number.isFinite(value))
+   .reduce<number | null>((max, value) => max === null ? value : Math.max(max, value), null);
+
+ return {
+   deadWeightKg,
+   volumetricWeightKg,
+   chargeableWeightKg
+ };
+}
+
 export function buildOrderAutomationPayloads(
  order: {
    id: string;
@@ -463,10 +506,53 @@ ordersRouter.get("/",async(req,res)=>{
    },
    orderBy:{
      createdAt:"desc"
+   },
+   include:{
+     shipmentDetails:true
    }
  });
 
- res.json({orders});
+ const courierIds = Array.from(new Set(
+   orders
+     .map((order) => order.shipmentDetails?.courierId)
+     .filter((courierId): courierId is string => Boolean(courierId))
+ ));
+ const couriers = courierIds.length
+   ? await prisma.courierPartner.findMany({
+     where: { id: { in: courierIds } },
+     select: { id: true, name: true, code: true }
+   })
+   : [];
+ const courierById = new Map(couriers.map((courier) => [courier.id, courier]));
+
+ const sellerSafeOrders = orders.map((order) => {
+   const { shipmentDetails, ...orderFields } = order;
+   const courier = shipmentDetails?.courierId ? courierById.get(shipmentDetails.courierId) : null;
+   const shipmentWeight = shipmentWeightSummary(order);
+
+   return {
+     ...orderFields,
+     orderId: order.externalOrderId,
+     customerName: order.buyerName,
+     shippingPincode: order.pincode,
+     declaredValue: order.orderValue,
+     awb: shipmentDetails?.awb ?? null,
+     awbNumber: shipmentDetails?.awb ?? null,
+     carrier: courier?.name ?? courier?.code ?? shipmentDetails?.courierId ?? null,
+     shipmentStatus: shipmentDetails?.shipmentStatus ?? order.status,
+     trackingNumber: shipmentDetails?.trackingNumber ?? null,
+     deadWeightKg: shipmentWeight.deadWeightKg,
+     volumetricWeightKg: shipmentWeight.volumetricWeightKg,
+     chargeableWeightKg: shipmentWeight.chargeableWeightKg,
+     shipmentWeight: {
+       deadWeightKg: shipmentWeight.deadWeightKg,
+       volumetricWeightKg: shipmentWeight.volumetricWeightKg,
+       chargeableWeightKg: shipmentWeight.chargeableWeightKg
+     }
+   };
+ });
+
+ res.json({orders:sellerSafeOrders});
 });
 
 ordersRouter.get("/:id",async(req,res)=>{
