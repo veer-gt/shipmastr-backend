@@ -6,6 +6,7 @@ import rateLimit from "express-rate-limit";
 import { pinoHttp } from "pino-http";
 
 import { allowedCorsOrigins, env } from "./config/env.js";
+import { corsAllowedHeaders } from "./config/cors.js";
 import { logger } from "./lib/logger.js";
 import { codDashboardRouter } from "./modules/codDashboard/cod-dashboard.routes.js";
 import { apiRouter } from "./routes/index.js";
@@ -33,15 +34,7 @@ app.use(
       return cb(null, false);
     },
     methods: ["GET", "HEAD", "POST", "PUT", "PATCH", "DELETE", "OPTIONS"],
-    allowedHeaders: [
-      "Content-Type",
-      "Authorization",
-      "X-Auth-Token",
-      "X-Journal-Secret",
-      "X-Shipmastr-Courier-Key",
-      "X-Shipmastr-Signature",
-      "X-Shipmastr-Timestamp"
-    ],
+    allowedHeaders: [...corsAllowedHeaders],
     credentials: true
   })
 );
