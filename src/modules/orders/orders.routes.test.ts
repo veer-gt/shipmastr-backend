@@ -35,6 +35,7 @@ function makeCourierShipment(overrides: Partial<SellerCourierShipmentInput> = {}
     awbNumber: "DEMO-AWB-1001",
     status: "ready_to_ship",
     weightGrams: 800,
+    trackingUrl: "https://shipmastr.com/tracking/?awb=DEMO-AWB-1001",
     createdAt,
     updatedAt: new Date("2026-06-01T11:00:00.000Z"),
     courier: {
@@ -69,6 +70,7 @@ describe("seller-safe order shipment mapping", () => {
     assert.equal(order?.awb, "DEMO-AWB-1001");
     assert.equal(order?.carrier, "Shipmastr Manual Courier");
     assert.equal(order?.shipmentStatus, "ready_to_ship");
+    assert.equal(order?.trackingUrl, "https://shipmastr.com/tracking/?awb=DEMO-AWB-1001");
     assert.equal(order?.deadWeightKg, 0.8);
     assert.equal(order?.chargeableWeightKg, 0.8);
     assert.deepEqual(order?.shipmentWeight, {
@@ -76,6 +78,19 @@ describe("seller-safe order shipment mapping", () => {
       volumetricWeightKg: null,
       chargeableWeightKg: 0.8
     });
+  });
+
+  it("builds a seller-safe relative tracking URL when a CourierShipment has no persisted URL", () => {
+    const [order] = buildSellerSafeOrders({
+      orders: [makeOrder()],
+      courierShipments: [
+        makeCourierShipment({
+          trackingUrl: null
+        })
+      ]
+    });
+
+    assert.equal(order?.trackingUrl, "/tracking/?awb=DEMO-AWB-1001");
   });
 
   it("uses the most recent matching CourierShipment when multiple shipment rows exist", () => {
@@ -122,6 +137,7 @@ describe("seller-safe order shipment mapping", () => {
     assert.equal(order?.carrier, "Fallback Courier");
     assert.equal(order?.shipmentStatus, "CREATED");
     assert.equal(order?.trackingNumber, "SHIPMENT-DETAILS-TRACKING");
+    assert.equal(order?.trackingUrl, "/tracking/?awb=SHIPMENT-DETAILS-AWB");
     assert.equal(order?.deadWeightKg, 0.6);
     assert.equal(order?.volumetricWeightKg, 1.2);
     assert.equal(order?.chargeableWeightKg, 1.2);
@@ -136,6 +152,7 @@ describe("seller-safe order shipment mapping", () => {
     assert.equal(order?.awbNumber, null);
     assert.equal(order?.awb, null);
     assert.equal(order?.carrier, null);
+    assert.equal(order?.trackingUrl, null);
   });
 
   it("does not map a first-shipment-linked CourierShipment from another merchant", () => {

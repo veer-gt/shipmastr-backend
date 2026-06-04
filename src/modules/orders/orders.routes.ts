@@ -157,6 +157,7 @@ type SellerOrderCourierShipment = {
   awbNumber: string;
   status: string;
   weightGrams?: number | null;
+  trackingUrl?: string | null;
   createdAt: Date;
   updatedAt: Date;
   courier: SellerOrderCourier;
@@ -225,6 +226,10 @@ function shipmentWeightFromCourierShipment(
   };
 }
 
+function trackingUrlForAwb(awbNumber: string | null) {
+  return awbNumber ? `/tracking/?awb=${encodeURIComponent(awbNumber)}` : null;
+}
+
 export function buildSellerSafeOrders(input: {
   orders: SellerOrderSource[];
   courierById?: Map<string, SellerOrderCourier>;
@@ -272,6 +277,7 @@ export function buildSellerSafeOrders(input: {
       carrier,
       shipmentStatus,
       trackingNumber: courierShipment?.awbNumber ?? shipmentDetails?.trackingNumber ?? null,
+      trackingUrl: courierShipment?.trackingUrl ?? trackingUrlForAwb(awbNumber),
       deadWeightKg: shipmentWeight.deadWeightKg,
       volumetricWeightKg: shipmentWeight.volumetricWeightKg,
       chargeableWeightKg: shipmentWeight.chargeableWeightKg,
