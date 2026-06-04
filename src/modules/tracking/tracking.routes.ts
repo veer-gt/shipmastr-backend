@@ -60,6 +60,26 @@ function normalizedResponse(lookupType: "awb" | "order" | "mobile") {
   };
 }
 
+function publicTrackingEvents(shipment: NonNullable<Awaited<ReturnType<typeof findCourierShipmentByAwb>>>) {
+  const events = shipment.events.map((event) => ({
+    status: event.status,
+    location: event.location || "",
+    timestamp: event.createdAt,
+    description: event.remarks || event.eventType
+  }));
+
+  if (events.length > 0) return events;
+
+  return [
+    {
+      status: shipment.status,
+      location: "",
+      timestamp: shipment.updatedAt || shipment.createdAt,
+      description: shipment.lastEvent || "Shipment status updated."
+    }
+  ];
+}
+
 function normalizeCourierShipment(shipment: Awaited<ReturnType<typeof findCourierShipmentByAwb>>) {
   if (!shipment) return null;
 
@@ -71,13 +91,12 @@ function normalizeCourierShipment(shipment: Awaited<ReturnType<typeof findCourie
       fromPincode: shipment.fromPincode,
       toPincode: shipment.toPincode,
       labelUrl: null,
+      trackingUrl: shipment.trackingUrl,
+      lastEvent: shipment.lastEvent || null,
       createdAt: shipment.createdAt,
-      events: shipment.events.map((event) => ({
-        status: event.status,
-        location: event.location || "",
-        timestamp: event.createdAt,
-        description: event.remarks || event.eventType
-      }))
+      updatedAt: shipment.updatedAt,
+      expectedDeliveryDate: shipment.expectedDeliveryDate,
+      events: publicTrackingEvents(shipment)
     },
     order: {
       orderId: shipment.orderId || shipment.awbNumber,
