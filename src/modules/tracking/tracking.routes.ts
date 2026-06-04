@@ -60,7 +60,23 @@ function normalizedResponse(lookupType: "awb" | "order" | "mobile") {
   };
 }
 
-function publicTrackingEvents(shipment: NonNullable<Awaited<ReturnType<typeof findCourierShipmentByAwb>>>) {
+type PublicTrackingEventSource = {
+  status: string;
+  location?: string | null;
+  createdAt: Date | string;
+  remarks?: string | null;
+  eventType: string;
+};
+
+type PublicTrackingShipmentSource = {
+  status: string;
+  lastEvent?: string | null;
+  createdAt: Date | string;
+  updatedAt?: Date | string | null;
+  events: PublicTrackingEventSource[];
+};
+
+export function publicTrackingEvents(shipment: PublicTrackingShipmentSource) {
   const events = shipment.events.map((event) => ({
     status: event.status,
     location: event.location || "",

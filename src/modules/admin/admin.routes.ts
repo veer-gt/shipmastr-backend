@@ -51,6 +51,10 @@ import {
   getOrInitAdminOnboardingChecklist,
   patchAdminOnboardingChecklistItem
 } from "./services/admin-onboarding-checklist.service.js";
+import {
+  manualShipmentStatusValues,
+  updateManualShipmentStatus
+} from "./services/manual-shipment-status.service.js";
 
 export const adminRouter = Router();
 
@@ -117,6 +121,13 @@ const courierShipmentSchema = z.object({
   opsNotes: z.string().trim().max(2000).optional().or(z.literal("")),
   firstShipmentRequestId: z.string().trim().optional().or(z.literal("")),
   expectedDeliveryDate: z.string().trim().optional()
+});
+
+const manualShipmentStatusUpdateSchema = z.object({
+  status: z.enum(manualShipmentStatusValues),
+  eventType: z.string().trim().min(2).max(80).optional().or(z.literal("")),
+  location: z.string().trim().max(160).optional().or(z.literal("")),
+  remarks: z.string().trim().max(500).optional().or(z.literal(""))
 });
 
 const rateCardSchema = z.object({
@@ -762,6 +773,40 @@ adminRouter.post("/shipments", async (req, res) => {
   });
 
   res.status(201).json({ shipment });
+});
+
+adminRouter.patch("/shipments/:id/status", async (req, res) => {
+  const body = manualShipmentStatusUpdateSchema.parse(req.body);
+  const result = await updateManualShipmentStatus({
+    shipmentIdOrAwb: req.params.id,
+    actorId: req.auth!.userId,
+    status: body.status,
+    eventType: body.eventType || null,
+    location: body.location || null,
+    remarks: body.remarks || null
+  });
+
+  res.json({
+    shipment: {
+      orderId: result.shipment.orderId,
+      awbNumber: result.shipment.awbNumber,
+      carrier: result.shipment.courier.name,
+      status: result.shipment.status,
+      previousStatus: result.previousStatus,
+      fromPincode: result.shipment.fromPincode,
+      toPincode: result.shipment.toPincode,
+      trackingUrl: result.shipment.trackingUrl,
+      lastEvent: result.shipment.lastEvent,
+      updatedAt: result.shipment.updatedAt,
+      events: result.shipment.events.map((event) => ({
+        status: event.status,
+        eventType: event.eventType,
+        location: event.location || "",
+        remarks: event.remarks || event.eventType,
+        createdAt: event.createdAt
+      }))
+    }
+  });
 });
 
 adminRouter.get("/webhook-events", async (_req, res) => {
