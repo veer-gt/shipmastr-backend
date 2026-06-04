@@ -118,6 +118,172 @@ function shipmentWeightSummary(input: {
  };
 }
 
+type SellerOrderShipmentDetails = {
+  courierId?: string | null;
+  awb?: string | null;
+  trackingNumber?: string | null;
+  shipmentStatus?: string | null;
+  weightGrams?: number | null;
+  volumetricWeight?: unknown;
+} | null;
+
+type SellerOrderSource = {
+  id: string;
+  merchantId: string;
+  externalOrderId: string;
+  buyerName: string;
+  city: string;
+  state: string;
+  pincode: string;
+  orderValue: number;
+  codAmount: number;
+  paymentMode: string;
+  weightGrams?: number | null;
+  status: string;
+  createdAt: Date;
+  updatedAt: Date;
+  shipmentDetails?: SellerOrderShipmentDetails;
+};
+
+type SellerOrderCourier = {
+  id?: string;
+  name?: string | null;
+  code?: string | null;
+};
+
+type SellerOrderCourierShipment = {
+  id: string;
+  orderId?: string | null;
+  awbNumber: string;
+  status: string;
+  weightGrams?: number | null;
+  createdAt: Date;
+  updatedAt: Date;
+  courier: SellerOrderCourier;
+  firstShipmentRequest?: {
+    merchantId: string;
+  } | null;
+};
+
+function latestTimestamp(value: { updatedAt: Date; createdAt: Date }) {
+  return Math.max(value.updatedAt.getTime(), value.createdAt.getTime());
+}
+
+function courierShipmentMatchesOrder(shipment: SellerOrderCourierShipment, order: SellerOrderSource) {
+  if (!shipment.orderId) return false;
+  if (shipment.firstShipmentRequest?.merchantId && shipment.firstShipmentRequest.merchantId !== order.merchantId) {
+    return false;
+  }
+
+  return shipment.orderId === order.id || shipment.orderId === order.externalOrderId;
+}
+
+function findCourierShipmentForOrder(order: SellerOrderSource, shipmentsByOrderKey: Map<string, SellerOrderCourierShipment[]>) {
+  const candidates = [
+    ...(shipmentsByOrderKey.get(order.id) ?? []),
+    ...(shipmentsByOrderKey.get(order.externalOrderId) ?? [])
+  ];
+  const seen = new Set<string>();
+
+  return candidates
+    .filter((shipment) => {
+      if (seen.has(shipment.id)) return false;
+      seen.add(shipment.id);
+      return courierShipmentMatchesOrder(shipment, order);
+    })
+    .sort((left, right) => latestTimestamp(right) - latestTimestamp(left))[0] ?? null;
+}
+
+function buildCourierShipmentMap(courierShipments: SellerOrderCourierShipment[]) {
+  const shipmentsByOrderKey = new Map<string, SellerOrderCourierShipment[]>();
+
+  for (const shipment of courierShipments) {
+    if (!shipment.orderId) continue;
+    const shipments = shipmentsByOrderKey.get(shipment.orderId) ?? [];
+    shipments.push(shipment);
+    shipmentsByOrderKey.set(shipment.orderId, shipments);
+  }
+
+  for (const shipments of shipmentsByOrderKey.values()) {
+    shipments.sort((left, right) => latestTimestamp(right) - latestTimestamp(left));
+  }
+
+  return shipmentsByOrderKey;
+}
+
+function shipmentWeightFromCourierShipment(
+  courierShipment: SellerOrderCourierShipment | null,
+  fallback: ReturnType<typeof shipmentWeightSummary>
+) {
+  if (!courierShipment) return fallback;
+
+  const courierWeightKg = kgFromGrams(courierShipment.weightGrams);
+  return {
+    deadWeightKg: courierWeightKg ?? fallback.deadWeightKg,
+    volumetricWeightKg: fallback.volumetricWeightKg,
+    chargeableWeightKg: courierWeightKg ?? fallback.chargeableWeightKg
+  };
+}
+
+export function buildSellerSafeOrders(input: {
+  orders: SellerOrderSource[];
+  courierById?: Map<string, SellerOrderCourier>;
+  courierShipments?: SellerOrderCourierShipment[];
+}) {
+  const courierById = input.courierById ?? new Map<string, SellerOrderCourier>();
+  const shipmentsByOrderKey = buildCourierShipmentMap(input.courierShipments ?? []);
+
+  return input.orders.map((order) => {
+    const shipmentDetails = order.shipmentDetails ?? null;
+    const courierShipment = findCourierShipmentForOrder(order, shipmentsByOrderKey);
+    const shipmentDetailsCourier = shipmentDetails?.courierId ? courierById.get(shipmentDetails.courierId) : null;
+    const fallbackWeight = shipmentWeightSummary(order);
+    const shipmentWeight = shipmentWeightFromCourierShipment(courierShipment, fallbackWeight);
+    const awbNumber = courierShipment?.awbNumber ?? shipmentDetails?.awb ?? null;
+    const carrier = courierShipment?.courier.name
+      ?? courierShipment?.courier.code
+      ?? shipmentDetailsCourier?.name
+      ?? shipmentDetailsCourier?.code
+      ?? shipmentDetails?.courierId
+      ?? null;
+    const shipmentStatus = courierShipment?.status ?? shipmentDetails?.shipmentStatus ?? order.status;
+
+    return {
+      id: order.id,
+      merchantId: order.merchantId,
+      externalOrderId: order.externalOrderId,
+      orderId: order.externalOrderId,
+      customerName: order.buyerName,
+      buyerName: order.buyerName,
+      city: order.city,
+      state: order.state,
+      pincode: order.pincode,
+      shippingPincode: order.pincode,
+      declaredValue: order.orderValue,
+      orderValue: order.orderValue,
+      codAmount: order.codAmount,
+      paymentMode: order.paymentMode,
+      weightGrams: order.weightGrams ?? null,
+      status: order.status,
+      createdAt: order.createdAt,
+      updatedAt: order.updatedAt,
+      awb: awbNumber,
+      awbNumber,
+      carrier,
+      shipmentStatus,
+      trackingNumber: courierShipment?.awbNumber ?? shipmentDetails?.trackingNumber ?? null,
+      deadWeightKg: shipmentWeight.deadWeightKg,
+      volumetricWeightKg: shipmentWeight.volumetricWeightKg,
+      chargeableWeightKg: shipmentWeight.chargeableWeightKg,
+      shipmentWeight: {
+        deadWeightKg: shipmentWeight.deadWeightKg,
+        volumetricWeightKg: shipmentWeight.volumetricWeightKg,
+        chargeableWeightKg: shipmentWeight.chargeableWeightKg
+      }
+    };
+  });
+}
+
 export function buildOrderAutomationPayloads(
  order: {
    id: string;
@@ -512,6 +678,22 @@ ordersRouter.get("/",async(req,res)=>{
    }
  });
 
+ const orderKeys = Array.from(new Set(
+   orders.flatMap((order) => [order.id, order.externalOrderId]).filter(Boolean)
+ ));
+ const courierShipments = orderKeys.length
+   ? await prisma.courierShipment.findMany({
+     where: { orderId: { in: orderKeys } },
+     orderBy: [
+       { updatedAt: "desc" },
+       { createdAt: "desc" }
+     ],
+     include: {
+       courier: { select: { id: true, name: true, code: true } },
+       firstShipmentRequest: { select: { merchantId: true } }
+     }
+   })
+   : [];
  const courierIds = Array.from(new Set(
    orders
      .map((order) => order.shipmentDetails?.courierId)
@@ -525,32 +707,7 @@ ordersRouter.get("/",async(req,res)=>{
    : [];
  const courierById = new Map(couriers.map((courier) => [courier.id, courier]));
 
- const sellerSafeOrders = orders.map((order) => {
-   const { shipmentDetails, ...orderFields } = order;
-   const courier = shipmentDetails?.courierId ? courierById.get(shipmentDetails.courierId) : null;
-   const shipmentWeight = shipmentWeightSummary(order);
-
-   return {
-     ...orderFields,
-     orderId: order.externalOrderId,
-     customerName: order.buyerName,
-     shippingPincode: order.pincode,
-     declaredValue: order.orderValue,
-     awb: shipmentDetails?.awb ?? null,
-     awbNumber: shipmentDetails?.awb ?? null,
-     carrier: courier?.name ?? courier?.code ?? shipmentDetails?.courierId ?? null,
-     shipmentStatus: shipmentDetails?.shipmentStatus ?? order.status,
-     trackingNumber: shipmentDetails?.trackingNumber ?? null,
-     deadWeightKg: shipmentWeight.deadWeightKg,
-     volumetricWeightKg: shipmentWeight.volumetricWeightKg,
-     chargeableWeightKg: shipmentWeight.chargeableWeightKg,
-     shipmentWeight: {
-       deadWeightKg: shipmentWeight.deadWeightKg,
-       volumetricWeightKg: shipmentWeight.volumetricWeightKg,
-       chargeableWeightKg: shipmentWeight.chargeableWeightKg
-     }
-   };
- });
+ const sellerSafeOrders = buildSellerSafeOrders({ orders, courierById, courierShipments });
 
  res.json({orders:sellerSafeOrders});
 });
