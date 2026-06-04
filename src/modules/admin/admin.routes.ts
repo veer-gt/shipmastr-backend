@@ -55,6 +55,7 @@ import {
   manualShipmentStatusValues,
   updateManualShipmentStatus
 } from "./services/manual-shipment-status.service.js";
+import { reconcileManualCodRemittance } from "./services/manual-cod-remittance-reconciliation.service.js";
 
 export const adminRouter = Router();
 
@@ -127,6 +128,14 @@ const manualShipmentStatusUpdateSchema = z.object({
   status: z.enum(manualShipmentStatusValues),
   eventType: z.string().trim().min(2).max(80).optional().or(z.literal("")),
   location: z.string().trim().max(160).optional().or(z.literal("")),
+  remarks: z.string().trim().max(500).optional().or(z.literal(""))
+});
+
+const manualCodRemittanceReconcileSchema = z.object({
+  awbNumber: z.string().trim().min(4).max(80),
+  amount: z.coerce.number().positive(),
+  receivedAt: z.coerce.date().optional(),
+  referenceNumber: z.string().trim().max(120).optional().or(z.literal("")),
   remarks: z.string().trim().max(500).optional().or(z.literal(""))
 });
 
@@ -806,6 +815,23 @@ adminRouter.patch("/shipments/:id/status", async (req, res) => {
         createdAt: event.createdAt
       }))
     }
+  });
+});
+
+adminRouter.post("/finance/cod-remittances/reconcile", async (req, res) => {
+  const body = manualCodRemittanceReconcileSchema.parse(req.body);
+  const result = await reconcileManualCodRemittance({
+    awbNumber: body.awbNumber,
+    amount: body.amount,
+    receivedAt: body.receivedAt ?? null,
+    referenceNumber: body.referenceNumber || null,
+    remarks: body.remarks || null,
+    actorId: req.auth!.userId
+  });
+
+  res.status(result.idempotent ? 200 : 201).json({
+    success: true,
+    data: result
   });
 });
 

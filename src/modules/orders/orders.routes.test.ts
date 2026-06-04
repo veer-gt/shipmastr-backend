@@ -4,6 +4,7 @@ import { buildSellerSafeOrders } from "./orders.routes.js";
 
 type SellerOrderInput = Parameters<typeof buildSellerSafeOrders>[0]["orders"][number];
 type SellerCourierShipmentInput = NonNullable<Parameters<typeof buildSellerSafeOrders>[0]["courierShipments"]>[number];
+type SellerCodRemittanceInput = NonNullable<Parameters<typeof buildSellerSafeOrders>[0]["codRemittances"]>[number];
 
 const createdAt = new Date("2026-06-01T10:00:00.000Z");
 
@@ -44,6 +45,23 @@ function makeCourierShipment(overrides: Partial<SellerCourierShipmentInput> = {}
       code: "MANUAL"
     },
     firstShipmentRequest: null,
+    ...overrides
+  };
+}
+
+function makeCodRemittance(overrides: Partial<SellerCodRemittanceInput> = {}) {
+  return {
+    id: "cod_remittance_1",
+    merchantId: "merchant_1",
+    awb: "DEMO-COD-AWB-1001",
+    orderId: "order_internal_1",
+    externalOrderId: "seller-demo-mpzrjxf5-c30a8ee4",
+    remittedAmount: 1499,
+    remittedAt: new Date("2026-06-04T12:30:00.000Z"),
+    utr: "UTR-DEMO-1001",
+    status: "manual_reconciled",
+    createdAt,
+    updatedAt: new Date("2026-06-04T12:31:00.000Z"),
     ...overrides
   };
 }
@@ -178,5 +196,53 @@ describe("seller-safe order shipment mapping", () => {
     assert.equal("buyerPhone" in (order ?? {}), false);
     assert.equal("addressLine1" in (order ?? {}), false);
     assert.equal("addressLine2" in (order ?? {}), false);
+  });
+
+  it("marks delivered COD orders as remittance tracking started when no remittance exists", () => {
+    const [order] = buildSellerSafeOrders({
+      orders: [
+        makeOrder({
+          externalOrderId: "seller-demo-mpzrjxf5-c30a8ee4",
+          codAmount: 1499,
+          paymentMode: "COD"
+        })
+      ],
+      courierShipments: [
+        makeCourierShipment({
+          orderId: "seller-demo-mpzrjxf5-c30a8ee4",
+          awbNumber: "DEMO-COD-AWB-1001",
+          status: "delivered"
+        })
+      ]
+    });
+
+    assert.equal(order?.isDelivered, true);
+    assert.equal(order?.codRemittanceStatus, "pending_reconciliation");
+    assert.equal(order?.codRemittanceReadiness, "tracking_started");
+  });
+
+  it("marks delivered COD orders as reconciled when a manual remittance exists", () => {
+    const [order] = buildSellerSafeOrders({
+      orders: [
+        makeOrder({
+          externalOrderId: "seller-demo-mpzrjxf5-c30a8ee4",
+          codAmount: 1499,
+          paymentMode: "COD"
+        })
+      ],
+      courierShipments: [
+        makeCourierShipment({
+          orderId: "seller-demo-mpzrjxf5-c30a8ee4",
+          awbNumber: "DEMO-COD-AWB-1001",
+          status: "delivered"
+        })
+      ],
+      codRemittances: [makeCodRemittance()]
+    });
+
+    assert.equal(order?.codRemittanceStatus, "reconciled");
+    assert.equal(order?.codRemittanceReadiness, "reconciled");
+    assert.equal(order?.codRemittedAmount, 1499);
+    assert.equal("codRemittanceReference" in (order ?? {}), false);
   });
 });
