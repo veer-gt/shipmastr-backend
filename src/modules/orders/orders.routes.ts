@@ -320,6 +320,15 @@ function sellerPayoutReleaseConfirmed(metadata: Record<string, unknown>) {
   return metadata.financeReleaseConfirmed === true || metadata.releasedForPayoutProcessing === true;
 }
 
+function sellerPayoutSandboxPaid(metadata: Record<string, unknown>) {
+  return metadata.paid === true && (metadata.sandboxManual === true || metadata.manualSandboxPaid === true);
+}
+
+function metadataString(metadata: Record<string, unknown>, key: string) {
+  const value = metadata[key];
+  return typeof value === "string" ? value.trim() : null;
+}
+
 function metadataDateString(metadata: Record<string, unknown>, key: string) {
   const value = metadata[key];
   if (value instanceof Date) return value.toISOString();
@@ -372,6 +381,13 @@ export function buildSellerSafeOrders(input: {
     const sellerSettlementStatus = sellerSettlement?.status ?? null;
     const sellerSettlementMetadata = sellerSettlementMetadataObject(sellerSettlement?.metadata);
     const releaseConfirmed = sellerSettlementStatus === "APPROVED" && sellerPayoutReleaseConfirmed(sellerSettlementMetadata);
+    const sandboxPaid = sellerSettlementStatus === "SETTLED" && sellerPayoutSandboxPaid(sellerSettlementMetadata);
+    const paidAt = sellerSettlementStatus === "SETTLED"
+      ? metadataDateString(sellerSettlementMetadata, "manualSandboxPaidAt")
+        ?? metadataDateString(sellerSettlementMetadata, "paidAt")
+        ?? sellerSettlement?.settledAt
+        ?? null
+      : null;
     const sellerPayoutReadiness = sellerSettlementStatus === "APPROVED"
       ? releaseConfirmed ? "finance_released" : "approved_for_review"
       : sellerSettlementStatus === "SETTLED"
@@ -436,7 +452,14 @@ export function buildSellerSafeOrders(input: {
       sellerPayoutReleasedAmount: releaseConfirmed ? decimalToNumber(sellerSettlement?.sellerPayable) : null,
       sellerPayoutReleasedAt: releaseConfirmed ? metadataDateString(sellerSettlementMetadata, "financeReleasedAt") : null,
       sellerPayoutAwaitingExternalExecution: releaseConfirmed ? true : null,
-      sellerPayoutPaid: sellerSettlementStatus === "SETTLED"
+      sellerPayoutPaid: sellerSettlementStatus === "SETTLED",
+      sellerPayoutPaidAmount: sellerSettlementStatus === "SETTLED" ? decimalToNumber(sellerSettlement?.sellerPayable) : null,
+      sellerPayoutPaidAt: paidAt,
+      sellerPayoutPaidMode: sandboxPaid ? "manual_sandbox" : null,
+      sellerPayoutPaidReference: sandboxPaid ? metadataString(sellerSettlementMetadata, "paidReference") : null,
+      sellerPayoutSandboxManual: sandboxPaid,
+      sellerPayoutPaymentProviderCalled: sandboxPaid ? false : null,
+      sellerPayoutBankTransferCreated: sandboxPaid ? false : null
     };
   });
 }

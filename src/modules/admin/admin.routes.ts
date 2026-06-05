@@ -58,6 +58,7 @@ import {
 import { reconcileManualCodRemittance } from "./services/manual-cod-remittance-reconciliation.service.js";
 import { approveManualSellerPayout } from "./services/manual-seller-payout-approval.service.js";
 import { releaseManualSellerPayout } from "./services/manual-seller-payout-release.service.js";
+import { markManualSellerPayoutPaid } from "./services/manual-seller-payout-paid.service.js";
 
 export const adminRouter = Router();
 
@@ -153,6 +154,15 @@ const manualSellerPayoutReleaseSchema = z.object({
   amount: z.coerce.number().positive(),
   releaseReference: z.string().trim().max(120).optional().or(z.literal("")),
   remarks: z.string().trim().max(500).optional().or(z.literal(""))
+});
+
+const manualSellerPayoutPaidSchema = z.object({
+  awbNumber: z.string().trim().min(4).max(80),
+  amount: z.coerce.number().positive(),
+  paidReference: z.string().trim().max(120).optional().or(z.literal("")),
+  paidAt: z.coerce.date().optional(),
+  remarks: z.string().trim().max(500).optional().or(z.literal("")),
+  mode: z.literal("manual_sandbox")
 });
 
 const rateCardSchema = z.object({
@@ -874,6 +884,24 @@ adminRouter.post("/finance/seller-payouts/release", async (req, res) => {
     amount: body.amount,
     releaseReference: body.releaseReference || null,
     remarks: body.remarks || null,
+    actorId: req.auth!.userId
+  });
+
+  res.status(result.idempotent ? 200 : 201).json({
+    success: true,
+    data: result
+  });
+});
+
+adminRouter.post("/finance/seller-payouts/mark-paid", async (req, res) => {
+  const body = manualSellerPayoutPaidSchema.parse(req.body);
+  const result = await markManualSellerPayoutPaid({
+    awbNumber: body.awbNumber,
+    amount: body.amount,
+    paidReference: body.paidReference || null,
+    paidAt: body.paidAt ?? null,
+    remarks: body.remarks || null,
+    mode: body.mode,
     actorId: req.auth!.userId
   });
 
