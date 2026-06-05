@@ -166,6 +166,20 @@ type SellerOrderCourierShipment = {
   } | null;
 };
 
+type SellerOrderCodRemittance = {
+  id: string;
+  merchantId: string;
+  awb?: string | null;
+  orderId?: string | null;
+  externalOrderId?: string | null;
+  remittedAmount?: unknown;
+  remittedAt?: Date | null;
+  utr?: string | null;
+  status: string;
+  createdAt: Date;
+  updatedAt: Date;
+};
+
 function latestTimestamp(value: { updatedAt: Date; createdAt: Date }) {
   return Math.max(value.updatedAt.getTime(), value.createdAt.getTime());
 }
@@ -230,13 +244,49 @@ function trackingUrlForAwb(awbNumber: string | null) {
   return awbNumber ? `/tracking/?awb=${encodeURIComponent(awbNumber)}` : null;
 }
 
+function normalizedStatus(value: unknown) {
+  return String(value || "").trim().toLowerCase().replace(/[\s-]+/g, "_");
+}
+
+function isDeliveredShipmentStatus(value: unknown) {
+  return normalizedStatus(value) === "delivered";
+}
+
+function isCodPaymentMode(value: unknown) {
+  return String(value || "").trim().toUpperCase() === "COD";
+}
+
+function codRemittanceMatchesOrder(
+  remittance: SellerOrderCodRemittance,
+  order: SellerOrderSource,
+  awbNumber: string | null
+) {
+  if (remittance.merchantId !== order.merchantId) return false;
+  if (awbNumber && remittance.awb === awbNumber) return true;
+  if (remittance.orderId === order.id || remittance.orderId === order.externalOrderId) return true;
+  return remittance.externalOrderId === order.externalOrderId;
+}
+
+function findCodRemittanceForOrder(
+  order: SellerOrderSource,
+  awbNumber: string | null,
+  codRemittances: SellerOrderCodRemittance[]
+) {
+  return codRemittances
+    .filter((remittance) => codRemittanceMatchesOrder(remittance, order, awbNumber))
+    .filter((remittance) => decimalToNumber(remittance.remittedAmount) !== null || Boolean(remittance.remittedAt))
+    .sort((left, right) => latestTimestamp(right) - latestTimestamp(left))[0] ?? null;
+}
+
 export function buildSellerSafeOrders(input: {
   orders: SellerOrderSource[];
   courierById?: Map<string, SellerOrderCourier>;
   courierShipments?: SellerOrderCourierShipment[];
+  codRemittances?: SellerOrderCodRemittance[];
 }) {
   const courierById = input.courierById ?? new Map<string, SellerOrderCourier>();
   const shipmentsByOrderKey = buildCourierShipmentMap(input.courierShipments ?? []);
+  const codRemittances = input.codRemittances ?? [];
 
   return input.orders.map((order) => {
     const shipmentDetails = order.shipmentDetails ?? null;
@@ -252,6 +302,18 @@ export function buildSellerSafeOrders(input: {
       ?? shipmentDetails?.courierId
       ?? null;
     const shipmentStatus = courierShipment?.status ?? shipmentDetails?.shipmentStatus ?? order.status;
+    const isDelivered = isDeliveredShipmentStatus(shipmentStatus) || isDeliveredShipmentStatus(order.status);
+    const codRemittance = isCodPaymentMode(order.paymentMode) && isDelivered
+      ? findCodRemittanceForOrder(order, awbNumber, codRemittances)
+      : null;
+    const codRemittanceStatus = isCodPaymentMode(order.paymentMode) && isDelivered
+      ? codRemittance ? "reconciled" : "pending_reconciliation"
+      : null;
+    const codRemittanceReadiness = codRemittanceStatus === "reconciled"
+      ? "reconciled"
+      : codRemittanceStatus === "pending_reconciliation"
+        ? "tracking_started"
+        : null;
 
     return {
       id: order.id,
@@ -270,6 +332,7 @@ export function buildSellerSafeOrders(input: {
       paymentMode: order.paymentMode,
       weightGrams: order.weightGrams ?? null,
       status: order.status,
+      isDelivered,
       createdAt: order.createdAt,
       updatedAt: order.updatedAt,
       awb: awbNumber,
@@ -285,7 +348,11 @@ export function buildSellerSafeOrders(input: {
         deadWeightKg: shipmentWeight.deadWeightKg,
         volumetricWeightKg: shipmentWeight.volumetricWeightKg,
         chargeableWeightKg: shipmentWeight.chargeableWeightKg
-      }
+      },
+      codRemittanceStatus,
+      codRemittanceReadiness,
+      codRemittedAmount: codRemittance ? decimalToNumber(codRemittance.remittedAmount) : null,
+      codRemittedAt: codRemittance?.remittedAt ?? null
     };
   });
 }
@@ -712,8 +779,29 @@ ordersRouter.get("/",async(req,res)=>{
    })
    : [];
  const courierById = new Map(couriers.map((courier) => [courier.id, courier]));
+ const awbKeys = Array.from(new Set([
+   ...courierShipments.map((shipment) => shipment.awbNumber).filter(Boolean),
+   ...orders.map((order) => order.shipmentDetails?.awb).filter((awb): awb is string => Boolean(awb))
+ ]));
+ const codRemittanceClauses = [
+   orderKeys.length ? { orderId: { in: orderKeys } } : null,
+   orderKeys.length ? { externalOrderId: { in: orderKeys } } : null,
+   awbKeys.length ? { awb: { in: awbKeys } } : null
+ ].filter((clause): clause is NonNullable<typeof clause> => Boolean(clause));
+ const codRemittances = codRemittanceClauses.length
+   ? await prisma.codRemittance.findMany({
+     where: {
+       merchantId: req.auth!.merchantId,
+       OR: codRemittanceClauses
+     },
+     orderBy: [
+       { updatedAt: "desc" },
+       { createdAt: "desc" }
+     ]
+   })
+   : [];
 
- const sellerSafeOrders = buildSellerSafeOrders({ orders, courierById, courierShipments });
+ const sellerSafeOrders = buildSellerSafeOrders({ orders, courierById, courierShipments, codRemittances });
 
  res.json({orders:sellerSafeOrders});
 });
