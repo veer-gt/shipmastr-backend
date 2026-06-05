@@ -180,6 +180,18 @@ type SellerOrderCodRemittance = {
   updatedAt: Date;
 };
 
+type SellerOrderSettlement = {
+  merchantId: string;
+  orderId?: string | null;
+  awb?: string | null;
+  status: string;
+  sellerPayable?: unknown;
+  approvedAt?: Date | null;
+  settledAt?: Date | null;
+  createdAt: Date;
+  updatedAt: Date;
+};
+
 function latestTimestamp(value: { updatedAt: Date; createdAt: Date }) {
   return Math.max(value.updatedAt.getTime(), value.createdAt.getTime());
 }
@@ -278,15 +290,37 @@ function findCodRemittanceForOrder(
     .sort((left, right) => latestTimestamp(right) - latestTimestamp(left))[0] ?? null;
 }
 
+function sellerSettlementMatchesOrder(
+  settlement: SellerOrderSettlement,
+  order: SellerOrderSource,
+  awbNumber: string | null
+) {
+  if (settlement.merchantId !== order.merchantId) return false;
+  if (awbNumber && settlement.awb === awbNumber) return true;
+  return settlement.orderId === order.id || settlement.orderId === order.externalOrderId;
+}
+
+function findSellerSettlementForOrder(
+  order: SellerOrderSource,
+  awbNumber: string | null,
+  sellerSettlements: SellerOrderSettlement[]
+) {
+  return sellerSettlements
+    .filter((settlement) => sellerSettlementMatchesOrder(settlement, order, awbNumber))
+    .sort((left, right) => latestTimestamp(right) - latestTimestamp(left))[0] ?? null;
+}
+
 export function buildSellerSafeOrders(input: {
   orders: SellerOrderSource[];
   courierById?: Map<string, SellerOrderCourier>;
   courierShipments?: SellerOrderCourierShipment[];
   codRemittances?: SellerOrderCodRemittance[];
+  sellerSettlements?: SellerOrderSettlement[];
 }) {
   const courierById = input.courierById ?? new Map<string, SellerOrderCourier>();
   const shipmentsByOrderKey = buildCourierShipmentMap(input.courierShipments ?? []);
   const codRemittances = input.codRemittances ?? [];
+  const sellerSettlements = input.sellerSettlements ?? [];
 
   return input.orders.map((order) => {
     const shipmentDetails = order.shipmentDetails ?? null;
@@ -314,6 +348,24 @@ export function buildSellerSafeOrders(input: {
       : codRemittanceStatus === "pending_reconciliation"
         ? "tracking_started"
         : null;
+    const sellerSettlement = codRemittanceStatus === "reconciled"
+      ? findSellerSettlementForOrder(order, awbNumber, sellerSettlements)
+      : null;
+    const sellerSettlementStatus = sellerSettlement?.status ?? null;
+    const sellerPayoutReadiness = sellerSettlementStatus === "APPROVED"
+      ? "approved_for_review"
+      : sellerSettlementStatus === "SETTLED"
+        ? "paid"
+        : codRemittanceStatus === "reconciled"
+          ? "ready_for_review"
+          : null;
+    const sellerPayoutApprovalStatus = sellerSettlementStatus === "APPROVED"
+      ? "approved_not_paid"
+      : sellerSettlementStatus === "SETTLED"
+        ? "paid"
+        : sellerSettlementStatus === "PENDING"
+          ? "pending_review"
+          : null;
 
     return {
       id: order.id,
@@ -352,7 +404,14 @@ export function buildSellerSafeOrders(input: {
       codRemittanceStatus,
       codRemittanceReadiness,
       codRemittedAmount: codRemittance ? decimalToNumber(codRemittance.remittedAmount) : null,
-      codRemittedAt: codRemittance?.remittedAt ?? null
+      codRemittedAt: codRemittance?.remittedAt ?? null,
+      sellerPayoutReadiness,
+      sellerPayoutApprovalStatus,
+      sellerPayoutApprovedAmount: sellerSettlementStatus === "APPROVED"
+        ? decimalToNumber(sellerSettlement?.sellerPayable)
+        : null,
+      sellerPayoutApprovedAt: sellerSettlementStatus === "APPROVED" ? sellerSettlement?.approvedAt ?? null : null,
+      sellerPayoutPaid: sellerSettlementStatus === "SETTLED"
     };
   });
 }
@@ -800,8 +859,24 @@ ordersRouter.get("/",async(req,res)=>{
      ]
    })
    : [];
+ const sellerSettlementClauses = [
+   orderKeys.length ? { orderId: { in: orderKeys } } : null,
+   awbKeys.length ? { awb: { in: awbKeys } } : null
+ ].filter((clause): clause is NonNullable<typeof clause> => Boolean(clause));
+ const sellerSettlements = sellerSettlementClauses.length
+   ? await prisma.sellerSettlement.findMany({
+     where: {
+       merchantId: req.auth!.merchantId,
+       OR: sellerSettlementClauses
+     },
+     orderBy: [
+       { updatedAt: "desc" },
+       { createdAt: "desc" }
+     ]
+   })
+   : [];
 
- const sellerSafeOrders = buildSellerSafeOrders({ orders, courierById, courierShipments, codRemittances });
+ const sellerSafeOrders = buildSellerSafeOrders({ orders, courierById, courierShipments, codRemittances, sellerSettlements });
 
  res.json({orders:sellerSafeOrders});
 });

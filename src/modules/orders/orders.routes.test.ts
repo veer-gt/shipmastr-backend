@@ -5,6 +5,7 @@ import { buildSellerSafeOrders } from "./orders.routes.js";
 type SellerOrderInput = Parameters<typeof buildSellerSafeOrders>[0]["orders"][number];
 type SellerCourierShipmentInput = NonNullable<Parameters<typeof buildSellerSafeOrders>[0]["courierShipments"]>[number];
 type SellerCodRemittanceInput = NonNullable<Parameters<typeof buildSellerSafeOrders>[0]["codRemittances"]>[number];
+type SellerSettlementInput = NonNullable<Parameters<typeof buildSellerSafeOrders>[0]["sellerSettlements"]>[number];
 
 const createdAt = new Date("2026-06-01T10:00:00.000Z");
 
@@ -62,6 +63,21 @@ function makeCodRemittance(overrides: Partial<SellerCodRemittanceInput> = {}) {
     status: "manual_reconciled",
     createdAt,
     updatedAt: new Date("2026-06-04T12:31:00.000Z"),
+    ...overrides
+  };
+}
+
+function makeSellerSettlement(overrides: Partial<SellerSettlementInput> = {}) {
+  return {
+    merchantId: "merchant_1",
+    orderId: "order_internal_1",
+    awb: "DEMO-COD-AWB-1001",
+    status: "APPROVED",
+    sellerPayable: 1499,
+    approvedAt: new Date("2026-06-05T10:00:00.000Z"),
+    settledAt: null,
+    createdAt,
+    updatedAt: new Date("2026-06-05T10:00:00.000Z"),
     ...overrides
   };
 }
@@ -244,5 +260,33 @@ describe("seller-safe order shipment mapping", () => {
     assert.equal(order?.codRemittanceReadiness, "reconciled");
     assert.equal(order?.codRemittedAmount, 1499);
     assert.equal("codRemittanceReference" in (order ?? {}), false);
+  });
+
+  it("marks reconciled COD as seller payout approved for review when a settlement is approved", () => {
+    const [order] = buildSellerSafeOrders({
+      orders: [
+        makeOrder({
+          externalOrderId: "seller-demo-mpzrjxf5-c30a8ee4",
+          codAmount: 1499,
+          paymentMode: "COD"
+        })
+      ],
+      courierShipments: [
+        makeCourierShipment({
+          orderId: "seller-demo-mpzrjxf5-c30a8ee4",
+          awbNumber: "DEMO-COD-AWB-1001",
+          status: "delivered"
+        })
+      ],
+      codRemittances: [makeCodRemittance()],
+      sellerSettlements: [makeSellerSettlement()]
+    });
+
+    assert.equal(order?.sellerPayoutReadiness, "approved_for_review");
+    assert.equal(order?.sellerPayoutApprovalStatus, "approved_not_paid");
+    assert.equal(order?.sellerPayoutApprovedAmount, 1499);
+    assert.equal(order?.sellerPayoutPaid, false);
+    assert.equal("sellerSettlementId" in (order ?? {}), false);
+    assert.equal("bankDetails" in (order ?? {}), false);
   });
 });
