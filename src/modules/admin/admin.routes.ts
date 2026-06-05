@@ -56,6 +56,7 @@ import {
   updateManualShipmentStatus
 } from "./services/manual-shipment-status.service.js";
 import { reconcileManualCodRemittance } from "./services/manual-cod-remittance-reconciliation.service.js";
+import { approveManualSellerPayout } from "./services/manual-seller-payout-approval.service.js";
 
 export const adminRouter = Router();
 
@@ -136,6 +137,13 @@ const manualCodRemittanceReconcileSchema = z.object({
   amount: z.coerce.number().positive(),
   receivedAt: z.coerce.date().optional(),
   referenceNumber: z.string().trim().max(120).optional().or(z.literal("")),
+  remarks: z.string().trim().max(500).optional().or(z.literal(""))
+});
+
+const manualSellerPayoutApprovalSchema = z.object({
+  awbNumber: z.string().trim().min(4).max(80),
+  amount: z.coerce.number().positive(),
+  approvalReference: z.string().trim().max(120).optional().or(z.literal("")),
   remarks: z.string().trim().max(500).optional().or(z.literal(""))
 });
 
@@ -825,6 +833,22 @@ adminRouter.post("/finance/cod-remittances/reconcile", async (req, res) => {
     amount: body.amount,
     receivedAt: body.receivedAt ?? null,
     referenceNumber: body.referenceNumber || null,
+    remarks: body.remarks || null,
+    actorId: req.auth!.userId
+  });
+
+  res.status(result.idempotent ? 200 : 201).json({
+    success: true,
+    data: result
+  });
+});
+
+adminRouter.post("/finance/seller-payouts/approve", async (req, res) => {
+  const body = manualSellerPayoutApprovalSchema.parse(req.body);
+  const result = await approveManualSellerPayout({
+    awbNumber: body.awbNumber,
+    amount: body.amount,
+    approvalReference: body.approvalReference || null,
     remarks: body.remarks || null,
     actorId: req.auth!.userId
   });
