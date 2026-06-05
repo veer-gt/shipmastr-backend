@@ -188,6 +188,7 @@ type SellerOrderSettlement = {
   sellerPayable?: unknown;
   approvedAt?: Date | null;
   settledAt?: Date | null;
+  metadata?: unknown;
   createdAt: Date;
   updatedAt: Date;
 };
@@ -310,6 +311,23 @@ function findSellerSettlementForOrder(
     .sort((left, right) => latestTimestamp(right) - latestTimestamp(left))[0] ?? null;
 }
 
+function sellerSettlementMetadataObject(value: unknown) {
+  if (!value || typeof value !== "object" || Array.isArray(value)) return {};
+  return value as Record<string, unknown>;
+}
+
+function sellerPayoutReleaseConfirmed(metadata: Record<string, unknown>) {
+  return metadata.financeReleaseConfirmed === true || metadata.releasedForPayoutProcessing === true;
+}
+
+function metadataDateString(metadata: Record<string, unknown>, key: string) {
+  const value = metadata[key];
+  if (value instanceof Date) return value.toISOString();
+  if (typeof value !== "string") return null;
+  const date = new Date(value);
+  return Number.isNaN(date.getTime()) ? value : date.toISOString();
+}
+
 export function buildSellerSafeOrders(input: {
   orders: SellerOrderSource[];
   courierById?: Map<string, SellerOrderCourier>;
@@ -352,15 +370,17 @@ export function buildSellerSafeOrders(input: {
       ? findSellerSettlementForOrder(order, awbNumber, sellerSettlements)
       : null;
     const sellerSettlementStatus = sellerSettlement?.status ?? null;
+    const sellerSettlementMetadata = sellerSettlementMetadataObject(sellerSettlement?.metadata);
+    const releaseConfirmed = sellerSettlementStatus === "APPROVED" && sellerPayoutReleaseConfirmed(sellerSettlementMetadata);
     const sellerPayoutReadiness = sellerSettlementStatus === "APPROVED"
-      ? "approved_for_review"
+      ? releaseConfirmed ? "finance_released" : "approved_for_review"
       : sellerSettlementStatus === "SETTLED"
         ? "paid"
         : codRemittanceStatus === "reconciled"
           ? "ready_for_review"
           : null;
     const sellerPayoutApprovalStatus = sellerSettlementStatus === "APPROVED"
-      ? "approved_not_paid"
+      ? releaseConfirmed ? "released_not_paid" : "approved_not_paid"
       : sellerSettlementStatus === "SETTLED"
         ? "paid"
         : sellerSettlementStatus === "PENDING"
@@ -411,6 +431,11 @@ export function buildSellerSafeOrders(input: {
         ? decimalToNumber(sellerSettlement?.sellerPayable)
         : null,
       sellerPayoutApprovedAt: sellerSettlementStatus === "APPROVED" ? sellerSettlement?.approvedAt ?? null : null,
+      sellerPayoutReleaseStatus: releaseConfirmed ? "released_for_payout_processing" : null,
+      sellerPayoutReleaseConfirmed: releaseConfirmed,
+      sellerPayoutReleasedAmount: releaseConfirmed ? decimalToNumber(sellerSettlement?.sellerPayable) : null,
+      sellerPayoutReleasedAt: releaseConfirmed ? metadataDateString(sellerSettlementMetadata, "financeReleasedAt") : null,
+      sellerPayoutAwaitingExternalExecution: releaseConfirmed ? true : null,
       sellerPayoutPaid: sellerSettlementStatus === "SETTLED"
     };
   });
