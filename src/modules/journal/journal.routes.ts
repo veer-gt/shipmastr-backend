@@ -1,4 +1,4 @@
-import { Router } from "express";
+import { Router, type Request, type Response } from "express";
 import { z } from "zod";
 
 import { HttpError } from "../../lib/httpError.js";
@@ -31,6 +31,31 @@ const sendTestEmailSchema = z.object({
 
 function safeRouteErrorName(error: unknown) {
   return error instanceof Error ? error.name : "UnknownError";
+}
+
+function safeRouteErrorMessage(error: unknown) {
+  return error instanceof Error && /^[A-Z0-9_]{3,80}$/.test(error.message) ? error.message : "JOURNAL_DAILY_RUN_UNAVAILABLE";
+}
+
+function dailyRunSkippedResponse(input: {
+  reason: string;
+  options?: z.infer<typeof publishOptionsSchema>;
+}) {
+  return {
+    ok: false,
+    status: "SKIPPED",
+    skipped: true,
+    reason: input.reason,
+    error: input.reason,
+    published: false,
+    emailSent: false,
+    requested: {
+      mode: input.options?.mode || "auto",
+      publish: Boolean(input.options?.publish),
+      sendEmail: Boolean(input.options?.sendEmail)
+    },
+    failedChecks: [input.reason]
+  };
 }
 
 journalRouter.get("/email-config", async (_req, res) => {
@@ -82,33 +107,58 @@ journalRouter.post("/validate", (req, res) => {
   res.json(validateJournalPost(req.body));
 });
 
-journalRouter.post("/run-daily", async (req, res) => {
-  requireJournalAdmin(req);
+export async function handleRunDailyJournal(req: Request, res: Response) {
+  try {
+    requireJournalAdmin(req);
+  } catch (error) {
+    if (error instanceof HttpError && error.message === "JOURNAL_ADMIN_TOKEN_NOT_CONFIGURED") {
+      logger.warn(
+        {
+          message: "journal_daily_run_skipped",
+          journal: {
+            reason: "JOURNAL_ADMIN_TOKEN_NOT_CONFIGURED"
+          }
+        },
+        "journal_daily_run_skipped"
+      );
+
+      return res.status(202).json(dailyRunSkippedResponse({
+        reason: "JOURNAL_ADMIN_TOKEN_NOT_CONFIGURED"
+      }));
+    }
+
+    throw error;
+  }
+
   const options = publishOptionsSchema.parse(req.body);
   try {
-    res.json(await runDailyJournalAutopublish({
+    const result = await runDailyJournalAutopublish({
       ...(options.mode === undefined ? {} : { mode: options.mode }),
       ...(options.publish === undefined ? {} : { publish: options.publish }),
       ...(options.sendEmail === undefined ? {} : { sendEmail: options.sendEmail })
-    }));
+    });
+
+    res.status((result as { skipped?: boolean }).skipped ? 202 : 200).json(result);
   } catch (error) {
     logger.error(
       {
         message: "journal_daily_run_failed",
         journal: {
-          errorName: safeRouteErrorName(error)
+          errorName: safeRouteErrorName(error),
+          error: safeRouteErrorMessage(error)
         }
       },
       "journal_daily_run_failed"
     );
 
-    res.status(500).json({
-      ok: false,
-      status: "JOURNAL_DAILY_RUN_FAILED",
-      error: "JOURNAL_DAILY_RUN_FAILED"
-    });
+    res.status(202).json(dailyRunSkippedResponse({
+      reason: "JOURNAL_DAILY_RUN_UNAVAILABLE",
+      options
+    }));
   }
-});
+}
+
+journalRouter.post("/run-daily", handleRunDailyJournal);
 
 journalRouter.post("/publish", async (req, res) => {
   requireJournalAdmin(req);

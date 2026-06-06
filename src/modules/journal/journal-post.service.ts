@@ -111,6 +111,36 @@ type JournalPostDependencies = {
   }) => Promise<EmailSendResult>;
 };
 
+type PublicJournalPost = {
+  id: string;
+  slug: string;
+  title: string;
+  category: string;
+  status: string;
+  publishedAt: Date | null;
+  sentAt: Date | null;
+};
+
+export type RunDailyJournalAutopublishResult = {
+  ok: boolean;
+  status: string;
+  skipped?: boolean;
+  reason?: string;
+  published: boolean;
+  emailSent: boolean;
+  recipientCount?: number;
+  emailSkippedReason?: string | undefined;
+  emailFailureCount?: number | undefined;
+  requested: {
+    mode: string;
+    publish: boolean;
+    sendEmail: boolean;
+  };
+  failedChecks: string[];
+  warnings?: string[];
+  post?: PublicJournalPost;
+};
+
 const publishedStatuses = ["PUBLISHED", "SENT"];
 const defaultClient = prisma as unknown as JournalPostClient;
 
@@ -399,7 +429,7 @@ function storageData(post: GeneratedJournalPost, input: {
   };
 }
 
-function publicPost(record: JournalPostRecord) {
+function publicPost(record: JournalPostRecord): PublicJournalPost {
   return {
     id: record.id,
     slug: record.slug,
@@ -480,6 +510,46 @@ function replaceUnsubscribeToken(value: string, unsubscribeUrl: string) {
 function safeEmailFailureCode(error: unknown, fallback: string) {
   const message = error instanceof Error ? error.message : "";
   return /^[A-Z0-9_]{3,80}$/.test(message) ? message : fallback;
+}
+
+function safeOperationalFailureCode(error: unknown, fallback: string) {
+  const code = typeof (error as { code?: unknown })?.code === "string" ? (error as { code: string }).code : "";
+  if (/^[A-Z0-9_]{3,80}$/.test(code)) return code;
+  return safeEmailFailureCode(error, fallback);
+}
+
+function skippedDailyRun(input: {
+  reason: string;
+  requested: {
+    mode: string;
+    publish: boolean;
+    sendEmail: boolean;
+  };
+  failedChecks?: string[];
+}): RunDailyJournalAutopublishResult {
+  return {
+    ok: false,
+    status: "SKIPPED",
+    skipped: true,
+    reason: input.reason,
+    published: false,
+    emailSent: false,
+    requested: input.requested,
+    failedChecks: input.failedChecks || [input.reason]
+  };
+}
+
+function logJournalStoreFailure(error: unknown, stage: string) {
+  logger.error(
+    {
+      message: "journal_daily_store_unavailable",
+      journal: {
+        stage,
+        error: safeOperationalFailureCode(error, "JOURNAL_STORE_UNAVAILABLE")
+      }
+    },
+    "journal_daily_store_unavailable"
+  );
 }
 
 async function sendPostToSubscribers(post: GeneratedJournalPost, record: JournalPostRecord, deps: Required<Pick<JournalPostDependencies, "loadSubscribers" | "sendEmail" | "getEmailConfig">>): Promise<JournalEmailDelivery> {
@@ -618,7 +688,7 @@ function storeReady(mode: string) {
   return mode === "postgres" || mode === "db";
 }
 
-export async function runDailyJournalAutopublish(options: RunDailyOptions = {}, deps: JournalPostDependencies = {}) {
+export async function runDailyJournalAutopublish(options: RunDailyOptions = {}, deps: JournalPostDependencies = {}): Promise<RunDailyJournalAutopublishResult> {
   const storeMode = configuredStoreMode(deps);
   const now = options.now || new Date();
   const requested = {
@@ -628,15 +698,11 @@ export async function runDailyJournalAutopublish(options: RunDailyOptions = {}, 
   };
 
   if (!storeReady(storeMode)) {
-    return {
-      ok: false,
-      status: "GUARDRAIL_HOLD",
+    return skippedDailyRun({
       reason: "JOURNAL_AUTOPUBLISH_STORE_NOT_CONFIGURED",
-      published: false,
-      emailSent: false,
       requested,
       failedChecks: ["JOURNAL_AUTOPUBLISH_STORE_NOT_CONFIGURED"]
-    };
+    });
   }
 
   const client = deps.client || defaultClient;
@@ -644,14 +710,24 @@ export async function runDailyJournalAutopublish(options: RunDailyOptions = {}, 
   const validation = validateJournalPost(post);
 
   if (!validation.pass) {
-    const held = await client.journalPost.create({
-      data: storageData(post, {
-        status: "HELD",
-        guardrailStatus: "FAIL",
-        guardrailFailures: validation.failedChecks,
-        now
-      })
-    });
+    let held: JournalPostRecord;
+    try {
+      held = await client.journalPost.create({
+        data: storageData(post, {
+          status: "HELD",
+          guardrailStatus: "FAIL",
+          guardrailFailures: validation.failedChecks,
+          now
+        })
+      });
+    } catch (error) {
+      logJournalStoreFailure(error, "guardrail_hold_create");
+      return skippedDailyRun({
+        reason: "JOURNAL_STORE_UNAVAILABLE",
+        requested,
+        failedChecks: ["JOURNAL_STORE_UNAVAILABLE"]
+      });
+    }
 
     logger.warn(
       {
@@ -678,21 +754,31 @@ export async function runDailyJournalAutopublish(options: RunDailyOptions = {}, 
   }
 
   if (!options.publish) {
-    const draft = await client.journalPost.upsert({
-      where: { slug: safeSlug(post.slug, `shipmastr-journal-${isoDate(now)}`) },
-      create: storageData(post, {
-        status: "DRAFT",
-        guardrailStatus: "PASS",
-        guardrailFailures: [],
-        now
-      }),
-      update: storageData(post, {
-        status: "DRAFT",
-        guardrailStatus: "PASS",
-        guardrailFailures: [],
-        now
-      })
-    });
+    let draft: JournalPostRecord;
+    try {
+      draft = await client.journalPost.upsert({
+        where: { slug: safeSlug(post.slug, `shipmastr-journal-${isoDate(now)}`) },
+        create: storageData(post, {
+          status: "DRAFT",
+          guardrailStatus: "PASS",
+          guardrailFailures: [],
+          now
+        }),
+        update: storageData(post, {
+          status: "DRAFT",
+          guardrailStatus: "PASS",
+          guardrailFailures: [],
+          now
+        })
+      });
+    } catch (error) {
+      logJournalStoreFailure(error, "draft_upsert");
+      return skippedDailyRun({
+        reason: "JOURNAL_STORE_UNAVAILABLE",
+        requested,
+        failedChecks: ["JOURNAL_STORE_UNAVAILABLE"]
+      });
+    }
 
     return {
       ok: true,
@@ -706,21 +792,31 @@ export async function runDailyJournalAutopublish(options: RunDailyOptions = {}, 
     };
   }
 
-  const published = await client.journalPost.upsert({
-    where: { slug: safeSlug(post.slug, `shipmastr-journal-${isoDate(now)}`) },
-    create: storageData(post, {
-      status: "PUBLISHED",
-      guardrailStatus: "PASS",
-      guardrailFailures: [],
-      now
-    }),
-    update: storageData(post, {
-      status: "PUBLISHED",
-      guardrailStatus: "PASS",
-      guardrailFailures: [],
-      now
-    })
-  });
+  let published: JournalPostRecord;
+  try {
+    published = await client.journalPost.upsert({
+      where: { slug: safeSlug(post.slug, `shipmastr-journal-${isoDate(now)}`) },
+      create: storageData(post, {
+        status: "PUBLISHED",
+        guardrailStatus: "PASS",
+        guardrailFailures: [],
+        now
+      }),
+      update: storageData(post, {
+        status: "PUBLISHED",
+        guardrailStatus: "PASS",
+        guardrailFailures: [],
+        now
+      })
+    });
+  } catch (error) {
+    logJournalStoreFailure(error, "publish_upsert");
+    return skippedDailyRun({
+      reason: "JOURNAL_STORE_UNAVAILABLE",
+      requested,
+      failedChecks: ["JOURNAL_STORE_UNAVAILABLE"]
+    });
+  }
 
   logger.info(
     {
@@ -747,13 +843,29 @@ export async function runDailyJournalAutopublish(options: RunDailyOptions = {}, 
       results: [] as EmailSendResult[]
     };
 
+  let sentAtUpdateWarning: string | undefined;
   if (email.emailSent) {
-    await client.journalPost.update({
-      where: { id: published.id },
-      data: {
-        sentAt: now
-      }
-    });
+    try {
+      await client.journalPost.update({
+        where: { id: published.id },
+        data: {
+          sentAt: now
+        }
+      });
+    } catch (error) {
+      sentAtUpdateWarning = "JOURNAL_SENT_AT_UPDATE_FAILED";
+      logger.warn(
+        {
+          message: "journal_sent_at_update_failed",
+          journal: {
+            postId: published.id,
+            slug: published.slug,
+            error: safeOperationalFailureCode(error, "JOURNAL_SENT_AT_UPDATE_FAILED")
+          }
+        },
+        "journal_sent_at_update_failed"
+      );
+    }
   }
 
   return {
@@ -765,6 +877,7 @@ export async function runDailyJournalAutopublish(options: RunDailyOptions = {}, 
     recipientCount: email.recipientCount,
     emailSkippedReason: "skippedReason" in email ? email.skippedReason : undefined,
     emailFailureCount: email.emailFailureCount,
+    warnings: sentAtUpdateWarning ? [sentAtUpdateWarning] : [],
     requested,
     failedChecks: [],
     post: publicPost(published)
