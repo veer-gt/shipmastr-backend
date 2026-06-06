@@ -11,6 +11,7 @@ import { authRouter } from "../modules/auth/auth.routes.js";
 import { codRemittancesRouter } from "../modules/codRemittances/cod-remittances.routes.js";
 import { codDashboardRouter } from "../modules/codDashboard/cod-dashboard.routes.js";
 import { adminCourierPartnerApplicationRouter, courierPartnerApplicationRouter } from "../modules/courierPartnerApplications/courier-partner-application.routes.js";
+import { courierPartnersRouter } from "../modules/courierPartners/courier-partners.routes.js";
 import { adminCourierPartnerRouter, courierOnboardingRouter } from "../modules/courierPartnerOnboarding/onboarding.routes.js";
 import { courierRouter } from "../modules/courier/courier.routes.js";
 import { courierInvoicesRouter } from "../modules/courierInvoices/courier-invoices.routes.js";
@@ -48,6 +49,8 @@ apiRouter.get("/health", (_req, res) => {
 
 apiRouter.use("/auth", authRouter);
 apiRouter.use("/courier-partner-applications", courierPartnerApplicationRouter);
+apiRouter.use("/courier-partners", courierPartnersRouter);
+apiRouter.use("/v1/courier-partners", courierPartnersRouter);
 apiRouter.use("/admin/courier-partner-applications", requireAdminJwt, adminCourierPartnerApplicationRouter);
 apiRouter.use("/admin/courier-partners", requireAdminJwt, adminCourierPartnerRouter);
 apiRouter.use("/admin/tax-compliance", requireAdminJwt, adminTaxComplianceRouter);

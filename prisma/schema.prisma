@@ -12,6 +12,57 @@ enum PaymentMode {
   COD
 }
 
+enum ShippingPaymentMode {
+  prepaid
+  cod
+}
+
+enum CourierPartnerStatus {
+  active
+  inactive
+  testing
+  suspended
+  failed
+}
+
+enum SellerCourierPartnerStatus {
+  active
+  inactive
+  suspended
+  failed
+}
+
+enum PartnerType {
+  system_managed
+  seller_owned
+  merchant_owned
+}
+
+enum ShipmentStatus {
+  draft
+  rates_fetched
+  manifested
+  pickup_scheduled
+  picked_up
+  in_transit
+  out_for_delivery
+  delivered
+  delivery_failed
+  rto_initiated
+  rto_in_transit
+  rto_delivered
+  cancelled
+  lost
+  damaged
+  exception
+}
+
+enum ShipmentSegment {
+  domestic_b2c
+  domestic_b2b
+  hyperlocal
+}
+
 enum OrderStatus {
   CREATED
   RISK_SCORED
@@ -687,6 +738,12 @@ model CourierPartner {
   id                  String   @id @default(cuid())
   name                String
   code                String   @unique
+  status              CourierPartnerStatus @default(active)
+  isSystemManaged     Boolean  @default(false)
+  defaultForNewSellers Boolean @default(false)
+  credentialsRequiredFromSeller Boolean @default(true)
+  country             String   @default("IN")
+  supportedSegments   ShipmentSegment[] @default([])
   gstin               String?
   serviceCodeType     String   @default("SAC")
   serviceCode         String   @default("996812")
@@ -719,12 +776,232 @@ model CourierPartner {
   pilotChecklist CourierPilotChecklistItem[]
   developerCredentials CourierDeveloperCredential[]
   apiEvents CourierApiEvent[]
+  sellerCourierPartners SellerCourierPartner[]
+  pickupLocationProviderMappings PickupLocationProviderMapping[]
+  networkShipments Shipment[]
+  shipmentProviderRefs ShipmentProviderRef[]
+  shipmentRates ShipmentRate[]
+  shipmentTrackingEvents ShipmentTrackingEvent[]
 
+  @@index([status])
   @@index([active])
   @@index([priority])
   @@index([gstin])
   @@index([serviceCode])
   @@index([bookingMode])
+  @@index([isSystemManaged])
+  @@index([defaultForNewSellers])
+  @@index([country])
+}
+
+model SellerCourierPartner {
+  id                            String                     @id @default(cuid())
+  sellerId                      String                     @map("seller_id")
+  courierPartnerId              String                     @map("courier_partner_id")
+  status                        SellerCourierPartnerStatus @default(active)
+  partnerType                   PartnerType                @default(system_managed) @map("partner_type")
+  credentialsRequiredFromSeller Boolean                    @default(false) @map("credentials_required_from_seller")
+  enabledSegments               ShipmentSegment[]          @default([]) @map("enabled_segments")
+  country                       String                     @default("IN")
+  displayCode                   String                     @default("shipmastr_courier_network") @map("display_code")
+  displayName                   String                     @default("Shipmastr Courier Network") @map("display_name")
+  createdAt                     DateTime                   @default(now()) @map("created_at")
+  updatedAt                     DateTime                   @default(now()) @updatedAt @map("updated_at")
+
+  courierPartner CourierPartner @relation(fields: [courierPartnerId], references: [id], onDelete: Cascade)
+  pickupLocationProviderMappings PickupLocationProviderMapping[]
+  shipments Shipment[]
+  shipmentRates ShipmentRate[]
+
+  @@unique([sellerId, courierPartnerId])
+  @@index([sellerId])
+  @@index([courierPartnerId])
+  @@index([status])
+  @@index([partnerType])
+  @@index([country])
+  @@map("seller_courier_partners")
+}
+
+model PickupLocation {
+  id           String   @id @default(cuid())
+  sellerId     String   @map("seller_id")
+  label        String
+  contactName  String?  @map("contact_name")
+  phone        String?
+  addressLine1 String?  @map("address_line1")
+  addressLine2 String?  @map("address_line2")
+  city         String?
+  state        String?
+  pincode      String?
+  country      String   @default("IN")
+  status       String   @default("active")
+  metadata     Json?
+  createdAt    DateTime @default(now()) @map("created_at")
+  updatedAt    DateTime @default(now()) @updatedAt @map("updated_at")
+
+  providerMappings PickupLocationProviderMapping[]
+  shipments Shipment[]
+
+  @@index([sellerId])
+  @@index([sellerId, status])
+  @@index([pincode])
+  @@index([country])
+  @@map("pickup_locations")
+}
+
+model PickupLocationProviderMapping {
+  id                     String   @id @default(cuid())
+  pickupLocationId       String   @map("pickup_location_id")
+  sellerCourierPartnerId String?  @map("seller_courier_partner_id")
+  courierPartnerId       String   @map("courier_partner_id")
+  providerPickupId       String?  @map("provider_pickup_id")
+  providerCode           String?  @map("provider_code")
+  status                 String   @default("active")
+  metadata               Json?
+  createdAt              DateTime @default(now()) @map("created_at")
+  updatedAt              DateTime @default(now()) @updatedAt @map("updated_at")
+
+  pickupLocation PickupLocation @relation(fields: [pickupLocationId], references: [id], onDelete: Cascade)
+  sellerCourierPartner SellerCourierPartner? @relation(fields: [sellerCourierPartnerId], references: [id], onDelete: SetNull)
+  courierPartner CourierPartner @relation(fields: [courierPartnerId], references: [id], onDelete: Cascade)
+
+  @@unique([pickupLocationId, courierPartnerId])
+  @@index([pickupLocationId])
+  @@index([sellerCourierPartnerId])
+  @@index([courierPartnerId])
+  @@index([providerPickupId])
+  @@index([status])
+  @@map("pickup_location_provider_mappings")
+}
+
+model Shipment {
+  id                     String              @id @default(cuid())
+  sellerId               String              @map("seller_id")
+  orderId                String?             @map("order_id")
+  externalOrderId        String?             @map("external_order_id")
+  pickupLocationId       String?             @map("pickup_location_id")
+  sellerCourierPartnerId String?             @map("seller_courier_partner_id")
+  courierPartnerId       String?             @map("courier_partner_id")
+  segment                ShipmentSegment     @default(domestic_b2c)
+  status                 ShipmentStatus      @default(draft)
+  paymentMode            ShippingPaymentMode @default(prepaid) @map("payment_mode")
+  codAmountPaise         Int                 @default(0) @map("cod_amount_paise")
+  declaredValuePaise     Int?                @map("declared_value_paise")
+  fromPincode            String?             @map("from_pincode")
+  toPincode              String?             @map("to_pincode")
+  deadWeightKg           Decimal?            @map("dead_weight_kg") @db.Decimal(10, 3)
+  lengthCm               Decimal?            @map("length_cm") @db.Decimal(10, 2)
+  breadthCm              Decimal?            @map("breadth_cm") @db.Decimal(10, 2)
+  heightCm               Decimal?            @map("height_cm") @db.Decimal(10, 2)
+  volumetricDivisor      Int                 @default(5000) @map("volumetric_divisor")
+  volumetricWeightKg     Decimal?            @map("volumetric_weight_kg") @db.Decimal(10, 3)
+  chargeableWeightKg     Decimal?            @map("chargeable_weight_kg") @db.Decimal(10, 3)
+  serviceLevel           String?             @map("service_level")
+  awbNumber              String?             @unique @map("awb_number")
+  trackingUrl            String?             @map("tracking_url")
+  metadata               Json?
+  createdAt              DateTime            @default(now()) @map("created_at")
+  updatedAt              DateTime            @default(now()) @updatedAt @map("updated_at")
+
+  pickupLocation PickupLocation? @relation(fields: [pickupLocationId], references: [id], onDelete: SetNull)
+  sellerCourierPartner SellerCourierPartner? @relation(fields: [sellerCourierPartnerId], references: [id], onDelete: SetNull)
+  courierPartner CourierPartner? @relation(fields: [courierPartnerId], references: [id], onDelete: SetNull)
+  providerRefs ShipmentProviderRef[]
+  rates ShipmentRate[]
+  trackingEvents ShipmentTrackingEvent[]
+
+  @@index([sellerId])
+  @@index([orderId])
+  @@index([externalOrderId])
+  @@index([pickupLocationId])
+  @@index([sellerCourierPartnerId])
+  @@index([courierPartnerId])
+  @@index([status])
+  @@index([segment])
+  @@index([paymentMode])
+  @@index([fromPincode, toPincode])
+  @@index([createdAt])
+  @@map("shipments")
+}
+
+model ShipmentProviderRef {
+  id                 String   @id @default(cuid())
+  shipmentId         String   @map("shipment_id")
+  courierPartnerId   String?  @map("courier_partner_id")
+  providerShipmentId String?  @map("provider_shipment_id")
+  providerAwb        String?  @map("provider_awb")
+  providerOrderId    String?  @map("provider_order_id")
+  providerPickupId   String?  @map("provider_pickup_id")
+  metadata           Json?
+  createdAt          DateTime @default(now()) @map("created_at")
+  updatedAt          DateTime @default(now()) @updatedAt @map("updated_at")
+
+  shipment Shipment @relation(fields: [shipmentId], references: [id], onDelete: Cascade)
+  courierPartner CourierPartner? @relation(fields: [courierPartnerId], references: [id], onDelete: SetNull)
+
+  @@index([shipmentId])
+  @@index([courierPartnerId])
+  @@index([providerShipmentId])
+  @@index([providerAwb])
+  @@index([providerOrderId])
+  @@map("shipment_provider_refs")
+}
+
+model ShipmentRate {
+  id                     String          @id @default(cuid())
+  shipmentId             String?         @map("shipment_id")
+  sellerId               String          @map("seller_id")
+  sellerCourierPartnerId String?         @map("seller_courier_partner_id")
+  courierPartnerId       String?         @map("courier_partner_id")
+  publicServiceCode      String          @default("shipmastr_smart") @map("public_service_code")
+  publicServiceName      String          @default("Shipmastr Smart") @map("public_service_name")
+  segment                ShipmentSegment @default(domestic_b2c)
+  chargeableWeightKg     Decimal?        @map("chargeable_weight_kg") @db.Decimal(10, 3)
+  amountPaise            Int             @map("amount_paise")
+  currency               String          @default("INR")
+  estimatedDeliveryDays  Int?            @map("estimated_delivery_days")
+  rateBreakup            Json?           @map("rate_breakup")
+  expiresAt              DateTime?       @map("expires_at")
+  createdAt              DateTime        @default(now()) @map("created_at")
+  updatedAt              DateTime        @default(now()) @updatedAt @map("updated_at")
+
+  shipment Shipment? @relation(fields: [shipmentId], references: [id], onDelete: Cascade)
+  sellerCourierPartner SellerCourierPartner? @relation(fields: [sellerCourierPartnerId], references: [id], onDelete: SetNull)
+  courierPartner CourierPartner? @relation(fields: [courierPartnerId], references: [id], onDelete: SetNull)
+
+  @@index([shipmentId])
+  @@index([sellerId])
+  @@index([sellerCourierPartnerId])
+  @@index([courierPartnerId])
+  @@index([publicServiceCode])
+  @@index([segment])
+  @@index([createdAt])
+  @@map("shipment_rates")
+}
+
+model ShipmentTrackingEvent {
+  id               String         @id @default(cuid())
+  shipmentId       String         @map("shipment_id")
+  courierPartnerId String?        @map("courier_partner_id")
+  status           ShipmentStatus
+  eventCode        String?        @map("event_code")
+  eventLabel       String         @map("event_label")
+  publicMessage    String?        @map("public_message")
+  location         String?
+  occurredAt       DateTime       @default(now()) @map("occurred_at")
+  providerEventId  String?        @map("provider_event_id")
+  metadata         Json?
+  createdAt        DateTime       @default(now()) @map("created_at")
+
+  shipment Shipment @relation(fields: [shipmentId], references: [id], onDelete: Cascade)
+  courierPartner CourierPartner? @relation(fields: [courierPartnerId], references: [id], onDelete: SetNull)
+
+  @@index([shipmentId])
+  @@index([courierPartnerId])
+  @@index([status])
+  @@index([providerEventId])
+  @@index([occurredAt])
+  @@map("shipment_tracking_events")
 }
 
 model CourierPartnerApplication {

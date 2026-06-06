@@ -1,4 +1,4 @@
-import { PrismaClient } from "@prisma/client";
+import { CourierPartnerStatus, PrismaClient, ShipmentSegment } from "@prisma/client";
 
 const prisma = new PrismaClient();
 
@@ -12,6 +12,20 @@ const couriers = [
   { name: "Shipmastr Manual Courier", code: "SMMANUAL", priority: 100 },
   { name: "Metro Swift", code: "METROSWIFT", priority: 80 },
   { name: "Bharat Express", code: "BHARATEXP", priority: 90 }
+];
+
+const systemManagedCouriers = [
+  {
+    name: "Bigship",
+    code: "bigship",
+    priority: 50,
+    country: "IN",
+    supportedSegments: [
+      ShipmentSegment.domestic_b2c,
+      ShipmentSegment.domestic_b2b,
+      ShipmentSegment.hyperlocal
+    ]
+  }
 ];
 
 async function main() {
@@ -107,6 +121,40 @@ async function main() {
         deliveryRate: 0.8967,
         rtoRate: 0.06,
         score: 82
+      }
+    });
+  }
+
+  for (const courier of systemManagedCouriers) {
+    await prisma.courierPartner.upsert({
+      where: { code: courier.code },
+      create: {
+        name: courier.name,
+        code: courier.code,
+        priority: courier.priority,
+        active: true,
+        status: CourierPartnerStatus.active,
+        apiMode: "internal_adapter",
+        bookingMode: "api",
+        supportsCOD: true,
+        supportsPrepaid: true,
+        supportsPickup: true,
+        isSystemManaged: true,
+        defaultForNewSellers: true,
+        credentialsRequiredFromSeller: false,
+        country: courier.country,
+        supportedSegments: courier.supportedSegments
+      },
+      update: {
+        name: courier.name,
+        priority: courier.priority,
+        active: true,
+        status: CourierPartnerStatus.active,
+        isSystemManaged: true,
+        defaultForNewSellers: true,
+        credentialsRequiredFromSeller: false,
+        country: courier.country,
+        supportedSegments: courier.supportedSegments
       }
     });
   }
