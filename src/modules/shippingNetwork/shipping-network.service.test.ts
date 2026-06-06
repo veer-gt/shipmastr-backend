@@ -222,7 +222,10 @@ function createFakeClient() {
         state.pickupLocations.push(row);
         return row;
       },
-      findMany: async ({ where }: any) => state.pickupLocations.filter((row) => row.sellerId === where.sellerId),
+      findMany: async ({ where }: any) => state.pickupLocations.filter((row) => (
+        row.sellerId === where.sellerId
+        && (!where.status || row.status === where.status)
+      )),
       findFirst: async ({ where }: any) => state.pickupLocations.find((row) =>
         row.id === where.id && (!where.sellerId || row.sellerId === where.sellerId)
       ) ?? null
@@ -394,16 +397,26 @@ describe("Shipmastr Shipping Network services", () => {
     const adapter = createFakeAdapter();
 
     const pickup = await createShippingPickupLocation("seller_1", pickupBody(), { client, adapter });
+    state.pickupLocations.push({
+      id: "pickup_inactive",
+      sellerId: "seller_1",
+      label: "Inactive warehouse",
+      status: "inactive",
+      country: "IN",
+      createdAt: now,
+      updatedAt: now
+    });
     const list = await listShippingPickupLocations("seller_1", client);
     const json = JSON.stringify({ pickup, list });
 
     assert.equal(adapter.calls.createPickupLocation, 1);
-    assert.equal(state.pickupLocations.length, 1);
+    assert.equal(state.pickupLocations.length, 2);
     assert.equal(state.pickupMappings.length, 1);
     assert.equal(state.pickupMappings[0]?.providerPickupId, "internal_pickup_001");
     assert.equal(pickup.pickup_location_id, "pickup_1");
     assert.equal(pickup.courier_network, "Shipmastr Courier Network");
     assert.equal(list.length, 1);
+    assert.equal(list[0]?.pickup_location_id, "pickup_1");
     assert.doesNotMatch(json, /internal_pickup_001|providerPickupId|internal_partner/i);
   });
 

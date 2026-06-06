@@ -616,7 +616,7 @@ export async function importShippingOrdersCsv(input: {
   if (input.buffer.length > 2 * 1024 * 1024) {
     throw new HttpError(413, "CSV_FILE_TOO_LARGE");
   }
-  if (input.mimeType && !["text/csv", "text/plain", "application/csv"].includes(input.mimeType)) {
+  if (input.mimeType && !["text/csv", "text/plain"].includes(input.mimeType)) {
     throw new HttpError(400, "CSV_UNSUPPORTED_MIME_TYPE");
   }
   const rows = parseCsvRows(input.buffer);

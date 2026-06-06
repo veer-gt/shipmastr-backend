@@ -12,6 +12,8 @@ import type { InternalCourierProviderAdapter } from "../courierPartners/provider
 import { SHIPMASTR_PUBLIC_COURIER_NETWORK } from "../courierPartners/courier-partners.config.js";
 import type { CreatePickupLocationInput } from "./shipping-validation.js";
 import { serializePickupLocation, toPrismaJson } from "./shipping-public-serializers.js";
+import { normalizeIndianPhone } from "./shipping-order-validation.js";
+import { normalizeStateName } from "./shipping-indian-states.js";
 
 type Db = Prisma.TransactionClient | typeof prisma;
 
@@ -128,17 +130,19 @@ export async function createShippingPickupLocation(
   const client = options.client ?? prisma;
   const adapter = options.adapter ?? createMockSafeShippingAdapter();
   const { partner, mapping } = await ensureSystemManagedCourierNetwork(sellerId, client);
+  const phone = normalizeIndianPhone(input.phone);
+  const state = normalizeStateName(input.address.state);
 
   const location = await client.pickupLocation.create({
     data: {
       sellerId,
       label: input.name,
       contactName: input.contact_person,
-      phone: input.phone,
+      phone,
       addressLine1: input.address.line1,
       addressLine2: input.address.line2 ?? null,
       city: input.address.city,
-      state: input.address.state,
+      state,
       pincode: input.address.pincode,
       country: input.address.country.toUpperCase(),
       status: "active",
@@ -161,13 +165,13 @@ export async function createShippingPickupLocation(
     pickupLocationId: location.id,
     name: input.name,
     contactPerson: input.contact_person,
-    phone: input.phone,
+    phone,
     email: input.email ?? null,
     addressLine1: input.address.line1,
     addressLine2: input.address.line2 ?? null,
     landmark: input.address.landmark ?? null,
     city: input.address.city,
-    state: input.address.state,
+    state,
     country: input.address.country.toUpperCase(),
     pincode: input.address.pincode,
     latitude: input.address.latitude ?? null,
@@ -213,8 +217,11 @@ export async function listShippingPickupLocations(
   client: Db = prisma
 ) {
   const locations = await client.pickupLocation.findMany({
-    where: { sellerId },
-    orderBy: { createdAt: "desc" }
+    where: {
+      sellerId,
+      status: "active"
+    },
+    orderBy: { createdAt: "asc" }
   });
 
   return locations.map(serializePickupLocation);

@@ -11,6 +11,7 @@ import {
   ShippingValidationError
 } from "./shipping-order-ingestion.service.js";
 import { updateShippingPickupLocation } from "./shipping-pickup-crud.service.js";
+import { createPickupLocationSchema } from "./shipping-validation.js";
 
 function now() {
   return new Date("2026-06-06T12:00:00.000Z");
@@ -213,7 +214,7 @@ describe("Phase 5B shipping order foundation helpers", () => {
     });
     const needsAttention = validateOrder({
       buyerName: "",
-      buyerPhone: "123",
+      buyerPhone: "1234567890",
       addressLine1: "test",
       city: "",
       state: "",
@@ -226,14 +227,86 @@ describe("Phase 5B shipping order foundation helpers", () => {
     assert.equal(ready.status, "ready_to_ship");
     assert.equal(needsAttention.status, "needs_attention");
     assert.ok(needsAttention.needsAttentionReasons.includes("MISSING_BUYER_NAME"));
+    assert.ok(needsAttention.needsAttentionReasons.includes("INVALID_PHONE"));
+    assert.ok(needsAttention.needsAttentionReasons.includes("INVALID_PINCODE"));
+    assert.ok(needsAttention.needsAttentionReasons.includes("MISSING_PACKAGE_WEIGHT"));
+    assert.ok(needsAttention.needsAttentionReasons.includes("MISSING_PICKUP_LOCATION"));
     assert.ok(needsAttention.needsAttentionReasons.includes("COD_AMOUNT_OVER_LIMIT"));
   });
 
+  it("detects missing phone, missing pincode, and zero package weight independently", () => {
+    const result = validateOrder({
+      buyerName: "Rahul Sharma",
+      buyerPhone: "",
+      addressLine1: "221 Market Street, Block A",
+      city: "Delhi",
+      state: "Delhi",
+      pincode: "",
+      packageWeightGrams: 0,
+      paymentMode: "PREPAID",
+      pickupLocationId: "pickup_1"
+    });
+
+    assert.equal(result.status, "needs_attention");
+    assert.ok(result.needsAttentionReasons.includes("MISSING_PHONE"));
+    assert.ok(result.needsAttentionReasons.includes("MISSING_PINCODE"));
+    assert.ok(result.needsAttentionReasons.includes("ZERO_PACKAGE_WEIGHT"));
+  });
+
   it("parses money formats and normalizes Indian state names", () => {
+    assert.equal(parseAmountToPaise("₹499"), 49900);
     assert.equal(parseAmountToPaise("₹1,299.00"), 129900);
+    assert.equal(parseAmountToPaise(1299), 129900);
+    assert.equal(parseAmountToPaise("1,299"), 129900);
     assert.equal(parseAmountToPaise("499.50"), 49950);
+    assert.equal(parseAmountToPaise(0), 0);
+    assert.equal(parseAmountToPaise(""), 0);
+    assert.equal(parseAmountToPaise(null), 0);
+    assert.equal(parseAmountToPaise(undefined), 0);
+    assert.equal(parseAmountToPaise("-1"), 0);
+    assert.equal(parseAmountToPaise("not money"), 0);
     assert.equal(normalizeStateName("DL"), "Delhi");
     assert.equal(normalizeStateName("mh"), "Maharashtra");
+    assert.equal(normalizeStateName("KA"), "Karnataka");
+    assert.equal(normalizeStateName("UP"), "Uttar Pradesh");
+    assert.equal(normalizeStateName("UK"), "Uttarakhand");
+    assert.equal(normalizeStateName("TN"), "Tamil Nadu");
+    assert.equal(normalizeStateName("GJ"), "Gujarat");
+    assert.equal(normalizeStateName("RJ"), "Rajasthan");
+    assert.equal(normalizeStateName("HR"), "Haryana");
+    assert.equal(normalizeStateName("PB"), "Punjab");
+    assert.equal(normalizeStateName("WB"), "West Bengal");
+    assert.equal(normalizeStateName("TG"), "Telangana");
+    assert.equal(normalizeStateName("AP"), "Andhra Pradesh");
+    assert.equal(normalizeStateName("MP"), "Madhya Pradesh");
+  });
+
+  it("enforces pickup phone and pincode quality at validation boundary", () => {
+    const valid = createPickupLocationSchema.parse({
+      name: "Main warehouse",
+      contact_person: "Ops",
+      phone: "+91 98765 43210",
+      address: {
+        line1: "Warehouse line",
+        city: "Delhi",
+        state: "DL",
+        country: "IN",
+        pincode: "110001"
+      }
+    });
+
+    assert.equal(valid.phone, "+91 98765 43210");
+    assert.throws(() => createPickupLocationSchema.parse({
+      ...valid,
+      phone: "12345"
+    }));
+    assert.throws(() => createPickupLocationSchema.parse({
+      ...valid,
+      address: {
+        ...valid.address,
+        pincode: "000000"
+      }
+    }));
   });
 });
 

@@ -1,6 +1,10 @@
 import { z } from "zod";
 
-const pincodeSchema = z.string().trim().regex(/^\d{6}$/, "Expected a 6 digit Indian pincode.");
+const pincodeSchema = z.string().trim().regex(/^[1-9][0-9]{5}$/, "Expected a valid 6 digit Indian pincode.");
+const indianPhoneSchema = z.string().trim().refine((value) => {
+  const phone = value.replace(/\D/g, "").slice(-10);
+  return /^[6-9][0-9]{9}$/.test(phone);
+}, "Expected a valid 10 digit Indian mobile number.");
 const positiveMoneySchema = z.number().positive();
 const positiveDimensionSchema = z.number().positive();
 
@@ -26,7 +30,7 @@ const productSchema = z.object({
 export const createPickupLocationSchema = z.object({
   name: z.string().trim().min(1),
   contact_person: z.string().trim().min(1),
-  phone: z.string().trim().min(7).max(20),
+  phone: indianPhoneSchema,
   email: z.string().trim().email().optional(),
   address: addressSchema,
   address_type: z.string().trim().max(80).optional(),
