@@ -129,6 +129,57 @@ describe("journal autopublish Postgres store", () => {
     assert.equal(result.published, true);
   });
 
+  it("returns a skipped state when the journal store is not configured", async () => {
+    const { client } = makeClient();
+    const result = await runDailyJournalAutopublish({
+      publish: true,
+      sendEmail: true,
+      now
+    }, {
+      client,
+      storeMode: "not_configured"
+    });
+
+    assert.equal(result.ok, false);
+    assert.equal(result.status, "SKIPPED");
+    assert.equal(result.skipped, true);
+    assert.equal(result.reason, "JOURNAL_AUTOPUBLISH_STORE_NOT_CONFIGURED");
+    assert.equal(result.published, false);
+    assert.equal(result.emailSent, false);
+  });
+
+  it("returns a skipped state when the journal store is unavailable", async () => {
+    const { client } = makeClient();
+    const failingClient = {
+      ...client,
+      journalPost: {
+        ...client.journalPost,
+        upsert: async () => {
+          throw new Error("database secret connection payload should not leak");
+        }
+      }
+    };
+
+    const result = await runDailyJournalAutopublish({
+      publish: true,
+      sendEmail: true,
+      now
+    }, {
+      client: failingClient as any,
+      storeMode: "postgres"
+    });
+
+    const serialized = JSON.stringify(result);
+    assert.equal(result.ok, false);
+    assert.equal(result.status, "SKIPPED");
+    assert.equal(result.skipped, true);
+    assert.equal(result.reason, "JOURNAL_STORE_UNAVAILABLE");
+    assert.equal(result.published, false);
+    assert.equal(result.emailSent, false);
+    assert.doesNotMatch(serialized, /database secret connection payload/);
+    assert.doesNotMatch(serialized, /secret/);
+  });
+
   it("saves guardrail failures as HELD and does not email", async () => {
     const { client, state } = makeClient();
     let emailCalls = 0;
@@ -199,6 +250,38 @@ describe("journal autopublish Postgres store", () => {
     assert.equal(result.published, true);
     assert.equal(result.emailSent, true);
     assert.deepEqual(sentTo, ["seller@example.com"]);
+  });
+
+  it("does not fail the daily run when sentAt update fails after email send", async () => {
+    const { client } = makeClient();
+    const warningClient = {
+      ...client,
+      journalPost: {
+        ...client.journalPost,
+        update: async () => {
+          throw new Error("provider secret response should not leak");
+        }
+      }
+    };
+
+    const result = await runDailyJournalAutopublish({
+      publish: true,
+      sendEmail: true,
+      now
+    }, {
+      client: warningClient as any,
+      storeMode: "postgres",
+      loadSubscribers: async () => [{ id: "subscriber_1", email: "seller@example.com", unsubscribeUrl: "https://www.shipmastr.com/unsubscribe/test" }],
+      getEmailConfig: async () => readyConfig(),
+      sendEmail: async (input) => ({ messageId: "msg_1", accepted: [input.to], rejected: [], response: "250 OK" })
+    });
+
+    const serialized = JSON.stringify(result);
+    assert.equal(result.status, "PUBLISHED");
+    assert.equal(result.published, true);
+    assert.equal(result.emailSent, true);
+    assert.deepEqual(result.warnings, ["JOURNAL_SENT_AT_UPDATE_FAILED"]);
+    assert.doesNotMatch(serialized, /provider secret response/);
   });
 
   it("publishes and skips email safely when there are no newsletter recipients", async () => {
