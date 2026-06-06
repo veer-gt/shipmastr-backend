@@ -105,6 +105,10 @@ export type ProviderRateResult = {
   currency: "INR";
   tatDays: number;
   chargedWeightKg: number;
+  codSupported?: boolean;
+  pickupAvailable?: boolean;
+  deliveryAvailable?: boolean;
+  reliabilityScore?: number;
   providerCourierId?: string;
   providerMetadata: Record<string, unknown>;
 };
@@ -123,6 +127,25 @@ export type ProviderManifestResult = {
   status: ProviderShipmentStatus;
   providerReferenceNumber: string;
   providerAwb?: string;
+  labelUrl?: string | null;
+  trackingUrl?: string | null;
+  message: string;
+  providerMetadata: Record<string, unknown>;
+};
+
+export type ProviderLabelInput = {
+  sellerId: string;
+  shipmentId: string;
+  awb?: string | null;
+  trackingNumber?: string | null;
+  providerOrderId?: string | null;
+  providerShipmentId?: string | null;
+};
+
+export type ProviderLabelResult = {
+  labelUrl: string | null;
+  trackingUrl?: string | null;
+  status: ProviderShipmentStatus;
   message: string;
   providerMetadata: Record<string, unknown>;
 };
@@ -173,6 +196,7 @@ export interface InternalCourierProviderAdapter {
   createDraftOrder(input: ProviderDraftOrderInput): Promise<ProviderDraftOrderResult>;
   getRates(input: ProviderRateInput): Promise<ProviderRateResult[]>;
   manifestOrder(input: ProviderManifestInput): Promise<ProviderManifestResult>;
+  getLabel(input: ProviderLabelInput): Promise<ProviderLabelResult>;
   trackOrder(input: ProviderTrackingInput): Promise<ProviderTrackingResult>;
   cancelOrder(input: ProviderCancelInput): Promise<ProviderCancelResult>;
 }

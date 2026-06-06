@@ -6,6 +6,8 @@ import type {
   BigshipCourierRateResponse,
   BigshipDomesticB2COrderRequest,
   BigshipDomesticB2COrderResponse,
+  BigshipGetLabelRequest,
+  BigshipGetLabelResponse,
   BigshipLoginRequest,
   BigshipLoginResponse,
   BigshipPlaceOrderRequest,
@@ -16,11 +18,18 @@ import type {
   BigshipTrackingResponse
 } from "./bigship.types.js";
 
+export type BigshipMode = "mock" | "sandbox" | "live";
+
 export type BigshipClientConfig = {
+  mode?: BigshipMode;
   baseUrl?: string;
   username?: string | undefined;
   password?: string | undefined;
   accessKey?: string | undefined;
+  apiKey?: string | undefined;
+  clientId?: string | undefined;
+  clientSecret?: string | undefined;
+  enableRealCalls?: boolean;
   enabled?: boolean;
   mockMode?: boolean;
   timeoutMs?: number;
@@ -43,7 +52,19 @@ export type BigshipFetchResponse = {
 export type BigshipFetch = (url: string, init: BigshipFetchInit) => Promise<BigshipFetchResponse>;
 
 const DEFAULT_BASE_URL = "https://api.bigship.direct/";
-const DEFAULT_TIMEOUT_MS = 8000;
+const DEFAULT_TIMEOUT_MS = 15_000;
+
+const BIGSHIP_ENDPOINTS = {
+  // TODO: Confirm endpoint paths against official provider docs before live mode is enabled.
+  login: "/api/login",
+  saveWarehouse: "/api/warehouse/save",
+  createDomesticB2COrder: "/api/orders/domestic-b2c",
+  rates: "/api/rates",
+  placeOrder: "/api/orders/place",
+  label: "/api/orders/label",
+  tracking: "/api/track",
+  cancel: "/api/orders/cancel"
+} as const;
 
 function normalizeBaseUrl(baseUrl: string) {
   return baseUrl.endsWith("/") ? baseUrl.slice(0, -1) : baseUrl;
@@ -57,6 +78,17 @@ function boolFromEnv(value: string | undefined, fallback: boolean) {
   return fallback;
 }
 
+function modeFromEnv(value: string | undefined): BigshipMode {
+  const normalized = value?.trim().toLowerCase();
+  if (normalized === "sandbox" || normalized === "live") return normalized;
+  return "mock";
+}
+
+function intFromEnv(value: string | undefined, fallback: number) {
+  const parsed = Number(value);
+  return Number.isInteger(parsed) && parsed > 0 ? parsed : fallback;
+}
+
 function defaultFetch(): BigshipFetch {
   return async (url, init) => {
     if (typeof fetch !== "function") {
@@ -68,13 +100,25 @@ function defaultFetch(): BigshipFetch {
 }
 
 export function bigshipClientConfigFromEnv(source: NodeJS.ProcessEnv = process.env): BigshipClientConfig {
+  const mode = modeFromEnv(source.BIGSHIP_MODE);
+  const enableRealCalls = boolFromEnv(
+    source.BIGSHIP_ENABLE_REAL_CALLS,
+    boolFromEnv(source.BIGSHIP_ENABLED, false)
+  );
+
   return {
+    mode,
     baseUrl: source.BIGSHIP_BASE_URL ?? DEFAULT_BASE_URL,
-    username: source.BIGSHIP_USERNAME,
-    password: source.BIGSHIP_PASSWORD,
-    accessKey: source.BIGSHIP_ACCESS_KEY,
-    enabled: boolFromEnv(source.BIGSHIP_ENABLED, false),
-    mockMode: boolFromEnv(source.BIGSHIP_MOCK_MODE, true)
+    username: source.BIGSHIP_USERNAME ?? source.BIGSHIP_CLIENT_ID,
+    password: source.BIGSHIP_PASSWORD ?? source.BIGSHIP_CLIENT_SECRET,
+    accessKey: source.BIGSHIP_ACCESS_KEY ?? source.BIGSHIP_API_KEY,
+    apiKey: source.BIGSHIP_API_KEY,
+    clientId: source.BIGSHIP_CLIENT_ID,
+    clientSecret: source.BIGSHIP_CLIENT_SECRET,
+    enableRealCalls,
+    enabled: enableRealCalls,
+    mockMode: mode === "mock" ? true : boolFromEnv(source.BIGSHIP_MOCK_MODE, false),
+    timeoutMs: intFromEnv(source.BIGSHIP_TIMEOUT_MS, DEFAULT_TIMEOUT_MS)
   };
 }
 
@@ -83,18 +127,19 @@ export class BigshipClient {
   private readonly username: string | undefined;
   private readonly password: string | undefined;
   private readonly accessKey: string | undefined;
-  private readonly enabled: boolean;
+  private readonly enableRealCalls: boolean;
   private readonly mockMode: boolean;
   private readonly timeoutMs: number;
   private readonly fetchImpl: BigshipFetch;
 
   constructor(config: BigshipClientConfig = {}, fetchImpl: BigshipFetch = defaultFetch()) {
+    const mode = config.mode ?? (config.mockMode === false ? "sandbox" : "mock");
     this.baseUrl = normalizeBaseUrl(config.baseUrl ?? DEFAULT_BASE_URL);
-    this.username = config.username;
-    this.password = config.password;
-    this.accessKey = config.accessKey;
-    this.enabled = config.enabled ?? false;
-    this.mockMode = config.mockMode ?? true;
+    this.username = config.username ?? config.clientId;
+    this.password = config.password ?? config.clientSecret;
+    this.accessKey = config.accessKey ?? config.apiKey;
+    this.enableRealCalls = config.enableRealCalls ?? config.enabled ?? false;
+    this.mockMode = config.mockMode ?? mode === "mock";
     this.timeoutMs = config.timeoutMs ?? DEFAULT_TIMEOUT_MS;
     this.fetchImpl = fetchImpl;
   }
@@ -102,7 +147,7 @@ export class BigshipClient {
   private assertRealModeAllowed() {
     if (this.mockMode) return;
 
-    if (!this.enabled) {
+    if (!this.enableRealCalls) {
       throw new BigshipConfigError("Courier provider is disabled.");
     }
 
@@ -168,7 +213,7 @@ export class BigshipClient {
       access_key: this.accessKey ?? ""
     };
 
-    return this.requestJson<BigshipLoginResponse>("/api/login", {
+    return this.requestJson<BigshipLoginResponse>(BIGSHIP_ENDPOINTS.login, {
       method: "POST",
       body: request
     });
@@ -183,7 +228,7 @@ export class BigshipClient {
       };
     }
 
-    return this.requestJson<BigshipSaveWarehouseResponse>("/api/warehouse/save", {
+    return this.requestJson<BigshipSaveWarehouseResponse>(BIGSHIP_ENDPOINTS.saveWarehouse, {
       method: "POST",
       token,
       body: input
@@ -203,7 +248,7 @@ export class BigshipClient {
       };
     }
 
-    return this.requestJson<BigshipDomesticB2COrderResponse>("/api/orders/domestic-b2c", {
+    return this.requestJson<BigshipDomesticB2COrderResponse>(BIGSHIP_ENDPOINTS.createDomesticB2COrder, {
       method: "POST",
       token,
       body: input
@@ -251,7 +296,7 @@ export class BigshipClient {
       };
     }
 
-    return this.requestJson<BigshipCourierRateResponse>("/api/rates", {
+    return this.requestJson<BigshipCourierRateResponse>(BIGSHIP_ENDPOINTS.rates, {
       method: "POST",
       token,
       body: input
@@ -269,7 +314,27 @@ export class BigshipClient {
       };
     }
 
-    return this.requestJson<BigshipPlaceOrderResponse>("/api/orders/place", {
+    return this.requestJson<BigshipPlaceOrderResponse>(BIGSHIP_ENDPOINTS.placeOrder, {
+      method: "POST",
+      token,
+      body: input
+    });
+  }
+
+  async getLabel(input: BigshipGetLabelRequest, token: string): Promise<BigshipGetLabelResponse> {
+    if (this.mockMode) {
+      const key = input.shipment_id ?? input.order_id ?? input.awb ?? input.tracking_number ?? "shipment";
+      const safeKey = encodeURIComponent(String(key).replace(/[^a-z0-9_-]/gi, "").slice(-32) || "shipment");
+      const awb = input.awb ?? input.tracking_number ?? "mock_awb_001";
+      return {
+        label_url: `https://labels.shipmastr.local/mock/${safeKey}.pdf`,
+        tracking_url: `https://track.shipmastr.local/${encodeURIComponent(awb)}`,
+        status: "label_generated",
+        message: "Mock label generated."
+      };
+    }
+
+    return this.requestJson<BigshipGetLabelResponse>(BIGSHIP_ENDPOINTS.label, {
       method: "POST",
       token,
       body: input
@@ -300,7 +365,7 @@ export class BigshipClient {
       };
     }
 
-    return this.requestJson<BigshipTrackingResponse>("/api/track", {
+    return this.requestJson<BigshipTrackingResponse>(BIGSHIP_ENDPOINTS.tracking, {
       method: "POST",
       token,
       body: input
@@ -316,7 +381,7 @@ export class BigshipClient {
       };
     }
 
-    return this.requestJson<BigshipCancelOrderResponse>("/api/orders/cancel", {
+    return this.requestJson<BigshipCancelOrderResponse>(BIGSHIP_ENDPOINTS.cancel, {
       method: "POST",
       token,
       body: input

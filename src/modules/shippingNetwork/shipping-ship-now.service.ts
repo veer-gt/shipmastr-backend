@@ -1,0 +1,392 @@
+import { ShipmentStatus, type Prisma } from "@prisma/client";
+import { HttpError } from "../../lib/httpError.js";
+import { prisma } from "../../lib/prisma.js";
+import type { InternalCourierProviderAdapter } from "../courierPartners/providers/provider-adapter.types.js";
+import { createMockSafeShippingAdapter } from "./shipping-pickup-location.service.js";
+import {
+  PUBLIC_COURIER_NETWORK,
+  serviceCodeForName,
+  toPrismaJson,
+  trackingUrlForAwb
+} from "./shipping-public-serializers.js";
+import { fetchShipmentRates } from "./shipping-rates.service.js";
+import {
+  publicTierSummary,
+  selectShippingTiers,
+  type ShippingTier,
+  type ShippingTierCandidate
+} from "./shipping-tier-decision.service.js";
+import { ensureShipmentIsNotTerminal, getSellerShipment } from "./shipping-shipments.service.js";
+
+type Db = Prisma.TransactionClient | typeof prisma;
+
+type ShipNowOptions = {
+  client?: Db;
+  adapter?: InternalCourierProviderAdapter;
+};
+
+type ProviderRefForLabel = {
+  providerOrderId?: string | null;
+  providerShipmentId?: string | null;
+} | null;
+
+type ShipmentForPublicResponse = {
+  id: string;
+  awbNumber?: string | null;
+  trackingUrl?: string | null;
+  serviceLevel?: string | null;
+  metadata?: unknown;
+};
+
+function metadataObject(value: unknown) {
+  if (!value || typeof value !== "object" || Array.isArray(value)) return {};
+  return value as Record<string, unknown>;
+}
+
+function phase6Metadata(value: unknown) {
+  const metadata = metadataObject(value);
+  return metadataObject(metadata.phase6);
+}
+
+function stringMetadata(value: unknown) {
+  return typeof value === "string" && value.trim() ? value.trim() : null;
+}
+
+function numberMetadata(value: unknown, fallback: number | null = null) {
+  if (typeof value === "number" && Number.isFinite(value)) return value;
+  if (typeof value === "string" && Number.isFinite(Number(value))) return Number(value);
+  return fallback;
+}
+
+function boolMetadata(value: unknown, fallback = true) {
+  return typeof value === "boolean" ? value : fallback;
+}
+
+function publicAwb(shipmentId: string, fallback: string | null | undefined) {
+  if (fallback && !fallback.toLowerCase().startsWith("mock_")) return fallback;
+  const suffix = shipmentId.replace(/[^a-z0-9]/gi, "").slice(-10).toUpperCase();
+  return `SM${suffix || "SHIPMENT"}`;
+}
+
+function publicShipNowResponse(input: {
+  shipment: ShipmentForPublicResponse;
+  tier: ShippingTier;
+  serviceLevel: string | null;
+  labelUrl?: string | null;
+  trackingUrl?: string | null;
+  status?: "label_generated" | "awb_assigned";
+}) {
+  const awbNumber = input.shipment.awbNumber ?? null;
+  const labelUrl = input.labelUrl ?? stringMetadata(phase6Metadata(input.shipment.metadata).labelUrl);
+  const trackingUrl = input.trackingUrl ?? input.shipment.trackingUrl ?? trackingUrlForAwb(awbNumber);
+
+  return {
+    shipmentId: input.shipment.id,
+    shipment_id: input.shipment.id,
+    status: input.status ?? (labelUrl ? "label_generated" : "awb_assigned"),
+    tier: input.tier,
+    serviceLevel: input.serviceLevel,
+    courierNetwork: PUBLIC_COURIER_NETWORK,
+    awbNumber,
+    labelUrl,
+    trackingUrl,
+    message: labelUrl ? "Shipment created successfully" : "Shipment AWB generated. Label is pending."
+  };
+}
+
+function selectedCourierId(rateBreakup: unknown) {
+  const metadata = metadataObject(rateBreakup);
+  const value = metadata.internalCourierId;
+  return typeof value === "string" && value.trim() ? value.trim() : null;
+}
+
+function providerErrorJson(error: unknown) {
+  const maybe = error as { code?: unknown; retryable?: unknown; statusCode?: unknown };
+  const result: Record<string, unknown> = {
+    code: typeof maybe?.code === "string" ? maybe.code : "COURIER_PROVIDER_ERROR",
+    message: "Courier provider request failed.",
+    retryable: typeof maybe?.retryable === "boolean" ? maybe.retryable : true
+  };
+
+  if (typeof maybe?.statusCode === "number") result.statusCode = maybe.statusCode;
+  return result;
+}
+
+function rateCandidate(rate: {
+  id: string;
+  amountPaise: number;
+  currency: string;
+  estimatedDeliveryDays?: number | null;
+  chargeableWeightKg?: unknown;
+  rateBreakup?: unknown;
+}): ShippingTierCandidate {
+  const metadata = metadataObject(metadataObject(rate.rateBreakup).phase6);
+
+  return {
+    id: rate.id,
+    amountPaise: rate.amountPaise,
+    currency: rate.currency,
+    estimatedDeliveryDays: rate.estimatedDeliveryDays ?? null,
+    chargeableWeightKg: rate.chargeableWeightKg,
+    codSupported: boolMetadata(metadata.codSupported, true),
+    pickupAvailable: boolMetadata(metadata.pickupAvailable, true),
+    deliveryAvailable: boolMetadata(metadata.deliveryAvailable, true),
+    reliabilityScore: numberMetadata(metadata.reliabilityScore, 0.75)
+  };
+}
+
+async function findRates(client: Db, shipmentId: string, sellerId: string) {
+  return client.shipmentRate.findMany({
+    where: {
+      shipmentId,
+      sellerId
+    },
+    orderBy: { createdAt: "desc" }
+  });
+}
+
+async function storeProviderError(input: {
+  client: Db;
+  shipment: Awaited<ReturnType<typeof getSellerShipment>>;
+  error: unknown;
+  providerStatus?: string;
+}) {
+  const metadata = metadataObject(input.shipment.metadata);
+  const phase6 = phase6Metadata(input.shipment.metadata);
+
+  await input.client.shipment.update({
+    where: { id: input.shipment.id },
+    data: {
+      metadata: toPrismaJson({
+        ...metadata,
+        phase6: {
+          ...phase6,
+          providerStatus: input.providerStatus ?? "provider_failed",
+          providerErrorJson: providerErrorJson(input.error)
+        }
+      })
+    }
+  });
+}
+
+async function tryFetchLabel(input: {
+  client: Db;
+  adapter: InternalCourierProviderAdapter;
+  sellerId: string;
+  shipment: Awaited<ReturnType<typeof getSellerShipment>>;
+  providerRef: ProviderRefForLabel;
+  tier: ShippingTier;
+  serviceLevel: string | null;
+}) {
+  const awb = input.shipment.awbNumber;
+  if (!awb) {
+    return publicShipNowResponse({
+      shipment: input.shipment,
+      tier: input.tier,
+      serviceLevel: input.serviceLevel,
+      status: "awb_assigned"
+    });
+  }
+
+  try {
+    const label = await input.adapter.getLabel({
+      sellerId: input.sellerId,
+      shipmentId: input.shipment.id,
+      awb,
+      trackingNumber: awb,
+      providerOrderId: input.providerRef?.providerOrderId ?? null,
+      providerShipmentId: input.providerRef?.providerShipmentId ?? null
+    });
+    const metadata = metadataObject(input.shipment.metadata);
+    const phase6 = phase6Metadata(input.shipment.metadata);
+    const trackingUrl = label.trackingUrl ?? input.shipment.trackingUrl ?? trackingUrlForAwb(awb);
+
+    const updated = await input.client.shipment.update({
+      where: { id: input.shipment.id },
+      data: {
+        trackingUrl,
+        metadata: toPrismaJson({
+          ...metadata,
+          phase6: {
+            ...phase6,
+            selectedTier: input.tier,
+            labelUrl: label.labelUrl,
+            trackingUrl,
+            providerStatus: label.labelUrl ? "label_generated" : "awb_assigned",
+            labelGeneratedAt: label.labelUrl ? new Date().toISOString() : null,
+            providerResponseJson: {
+              ...metadataObject(phase6.providerResponseJson),
+              label: label.providerMetadata
+            }
+          }
+        })
+      }
+    });
+
+    return publicShipNowResponse({
+      shipment: updated,
+      tier: input.tier,
+      serviceLevel: input.serviceLevel,
+      labelUrl: label.labelUrl,
+      trackingUrl,
+      status: label.labelUrl ? "label_generated" : "awb_assigned"
+    });
+  } catch (error) {
+    await storeProviderError({
+      client: input.client,
+      shipment: input.shipment,
+      error,
+      providerStatus: "awb_assigned"
+    });
+    return publicShipNowResponse({
+      shipment: input.shipment,
+      tier: input.tier,
+      serviceLevel: input.serviceLevel,
+      status: "awb_assigned"
+    });
+  }
+}
+
+export async function shipNowShipment(
+  sellerId: string,
+  shipmentId: string,
+  tier: ShippingTier,
+  options: ShipNowOptions = {}
+) {
+  const client = options.client ?? prisma;
+  const adapter = options.adapter ?? createMockSafeShippingAdapter();
+  const shipment = await getSellerShipment(sellerId, shipmentId, client);
+  ensureShipmentIsNotTerminal(shipment.status);
+
+  const existingPhase6 = phase6Metadata(shipment.metadata);
+  const existingLabelUrl = stringMetadata(existingPhase6.labelUrl);
+  if (shipment.awbNumber && existingLabelUrl) {
+    const existingTier = stringMetadata(existingPhase6.selectedTier) as ShippingTier | null;
+    return publicShipNowResponse({
+      shipment,
+      tier: existingTier ?? tier,
+      serviceLevel: shipment.serviceLevel ?? null,
+      labelUrl: existingLabelUrl,
+      trackingUrl: stringMetadata(existingPhase6.trackingUrl) ?? shipment.trackingUrl
+    });
+  }
+
+  let rates = await findRates(client, shipment.id, sellerId);
+  if (!rates.length) {
+    await fetchShipmentRates(sellerId, shipment.id, { client, adapter });
+    rates = await findRates(client, shipment.id, sellerId);
+  }
+
+  const tiers = selectShippingTiers(rates.map(rateCandidate), shipment.paymentMode);
+  const selectedTier = tiers[tier];
+  const selectedRate = rates.find((rate) => rate.id === selectedTier.rateId);
+
+  if (!selectedRate) {
+    throw new HttpError(409, "SHIPMENT_RATE_NOT_FOUND");
+  }
+
+  const providerRef = await client.shipmentProviderRef.findFirst({
+    where: {
+      shipmentId: shipment.id,
+      courierPartnerId: selectedRate.courierPartnerId
+    },
+    orderBy: { createdAt: "desc" }
+  });
+
+  if (!providerRef?.providerOrderId) {
+    throw new HttpError(409, "SHIPMENT_PROVIDER_DRAFT_MISSING");
+  }
+
+  if (shipment.awbNumber) {
+    return tryFetchLabel({
+      client,
+      adapter,
+      sellerId,
+      shipment,
+      providerRef,
+      tier,
+      serviceLevel: selectedRate.publicServiceName
+    });
+  }
+
+  const internalCourierId = selectedCourierId(selectedRate.rateBreakup);
+  if (!internalCourierId) {
+    throw new HttpError(409, "SHIPMENT_RATE_INTERNAL_MAPPING_MISSING");
+  }
+
+  try {
+    const manifested = await adapter.manifestOrder({
+      sellerId,
+      shipmentId: shipment.id,
+      providerOrderId: providerRef.providerOrderId,
+      providerCourierId: internalCourierId,
+      selectedRateId: selectedRate.id
+    });
+    const awb = publicAwb(shipment.id, manifested.awb);
+    const trackingUrl = manifested.trackingUrl ?? trackingUrlForAwb(awb);
+    const metadata = metadataObject(shipment.metadata);
+    const phase6 = phase6Metadata(shipment.metadata);
+    const serviceLevel = selectedRate.publicServiceName;
+
+    await client.shipmentProviderRef.update({
+      where: { id: providerRef.id },
+      data: {
+        providerAwb: manifested.providerAwb ?? manifested.awb,
+        metadata: toPrismaJson({
+          ...metadataObject(providerRef.metadata),
+          phase6: {
+            ...metadataObject(metadataObject(providerRef.metadata).phase6),
+            manifestReference: manifested.providerReferenceNumber,
+            manifestStatus: manifested.status,
+            providerResponseJson: manifested.providerMetadata
+          }
+        })
+      }
+    });
+
+    const updated = await client.shipment.update({
+      where: { id: shipment.id },
+      data: {
+        status: ShipmentStatus.manifested,
+        awbNumber: awb,
+        trackingUrl,
+        serviceLevel,
+        sellerCourierPartnerId: selectedRate.sellerCourierPartnerId,
+        courierPartnerId: selectedRate.courierPartnerId,
+        metadata: toPrismaJson({
+          ...metadata,
+          phase6: {
+            ...phase6,
+            selectedTier: tier,
+            selectedTierLabel: selectedTier.label,
+            selectedRateId: selectedRate.id,
+            selectedServiceCode: serviceCodeForName(serviceLevel),
+            tierSummary: publicTierSummary(tiers),
+            providerStatus: "awb_assigned",
+            awbAssignedAt: new Date().toISOString(),
+            trackingUrl,
+            providerResponseJson: {
+              ...metadataObject(phase6.providerResponseJson),
+              manifest: manifested.providerMetadata
+            }
+          }
+        })
+      }
+    });
+
+    return tryFetchLabel({
+      client,
+      adapter,
+      sellerId,
+      shipment: updated,
+      providerRef,
+      tier,
+      serviceLevel
+    });
+  } catch (error) {
+    await storeProviderError({ client, shipment, error });
+    throw new HttpError(502, "SHIPMENT_CREATION_FAILED", {
+      retryable: providerErrorJson(error).retryable
+    });
+  }
+}

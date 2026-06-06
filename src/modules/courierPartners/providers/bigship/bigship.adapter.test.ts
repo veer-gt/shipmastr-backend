@@ -1,12 +1,13 @@
 import assert from "node:assert/strict";
 import { describe, it } from "node:test";
 import { BigshipAdapter } from "./bigship.adapter.js";
-import { BigshipClient } from "./bigship.client.js";
+import { BigshipClient, bigshipClientConfigFromEnv } from "./bigship.client.js";
 import { BigshipConfigError, normalizeBigshipError } from "./bigship.errors.js";
 import type {
   BigshipCancelOrderRequest,
   BigshipCourierRateRequest,
   BigshipDomesticB2COrderRequest,
+  BigshipGetLabelRequest,
   BigshipPlaceOrderRequest,
   BigshipSaveWarehouseRequest,
   BigshipTrackingRequest
@@ -83,6 +84,7 @@ function fakeClient() {
     createDomesticB2COrder: 0,
     getRates: 0,
     placeOrder: 0,
+    getLabel: 0,
     trackOrder: 0,
     cancelOrder: 0
   };
@@ -91,6 +93,7 @@ function fakeClient() {
     order: null as BigshipDomesticB2COrderRequest | null,
     rates: null as BigshipCourierRateRequest | null,
     manifest: null as BigshipPlaceOrderRequest | null,
+    label: null as BigshipGetLabelRequest | null,
     tracking: null as BigshipTrackingRequest | null,
     cancel: null as BigshipCancelOrderRequest | null
   };
@@ -157,6 +160,16 @@ function fakeClient() {
           reference_number: "mock_manifest_001",
           status: "manifested",
           message: "manifested"
+        };
+      },
+      getLabel: async (input: BigshipGetLabelRequest) => {
+        calls.getLabel += 1;
+        requests.label = input;
+        return {
+          label_url: `https://labels.shipmastr.local/mock/${input.shipment_id ?? "shipment_1"}.pdf`,
+          tracking_url: "https://track.shipmastr.local/mock_awb_001",
+          status: "label_generated",
+          message: "label generated"
         };
       },
       trackOrder: async (input: BigshipTrackingRequest) => {
@@ -258,6 +271,27 @@ describe("Bigship internal adapter", () => {
     ]);
   });
 
+  it("reads new Bigship env names while defaulting to mock-safe mode", () => {
+    const config = bigshipClientConfigFromEnv({
+      BIGSHIP_MODE: "sandbox",
+      BIGSHIP_BASE_URL: "https://sandbox.example.test/",
+      BIGSHIP_API_KEY: "internal_api_key",
+      BIGSHIP_CLIENT_ID: "internal_client",
+      BIGSHIP_CLIENT_SECRET: "internal_secret",
+      BIGSHIP_TIMEOUT_MS: "12000",
+      BIGSHIP_ENABLE_REAL_CALLS: "false"
+    } as NodeJS.ProcessEnv);
+
+    assert.equal(config.mode, "sandbox");
+    assert.equal(config.baseUrl, "https://sandbox.example.test/");
+    assert.equal(config.accessKey, "internal_api_key");
+    assert.equal(config.username, "internal_client");
+    assert.equal(config.password, "internal_secret");
+    assert.equal(config.timeoutMs, 12000);
+    assert.equal(config.enableRealCalls, false);
+    assert.equal(config.mockMode, false);
+  });
+
   it("real mode without credentials throws a safe config error", async () => {
     const client = new BigshipClient({
       enabled: true,
@@ -323,6 +357,23 @@ describe("Bigship internal adapter", () => {
     assert.equal(result.awb, "mock_awb_001");
     assert.equal(result.trackingNumber, "mock_awb_001");
     assert.equal(result.status, "manifested");
+  });
+
+  it("getLabel maps label and tracking URLs", async () => {
+    const fake = fakeClient();
+    const adapter = new BigshipAdapter({ client: fake.client });
+
+    const result = await adapter.getLabel({
+      sellerId: "seller_1",
+      shipmentId: "shipment_1",
+      awb: "mock_awb_001"
+    });
+
+    assert.equal(fake.calls.getLabel, 1);
+    assert.equal(fake.requests.label?.shipment_id, "shipment_1");
+    assert.equal(result.status, "manifested");
+    assert.equal(result.labelUrl, "https://labels.shipmastr.local/mock/shipment_1.pdf");
+    assert.equal(result.trackingUrl, "https://track.shipmastr.local/mock_awb_001");
   });
 
   it("trackOrder normalizes statuses", async () => {

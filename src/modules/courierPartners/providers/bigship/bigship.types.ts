@@ -111,7 +111,27 @@ export type BigshipPlaceOrderResponse = {
   awb_assigned?: string;
   awb?: string;
   tracking_number?: string;
+  label_url?: string;
+  labelUrl?: string;
+  tracking_url?: string;
+  trackingUrl?: string;
   reference_number?: string;
+  status?: string;
+  message?: string;
+};
+
+export type BigshipGetLabelRequest = {
+  awb?: string | null;
+  tracking_number?: string | null;
+  order_id?: string | null;
+  shipment_id?: string | null;
+};
+
+export type BigshipGetLabelResponse = {
+  label_url?: string | null;
+  labelUrl?: string | null;
+  tracking_url?: string | null;
+  trackingUrl?: string | null;
   status?: string;
   message?: string;
 };

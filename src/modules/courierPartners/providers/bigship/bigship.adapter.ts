@@ -4,6 +4,8 @@ import type {
   ProviderCancelResult,
   ProviderDraftOrderInput,
   ProviderDraftOrderResult,
+  ProviderLabelInput,
+  ProviderLabelResult,
   ProviderManifestInput,
   ProviderManifestResult,
   ProviderPickupLocationInput,
@@ -24,6 +26,7 @@ import {
 import {
   mapBigshipCancelToProviderCancel,
   mapBigshipDraftOrderToProviderDraftOrder,
+  mapBigshipLabelToProviderLabel,
   mapBigshipManifestToProviderManifest,
   mapBigshipPickupToProviderPickup,
   mapBigshipRateInputToRateRequest,
@@ -39,6 +42,8 @@ import type {
   BigshipCourierRateResponse,
   BigshipDomesticB2COrderRequest,
   BigshipDomesticB2COrderResponse,
+  BigshipGetLabelRequest,
+  BigshipGetLabelResponse,
   BigshipLoginResponse,
   BigshipPlaceOrderRequest,
   BigshipPlaceOrderResponse,
@@ -57,6 +62,7 @@ type BigshipAdapterClient = {
   ): Promise<BigshipDomesticB2COrderResponse>;
   getRates(input: BigshipCourierRateRequest, token: string): Promise<BigshipCourierRateResponse>;
   placeOrder(input: BigshipPlaceOrderRequest, token: string): Promise<BigshipPlaceOrderResponse>;
+  getLabel(input: BigshipGetLabelRequest, token: string): Promise<BigshipGetLabelResponse>;
   trackOrder(input: BigshipTrackingRequest, token: string): Promise<BigshipTrackingResponse>;
   cancelOrder(input: BigshipCancelOrderRequest, token: string): Promise<BigshipCancelOrderResponse>;
 };
@@ -186,6 +192,21 @@ export class BigshipAdapter implements InternalCourierProviderAdapter {
         courierId: input.providerCourierId
       }, token.token);
       return mapBigshipManifestToProviderManifest(response);
+    } catch (error) {
+      this.safeProviderError(error);
+    }
+  }
+
+  async getLabel(input: ProviderLabelInput): Promise<ProviderLabelResult> {
+    try {
+      const token = await this.ensureToken();
+      const response = await this.client.getLabel({
+        awb: input.awb ?? null,
+        tracking_number: input.trackingNumber ?? null,
+        order_id: input.providerOrderId ?? null,
+        shipment_id: input.providerShipmentId ?? input.shipmentId
+      }, token.token);
+      return mapBigshipLabelToProviderLabel(response);
     } catch (error) {
       this.safeProviderError(error);
     }

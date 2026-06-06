@@ -3,6 +3,7 @@ import type {
   ProviderCancelResult,
   ProviderDraftOrderInput,
   ProviderDraftOrderResult,
+  ProviderLabelResult,
   ProviderManifestResult,
   ProviderPickupLocationInput,
   ProviderPickupLocationResult,
@@ -18,6 +19,7 @@ import type {
   BigshipCourierRateResponse,
   BigshipDomesticB2COrderRequest,
   BigshipDomesticB2COrderResponse,
+  BigshipGetLabelResponse,
   BigshipPlaceOrderResponse,
   BigshipSaveWarehouseRequest,
   BigshipSaveWarehouseResponse,
@@ -99,7 +101,7 @@ export function mapBigshipStatusToShipmentStatus(status: string | undefined): Pr
   if (normalized.includes("delivered")) return "delivered";
   if (normalized.includes("picked") || normalized.includes("pickup_done")) return "picked_up";
   if (normalized.includes("pickup")) return "pickup_scheduled";
-  if (normalized.includes("manifest") || normalized.includes("ready")) return "manifested";
+  if (normalized.includes("label") || normalized.includes("manifest") || normalized.includes("ready")) return "manifested";
   if (normalized.includes("cancel")) return "cancelled";
   if (normalized.includes("lost")) return "lost";
   if (normalized.includes("damage")) return "damaged";
@@ -214,6 +216,10 @@ export function mapBigshipRatesToProviderRates(response: BigshipCourierRateRespo
       currency: "INR",
       tatDays: rateTat(rawRate),
       chargedWeightKg: rateChargedWeight(rawRate),
+      codSupported: true,
+      pickupAvailable: true,
+      deliveryAvailable: true,
+      reliabilityScore: 0.75,
       providerCourierId,
       providerMetadata: {
         providerCourierId,
@@ -264,6 +270,8 @@ export function mapBigshipManifestToProviderManifest(
     trackingNumber,
     status,
     providerReferenceNumber: nonEmptyString(response.reference_number) ?? "mock_provider_reference_001",
+    labelUrl: nonEmptyString(response.label_url ?? response.labelUrl) ?? null,
+    trackingUrl: nonEmptyString(response.tracking_url ?? response.trackingUrl) ?? null,
     message: response.message ?? "Shipment manifested.",
     providerMetadata: {
       status: response.status ?? "manifested"
@@ -272,6 +280,21 @@ export function mapBigshipManifestToProviderManifest(
 
   result.providerAwb = awb;
   return result;
+}
+
+export function mapBigshipLabelToProviderLabel(response: BigshipGetLabelResponse): ProviderLabelResult {
+  const status = mapBigshipStatusToShipmentStatus(response.status ?? "manifested");
+
+  return {
+    labelUrl: nonEmptyString(response.label_url ?? response.labelUrl) ?? null,
+    trackingUrl: nonEmptyString(response.tracking_url ?? response.trackingUrl) ?? null,
+    status,
+    message: response.message ?? "Shipment label fetched.",
+    providerMetadata: {
+      status: response.status ?? "manifested",
+      hasLabel: Boolean(response.label_url ?? response.labelUrl)
+    }
+  };
 }
 
 function mapTrackingEvent(event: BigshipTrackingEvent): ProviderTrackingEvent {

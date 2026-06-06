@@ -16,7 +16,9 @@ import { cancelShipment } from "./shipping-cancel.service.js";
 import { manifestShipment } from "./shipping-manifest.service.js";
 import { createShippingPickupLocation, listShippingPickupLocations } from "./shipping-pickup-location.service.js";
 import { fetchShipmentRates } from "./shipping-rates.service.js";
+import { shipNowShipment } from "./shipping-ship-now.service.js";
 import { createShipmentDraft } from "./shipping-shipments.service.js";
+import { selectShippingTiers } from "./shipping-tier-decision.service.js";
 import { fetchShipmentTracking } from "./shipping-tracking.service.js";
 import { listShippingShipments } from "./shipping-list.service.js";
 import { createShipmentFromOrder } from "./shipping-order-bridge.service.js";
@@ -36,6 +38,7 @@ function createFakeAdapter(): InternalCourierProviderAdapter & { calls: Record<s
     createDraftOrder: 0,
     getRates: 0,
     manifestOrder: 0,
+    getLabel: 0,
     trackOrder: 0,
     cancelOrder: 0
   };
@@ -92,6 +95,16 @@ function createFakeAdapter(): InternalCourierProviderAdapter & { calls: Record<s
         chargedWeightKg: 1,
         providerCourierId: "internal_courier_economy",
         providerMetadata: { score: 80 }
+      }, {
+        rateId: "internal_rate_express",
+        serviceLevel: "Shipmastr Express",
+        courierNetwork: "Shipmastr Courier Network",
+        totalCharge: 94,
+        currency: "INR",
+        tatDays: 1,
+        chargedWeightKg: 1,
+        providerCourierId: "internal_courier_express",
+        providerMetadata: { score: 85 }
       }];
     },
     manifestOrder: async () => {
@@ -104,6 +117,16 @@ function createFakeAdapter(): InternalCourierProviderAdapter & { calls: Record<s
         providerAwb: "mock_awb_001",
         message: "manifested",
         providerMetadata: { manifested: true }
+      };
+    },
+    getLabel: async ({ shipmentId, awb }) => {
+      calls.getLabel += 1;
+      return {
+        labelUrl: `https://labels.shipmastr.local/mock/${shipmentId}.pdf`,
+        trackingUrl: `https://track.shipmastr.local/${awb ?? "mock_awb_001"}`,
+        status: "manifested",
+        message: "label generated",
+        providerMetadata: { label: true }
       };
     },
     trackOrder: async () => {
@@ -295,6 +318,16 @@ function createFakeClient() {
         state.rates.push(row);
         return row;
       },
+      findMany: async ({ where, orderBy }: any) => {
+        const rows = state.rates.filter((row) =>
+          (where.shipmentId === undefined || row.shipmentId === where.shipmentId) &&
+          (where.sellerId === undefined || row.sellerId === where.sellerId)
+        );
+        if (orderBy?.createdAt === "desc") {
+          return [...rows].sort((left, right) => right.createdAt.getTime() - left.createdAt.getTime());
+        }
+        return rows;
+      },
       findFirst: async ({ where }: any) => state.rates.find((row) =>
         row.id === where.id && row.shipmentId === where.shipmentId && row.sellerId === where.sellerId
       ) ?? null
@@ -434,7 +467,7 @@ describe("Shipmastr Shipping Network services", () => {
     assert.equal(shipment.payment_mode, "cod");
   });
 
-  it("fetches rates, reuses provider drafts, and keeps public rates provider-safe", async () => {
+  it("fetches rates, reuses provider drafts, caches rates, and keeps public rates provider-safe", async () => {
     const { client, state } = createFakeClient();
     const adapter = createFakeAdapter();
     const pickup = await createShippingPickupLocation("seller_1", pickupBody(), { client, adapter });
@@ -445,11 +478,15 @@ describe("Shipmastr Shipping Network services", () => {
     const json = JSON.stringify(first);
 
     assert.equal(adapter.calls.createDraftOrder, 1);
-    assert.equal(adapter.calls.getRates, 2);
+    assert.equal(adapter.calls.getRates, 1);
     assert.equal(state.providerRefs.length, 1);
-    assert.equal(state.rates.length, 4);
-    assert.equal(first.rates.length, 2);
-    assert.equal(second.rates.length, 2);
+    assert.equal(state.rates.length, 3);
+    assert.equal(first.rates.length, 3);
+    assert.equal(second.rates.length, 3);
+    assert.equal(first.status, "rates_available");
+    assert.equal(first.tiers.smart.label, "Shipmastr Smart");
+    assert.equal(first.tiers.economy.label, "Shipmastr Economy");
+    assert.equal(first.tiers.express.label, "Shipmastr Express");
     assert.equal(first.rates[0]?.courier_network, "Shipmastr Courier Network");
     assert.doesNotMatch(json, /internal_courier|internal_order|providerOrder|provider_order|bigship/i);
   });
@@ -472,6 +509,56 @@ describe("Shipmastr Shipping Network services", () => {
     assert.equal(manifested.tracking_number, manifested.awb);
     assert.equal(manifested.courier_network, "Shipmastr Courier Network");
     assert.equal(manifested.service_level, "Shipmastr Smart");
+  });
+
+  it("ship-now fetches rates if missing, uses the requested tier, and stores AWB plus label", async () => {
+    const { client, state } = createFakeClient();
+    const adapter = createFakeAdapter();
+    const pickup = await createShippingPickupLocation("seller_1", pickupBody(), { client, adapter });
+    const shipment = await createShipmentDraft("seller_1", shipmentBody(pickup.pickup_location_id), client);
+
+    const created = await shipNowShipment("seller_1", shipment.shipment_id, "economy", { client, adapter });
+    const second = await shipNowShipment("seller_1", shipment.shipment_id, "economy", { client, adapter });
+    const json = JSON.stringify(created);
+
+    assert.equal(adapter.calls.getRates, 1);
+    assert.equal(adapter.calls.manifestOrder, 1);
+    assert.equal(adapter.calls.getLabel, 1);
+    assert.equal(created.status, "label_generated");
+    assert.equal(created.tier, "economy");
+    assert.equal(created.serviceLevel, "Shipmastr Economy");
+    assert.match(created.awbNumber ?? "", /^SM/);
+    assert.equal(created.labelUrl, "https://labels.shipmastr.local/mock/shipment_1.pdf");
+    assert.equal(second.awbNumber, created.awbNumber);
+    assert.equal(adapter.calls.manifestOrder, 1);
+    assert.equal(adapter.calls.getLabel, 1);
+    assert.equal(state.providerRefs[0]?.providerAwb, "mock_awb_001");
+    assert.equal(state.shipments[0]?.serviceLevel, "Shipmastr Economy");
+    assert.doesNotMatch(json, /internal_courier|internal_order|providerOrder|provider_order|bigship/i);
+  });
+
+  it("ship-now handles provider failure safely without leaking internals", async () => {
+    const { client, state } = createFakeClient();
+    const adapter = createFakeAdapter();
+    const pickup = await createShippingPickupLocation("seller_1", pickupBody(), { client, adapter });
+    const shipment = await createShipmentDraft("seller_1", shipmentBody(pickup.pickup_location_id), client);
+    adapter.manifestOrder = async () => {
+      adapter.calls.manifestOrder = (adapter.calls.manifestOrder ?? 0) + 1;
+      throw Object.assign(new Error("internal provider exploded"), {
+        code: "COURIER_PROVIDER_HTTP_ERROR",
+        retryable: true
+      });
+    };
+
+    await assert.rejects(
+      () => shipNowShipment("seller_1", shipment.shipment_id, "smart", { client, adapter }),
+      (error) => error instanceof HttpError && error.message === "SHIPMENT_CREATION_FAILED"
+    );
+
+    const json = JSON.stringify(state.shipments[0]?.metadata);
+    assert.equal(adapter.calls.manifestOrder, 1);
+    assert.match(json, /providerErrorJson/);
+    assert.doesNotMatch(json, /internal provider exploded|access_key|password|token/i);
   });
 
   it("stores normalized public tracking history", async () => {
@@ -610,6 +697,40 @@ describe("Shipmastr Shipping Network services", () => {
     ].sort());
   });
 
+  it("selects Economy, Express, and Smart tiers deterministically", () => {
+    const tiers = selectShippingTiers([
+      {
+        id: "slow_cheap",
+        amountPaise: 4900,
+        currency: "INR",
+        estimatedDeliveryDays: 5,
+        chargeableWeightKg: 1,
+        reliabilityScore: 0.7
+      },
+      {
+        id: "balanced",
+        amountPaise: 6200,
+        currency: "INR",
+        estimatedDeliveryDays: 2,
+        chargeableWeightKg: 1,
+        reliabilityScore: 0.95
+      },
+      {
+        id: "fast_costly",
+        amountPaise: 9800,
+        currency: "INR",
+        estimatedDeliveryDays: 1,
+        chargeableWeightKg: 1,
+        reliabilityScore: 0.75
+      }
+    ], "cod");
+
+    assert.equal(tiers.economy.rateId, "slow_cheap");
+    assert.equal(tiers.express.rateId, "fast_costly");
+    assert.equal(tiers.smart.rateId, "balanced");
+    assert.equal(tiers.smart.recommended, true);
+  });
+
   it("creates a shipment draft from an existing seller order without provider calls", async () => {
     const { client, state } = createFakeClient();
     const adapter = createFakeAdapter();
@@ -677,6 +798,7 @@ describe("Shipmastr Shipping Network services", () => {
     assert.match(routes, /apiRouter\.use\("\/shipments", requireJwtAuth, shipmentsRouter\);/);
     assert.match(shippingRoutes, /shippingNetworkRouter\.get\("\/shipments"/);
     assert.match(shippingRoutes, /shippingNetworkRouter\.post\("\/orders\/:orderId\/create-shipment"/);
+    assert.match(shippingRoutes, /shippingNetworkRouter\.post\("\/shipments\/:shipmentId\/ship-now"/);
     assert.match(legacyShipments, /shipmentsRouter\.get\("\/",/);
     assert.match(legacyShipments, /shipmentsRouter\.post\("\/",/);
   });

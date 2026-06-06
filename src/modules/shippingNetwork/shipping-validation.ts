@@ -99,6 +99,14 @@ export const manifestShipmentSchema = z.object({
   documents: z.record(z.string(), z.unknown()).optional()
 }).strict();
 
+export const fetchShipmentRatesSchema = z.object({
+  refresh: z.boolean().optional()
+}).strict();
+
+export const shipNowSchema = z.object({
+  tier: z.enum(["smart", "economy", "express"]).default("smart")
+}).strict();
+
 export const cancelShipmentSchema = z.object({
   reason: z.string().trim().max(300).optional()
 }).strict();
@@ -175,6 +183,8 @@ export type UpdatePickupLocationInput = z.infer<typeof updatePickupLocationSchem
 export type CreateShipmentInput = z.infer<typeof createShipmentSchema>;
 export type ShipmentBoxInput = z.infer<typeof shipmentBoxSchema>;
 export type ManifestShipmentInput = z.infer<typeof manifestShipmentSchema>;
+export type FetchShipmentRatesInput = z.infer<typeof fetchShipmentRatesSchema>;
+export type ShipNowInput = z.infer<typeof shipNowSchema>;
 export type CancelShipmentInput = z.infer<typeof cancelShipmentSchema>;
 export type ListShipmentsQueryInput = z.infer<typeof listShipmentsQuerySchema>;
 export type CreateShipmentFromOrderInput = z.infer<typeof createShipmentFromOrderSchema>;

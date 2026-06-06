@@ -9,6 +9,12 @@ import {
   toPrismaJson
 } from "./shipping-public-serializers.js";
 import {
+  publicTierSummary,
+  selectShippingTiers,
+  shippingTierFromServiceCode,
+  type ShippingTierCandidate
+} from "./shipping-tier-decision.service.js";
+import {
   createMockSafeShippingAdapter,
   ensureSystemManagedCourierNetwork
 } from "./shipping-pickup-location.service.js";
@@ -24,7 +30,98 @@ type Db = Prisma.TransactionClient | typeof prisma;
 type RateOptions = {
   client?: Db;
   adapter?: InternalCourierProviderAdapter;
+  refresh?: boolean;
 };
+
+function metadataObject(value: unknown) {
+  if (!value || typeof value !== "object" || Array.isArray(value)) return {};
+  return value as Record<string, unknown>;
+}
+
+function boolMetadata(value: unknown, fallback = true) {
+  return typeof value === "boolean" ? value : fallback;
+}
+
+function numberMetadata(value: unknown, fallback: number | null = null) {
+  if (typeof value === "number" && Number.isFinite(value)) return value;
+  if (typeof value === "string" && Number.isFinite(Number(value))) return Number(value);
+  return fallback;
+}
+
+function rateBreakupObject(value: unknown) {
+  return metadataObject(value);
+}
+
+function phase6RateMetadata(rateBreakup: unknown) {
+  const metadata = rateBreakupObject(rateBreakup);
+  const phase6 = metadata.phase6;
+  return metadataObject(phase6);
+}
+
+function tierCandidateFromRate(rate: {
+  id: string;
+  publicServiceCode?: string | null;
+  publicServiceName?: string | null;
+  amountPaise: number;
+  currency: string;
+  estimatedDeliveryDays?: number | null;
+  chargeableWeightKg?: unknown;
+  rateBreakup?: unknown;
+}): ShippingTierCandidate {
+  const metadata = phase6RateMetadata(rate.rateBreakup);
+  const candidate: ShippingTierCandidate = {
+    id: rate.id,
+    amountPaise: rate.amountPaise,
+    currency: rate.currency,
+    estimatedDeliveryDays: rate.estimatedDeliveryDays ?? null,
+    chargeableWeightKg: rate.chargeableWeightKg,
+    codSupported: boolMetadata(metadata.codSupported, true),
+    pickupAvailable: boolMetadata(metadata.pickupAvailable, true),
+    deliveryAvailable: boolMetadata(metadata.deliveryAvailable, true),
+    reliabilityScore: numberMetadata(metadata.reliabilityScore, 0.75)
+  };
+
+  if (rate.publicServiceName !== undefined) candidate.publicServiceName = rate.publicServiceName;
+  return candidate;
+}
+
+function rateTierResponse(
+  shipmentId: string,
+  paymentMode: string,
+  rates: Array<Parameters<typeof tierCandidateFromRate>[0]>
+) {
+  let tiers: ReturnType<typeof selectShippingTiers>;
+  try {
+    tiers = selectShippingTiers(rates.map(tierCandidateFromRate), paymentMode);
+  } catch {
+    throw new HttpError(409, "NO_ELIGIBLE_SHIPPING_RATES");
+  }
+
+  return {
+    shipment_id: shipmentId,
+    shipmentId,
+    status: "rates_available",
+    tiers: publicTierSummary(tiers),
+    rates: rates.map((rate) => serializeRate({
+      id: rate.id,
+      publicServiceName: rate.publicServiceName ?? "Shipmastr Smart",
+      chargeableWeightKg: rate.chargeableWeightKg,
+      amountPaise: rate.amountPaise,
+      currency: rate.currency,
+      estimatedDeliveryDays: rate.estimatedDeliveryDays ?? null
+    }))
+  };
+}
+
+async function findExistingRates(client: Db, shipmentId: string, sellerId: string) {
+  return client.shipmentRate.findMany({
+    where: {
+      shipmentId,
+      sellerId
+    },
+    orderBy: { createdAt: "desc" }
+  });
+}
 
 async function ensurePickupProviderMapping(input: {
   sellerId: string;
@@ -196,6 +293,13 @@ export async function fetchShipmentRates(
   const shipment = await getSellerShipment(sellerId, shipmentId, client);
   ensureShipmentIsNotTerminal(shipment.status);
 
+  if (!options.refresh) {
+    const existingRates = await findExistingRates(client, shipment.id, sellerId);
+    if (existingRates.length) {
+      return rateTierResponse(shipment.id, shipment.paymentMode, existingRates);
+    }
+  }
+
   const { partner, mapping } = await ensureSystemManagedCourierNetwork(sellerId, client);
   const pickupMapping = await ensurePickupProviderMapping({
     sellerId,
@@ -234,13 +338,14 @@ export async function fetchShipmentRates(
 
   const rates = [];
   for (const providerRate of providerRates) {
+    const publicServiceCode = serviceCodeForName(providerRate.serviceLevel);
     rates.push(await client.shipmentRate.create({
       data: {
         shipmentId: shipment.id,
         sellerId,
         sellerCourierPartnerId: mapping.id,
         courierPartnerId: partner.id,
-        publicServiceCode: serviceCodeForName(providerRate.serviceLevel),
+        publicServiceCode,
         publicServiceName: providerRate.serviceLevel,
         segment: shipment.segment,
         chargeableWeightKg: providerRate.chargedWeightKg,
@@ -250,11 +355,26 @@ export async function fetchShipmentRates(
         rateBreakup: toPrismaJson({
           internalRateId: providerRate.rateId,
           internalCourierId: providerRate.providerCourierId ?? null,
-          result: providerRate.providerMetadata
+          result: providerRate.providerMetadata,
+          phase6: {
+            tier: shippingTierFromServiceCode(publicServiceCode),
+            codSupported: providerRate.codSupported ?? true,
+            pickupAvailable: providerRate.pickupAvailable ?? true,
+            deliveryAvailable: providerRate.deliveryAvailable ?? true,
+            reliabilityScore: providerRate.reliabilityScore ?? 0.75,
+            providerResponseJson: providerRate.providerMetadata
+          }
         })
       }
     }));
   }
+
+  if (!rates.length) {
+    throw new HttpError(409, "NO_ELIGIBLE_SHIPPING_RATES");
+  }
+
+  const existingMetadata = metadataObject(shipment.metadata);
+  const existingPhase6 = metadataObject(existingMetadata.phase6);
 
   if (shipment.status === ShipmentStatus.draft) {
     await client.shipment.update({
@@ -262,13 +382,40 @@ export async function fetchShipmentRates(
       data: {
         status: ShipmentStatus.rates_fetched,
         sellerCourierPartnerId: mapping.id,
-        courierPartnerId: partner.id
+        courierPartnerId: partner.id,
+        metadata: toPrismaJson({
+          ...existingMetadata,
+          phase6: {
+            ...existingPhase6,
+            providerStatus: "rates_available",
+            ratedAt: new Date().toISOString(),
+            providerResponseJson: {
+              rateCount: providerRates.length
+            }
+          }
+        })
+      }
+    });
+  } else {
+    await client.shipment.update({
+      where: { id: shipment.id },
+      data: {
+        sellerCourierPartnerId: mapping.id,
+        courierPartnerId: partner.id,
+        metadata: toPrismaJson({
+          ...existingMetadata,
+          phase6: {
+            ...existingPhase6,
+            providerStatus: "rates_available",
+            ratedAt: new Date().toISOString(),
+            providerResponseJson: {
+              rateCount: providerRates.length
+            }
+          }
+        })
       }
     });
   }
 
-  return {
-    shipment_id: shipment.id,
-    rates: rates.map(serializeRate)
-  };
+  return rateTierResponse(shipment.id, shipment.paymentMode, rates);
 }

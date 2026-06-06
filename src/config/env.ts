@@ -86,10 +86,16 @@ const schema = z.object({
   CARRIER_API_KEY_SECRET_NAME: z.string().optional(),
   CARRIER_ACCOUNT_ID_SECRET_NAME: z.string().optional(),
   CARRIER_WEBHOOK_SECRET_NAME: z.string().optional(),
+  BIGSHIP_MODE: z.enum(["mock", "sandbox", "live"]).default("mock"),
   BIGSHIP_BASE_URL: z.string().url().default("https://api.bigship.direct/"),
+  BIGSHIP_API_KEY: z.string().optional(),
+  BIGSHIP_CLIENT_ID: z.string().optional(),
+  BIGSHIP_CLIENT_SECRET: z.string().optional(),
   BIGSHIP_USERNAME: z.string().optional(),
   BIGSHIP_PASSWORD: z.string().optional(),
   BIGSHIP_ACCESS_KEY: z.string().optional(),
+  BIGSHIP_TIMEOUT_MS: z.coerce.number().int().positive().default(15000),
+  BIGSHIP_ENABLE_REAL_CALLS: envBoolean(false),
   BIGSHIP_ENABLED: envBoolean(false),
   BIGSHIP_MOCK_MODE: envBoolean(true)
 });

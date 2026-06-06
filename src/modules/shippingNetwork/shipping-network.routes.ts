@@ -6,9 +6,11 @@ import {
   createShippingOrderSchema,
   createShipmentFromOrderSchema,
   createShipmentSchema,
+  fetchShipmentRatesSchema,
   listShippingOrdersQuerySchema,
   listShipmentsQuerySchema,
   manifestShipmentSchema,
+  shipNowSchema,
   updatePickupLocationSchema
 } from "./shipping-validation.js";
 import { successEnvelope } from "./shipping-public-serializers.js";
@@ -17,6 +19,7 @@ import { deleteShippingPickupLocation, updateShippingPickupLocation } from "./sh
 import { createShipmentDraft, getShipmentDetails } from "./shipping-shipments.service.js";
 import { fetchShipmentRates } from "./shipping-rates.service.js";
 import { manifestShipment } from "./shipping-manifest.service.js";
+import { shipNowShipment } from "./shipping-ship-now.service.js";
 import { fetchShipmentTracking } from "./shipping-tracking.service.js";
 import { cancelShipment } from "./shipping-cancel.service.js";
 import { listShippingShipments } from "./shipping-list.service.js";
@@ -164,8 +167,19 @@ shippingNetworkRouter.get("/shipments/:shipmentId", async (req, res) => {
 });
 
 shippingNetworkRouter.post("/shipments/:shipmentId/rates", async (req, res) => {
-  const data = await fetchShipmentRates(req.auth!.merchantId, req.params.shipmentId);
+  const body = fetchShipmentRatesSchema.parse(req.body);
+  const data = await fetchShipmentRates(
+    req.auth!.merchantId,
+    req.params.shipmentId,
+    body.refresh === undefined ? {} : { refresh: body.refresh }
+  );
   return res.json(successEnvelope("Rates fetched successfully.", data));
+});
+
+shippingNetworkRouter.post("/shipments/:shipmentId/ship-now", async (req, res) => {
+  const body = shipNowSchema.parse(req.body);
+  const data = await shipNowShipment(req.auth!.merchantId, req.params.shipmentId, body.tier);
+  return res.json(successEnvelope("Shipment created successfully.", data));
 });
 
 shippingNetworkRouter.post("/shipments/:shipmentId/manifest", async (req, res) => {

@@ -143,6 +143,10 @@ function shipmentInvoice(shipment: { metadata?: unknown }) {
   return nestedRecord(shipmentMetadataRecord(shipment), "invoice");
 }
 
+function shipmentPhase6(shipment: { metadata?: unknown }) {
+  return nestedRecord(shipmentMetadataRecord(shipment), "phase6");
+}
+
 function hasPositiveMoney(value: unknown) {
   return numberValue(value) > 0;
 }
@@ -300,10 +304,15 @@ export type PublicShipmentSource = {
   deadWeightKg?: unknown;
   volumetricWeightKg?: unknown;
   chargeableWeightKg?: unknown;
+  metadata?: unknown;
 };
 
 export function serializeShipment(shipment: PublicShipmentSource) {
   const awb = shipment.awbNumber ?? null;
+  const phase6 = shipmentPhase6(shipment);
+  const labelUrl = stringValue(phase6.labelUrl) || null;
+  const selectedTier = stringValue(phase6.selectedTier) || null;
+
   return {
     shipment_id: shipment.id,
     seller_order_id: shipment.externalOrderId ?? null,
@@ -313,8 +322,10 @@ export function serializeShipment(shipment: PublicShipmentSource) {
     awb,
     tracking_number: awb,
     tracking_url: shipment.trackingUrl ?? trackingUrlForAwb(awb),
+    label_url: labelUrl,
     courier_network: PUBLIC_COURIER_NETWORK,
     service_level: shipment.serviceLevel ?? null,
+    selected_tier: selectedTier,
     weight: {
       dead_weight_kg: decimalToNumber(shipment.deadWeightKg),
       volumetric_weight_kg: decimalToNumber(shipment.volumetricWeightKg),
@@ -336,6 +347,7 @@ export type PublicShipmentListSource = PublicShipmentSource & ShipmentAttentionS
 export function serializeShipmentListItem(shipment: PublicShipmentListSource) {
   const buyer = shipmentBuyer(shipment);
   const address = shipmentBuyerAddress(shipment);
+  const phase6 = shipmentPhase6(shipment);
   const awb = shipment.awbNumber ?? null;
   const attention = calculateAttentionReasons(shipment);
 
@@ -357,8 +369,10 @@ export function serializeShipmentListItem(shipment: PublicShipmentListSource) {
     awb,
     tracking_number: awb,
     tracking_url: shipment.trackingUrl ?? trackingUrlForAwb(awb),
+    label_url: stringValue(phase6.labelUrl) || null,
     courier_network: PUBLIC_COURIER_NETWORK,
     service_level: shipment.serviceLevel ?? null,
+    selected_tier: stringValue(phase6.selectedTier) || null,
     invoice_amount: shipment.declaredValuePaise ? paiseToMoney(shipment.declaredValuePaise) : null,
     collectable_amount: shipment.codAmountPaise ? paiseToMoney(shipment.codAmountPaise) : 0,
     weight: {

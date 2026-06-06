@@ -33,6 +33,18 @@ describe("Shipmastr Shipping Network public safety boundary", () => {
         courier_network: "Shipmastr Courier Network",
         service_level: "Shipmastr Smart"
       }),
+      successEnvelope("Shipment created successfully.", {
+        shipmentId: "shipment_1",
+        shipment_id: "shipment_1",
+        status: "label_generated",
+        tier: "smart",
+        serviceLevel: "Shipmastr Smart",
+        courierNetwork: "Shipmastr Courier Network",
+        awbNumber: "SM0001",
+        labelUrl: "https://labels.shipmastr.local/mock/shipment_1.pdf",
+        trackingUrl: "https://track.shipmastr.local/SM0001",
+        message: "Shipment created successfully"
+      }),
       successEnvelope("Shipments fetched successfully.", {
         shipments: [{
           shipment_id: "shipment_1",
