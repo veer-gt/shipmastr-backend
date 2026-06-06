@@ -1,5 +1,12 @@
 import { Router } from "express";
-import { cancelShipmentSchema, createPickupLocationSchema, createShipmentSchema, manifestShipmentSchema } from "./shipping-validation.js";
+import {
+  cancelShipmentSchema,
+  createPickupLocationSchema,
+  createShipmentFromOrderSchema,
+  createShipmentSchema,
+  listShipmentsQuerySchema,
+  manifestShipmentSchema
+} from "./shipping-validation.js";
 import { successEnvelope } from "./shipping-public-serializers.js";
 import { createShippingPickupLocation, listShippingPickupLocations } from "./shipping-pickup-location.service.js";
 import { createShipmentDraft, getShipmentDetails } from "./shipping-shipments.service.js";
@@ -7,6 +14,8 @@ import { fetchShipmentRates } from "./shipping-rates.service.js";
 import { manifestShipment } from "./shipping-manifest.service.js";
 import { fetchShipmentTracking } from "./shipping-tracking.service.js";
 import { cancelShipment } from "./shipping-cancel.service.js";
+import { listShippingShipments } from "./shipping-list.service.js";
+import { createShipmentFromOrder } from "./shipping-order-bridge.service.js";
 
 export const shippingNetworkRouter = Router();
 
@@ -37,6 +46,21 @@ shippingNetworkRouter.post("/shipments", async (req, res) => {
     segment: data.segment,
     payment_mode: data.payment_mode
   }));
+});
+
+shippingNetworkRouter.get("/shipments", async (req, res) => {
+  const query = listShipmentsQuerySchema.parse(req.query);
+  const data = await listShippingShipments(req.auth!.merchantId, query);
+  return res.json(successEnvelope("Shipments fetched successfully.", data));
+});
+
+shippingNetworkRouter.post("/orders/:orderId/create-shipment", async (req, res) => {
+  const body = createShipmentFromOrderSchema.parse(req.body);
+  const result = await createShipmentFromOrder(req.auth!.merchantId, req.params.orderId, body);
+  return res.status(result.existed ? 200 : 201).json(successEnvelope(
+    result.existed ? "Shipment draft already exists for this order." : "Shipment draft created from order successfully.",
+    result.shipment
+  ));
 });
 
 shippingNetworkRouter.get("/shipments/:shipmentId", async (req, res) => {

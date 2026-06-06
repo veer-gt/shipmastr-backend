@@ -3,10 +3,12 @@ import { readFileSync } from "node:fs";
 import { describe, it } from "node:test";
 import {
   CourierPartnerStatus,
+  PaymentMode,
   PartnerType,
   SellerCourierPartnerStatus,
   ShipmentSegment,
-  ShipmentStatus
+  ShipmentStatus,
+  ShippingPaymentMode
 } from "@prisma/client";
 import type { InternalCourierProviderAdapter } from "../courierPartners/providers/provider-adapter.types.js";
 import { HttpError } from "../../lib/httpError.js";
@@ -16,6 +18,13 @@ import { createShippingPickupLocation, listShippingPickupLocations } from "./shi
 import { fetchShipmentRates } from "./shipping-rates.service.js";
 import { createShipmentDraft } from "./shipping-shipments.service.js";
 import { fetchShipmentTracking } from "./shipping-tracking.service.js";
+import { listShippingShipments } from "./shipping-list.service.js";
+import { createShipmentFromOrder } from "./shipping-order-bridge.service.js";
+import {
+  calculateAttentionReasons,
+  calculateShipmentQueue,
+  serializeShipmentListItem
+} from "./shipping-public-serializers.js";
 
 const now = new Date("2026-06-06T10:00:00.000Z");
 
@@ -155,13 +164,42 @@ function createFakeClient() {
     shipments: [] as any[],
     providerRefs: [] as any[],
     rates: [] as any[],
-    trackingEvents: [] as any[]
+    trackingEvents: [] as any[],
+    orders: [] as any[]
   };
 
   const id = (prefix: string, count: number) => `${prefix}_${count + 1}`;
   const byId = <T extends { id: string }>(rows: T[], rowId: string) => rows.find((row) => row.id === rowId);
 
+  const matchesShipmentWhere = (row: any, where: any) => {
+    if (where.sellerId && row.sellerId !== where.sellerId) return false;
+    if (where.id && row.id !== where.id) return false;
+    if (where.status && row.status !== where.status) return false;
+    if (where.OR?.length) {
+      return where.OR.some((clause: any) => {
+        if (clause.orderId !== undefined) return row.orderId === clause.orderId;
+        if (clause.externalOrderId !== undefined) return row.externalOrderId === clause.externalOrderId;
+        if (clause.id !== undefined) return row.id === clause.id;
+        return false;
+      });
+    }
+    return true;
+  };
+
   const client = {
+    order: {
+      findFirst: async ({ where }: any) => state.orders.find((row) => {
+        if (where.merchantId && row.merchantId !== where.merchantId) return false;
+        if (where.OR?.length) {
+          return where.OR.some((clause: any) => {
+            if (clause.id !== undefined) return row.id === clause.id;
+            if (clause.externalOrderId !== undefined) return row.externalOrderId === clause.externalOrderId;
+            return false;
+          });
+        }
+        return true;
+      }) ?? null
+    },
     courierPartner: {
       findFirst: async () => state.courierPartners[0]
     },
@@ -216,9 +254,14 @@ function createFakeClient() {
         state.shipments.push(row);
         return row;
       },
-      findFirst: async ({ where }: any) => state.shipments.find((row) =>
-        row.id === where.id && (!where.sellerId || row.sellerId === where.sellerId)
-      ) ?? null,
+      findFirst: async ({ where }: any) => state.shipments.find((row) => matchesShipmentWhere(row, where)) ?? null,
+      findMany: async ({ where, orderBy }: any) => {
+        const rows = state.shipments.filter((row) => matchesShipmentWhere(row, where ?? {}));
+        if (orderBy?.createdAt === "desc") {
+          return [...rows].sort((left, right) => right.createdAt.getTime() - left.createdAt.getTime());
+        }
+        return rows;
+      },
       update: async ({ where, data }: any) => {
         const row = byId(state.shipments, where.id);
         assert.ok(row);
@@ -319,6 +362,29 @@ function shipmentBody(pickupLocationId: string) {
         unit_price: 1499
       }]
     }]
+  };
+}
+
+function orderBody(overrides: Record<string, unknown> = {}) {
+  return {
+    id: "order_1",
+    merchantId: "seller_1",
+    externalOrderId: "ORD1001",
+    buyerName: "Rahul Sharma",
+    buyerPhone: "9876543210",
+    addressLine1: "Buyer line",
+    addressLine2: null,
+    city: "Delhi",
+    state: "Delhi",
+    pincode: "110011",
+    orderValue: 1299,
+    codAmount: 1299,
+    paymentMode: PaymentMode.COD,
+    weightGrams: 800,
+    status: "CREATED",
+    createdAt: now,
+    updatedAt: now,
+    ...overrides
   };
 }
 
@@ -429,12 +495,175 @@ describe("Shipmastr Shipping Network services", () => {
     );
   });
 
+  it("lists only authenticated seller shipments and paginates safely", async () => {
+    const { client } = createFakeClient();
+    const adapter = createFakeAdapter();
+    const sellerPickup = await createShippingPickupLocation("seller_1", pickupBody(), { client, adapter });
+    const otherPickup = await createShippingPickupLocation("seller_2", pickupBody(), { client, adapter });
+    const first = await createShipmentDraft("seller_1", shipmentBody(sellerPickup.pickup_location_id), client);
+    await createShipmentDraft("seller_1", { ...shipmentBody(sellerPickup.pickup_location_id), seller_order_id: "ORD1002" }, client);
+    await createShipmentDraft("seller_2", { ...shipmentBody(otherPickup.pickup_location_id), seller_order_id: "OTHER1001" }, client);
+
+    const pageOne = await listShippingShipments("seller_1", { page: 1, per_page: 1 }, client);
+    const pageTwo = await listShippingShipments("seller_1", { page: 2, per_page: 1 }, client);
+    const searched = await listShippingShipments("seller_1", { page: 1, per_page: 20, search: first.seller_order_id ?? "" }, client);
+
+    assert.equal(pageOne.shipments.length, 1);
+    assert.equal(pageTwo.shipments.length, 1);
+    assert.equal(pageOne.pagination.total, 2);
+    assert.equal(pageOne.pagination.has_more, true);
+    assert.equal(pageTwo.pagination.has_more, false);
+    assert.equal(searched.shipments.length, 1);
+    assert.equal(searched.shipments[0]?.seller_order_id, "ORD1001");
+    assert.equal(pageOne.shipments.some((shipment) => shipment.seller_order_id === "OTHER1001"), false);
+  });
+
+  it("filters shipment lists by queue and keeps public rows provider-safe", async () => {
+    const { client } = createFakeClient();
+    const adapter = createFakeAdapter();
+    const pickup = await createShippingPickupLocation("seller_1", pickupBody(), { client, adapter });
+    const draft = await createShipmentDraft("seller_1", shipmentBody(pickup.pickup_location_id), client);
+    await fetchShipmentRates("seller_1", draft.shipment_id, { client, adapter });
+
+    const ready = await listShippingShipments("seller_1", { page: 1, per_page: 20, queue: "ready_to_ship" }, client);
+    const attention = await listShippingShipments("seller_1", { page: 1, per_page: 20, queue: "needs_attention" }, client);
+    const json = JSON.stringify(ready);
+
+    assert.equal(ready.shipments.length, 1);
+    assert.equal(ready.shipments[0]?.queue, "ready_to_ship");
+    assert.equal(attention.shipments.length, 0);
+    assert.doesNotMatch(json, /internal_courier|internal_order|providerOrder|provider_order|bigship/i);
+  });
+
+  it("classifies shipment queues and attention reasons safely", () => {
+    const completeDraft = {
+      id: "shipment_ready",
+      status: ShipmentStatus.rates_fetched,
+      paymentMode: ShippingPaymentMode.prepaid,
+      pickupLocationId: "pickup_1",
+      declaredValuePaise: 129900,
+      codAmountPaise: 0,
+      deadWeightKg: 1,
+      lengthCm: 20,
+      breadthCm: 15,
+      heightCm: 10,
+      metadata: {
+        buyer: {
+          name: "Buyer",
+          phone: "9999999999",
+          address: { pincode: "110011", city: "Delhi", state: "Delhi" }
+        },
+        invoice: { invoice_amount: 1299 }
+      }
+    };
+    const incompleteCod = {
+      ...completeDraft,
+      id: "shipment_attention",
+      status: ShipmentStatus.draft,
+      paymentMode: ShippingPaymentMode.cod,
+      pickupLocationId: null,
+      codAmountPaise: 0,
+      declaredValuePaise: null,
+      deadWeightKg: null,
+      lengthCm: null,
+      breadthCm: null,
+      heightCm: null,
+      metadata: {
+        buyer: {
+          name: "Buyer",
+          phone: "",
+          address: { pincode: "", city: "Delhi", state: "Delhi" }
+        },
+        invoice: {}
+      }
+    };
+
+    const reasonCodes = calculateAttentionReasons(incompleteCod).map((reason) => reason.code);
+
+    assert.equal(calculateShipmentQueue(completeDraft), "ready_to_ship");
+    assert.equal(calculateShipmentQueue({ ...completeDraft, status: ShipmentStatus.manifested }), "in_transit");
+    assert.equal(calculateShipmentQueue({ ...completeDraft, status: ShipmentStatus.delivered }), "delivered");
+    assert.equal(calculateShipmentQueue({ ...completeDraft, status: ShipmentStatus.delivery_failed }), "rto_failed");
+    assert.equal(calculateShipmentQueue(incompleteCod), "needs_attention");
+    assert.deepEqual(reasonCodes.sort(), [
+      "missing_buyer_phone",
+      "missing_buyer_pincode",
+      "missing_cod_collectable_amount",
+      "missing_invoice_amount",
+      "missing_package_dimensions",
+      "missing_package_weight",
+      "missing_pickup_location",
+      "no_rates_fetched"
+    ].sort());
+  });
+
+  it("creates a shipment draft from an existing seller order without provider calls", async () => {
+    const { client, state } = createFakeClient();
+    const adapter = createFakeAdapter();
+    const pickup = await createShippingPickupLocation("seller_1", pickupBody(), { client, adapter });
+    state.orders.push(orderBody());
+    adapter.calls.createPickupLocation = 0;
+
+    const result = await createShipmentFromOrder("seller_1", "order_1", {
+      pickup_location_id: pickup.pickup_location_id
+    }, client);
+    const publicRow = serializeShipmentListItem(state.shipments[0]);
+
+    assert.equal(result.existed, false);
+    assert.equal(result.shipment.order_id, "order_1");
+    assert.equal(result.shipment.seller_order_id, "ORD1001");
+    assert.equal(result.shipment.payment_mode, "cod");
+    assert.equal(result.shipment.pickup_location_id, pickup.pickup_location_id);
+    assert.equal(state.shipments.length, 1);
+    assert.equal(state.providerRefs.length, 0);
+    assert.equal(state.rates.length, 0);
+    assert.equal(adapter.calls.createPickupLocation, 0);
+    assert.equal(publicRow.buyer.name, "Rahul Sharma");
+    assert.equal(publicRow.buyer.pincode, "110011");
+  });
+
+  it("returns an existing order shipment instead of duplicating it", async () => {
+    const { client, state } = createFakeClient();
+    const adapter = createFakeAdapter();
+    const pickup = await createShippingPickupLocation("seller_1", pickupBody(), { client, adapter });
+    state.orders.push(orderBody());
+
+    const first = await createShipmentFromOrder("seller_1", "ORD1001", {
+      pickup_location_id: pickup.pickup_location_id
+    }, client);
+    const second = await createShipmentFromOrder("seller_1", "ORD1001", {
+      pickup_location_id: pickup.pickup_location_id
+    }, client);
+
+    assert.equal(first.existed, false);
+    assert.equal(second.existed, true);
+    assert.equal(second.shipment.shipment_id, first.shipment.shipment_id);
+    assert.equal(state.shipments.length, 1);
+  });
+
+  it("requires a pickup location when order bridge pickup selection is ambiguous", async () => {
+    const { client, state } = createFakeClient();
+    const adapter = createFakeAdapter();
+    await createShippingPickupLocation("seller_1", pickupBody(), { client, adapter });
+    await createShippingPickupLocation("seller_1", { ...pickupBody(), name: "Second warehouse" }, { client, adapter });
+    state.orders.push(orderBody());
+
+    await assert.rejects(
+      () => createShipmentFromOrder("seller_1", "ORD1001", {}, client),
+      (error) => error instanceof HttpError && error.message === "PICKUP_LOCATION_REQUIRED"
+    );
+    assert.equal(state.shipments.length, 0);
+  });
+
   it("preserves the existing manual /shipments route and mounts /shipping additively", () => {
     const routes = readFileSync("src/routes/index.ts", "utf8");
+    const shippingRoutes = readFileSync("src/modules/shippingNetwork/shipping-network.routes.ts", "utf8");
     const legacyShipments = readFileSync("src/modules/shipments/shipments.routes.ts", "utf8");
 
     assert.match(routes, /apiRouter\.use\("\/shipping", requireJwtAuth, shippingNetworkRouter\);/);
     assert.match(routes, /apiRouter\.use\("\/shipments", requireJwtAuth, shipmentsRouter\);/);
+    assert.match(shippingRoutes, /shippingNetworkRouter\.get\("\/shipments"/);
+    assert.match(shippingRoutes, /shippingNetworkRouter\.post\("\/orders\/:orderId\/create-shipment"/);
     assert.match(legacyShipments, /shipmentsRouter\.get\("\/",/);
     assert.match(legacyShipments, /shipmentsRouter\.post\("\/",/);
   });

@@ -94,8 +94,39 @@ export const cancelShipmentSchema = z.object({
   reason: z.string().trim().max(300).optional()
 }).strict();
 
+export const listShipmentsQuerySchema = z.object({
+  status: z.enum([
+    "draft",
+    "rates_fetched",
+    "manifested",
+    "pickup_scheduled",
+    "picked_up",
+    "in_transit",
+    "out_for_delivery",
+    "delivered",
+    "delivery_failed",
+    "rto_initiated",
+    "rto_in_transit",
+    "rto_delivered",
+    "cancelled",
+    "lost",
+    "damaged",
+    "exception"
+  ]).optional(),
+  queue: z.enum(["ready_to_ship", "needs_attention", "in_transit", "delivered", "rto_failed"]).optional(),
+  page: z.coerce.number().int().min(1).default(1),
+  per_page: z.coerce.number().int().min(1).max(50).default(20),
+  search: z.string().trim().max(120).optional()
+}).strict();
+
+export const createShipmentFromOrderSchema = z.object({
+  pickup_location_id: z.string().trim().min(1).optional()
+}).strict();
+
 export type CreatePickupLocationInput = z.infer<typeof createPickupLocationSchema>;
 export type CreateShipmentInput = z.infer<typeof createShipmentSchema>;
 export type ShipmentBoxInput = z.infer<typeof shipmentBoxSchema>;
 export type ManifestShipmentInput = z.infer<typeof manifestShipmentSchema>;
 export type CancelShipmentInput = z.infer<typeof cancelShipmentSchema>;
+export type ListShipmentsQueryInput = z.infer<typeof listShipmentsQuerySchema>;
+export type CreateShipmentFromOrderInput = z.infer<typeof createShipmentFromOrderSchema>;

@@ -32,6 +32,48 @@ describe("Shipmastr Shipping Network public safety boundary", () => {
         tracking_number: "SM0001",
         courier_network: "Shipmastr Courier Network",
         service_level: "Shipmastr Smart"
+      }),
+      successEnvelope("Shipments fetched successfully.", {
+        shipments: [{
+          shipment_id: "shipment_1",
+          seller_order_id: "ORD1001",
+          status: "draft",
+          queue: "needs_attention",
+          payment_mode: "cod",
+          buyer: {
+            name: "Rahul Sharma",
+            phone: "9876543210",
+            pincode: "110011",
+            city: "Delhi",
+            state: "Delhi"
+          },
+          pickup_location_id: "pickup_1",
+          awb: null,
+          tracking_number: null,
+          courier_network: "Shipmastr Courier Network",
+          service_level: null,
+          attention: [{
+            code: "no_rates_fetched",
+            label: "Rates Pending",
+            message: "Fetch Shipmastr service levels before AWB generation."
+          }]
+        }],
+        pagination: {
+          page: 1,
+          per_page: 20,
+          total: 1,
+          has_more: false
+        }
+      }),
+      successEnvelope("Shipment draft created from order successfully.", {
+        shipment_id: "shipment_1",
+        order_id: "order_1",
+        seller_order_id: "ORD1001",
+        status: "draft",
+        segment: "domestic_b2c",
+        payment_mode: "cod",
+        pickup_location_id: "pickup_1",
+        attention: []
       })
     ];
 

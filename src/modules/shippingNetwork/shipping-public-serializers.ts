@@ -73,6 +73,197 @@ export const terminalShipmentStatuses = new Set<string>([
   "damaged"
 ]);
 
+export const shipmentQueues = [
+  "ready_to_ship",
+  "needs_attention",
+  "in_transit",
+  "delivered",
+  "rto_failed"
+] as const;
+
+export type ShipmentQueue = typeof shipmentQueues[number];
+
+export type PublicAttentionReason = {
+  code: string;
+  label: string;
+  message: string;
+};
+
+const inTransitStatuses = new Set<string>([
+  "manifested",
+  "pickup_scheduled",
+  "picked_up",
+  "in_transit",
+  "out_for_delivery"
+]);
+
+const rtoFailedStatuses = new Set<string>([
+  "rto_initiated",
+  "rto_in_transit",
+  "rto_delivered",
+  "delivery_failed",
+  "exception",
+  "cancelled",
+  "lost",
+  "damaged"
+]);
+
+function isRecord(value: unknown): value is Record<string, unknown> {
+  return Boolean(value && typeof value === "object" && !Array.isArray(value));
+}
+
+function nestedRecord(value: unknown, key: string) {
+  if (!isRecord(value)) return {};
+  const nested = value[key];
+  return isRecord(nested) ? nested : {};
+}
+
+function stringValue(value: unknown) {
+  return typeof value === "string" ? value.trim() : "";
+}
+
+function numberValue(value: unknown) {
+  const parsed = decimalToNumber(value);
+  return parsed === null ? 0 : parsed;
+}
+
+function shipmentMetadataRecord(shipment: { metadata?: unknown }) {
+  return isRecord(shipment.metadata) ? shipment.metadata : {};
+}
+
+function shipmentBuyer(shipment: { metadata?: unknown }) {
+  return nestedRecord(shipmentMetadataRecord(shipment), "buyer");
+}
+
+function shipmentBuyerAddress(shipment: { metadata?: unknown }) {
+  return nestedRecord(shipmentBuyer(shipment), "address");
+}
+
+function shipmentInvoice(shipment: { metadata?: unknown }) {
+  return nestedRecord(shipmentMetadataRecord(shipment), "invoice");
+}
+
+function hasPositiveMoney(value: unknown) {
+  return numberValue(value) > 0;
+}
+
+function attentionReason(code: string, label: string, message: string): PublicAttentionReason {
+  return { code, label, message };
+}
+
+export type ShipmentAttentionSource = {
+  status: ShipmentStatus | string;
+  paymentMode?: string | null;
+  pickupLocationId?: string | null;
+  codAmountPaise?: number | null;
+  declaredValuePaise?: number | null;
+  deadWeightKg?: unknown;
+  lengthCm?: unknown;
+  breadthCm?: unknown;
+  heightCm?: unknown;
+  metadata?: unknown;
+};
+
+export function calculateAttentionReasons(shipment: ShipmentAttentionSource): PublicAttentionReason[] {
+  const status = String(shipment.status);
+  const buyer = shipmentBuyer(shipment);
+  const address = shipmentBuyerAddress(shipment);
+  const invoice = shipmentInvoice(shipment);
+  const reasons: PublicAttentionReason[] = [];
+
+  if (!shipment.pickupLocationId) {
+    reasons.push(attentionReason(
+      "missing_pickup_location",
+      "Address Quality Check",
+      "Pickup location is required before shipping."
+    ));
+  }
+
+  if (!stringValue(buyer.phone)) {
+    reasons.push(attentionReason(
+      "missing_buyer_phone",
+      "Address Quality Check",
+      "Buyer phone is required before rate selection."
+    ));
+  }
+
+  if (!stringValue(address.pincode)) {
+    reasons.push(attentionReason(
+      "missing_buyer_pincode",
+      "Address Quality Check",
+      "Buyer pincode is required for serviceability and rates."
+    ));
+  }
+
+  if (!shipment.declaredValuePaise && !hasPositiveMoney(invoice.invoice_amount)) {
+    reasons.push(attentionReason(
+      "missing_invoice_amount",
+      "Shipment Review",
+      "Invoice amount is required before AWB generation."
+    ));
+  }
+
+  if (String(shipment.paymentMode) === "cod" && !shipment.codAmountPaise && !hasPositiveMoney(invoice.collectable_amount)) {
+    reasons.push(attentionReason(
+      "missing_cod_collectable_amount",
+      "COD Shield",
+      "COD collectable amount is required for this shipment."
+    ));
+  }
+
+  if (numberValue(shipment.deadWeightKg) <= 0) {
+    reasons.push(attentionReason(
+      "missing_package_weight",
+      "Weight Guard",
+      "Package weight is required for chargeable weight calculation."
+    ));
+  }
+
+  if (numberValue(shipment.lengthCm) <= 0 || numberValue(shipment.breadthCm) <= 0 || numberValue(shipment.heightCm) <= 0) {
+    reasons.push(attentionReason(
+      "missing_package_dimensions",
+      "Weight Guard",
+      "Package dimensions are required for volumetric weight calculation."
+    ));
+  }
+
+  if (status === "draft") {
+    reasons.push(attentionReason(
+      "no_rates_fetched",
+      "Rates Pending",
+      "Fetch Shipmastr Smart, Economy, and Express rates before AWB generation."
+    ));
+  }
+
+  if (status === "cancelled") {
+    reasons.push(attentionReason(
+      "shipment_cancelled",
+      "Shipment Review",
+      "This shipment has been cancelled."
+    ));
+  }
+
+  if (status === "delivery_failed" || status === "exception") {
+    reasons.push(attentionReason(
+      "shipment_failed",
+      "Shipment Review",
+      "This shipment needs review before the next action."
+    ));
+  }
+
+  return reasons;
+}
+
+export function calculateShipmentQueue(shipment: ShipmentAttentionSource): ShipmentQueue {
+  const status = String(shipment.status);
+
+  if (status === "delivered") return "delivered";
+  if (rtoFailedStatuses.has(status)) return "rto_failed";
+  if (inTransitStatuses.has(status)) return "in_transit";
+
+  return calculateAttentionReasons(shipment).length ? "needs_attention" : "ready_to_ship";
+}
+
 export type PublicPickupLocationSource = {
   id: string;
   label: string;
@@ -129,6 +320,87 @@ export function serializeShipment(shipment: PublicShipmentSource) {
       volumetric_weight_kg: decimalToNumber(shipment.volumetricWeightKg),
       chargeable_weight_kg: decimalToNumber(shipment.chargeableWeightKg)
     }
+  };
+}
+
+export type PublicShipmentListSource = PublicShipmentSource & ShipmentAttentionSource & {
+  orderId?: string | null;
+  pickupLocationId?: string | null;
+  codAmountPaise?: number | null;
+  declaredValuePaise?: number | null;
+  createdAt?: Date | string;
+  updatedAt?: Date | string;
+  metadata?: unknown;
+};
+
+export function serializeShipmentListItem(shipment: PublicShipmentListSource) {
+  const buyer = shipmentBuyer(shipment);
+  const address = shipmentBuyerAddress(shipment);
+  const awb = shipment.awbNumber ?? null;
+  const attention = calculateAttentionReasons(shipment);
+
+  return {
+    shipment_id: shipment.id,
+    seller_order_id: shipment.externalOrderId ?? null,
+    order_id: shipment.orderId ?? null,
+    status: String(shipment.status),
+    queue: calculateShipmentQueue(shipment),
+    payment_mode: shipment.paymentMode,
+    buyer: {
+      name: stringValue(buyer.name) || null,
+      phone: stringValue(buyer.phone) || null,
+      pincode: stringValue(address.pincode) || null,
+      city: stringValue(address.city) || null,
+      state: stringValue(address.state) || null
+    },
+    pickup_location_id: shipment.pickupLocationId ?? null,
+    awb,
+    tracking_number: awb,
+    tracking_url: shipment.trackingUrl ?? trackingUrlForAwb(awb),
+    courier_network: PUBLIC_COURIER_NETWORK,
+    service_level: shipment.serviceLevel ?? null,
+    invoice_amount: shipment.declaredValuePaise ? paiseToMoney(shipment.declaredValuePaise) : null,
+    collectable_amount: shipment.codAmountPaise ? paiseToMoney(shipment.codAmountPaise) : 0,
+    weight: {
+      dead_weight_kg: decimalToNumber(shipment.deadWeightKg),
+      volumetric_weight_kg: decimalToNumber(shipment.volumetricWeightKg),
+      chargeable_weight_kg: decimalToNumber(shipment.chargeableWeightKg)
+    },
+    created_at: shipment.createdAt ?? null,
+    updated_at: shipment.updatedAt ?? null,
+    attention
+  };
+}
+
+export function serializeShipmentList(input: {
+  shipments: PublicShipmentListSource[];
+  page: number;
+  perPage: number;
+  total: number;
+}) {
+  return {
+    shipments: input.shipments.map(serializeShipmentListItem),
+    pagination: {
+      page: input.page,
+      per_page: input.perPage,
+      total: input.total,
+      has_more: input.page * input.perPage < input.total
+    }
+  };
+}
+
+export function serializeOrderShipmentBridgeResult(shipment: PublicShipmentListSource) {
+  const item = serializeShipmentListItem(shipment);
+
+  return {
+    shipment_id: item.shipment_id,
+    order_id: item.order_id,
+    seller_order_id: item.seller_order_id,
+    status: item.status,
+    segment: shipment.segment,
+    payment_mode: item.payment_mode,
+    pickup_location_id: item.pickup_location_id,
+    attention: item.attention
   };
 }
 
