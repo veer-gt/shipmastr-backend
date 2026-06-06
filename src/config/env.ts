@@ -85,7 +85,13 @@ const schema = z.object({
   CARRIER_API_BASE_URL: z.string().optional(),
   CARRIER_API_KEY_SECRET_NAME: z.string().optional(),
   CARRIER_ACCOUNT_ID_SECRET_NAME: z.string().optional(),
-  CARRIER_WEBHOOK_SECRET_NAME: z.string().optional()
+  CARRIER_WEBHOOK_SECRET_NAME: z.string().optional(),
+  BIGSHIP_BASE_URL: z.string().url().default("https://api.bigship.direct/"),
+  BIGSHIP_USERNAME: z.string().optional(),
+  BIGSHIP_PASSWORD: z.string().optional(),
+  BIGSHIP_ACCESS_KEY: z.string().optional(),
+  BIGSHIP_ENABLED: envBoolean(false),
+  BIGSHIP_MOCK_MODE: envBoolean(true)
 });
 
 export const env = schema.parse(process.env);
