@@ -6,6 +6,7 @@
   "scripts": {
     "test": "npm run build && node --test \"dist/**/*.test.js\"",
     "dev": "tsx watch src/server.ts",
+    "prebuild": "npm run prisma:generate",
     "build": "tsc",
     "start": "node dist/server.js",
     "prisma:generate": "prisma generate",
