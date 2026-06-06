@@ -20,6 +20,31 @@ type ShippingProviderOptions = {
   adapter?: InternalCourierProviderAdapter;
 };
 
+function metadataRecord(value: unknown) {
+  return value && typeof value === "object" && !Array.isArray(value) ? value as Record<string, unknown> : {};
+}
+
+async function unsetOtherDefaultPickupLocations(sellerId: string, keepId: string, client: Db) {
+  const locations = await client.pickupLocation.findMany({
+    where: {
+      sellerId,
+      status: "active"
+    }
+  });
+
+  await Promise.all(locations
+    .filter((location) => location.id !== keepId && metadataRecord(location.metadata).isDefault === true)
+    .map((location) => client.pickupLocation.update({
+      where: { id: location.id },
+      data: {
+        metadata: toPrismaJson({
+          ...metadataRecord(location.metadata),
+          isDefault: false
+        })
+      }
+    })));
+}
+
 export function createMockSafeShippingAdapter() {
   return createBigshipAdapter({
     enabled: false,
@@ -121,10 +146,15 @@ export async function createShippingPickupLocation(
         landmark: input.address.landmark ?? null,
         latitude: input.address.latitude ?? null,
         longitude: input.address.longitude ?? null,
-        addressType: input.address_type ?? null
+        addressType: input.address_type ?? null,
+        isDefault: input.is_default === true
       })
     }
   });
+
+  if (input.is_default === true) {
+    await unsetOtherDefaultPickupLocations(sellerId, location.id, client);
+  }
 
   const providerPickup = await adapter.createPickupLocation({
     sellerId,

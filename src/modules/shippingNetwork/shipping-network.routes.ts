@@ -1,14 +1,19 @@
-import { Router } from "express";
+import { Router, type Response } from "express";
+import multer from "multer";
 import {
   cancelShipmentSchema,
   createPickupLocationSchema,
+  createShippingOrderSchema,
   createShipmentFromOrderSchema,
   createShipmentSchema,
+  listShippingOrdersQuerySchema,
   listShipmentsQuerySchema,
-  manifestShipmentSchema
+  manifestShipmentSchema,
+  updatePickupLocationSchema
 } from "./shipping-validation.js";
 import { successEnvelope } from "./shipping-public-serializers.js";
 import { createShippingPickupLocation, listShippingPickupLocations } from "./shipping-pickup-location.service.js";
+import { deleteShippingPickupLocation, updateShippingPickupLocation } from "./shipping-pickup-crud.service.js";
 import { createShipmentDraft, getShipmentDetails } from "./shipping-shipments.service.js";
 import { fetchShipmentRates } from "./shipping-rates.service.js";
 import { manifestShipment } from "./shipping-manifest.service.js";
@@ -16,8 +21,30 @@ import { fetchShipmentTracking } from "./shipping-tracking.service.js";
 import { cancelShipment } from "./shipping-cancel.service.js";
 import { listShippingShipments } from "./shipping-list.service.js";
 import { createShipmentFromOrder } from "./shipping-order-bridge.service.js";
+import {
+  cancelShippingOrder,
+  createShippingOrder,
+  getShippingOrder,
+  importShippingOrdersCsv,
+  listShippingOrders,
+  ShippingValidationError,
+  summarizeShippingOrders,
+  updateShippingOrder
+} from "./shipping-order-ingestion.service.js";
 
 export const shippingNetworkRouter = Router();
+const csvUpload = multer({
+  storage: multer.memoryStorage(),
+  limits: { fileSize: 2 * 1024 * 1024 }
+});
+
+function sendValidationError(res: Response, error: ShippingValidationError) {
+  return res.status(400).json({
+    error: "VALIDATION_ERROR",
+    message: error.message,
+    fields: error.fields
+  });
+}
 
 shippingNetworkRouter.post("/pickup-locations", async (req, res) => {
   const body = createPickupLocationSchema.parse(req.body);
@@ -33,6 +60,74 @@ shippingNetworkRouter.post("/pickup-locations", async (req, res) => {
 shippingNetworkRouter.get("/pickup-locations", async (req, res) => {
   const data = await listShippingPickupLocations(req.auth!.merchantId);
   return res.json(successEnvelope("Pickup locations fetched successfully.", { pickup_locations: data }));
+});
+
+shippingNetworkRouter.put("/pickup-locations/:id", async (req, res) => {
+  const body = updatePickupLocationSchema.parse(req.body);
+  const data = await updateShippingPickupLocation(req.auth!.merchantId, req.params.id, body);
+  return res.json(successEnvelope("Pickup location updated successfully.", data));
+});
+
+shippingNetworkRouter.delete("/pickup-locations/:id", async (req, res) => {
+  const data = await deleteShippingPickupLocation(req.auth!.merchantId, req.params.id);
+  return res.json(successEnvelope("Pickup location deleted successfully.", data));
+});
+
+shippingNetworkRouter.post("/orders", async (req, res) => {
+  const body = createShippingOrderSchema.parse(req.body);
+  try {
+    const data = await createShippingOrder(req.auth!.merchantId, body);
+    return res.status(201).json(successEnvelope("Order created successfully.", { order: data }));
+  } catch (error) {
+    if (error instanceof ShippingValidationError) return sendValidationError(res, error);
+    throw error;
+  }
+});
+
+shippingNetworkRouter.post("/orders/import/csv", csvUpload.single("file"), async (req, res) => {
+  if (!req.file) {
+    return res.status(400).json({ error: "VALIDATION_ERROR", message: "CSV file is required.", fields: [{ field: "file", message: "CSV file is required." }] });
+  }
+  const data = await importShippingOrdersCsv({
+    merchantId: req.auth!.merchantId,
+    filename: req.file.originalname,
+    mimeType: req.file.mimetype,
+    buffer: req.file.buffer,
+    pickupLocationId: typeof req.body.pickupLocationId === "string" ? req.body.pickupLocationId : undefined
+  });
+  return res.status(201).json(data);
+});
+
+shippingNetworkRouter.get("/orders/summary", async (req, res) => {
+  const data = await summarizeShippingOrders(req.auth!.merchantId);
+  return res.json(successEnvelope("Order summary fetched successfully.", data));
+});
+
+shippingNetworkRouter.get("/orders", async (req, res) => {
+  const query = listShippingOrdersQuerySchema.parse(req.query);
+  const data = await listShippingOrders(req.auth!.merchantId, query);
+  return res.json(successEnvelope("Orders fetched successfully.", data));
+});
+
+shippingNetworkRouter.get("/orders/:id", async (req, res) => {
+  const data = await getShippingOrder(req.auth!.merchantId, req.params.id);
+  return res.json(successEnvelope("Order fetched successfully.", { order: data }));
+});
+
+shippingNetworkRouter.put("/orders/:id", async (req, res) => {
+  const body = createShippingOrderSchema.partial().parse(req.body);
+  try {
+    const data = await updateShippingOrder(req.auth!.merchantId, req.params.id, body);
+    return res.json(successEnvelope("Order updated successfully.", { order: data }));
+  } catch (error) {
+    if (error instanceof ShippingValidationError) return sendValidationError(res, error);
+    throw error;
+  }
+});
+
+shippingNetworkRouter.delete("/orders/:id", async (req, res) => {
+  const data = await cancelShippingOrder(req.auth!.merchantId, req.params.id);
+  return res.json(successEnvelope("Order cancelled successfully.", { order: data }));
 });
 
 shippingNetworkRouter.post("/shipments", async (req, res) => {

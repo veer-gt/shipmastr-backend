@@ -68,6 +68,7 @@ enum OrderStatus {
   RISK_SCORED
   VERIFIED
   HELD
+  NEEDS_ATTENTION
   READY_TO_SHIP
   SHIPPED
   DELIVERED
@@ -589,6 +590,7 @@ model Merchant {
   leads     Lead[]
   firstShipmentRequests FirstShipmentRequest[]
   orders    Order[]
+  orderImportBatches OrderImportBatch[]
   auditLogs AuditLog[]
   gstinRecords MerchantGstinRecord[]
   pickupPoints MerchantPickupPoint[]
@@ -841,6 +843,7 @@ model PickupLocation {
 
   providerMappings PickupLocationProviderMapping[]
   shipments Shipment[]
+  orders Order[]
 
   @@index([sellerId])
   @@index([sellerId, status])
@@ -2099,22 +2102,49 @@ model Order {
   id              String      @id @default(cuid())
   merchantId      String
   externalOrderId String
+  source          String      @default("manual")
+  importBatchId   String?
   buyerName       String
   buyerPhone      String
+  buyerEmail      String?
+  buyerAltPhone   String?
   addressLine1    String
   addressLine2    String?
+  landmark        String?
   city            String
   state           String
   pincode         String
+  country         String      @default("IN")
   orderValue      Int
   codAmount       Int         @default(0)
+  declaredValue   Int         @default(0)
   paymentMode     PaymentMode
   weightGrams     Int?
+  packageLengthMm Int?
+  packageWidthMm  Int?
+  packageHeightMm Int?
+  volumetricWeightGrams Int?
+  productDescription String?
+  hsnCode         String?
+  itemCount       Int         @default(1)
+  tags            Json?
+  codRiskScore    Int?
+  codRiskLevel    String?
+  rtoRiskScore    Int?
+  rtoRiskLevel    String?
+  courierOverride String?
+  addressQualityScore Int?
+  addressQualityFlags Json?
+  needsAttentionReasons Json?
+  sellerNotes     String?
+  pickupLocationId String?
   status          OrderStatus @default(CREATED)
   createdAt       DateTime    @default(now())
   updatedAt       DateTime    @updatedAt
 
   merchant          Merchant           @relation(fields: [merchantId], references: [id], onDelete: Cascade)
+  importBatch       OrderImportBatch?  @relation(fields: [importBatchId], references: [id], onDelete: SetNull)
+  pickupLocation    PickupLocation?    @relation(fields: [pickupLocationId], references: [id], onDelete: SetNull)
   riskScores        RiskScore[]
   webhookEvents     WebhookEvent[]
   shipmentDetails   ShipmentDetails?
@@ -2128,7 +2158,31 @@ model Order {
   @@unique([merchantId, externalOrderId])
   @@index([merchantId, buyerPhone])
   @@index([merchantId, pincode])
+  @@index([merchantId, source])
+  @@index([merchantId, importBatchId])
+  @@index([merchantId, pickupLocationId])
   @@index([status])
+}
+
+model OrderImportBatch {
+  id           String   @id @default(cuid())
+  merchantId   String
+  filename     String
+  totalRows    Int      @default(0)
+  importedRows Int      @default(0)
+  skippedRows  Int      @default(0)
+  failedRows   Int      @default(0)
+  errorsJson   Json?
+  status       String   @default("processing")
+  createdAt    DateTime @default(now())
+  updatedAt    DateTime @updatedAt
+
+  merchant Merchant @relation(fields: [merchantId], references: [id], onDelete: Cascade)
+  orders Order[]
+
+  @@index([merchantId])
+  @@index([merchantId, status])
+  @@index([merchantId, createdAt])
 }
 
 model ShipmentDetails {

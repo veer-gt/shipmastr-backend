@@ -29,7 +29,12 @@ export const createPickupLocationSchema = z.object({
   phone: z.string().trim().min(7).max(20),
   email: z.string().trim().email().optional(),
   address: addressSchema,
-  address_type: z.string().trim().max(80).optional()
+  address_type: z.string().trim().max(80).optional(),
+  is_default: z.boolean().optional()
+}).strict();
+
+export const updatePickupLocationSchema = createPickupLocationSchema.partial().extend({
+  is_default: z.boolean().optional()
 }).strict();
 
 export const shipmentBoxSchema = z.object({
@@ -123,10 +128,51 @@ export const createShipmentFromOrderSchema = z.object({
   pickup_location_id: z.string().trim().min(1).optional()
 }).strict();
 
+export const createShippingOrderSchema = z.object({
+  externalOrderId: z.string().trim().min(1).optional(),
+  paymentMode: z.enum(["COD", "PREPAID"]).default("COD"),
+  orderAmount: z.number().int().nonnegative(),
+  codAmount: z.number().int().nonnegative().optional(),
+  declaredValue: z.number().int().nonnegative().optional(),
+  buyerName: z.string().trim().min(1),
+  buyerPhone: z.string().trim().min(1),
+  buyerEmail: z.string().trim().email().optional(),
+  buyerAltPhone: z.string().trim().optional(),
+  addressLine1: z.string().trim().min(1),
+  addressLine2: z.string().trim().optional(),
+  landmark: z.string().trim().optional(),
+  city: z.string().trim().min(1),
+  state: z.string().trim().min(1),
+  pincode: z.string().trim().min(1),
+  packageWeight: z.number().int().nonnegative().optional(),
+  packageLength: z.number().int().nonnegative().optional(),
+  packageWidth: z.number().int().nonnegative().optional(),
+  packageHeight: z.number().int().nonnegative().optional(),
+  productDescription: z.string().trim().optional(),
+  hsnCode: z.string().trim().optional(),
+  itemCount: z.number().int().positive().optional(),
+  sellerNotes: z.string().trim().optional(),
+  pickupLocationId: z.string().trim().min(1).optional(),
+  tags: z.array(z.string().trim().min(1)).optional()
+}).strict();
+
+export const listShippingOrdersQuerySchema = z.object({
+  status: z.string().trim().optional(),
+  paymentMode: z.enum(["COD", "PREPAID"]).optional(),
+  search: z.string().trim().max(120).optional(),
+  dateFrom: z.coerce.date().optional(),
+  dateTo: z.coerce.date().optional(),
+  page: z.coerce.number().int().min(1).default(1),
+  limit: z.coerce.number().int().min(1).max(100).default(20)
+}).strict();
+
 export type CreatePickupLocationInput = z.infer<typeof createPickupLocationSchema>;
+export type UpdatePickupLocationInput = z.infer<typeof updatePickupLocationSchema>;
 export type CreateShipmentInput = z.infer<typeof createShipmentSchema>;
 export type ShipmentBoxInput = z.infer<typeof shipmentBoxSchema>;
 export type ManifestShipmentInput = z.infer<typeof manifestShipmentSchema>;
 export type CancelShipmentInput = z.infer<typeof cancelShipmentSchema>;
 export type ListShipmentsQueryInput = z.infer<typeof listShipmentsQuerySchema>;
 export type CreateShipmentFromOrderInput = z.infer<typeof createShipmentFromOrderSchema>;
+export type CreateShippingOrderInput = z.infer<typeof createShippingOrderSchema>;
+export type ListShippingOrdersQueryInput = z.infer<typeof listShippingOrdersQuerySchema>;
