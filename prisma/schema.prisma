@@ -541,6 +541,29 @@ enum PlatformTrackingSyncStatus {
   SKIPPED
 }
 
+enum PlatformCredentialProvider {
+  SHOPIFY
+  WOOCOMMERCE
+  MAGENTO
+  CUSTOM
+}
+
+enum PlatformCredentialType {
+  SHOPIFY_CUSTOM_APP_TOKEN
+  SHOPIFY_OAUTH_PLACEHOLDER
+  WOOCOMMERCE_REST_KEYS
+  MAGENTO_INTEGRATION_TOKEN
+  CUSTOM_API_KEY
+  WEBHOOK_SECRET
+}
+
+enum PlatformCredentialStatus {
+  ACTIVE
+  REVOKED
+  ROTATED
+  EXPIRED
+}
+
 enum ShopifyInstallMode {
   CUSTOM_APP
   PUBLIC_APP_PLACEHOLDER
@@ -1541,6 +1564,42 @@ model PlatformTrackingSync {
   @@index([shipmentId])
   @@index([merchantId, externalOrderId])
   @@map("platform_tracking_syncs")
+}
+
+model PlatformCredential {
+  id                String                   @id @default(cuid())
+  merchantId        String                   @map("merchant_id")
+  platform          PlatformCredentialProvider
+  credentialType    PlatformCredentialType   @map("credential_type")
+  name              String
+  status            PlatformCredentialStatus @default(ACTIVE)
+  secretRef         String                   @unique @map("secret_ref")
+  secretFingerprint String                   @map("secret_fingerprint")
+  safeMetadata      Json?                    @map("safe_metadata")
+  lastUsedAt        DateTime?                @map("last_used_at")
+  expiresAt         DateTime?                @map("expires_at")
+  createdAt         DateTime                 @default(now()) @map("created_at")
+  updatedAt         DateTime                 @default(now()) @updatedAt @map("updated_at")
+  rotatedAt         DateTime?                @map("rotated_at")
+  revokedAt         DateTime?                @map("revoked_at")
+
+  @@index([merchantId, platform])
+  @@index([merchantId, status])
+  @@index([credentialType])
+  @@index([expiresAt])
+  @@map("platform_credentials")
+}
+
+model PlatformCredentialSecret {
+  id                String   @id @default(cuid())
+  credentialId      String   @unique @map("credential_id")
+  encryptedValue    String   @map("encrypted_value")
+  encryptionVersion String   @default("local-aes-256-gcm-v1") @map("encryption_version")
+  createdAt         DateTime @default(now()) @map("created_at")
+  updatedAt         DateTime @default(now()) @updatedAt @map("updated_at")
+
+  @@index([credentialId])
+  @@map("platform_credential_secrets")
 }
 
 model CourierPartnerApplication {

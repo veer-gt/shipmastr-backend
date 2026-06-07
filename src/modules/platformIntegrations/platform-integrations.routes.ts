@@ -25,6 +25,7 @@ import {
 import { shopifyPlatformRouter } from "./shopify/shopify.routes.js";
 import { wooCommercePlatformRouter } from "./woocommerce/woocommerce.routes.js";
 import { magentoPlatformRouter } from "./magento/magento.routes.js";
+import { platformCredentialsRouter } from "./credentials/platform-credentials.routes.js";
 
 export const platformIntegrationsRouter = Router();
 
@@ -35,6 +36,7 @@ function routeParam(value: string | string[] | undefined) {
 platformIntegrationsRouter.use("/", shopifyPlatformRouter);
 platformIntegrationsRouter.use("/", wooCommercePlatformRouter);
 platformIntegrationsRouter.use("/", magentoPlatformRouter);
+platformIntegrationsRouter.use("/", platformCredentialsRouter);
 
 platformIntegrationsRouter.post("/platform-connections", async (req, res) => {
   const body = createPlatformConnectionSchema.parse(req.body);
