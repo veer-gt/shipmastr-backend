@@ -506,6 +506,41 @@ enum WebhookEventOutboxStatus {
   SKIPPED
 }
 
+enum StorePlatform {
+  SHOPIFY
+  WOOCOMMERCE
+  MAGENTO
+  CUSTOM
+}
+
+enum PlatformConnectionStatus {
+  DRAFT
+  ACTIVE
+  DISABLED
+  ERROR
+}
+
+enum PlatformSyncDirection {
+  IMPORT_ONLY
+  EXPORT_ONLY
+  BIDIRECTIONAL
+}
+
+enum PlatformOrderImportStatus {
+  RECEIVED
+  MAPPED
+  SKIPPED
+  FAILED
+  IMPORTED
+}
+
+enum PlatformTrackingSyncStatus {
+  PENDING
+  SYNCED
+  FAILED
+  SKIPPED
+}
+
 enum AutomationEventStatus {
   QUEUED
   PROCESSING
@@ -1339,6 +1374,76 @@ model WebhookEventOutbox {
   @@index([subscriptionId])
   @@index([createdAt])
   @@map("webhook_event_outbox")
+}
+
+model PlatformConnection {
+  id                 String                   @id @default(cuid())
+  merchantId         String                   @map("merchant_id")
+  platform           StorePlatform
+  storeName          String?                  @map("store_name")
+  storeUrl           String                   @map("store_url")
+  status             PlatformConnectionStatus @default(DRAFT)
+  syncDirection      PlatformSyncDirection    @default(IMPORT_ONLY) @map("sync_direction")
+  credentialsRef     String?                  @map("credentials_ref")
+  credentialsMeta    Json?                    @map("credentials_meta")
+  lastOrderImportAt  DateTime?                @map("last_order_import_at")
+  lastTrackingSyncAt DateTime?                @map("last_tracking_sync_at")
+  lastErrorCode      String?                  @map("last_error_code")
+  lastErrorMessage   String?                  @map("last_error_message")
+  disabledAt         DateTime?                @map("disabled_at")
+  createdAt          DateTime                 @default(now()) @map("created_at")
+  updatedAt          DateTime                 @default(now()) @updatedAt @map("updated_at")
+
+  @@index([merchantId, status])
+  @@index([merchantId, platform])
+  @@index([merchantId, createdAt])
+  @@map("platform_connections")
+}
+
+model PlatformOrderImport {
+  id                String                    @id @default(cuid())
+  connectionId      String                    @map("connection_id")
+  merchantId        String                    @map("merchant_id")
+  platform          StorePlatform
+  externalOrderId   String                    @map("external_order_id")
+  externalOrderName String?                   @map("external_order_name")
+  status            PlatformOrderImportStatus @default(RECEIVED)
+  normalizedOrderId String?                   @map("normalized_order_id")
+  rawPayloadHash    String?                   @map("raw_payload_hash")
+  rawPayloadPreview Json?                     @map("raw_payload_preview")
+  mappingWarnings   Json?                     @map("mapping_warnings")
+  createdAt         DateTime                  @default(now()) @map("created_at")
+  updatedAt         DateTime                  @default(now()) @updatedAt @map("updated_at")
+
+  @@index([merchantId, status])
+  @@index([connectionId])
+  @@index([merchantId, platform])
+  @@index([merchantId, externalOrderId])
+  @@index([createdAt])
+  @@map("platform_order_imports")
+}
+
+model PlatformTrackingSync {
+  id             String                     @id @default(cuid())
+  connectionId   String                     @map("connection_id")
+  merchantId     String                     @map("merchant_id")
+  shipmentId     String                     @map("shipment_id")
+  platform       StorePlatform
+  externalOrderId String?                   @map("external_order_id")
+  trackingNumber String?                    @map("tracking_number")
+  trackingUrl    String?                    @map("tracking_url")
+  status         PlatformTrackingSyncStatus @default(PENDING)
+  lastAttemptAt  DateTime?                  @map("last_attempt_at")
+  syncedAt       DateTime?                  @map("synced_at")
+  errorMessage   String?                    @map("error_message")
+  createdAt      DateTime                   @default(now()) @map("created_at")
+  updatedAt      DateTime                   @default(now()) @updatedAt @map("updated_at")
+
+  @@index([merchantId, status])
+  @@index([connectionId])
+  @@index([shipmentId])
+  @@index([merchantId, externalOrderId])
+  @@map("platform_tracking_syncs")
 }
 
 model CourierPartnerApplication {
