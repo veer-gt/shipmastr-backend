@@ -6,16 +6,27 @@ import {
   bulkRatesSchema,
   bulkShipNowSchema,
   cancelShipmentSchema,
+  codLedgerEntrySchema,
+  createNdrCaseSchema,
   createPickupLocationSchema,
+  createRtoCaseSchema,
   createShippingOrderSchema,
   createShipmentFromOrderSchema,
   createShipmentSchema,
+  detectWeightDiscrepancySchema,
   fetchShipmentRatesSchema,
+  listCodLedgerQuerySchema,
+  listOperationalCasesQuerySchema,
   listShippingOrdersQuerySchema,
   listShipmentsQuerySchema,
   manifestShipmentSchema,
+  recordNdrActionSchema,
+  resolveNdrCaseSchema,
   slaStatsQuerySchema,
   shipNowSchema,
+  updateRtoStatusSchema,
+  updateWeightEvidenceSchema,
+  weightDisputeStatusSchema,
   updatePickupLocationSchema
 } from "./shipping-validation.js";
 import { successEnvelope } from "./shipping-public-serializers.js";
@@ -33,6 +44,35 @@ import { getAutopilotPreferences, upsertAutopilotPreferences } from "./shipping-
 import { recommendAutopilotForShipment } from "./shipping-autopilot.service.js";
 import { getCourierSlaStats } from "./shipping-sla-learning.service.js";
 import { bulkFetchRates, bulkShipNow } from "./shipping-bulk.service.js";
+import {
+  createOrUpdateNdrCaseFromShipment,
+  getNdrCase,
+  listNdrCases,
+  recordNdrAction,
+  resolveNdrCase
+} from "./shipping-ndr.service.js";
+import {
+  createOrUpdateRtoCaseFromShipment,
+  getRtoCase,
+  listRtoCases,
+  updateRtoStatus
+} from "./shipping-rto.service.js";
+import {
+  createExpectedCodEntryForCodShipment,
+  getCodLedgerSummary,
+  listCodLedger,
+  recordCodCollected,
+  recordCodRemittanceDue,
+  recordCodRemitted
+} from "./shipping-cod-ledger.service.js";
+import {
+  closeWeightDispute,
+  detectWeightDiscrepancy,
+  getWeightDiscrepancyCase,
+  listWeightDiscrepancyCases,
+  markWeightDisputeSubmitted,
+  updateWeightDisputeEvidence
+} from "./shipping-weight-dispute.service.js";
 import {
   cancelShippingOrder,
   createShippingOrder,
@@ -56,6 +96,15 @@ function sendValidationError(res: Response, error: ShippingValidationError) {
     message: error.message,
     fields: error.fields
   });
+}
+
+function operationalQuery(input: unknown) {
+  const query = listOperationalCasesQuerySchema.parse(input);
+  return {
+    ...(query.status ? { status: query.status } : {}),
+    page: query.page,
+    perPage: query.per_page
+  };
 }
 
 shippingNetworkRouter.post("/pickup-locations", async (req, res) => {
@@ -124,6 +173,137 @@ shippingNetworkRouter.post("/bulk/ship-now", async (req, res) => {
     ...(body.acknowledgeProtectionWarnings === undefined ? {} : { acknowledgeProtectionWarnings: body.acknowledgeProtectionWarnings })
   });
   return res.json(successEnvelope("Bulk Ship Now processed successfully.", data));
+});
+
+shippingNetworkRouter.get("/ndr", async (req, res) => {
+  const data = await listNdrCases(req.auth!.merchantId, operationalQuery(req.query));
+  return res.json(successEnvelope("NDR cases fetched successfully.", data));
+});
+
+shippingNetworkRouter.get("/ndr/:caseId", async (req, res) => {
+  const data = await getNdrCase(req.auth!.merchantId, req.params.caseId);
+  return res.json(successEnvelope("NDR case fetched successfully.", data));
+});
+
+shippingNetworkRouter.post("/shipments/:shipmentId/ndr", async (req, res) => {
+  const body = createNdrCaseSchema.parse(req.body);
+  const data = await createOrUpdateNdrCaseFromShipment(req.auth!.merchantId, req.params.shipmentId, body);
+  return res.status(201).json(successEnvelope("NDR case recorded successfully.", data));
+});
+
+shippingNetworkRouter.post("/ndr/:caseId/actions", async (req, res) => {
+  const body = recordNdrActionSchema.parse(req.body);
+  const data = await recordNdrAction(req.auth!.merchantId, req.params.caseId, body);
+  return res.status(201).json(successEnvelope("NDR action recorded successfully.", data));
+});
+
+shippingNetworkRouter.put("/ndr/:caseId/resolve", async (req, res) => {
+  const body = resolveNdrCaseSchema.parse(req.body);
+  const data = await resolveNdrCase(req.auth!.merchantId, req.params.caseId, body);
+  return res.json(successEnvelope("NDR case resolved successfully.", data));
+});
+
+shippingNetworkRouter.get("/rto", async (req, res) => {
+  const data = await listRtoCases(req.auth!.merchantId, operationalQuery(req.query));
+  return res.json(successEnvelope("RTO cases fetched successfully.", data));
+});
+
+shippingNetworkRouter.get("/rto/:caseId", async (req, res) => {
+  const data = await getRtoCase(req.auth!.merchantId, req.params.caseId);
+  return res.json(successEnvelope("RTO case fetched successfully.", data));
+});
+
+shippingNetworkRouter.post("/shipments/:shipmentId/rto", async (req, res) => {
+  const body = createRtoCaseSchema.parse(req.body);
+  const data = await createOrUpdateRtoCaseFromShipment(req.auth!.merchantId, req.params.shipmentId, body);
+  return res.status(201).json(successEnvelope("RTO case recorded successfully.", data));
+});
+
+shippingNetworkRouter.put("/rto/:caseId/status", async (req, res) => {
+  const body = updateRtoStatusSchema.parse(req.body);
+  const data = await updateRtoStatus(req.auth!.merchantId, req.params.caseId, body);
+  return res.json(successEnvelope("RTO case updated successfully.", data));
+});
+
+shippingNetworkRouter.get("/cod-ledger/summary", async (req, res) => {
+  const query = listCodLedgerQuerySchema.parse(req.query);
+  const data = await getCodLedgerSummary(req.auth!.merchantId, {
+    ...(query.status ? { status: query.status } : {}),
+    ...(query.entryType ? { entryType: query.entryType } : {})
+  });
+  return res.json(successEnvelope("COD ledger summary fetched successfully.", data));
+});
+
+shippingNetworkRouter.get("/cod-ledger", async (req, res) => {
+  const query = listCodLedgerQuerySchema.parse(req.query);
+  const data = await listCodLedger(req.auth!.merchantId, {
+    ...(query.status ? { status: query.status } : {}),
+    ...(query.entryType ? { entryType: query.entryType } : {}),
+    page: query.page,
+    perPage: query.per_page
+  });
+  return res.json(successEnvelope("COD ledger entries fetched successfully.", data));
+});
+
+shippingNetworkRouter.post("/shipments/:shipmentId/cod/expected", async (req, res) => {
+  const body = codLedgerEntrySchema.parse(req.body);
+  const data = await createExpectedCodEntryForCodShipment(req.auth!.merchantId, req.params.shipmentId, body);
+  return res.status(201).json(successEnvelope("Expected COD collection recorded successfully.", data));
+});
+
+shippingNetworkRouter.post("/shipments/:shipmentId/cod/collected", async (req, res) => {
+  const body = codLedgerEntrySchema.parse(req.body);
+  const data = await recordCodCollected(req.auth!.merchantId, req.params.shipmentId, body);
+  return res.status(201).json(successEnvelope("COD collection recorded successfully.", data));
+});
+
+shippingNetworkRouter.post("/shipments/:shipmentId/cod/remittance-due", async (req, res) => {
+  const body = codLedgerEntrySchema.parse(req.body);
+  const data = await recordCodRemittanceDue(req.auth!.merchantId, req.params.shipmentId, body);
+  return res.status(201).json(successEnvelope("COD remittance due recorded successfully.", data));
+});
+
+shippingNetworkRouter.post("/shipments/:shipmentId/cod/remitted", async (req, res) => {
+  const body = codLedgerEntrySchema.parse(req.body);
+  const data = await recordCodRemitted(req.auth!.merchantId, req.params.shipmentId, body);
+  return res.status(201).json(successEnvelope("COD remittance recorded successfully.", data));
+});
+
+shippingNetworkRouter.get("/weight-disputes", async (req, res) => {
+  const data = await listWeightDiscrepancyCases(req.auth!.merchantId, operationalQuery(req.query));
+  return res.json(successEnvelope("Weight discrepancy cases fetched successfully.", data));
+});
+
+shippingNetworkRouter.get("/weight-disputes/:caseId", async (req, res) => {
+  const data = await getWeightDiscrepancyCase(req.auth!.merchantId, req.params.caseId);
+  return res.json(successEnvelope("Weight discrepancy case fetched successfully.", data));
+});
+
+shippingNetworkRouter.post("/shipments/:shipmentId/weight-discrepancy", async (req, res) => {
+  const body = detectWeightDiscrepancySchema.parse(req.body);
+  const data = await detectWeightDiscrepancy(req.auth!.merchantId, req.params.shipmentId, body);
+  return res.status(data.created ? 201 : 200).json(successEnvelope(
+    data.created ? "Weight discrepancy case recorded successfully." : "No billable weight discrepancy detected.",
+    data
+  ));
+});
+
+shippingNetworkRouter.put("/weight-disputes/:caseId/evidence", async (req, res) => {
+  const body = updateWeightEvidenceSchema.parse(req.body);
+  const data = await updateWeightDisputeEvidence(req.auth!.merchantId, req.params.caseId, body);
+  return res.json(successEnvelope("Weight dispute evidence updated successfully.", data));
+});
+
+shippingNetworkRouter.put("/weight-disputes/:caseId/submitted", async (req, res) => {
+  const body = weightDisputeStatusSchema.parse(req.body);
+  const data = await markWeightDisputeSubmitted(req.auth!.merchantId, req.params.caseId, body);
+  return res.json(successEnvelope("Weight dispute marked submitted successfully.", data));
+});
+
+shippingNetworkRouter.put("/weight-disputes/:caseId/close", async (req, res) => {
+  const body = weightDisputeStatusSchema.parse(req.body);
+  const data = await closeWeightDispute(req.auth!.merchantId, req.params.caseId, body);
+  return res.json(successEnvelope("Weight dispute closed successfully.", data));
 });
 
 shippingNetworkRouter.post("/orders", async (req, res) => {

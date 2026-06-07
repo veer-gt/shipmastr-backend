@@ -1135,6 +1135,131 @@ model BulkShippingItem {
   @@map("bulk_shipping_items")
 }
 
+model NdrCase {
+  id                String    @id @default(cuid())
+  merchantId        String    @map("merchant_id")
+  shipmentId        String    @map("shipment_id")
+  orderId           String?   @map("order_id")
+  status            String    @default("open")
+  reasonCode        String?   @map("reason_code")
+  reasonLabel       String?   @map("reason_label")
+  buyerIssueType    String?   @map("buyer_issue_type")
+  latestAttemptAt   DateTime? @map("latest_attempt_at")
+  nextActionBy      DateTime? @map("next_action_by")
+  sellerAction      String?   @map("seller_action")
+  actionPayloadJson Json?     @map("action_payload_json")
+  providerActionRef String?   @map("provider_action_ref")
+  providerStatus    String?   @map("provider_status")
+  internalNotes     String?   @map("internal_notes")
+  createdAt         DateTime  @default(now()) @map("created_at")
+  updatedAt         DateTime  @default(now()) @updatedAt @map("updated_at")
+
+  @@index([merchantId, status])
+  @@index([shipmentId])
+  @@index([merchantId, createdAt])
+  @@map("ndr_cases")
+}
+
+model NdrActionAttempt {
+  id          String   @id @default(cuid())
+  merchantId  String   @map("merchant_id")
+  ndrCaseId   String   @map("ndr_case_id")
+  shipmentId  String   @map("shipment_id")
+  action      String
+  status      String   @default("recorded")
+  payloadJson Json?    @map("payload_json")
+  providerRef String?  @map("provider_ref")
+  errorJson   Json?    @map("error_json")
+  createdAt   DateTime @default(now()) @map("created_at")
+
+  @@index([merchantId, ndrCaseId])
+  @@index([shipmentId])
+  @@map("ndr_action_attempts")
+}
+
+model RtoCase {
+  id                 String    @id @default(cuid())
+  merchantId         String    @map("merchant_id")
+  shipmentId         String    @map("shipment_id")
+  orderId            String?   @map("order_id")
+  status             String    @default("initiated")
+  rtoReasonCode      String?   @map("rto_reason_code")
+  rtoReasonLabel     String?   @map("rto_reason_label")
+  initiatedAt        DateTime? @map("initiated_at")
+  receivedAt         DateTime? @map("received_at")
+  closedAt           DateTime? @map("closed_at")
+  forwardFreightPaise Int?     @map("forward_freight_paise")
+  rtoFreightPaise    Int?      @map("rto_freight_paise")
+  codLostPaise       Int?      @map("cod_lost_paise")
+  estimatedLossPaise Int?      @map("estimated_loss_paise")
+  providerStatus     String?   @map("provider_status")
+  metadataJson       Json?     @map("metadata_json")
+  createdAt          DateTime  @default(now()) @map("created_at")
+  updatedAt          DateTime  @default(now()) @updatedAt @map("updated_at")
+
+  @@index([merchantId, status])
+  @@index([shipmentId])
+  @@index([merchantId, createdAt])
+  @@map("rto_cases")
+}
+
+model CodLedgerEntry {
+  id                   String    @id @default(cuid())
+  merchantId           String    @map("merchant_id")
+  shipmentId           String?   @map("shipment_id")
+  orderId              String?   @map("order_id")
+  entryType            String    @map("entry_type")
+  status               String    @default("pending")
+  amountPaise          Int       @map("amount_paise")
+  currency             String    @default("INR")
+  expectedCollectionAt DateTime? @map("expected_collection_at")
+  collectedAt          DateTime? @map("collected_at")
+  remittanceDueAt      DateTime? @map("remittance_due_at")
+  remittedAt           DateTime? @map("remitted_at")
+  reference            String?
+  notes                String?
+  metadataJson         Json?     @map("metadata_json")
+  createdAt            DateTime  @default(now()) @map("created_at")
+  updatedAt            DateTime  @default(now()) @updatedAt @map("updated_at")
+
+  @@index([merchantId, status])
+  @@index([shipmentId])
+  @@index([orderId])
+  @@index([merchantId, createdAt])
+  @@map("cod_ledger_entries")
+}
+
+model WeightDiscrepancyCase {
+  id                    String    @id @default(cuid())
+  merchantId            String    @map("merchant_id")
+  shipmentId            String    @map("shipment_id")
+  orderId               String?   @map("order_id")
+  status                String    @default("detected")
+  declaredWeightGrams   Int?      @map("declared_weight_grams")
+  volumetricWeightGrams Int?      @map("volumetric_weight_grams")
+  billedWeightGrams     Int?      @map("billed_weight_grams")
+  differenceGrams       Int?      @map("difference_grams")
+  expectedChargePaise   Int?      @map("expected_charge_paise")
+  billedChargePaise     Int?      @map("billed_charge_paise")
+  differencePaise       Int?      @map("difference_paise")
+  reasonCode            String?   @map("reason_code")
+  reasonLabel           String?   @map("reason_label")
+  evidenceJson          Json?     @map("evidence_json")
+  providerRef           String?   @map("provider_ref")
+  providerStatus        String?   @map("provider_status")
+  internalNotes         String?   @map("internal_notes")
+  detectedAt            DateTime  @default(now()) @map("detected_at")
+  submittedAt           DateTime? @map("submitted_at")
+  closedAt              DateTime? @map("closed_at")
+  createdAt             DateTime  @default(now()) @map("created_at")
+  updatedAt             DateTime  @default(now()) @updatedAt @map("updated_at")
+
+  @@index([merchantId, status])
+  @@index([shipmentId])
+  @@index([merchantId, createdAt])
+  @@map("weight_discrepancy_cases")
+}
+
 model CourierPartnerApplication {
   id                         String                          @id @default(cuid())
   companyName                String

@@ -27,6 +27,33 @@ import { getAutopilotPreferences, upsertAutopilotPreferences } from "./shipping-
 import { buildAutopilotRecommendation, recommendAutopilotForShipment } from "./shipping-autopilot.service.js";
 import { bulkFetchRates, bulkShipNow } from "./shipping-bulk.service.js";
 import {
+  createOrUpdateNdrCaseFromShipment,
+  getNdrCase,
+  listNdrCases,
+  recordNdrAction
+} from "./shipping-ndr.service.js";
+import {
+  calculateEstimatedRtoLoss,
+  createOrUpdateRtoCaseFromShipment,
+  listRtoCases,
+  updateRtoStatus
+} from "./shipping-rto.service.js";
+import {
+  createExpectedCodEntryForCodShipment,
+  getCodLedgerSummary,
+  listCodLedger,
+  recordCodCollected,
+  recordCodRemittanceDue,
+  recordCodRemitted
+} from "./shipping-cod-ledger.service.js";
+import {
+  closeWeightDispute,
+  detectWeightDiscrepancy,
+  listWeightDiscrepancyCases,
+  markWeightDisputeSubmitted,
+  updateWeightDisputeEvidence
+} from "./shipping-weight-dispute.service.js";
+import {
   calculateReliabilityScore,
   getReliabilityScoreForRate,
   recalculateCourierSlaStats,
@@ -224,11 +251,37 @@ function createFakeClient() {
     slaEvents: [] as any[],
     slaStats: [] as any[],
     bulkBatches: [] as any[],
-    bulkItems: [] as any[]
+    bulkItems: [] as any[],
+    ndrCases: [] as any[],
+    ndrActionAttempts: [] as any[],
+    rtoCases: [] as any[],
+    codLedgerEntries: [] as any[],
+    weightDiscrepancyCases: [] as any[]
   };
 
   const id = (prefix: string, count: number) => `${prefix}_${count + 1}`;
   const byId = <T extends { id: string }>(rows: T[], rowId: string) => rows.find((row) => row.id === rowId);
+  const statusMatches = (rowStatus: string, whereStatus: any) => {
+    if (whereStatus === undefined) return true;
+    if (typeof whereStatus === "string") return rowStatus === whereStatus;
+    if (Array.isArray(whereStatus.in)) return whereStatus.in.includes(rowStatus);
+    return true;
+  };
+  const pageRows = <T>(rows: T[], args: any = {}) => {
+    const sorted = args.orderBy?.createdAt === "desc"
+      ? [...rows].sort((left: any, right: any) => right.createdAt.getTime() - left.createdAt.getTime())
+      : rows;
+    return sorted.slice(args.skip ?? 0, (args.skip ?? 0) + (args.take ?? sorted.length));
+  };
+  const matchesOperationalWhere = (row: any, where: any = {}) => {
+    if (where.id !== undefined && row.id !== where.id) return false;
+    if (where.merchantId !== undefined && row.merchantId !== where.merchantId) return false;
+    if (where.shipmentId !== undefined && row.shipmentId !== where.shipmentId) return false;
+    if (where.ndrCaseId !== undefined && row.ndrCaseId !== where.ndrCaseId) return false;
+    if (!statusMatches(row.status, where.status)) return false;
+    if (where.entryType !== undefined && row.entryType !== where.entryType) return false;
+    return true;
+  };
 
   const matchesShipmentWhere = (row: any, where: any) => {
     if (where.sellerId && row.sellerId !== where.sellerId) return false;
@@ -484,6 +537,87 @@ function createFakeClient() {
       create: async ({ data }: any) => {
         const row = { id: id("bulk_item", state.bulkItems.length), createdAt: now, ...data };
         state.bulkItems.push(row);
+        return row;
+      }
+    },
+    ndrCase: {
+      create: async ({ data }: any) => {
+        const row = { id: id("ndr", state.ndrCases.length), createdAt: now, updatedAt: now, ...data };
+        state.ndrCases.push(row);
+        return row;
+      },
+      findFirst: async ({ where }: any) => state.ndrCases.find((row) => matchesOperationalWhere(row, where)) ?? null,
+      findMany: async (args: any = {}) => pageRows(
+        state.ndrCases.filter((row) => matchesOperationalWhere(row, args.where)),
+        args
+      ),
+      count: async ({ where }: any = {}) => state.ndrCases.filter((row) => matchesOperationalWhere(row, where)).length,
+      update: async ({ where, data }: any) => {
+        const row = byId(state.ndrCases, where.id);
+        assert.ok(row);
+        Object.assign(row, data, { updatedAt: now });
+        return row;
+      }
+    },
+    ndrActionAttempt: {
+      create: async ({ data }: any) => {
+        const row = { id: id("ndr_action", state.ndrActionAttempts.length), createdAt: now, ...data };
+        state.ndrActionAttempts.push(row);
+        return row;
+      },
+      findMany: async (args: any = {}) => pageRows(
+        state.ndrActionAttempts.filter((row) => matchesOperationalWhere(row, args.where)),
+        args
+      )
+    },
+    rtoCase: {
+      create: async ({ data }: any) => {
+        const row = { id: id("rto", state.rtoCases.length), createdAt: now, updatedAt: now, ...data };
+        state.rtoCases.push(row);
+        return row;
+      },
+      findFirst: async ({ where }: any) => state.rtoCases.find((row) => matchesOperationalWhere(row, where)) ?? null,
+      findMany: async (args: any = {}) => pageRows(
+        state.rtoCases.filter((row) => matchesOperationalWhere(row, args.where)),
+        args
+      ),
+      count: async ({ where }: any = {}) => state.rtoCases.filter((row) => matchesOperationalWhere(row, where)).length,
+      update: async ({ where, data }: any) => {
+        const row = byId(state.rtoCases, where.id);
+        assert.ok(row);
+        Object.assign(row, data, { updatedAt: now });
+        return row;
+      }
+    },
+    codLedgerEntry: {
+      create: async ({ data }: any) => {
+        const row = { id: id("cod_ledger", state.codLedgerEntries.length), createdAt: now, updatedAt: now, ...data };
+        state.codLedgerEntries.push(row);
+        return row;
+      },
+      findFirst: async ({ where }: any) => state.codLedgerEntries.find((row) => matchesOperationalWhere(row, where)) ?? null,
+      findMany: async (args: any = {}) => pageRows(
+        state.codLedgerEntries.filter((row) => matchesOperationalWhere(row, args.where)),
+        args
+      ),
+      count: async ({ where }: any = {}) => state.codLedgerEntries.filter((row) => matchesOperationalWhere(row, where)).length
+    },
+    weightDiscrepancyCase: {
+      create: async ({ data }: any) => {
+        const row = { id: id("weight_dispute", state.weightDiscrepancyCases.length), createdAt: now, updatedAt: now, detectedAt: now, ...data };
+        state.weightDiscrepancyCases.push(row);
+        return row;
+      },
+      findFirst: async ({ where }: any) => state.weightDiscrepancyCases.find((row) => matchesOperationalWhere(row, where)) ?? null,
+      findMany: async (args: any = {}) => pageRows(
+        state.weightDiscrepancyCases.filter((row) => matchesOperationalWhere(row, args.where)),
+        args
+      ),
+      count: async ({ where }: any = {}) => state.weightDiscrepancyCases.filter((row) => matchesOperationalWhere(row, where)).length,
+      update: async ({ where, data }: any) => {
+        const row = byId(state.weightDiscrepancyCases, where.id);
+        assert.ok(row);
+        Object.assign(row, data, { updatedAt: now });
         return row;
       }
     }
@@ -1162,6 +1296,177 @@ describe("Shipmastr Shipping Network services", () => {
     assert.doesNotMatch(json, /internal_courier|internal_order|providerResponseJson|providerErrorJson|bigship/i);
   });
 
+  it("records NDR cases and seller actions with merchant scoping and safe responses", async () => {
+    const { client, state } = createFakeClient();
+    const adapter = createFakeAdapter();
+    const sellerPickup = await createShippingPickupLocation("seller_1", pickupBody(), { client, adapter });
+    const otherPickup = await createShippingPickupLocation("seller_2", pickupBody(), { client, adapter });
+    const shipment = await createShipmentDraft("seller_1", shipmentBody(sellerPickup.pickup_location_id), client);
+    const otherShipment = await createShipmentDraft("seller_2", shipmentBody(otherPickup.pickup_location_id), client);
+
+    const ndr = await createOrUpdateNdrCaseFromShipment("seller_1", shipment.shipment_id, {
+      reasonCode: "CUSTOMER_NOT_REACHABLE",
+      reasonLabel: "Buyer unreachable",
+      buyerIssueType: "unreachable"
+    }, client);
+    await createOrUpdateNdrCaseFromShipment("seller_2", otherShipment.shipment_id, {
+      reasonCode: "ADDRESS_ISSUE"
+    }, client);
+    const action = await recordNdrAction("seller_1", ndr.case_id, {
+      action: "update_phone",
+      payload: { buyerPhone: "9999999999", note: "call requested" }
+    }, client);
+    const detail = await getNdrCase("seller_1", ndr.case_id, client);
+    const list = await listNdrCases("seller_1", {}, client);
+    const json = JSON.stringify({ ndr, action, detail, list });
+
+    assert.equal(state.ndrCases.length, 2);
+    assert.equal(state.ndrActionAttempts.length, 1);
+    assert.equal(action.case.status, "action_submitted");
+    assert.equal(list.cases.length, 1);
+    assert.equal(detail.actions.length, 1);
+    assert.doesNotMatch(json, /9999999999|providerActionRef|providerStatus|internalNotes|payloadJson|bigship/i);
+    await assert.rejects(
+      () => getNdrCase("seller_2", ndr.case_id, client),
+      (error) => error instanceof HttpError && error.message === "NDR_CASE_NOT_FOUND"
+    );
+  });
+
+  it("records RTO cases, calculates loss, and keeps RTO lists merchant-scoped", async () => {
+    const { client } = createFakeClient();
+    const adapter = createFakeAdapter();
+    const sellerPickup = await createShippingPickupLocation("seller_1", pickupBody(), { client, adapter });
+    const otherPickup = await createShippingPickupLocation("seller_2", pickupBody(), { client, adapter });
+    const shipment = await createShipmentDraft("seller_1", shipmentBody(sellerPickup.pickup_location_id), client);
+    const otherShipment = await createShipmentDraft("seller_2", shipmentBody(otherPickup.pickup_location_id), client);
+
+    const rto = await createOrUpdateRtoCaseFromShipment("seller_1", shipment.shipment_id, {
+      reasonCode: "CUSTOMER_REFUSED",
+      reasonLabel: "Buyer refused delivery",
+      forwardFreightPaise: 6200,
+      rtoFreightPaise: 4200,
+      codLostPaise: 149900
+    }, client);
+    await createOrUpdateRtoCaseFromShipment("seller_2", otherShipment.shipment_id, {
+      reasonCode: "OTHER"
+    }, client);
+    const received = await updateRtoStatus("seller_1", rto.case_id, { status: "received" }, client);
+    const list = await listRtoCases("seller_1", {}, client);
+    const json = JSON.stringify({ rto, received, list });
+
+    assert.equal(calculateEstimatedRtoLoss({
+      forwardFreightPaise: 6200,
+      rtoFreightPaise: 4200,
+      codLostPaise: 149900
+    }), 160300);
+    assert.equal(rto.loss.estimated_loss_paise, 160300);
+    assert.equal(received.status, "received");
+    assert.equal(list.cases.length, 1);
+    assert.doesNotMatch(json, /providerStatus|metadataJson|internal_order|bigship/i);
+  });
+
+  it("maintains COD ledger entries, summaries, duplicate protection, and prepaid safeguards", async () => {
+    const { client, state } = createFakeClient();
+    const adapter = createFakeAdapter();
+    const pickup = await createShippingPickupLocation("seller_1", pickupBody(), { client, adapter });
+    const codShipment = await createShipmentDraft("seller_1", shipmentBody(pickup.pickup_location_id), client);
+    const prepaidShipment = await createShipmentDraft("seller_1", {
+      ...shipmentBody(pickup.pickup_location_id),
+      seller_order_id: "ORD_PREPAID",
+      payment_mode: "prepaid",
+      invoice: { invoice_amount: 999 }
+    }, client);
+
+    const expected = await createExpectedCodEntryForCodShipment("seller_1", codShipment.shipment_id, {}, client);
+    const duplicateExpected = await createExpectedCodEntryForCodShipment("seller_1", codShipment.shipment_id, {}, client);
+    await recordCodCollected("seller_1", codShipment.shipment_id, { amountPaise: 149900 }, client);
+    await recordCodRemittanceDue("seller_1", codShipment.shipment_id, { amountPaise: 149900 }, client);
+    await recordCodRemitted("seller_1", codShipment.shipment_id, { amountPaise: 100000 }, client);
+    state.codLedgerEntries.push({
+      id: "cod_other",
+      merchantId: "seller_2",
+      shipmentId: "shipment_other",
+      orderId: null,
+      entryType: "expected_collection",
+      status: "pending",
+      amountPaise: 50000,
+      currency: "INR",
+      createdAt: now,
+      updatedAt: now
+    });
+    const summary = await getCodLedgerSummary("seller_1", {}, client);
+    const list = await listCodLedger("seller_1", {}, client);
+    const json = JSON.stringify({ expected, summary, list });
+
+    assert.equal(expected.entry_id, duplicateExpected.entry_id);
+    assert.equal(state.codLedgerEntries.filter((entry) => entry.merchantId === "seller_1").length, 4);
+    assert.equal(summary.expected_collection_paise, 149900);
+    assert.equal(summary.collected_paise, 149900);
+    assert.equal(summary.remittance_due_paise, 149900);
+    assert.equal(summary.remitted_paise, 100000);
+    assert.equal(summary.pending_paise, 49900);
+    assert.equal(list.entries.length, 4);
+    assert.doesNotMatch(json, /providerResponseJson|providerErrorJson|courierOverride|Buyer line|8888888888|bigship/i);
+    await assert.rejects(
+      () => createExpectedCodEntryForCodShipment("seller_1", prepaidShipment.shipment_id, {}, client),
+      (error) => error instanceof HttpError && error.message === "COD_LEDGER_PREPAID_SHIPMENT"
+    );
+    await assert.rejects(
+      () => recordCodCollected("seller_1", codShipment.shipment_id, { amountPaise: -1 }, client),
+      (error) => error instanceof HttpError && error.message === "COD_LEDGER_AMOUNT_INVALID"
+    );
+  });
+
+  it("detects weight discrepancies and supports evidence/submission/close workflow safely", async () => {
+    const { client, state } = createFakeClient();
+    const adapter = createFakeAdapter();
+    const pickup = await createShippingPickupLocation("seller_1", pickupBody(), { client, adapter });
+    const shipment = await createShipmentDraft("seller_1", shipmentBody(pickup.pickup_location_id), client);
+
+    const none = await detectWeightDiscrepancy("seller_1", shipment.shipment_id, {
+      billedWeightGrams: 700
+    }, client);
+    const detected = await detectWeightDiscrepancy("seller_1", shipment.shipment_id, {
+      billedWeightGrams: 1200,
+      expectedChargePaise: 6200,
+      billedChargePaise: 8200
+    }, client);
+    const caseId = detected.case!.case_id;
+    const evidence = await updateWeightDisputeEvidence("seller_1", caseId, {
+      packagePhotos: ["s3://evidence/package-1.jpg"],
+      sellerNote: "Package measured before pickup."
+    }, client);
+    const submitted = await markWeightDisputeSubmitted("seller_1", caseId, {
+      providerRef: "internal_provider_dispute_1",
+      note: "Submitted manually in provider portal."
+    }, client);
+    const closed = await closeWeightDispute("seller_1", caseId, {
+      note: "Credit received."
+    }, client);
+    state.weightDiscrepancyCases.push({
+      id: "weight_other",
+      merchantId: "seller_2",
+      shipmentId: "shipment_other",
+      orderId: null,
+      status: "detected",
+      differenceGrams: 500,
+      createdAt: now,
+      updatedAt: now,
+      detectedAt: now
+    });
+    const list = await listWeightDiscrepancyCases("seller_1", {}, client);
+    const json = JSON.stringify({ detected, evidence, submitted, closed, list });
+
+    assert.equal(none.created, false);
+    assert.equal(detected.created, true);
+    assert.equal(detected.difference_grams, 400);
+    assert.equal(evidence.status, "dispute_ready");
+    assert.equal(submitted.status, "submitted");
+    assert.equal(closed.status, "closed");
+    assert.equal(list.cases.length, 1);
+    assert.doesNotMatch(json, /internal_provider_dispute_1|providerRef|providerStatus|internalNotes|Buyer line|8888888888|bigship/i);
+  });
+
   it("creates a shipment draft from an existing seller order without provider calls", async () => {
     const { client, state } = createFakeClient();
     const adapter = createFakeAdapter();
@@ -1234,6 +1539,14 @@ describe("Shipmastr Shipping Network services", () => {
     assert.match(shippingRoutes, /shippingNetworkRouter\.post\("\/bulk\/rates"/);
     assert.match(shippingRoutes, /shippingNetworkRouter\.post\("\/bulk\/ship-now"/);
     assert.match(shippingRoutes, /shippingNetworkRouter\.get\("\/sla\/stats"/);
+    assert.match(shippingRoutes, /shippingNetworkRouter\.get\("\/ndr"/);
+    assert.match(shippingRoutes, /shippingNetworkRouter\.post\("\/shipments\/:shipmentId\/ndr"/);
+    assert.match(shippingRoutes, /shippingNetworkRouter\.get\("\/rto"/);
+    assert.match(shippingRoutes, /shippingNetworkRouter\.post\("\/shipments\/:shipmentId\/rto"/);
+    assert.match(shippingRoutes, /shippingNetworkRouter\.get\("\/cod-ledger\/summary"/);
+    assert.match(shippingRoutes, /shippingNetworkRouter\.post\("\/shipments\/:shipmentId\/cod\/expected"/);
+    assert.match(shippingRoutes, /shippingNetworkRouter\.get\("\/weight-disputes"/);
+    assert.match(shippingRoutes, /shippingNetworkRouter\.post\("\/shipments\/:shipmentId\/weight-discrepancy"/);
     assert.match(legacyShipments, /shipmentsRouter\.get\("\/",/);
     assert.match(legacyShipments, /shipmentsRouter\.post\("\/",/);
   });

@@ -141,6 +141,106 @@ export const bulkShipNowSchema = z.object({
   acknowledgeProtectionWarnings: z.boolean().optional()
 }).strict();
 
+export const listOperationalCasesQuerySchema = z.object({
+  status: z.string().trim().max(80).optional(),
+  page: z.coerce.number().int().min(1).default(1),
+  per_page: z.coerce.number().int().min(1).max(50).default(20)
+}).strict();
+
+export const createNdrCaseSchema = z.object({
+  reasonCode: z.string().trim().max(120).optional(),
+  reasonLabel: z.string().trim().max(200).optional(),
+  buyerIssueType: z.enum([
+    "unreachable",
+    "address_issue",
+    "buyer_refused",
+    "payment_issue",
+    "delivery_attempt_failed",
+    "other"
+  ]).optional(),
+  latestAttemptAt: z.coerce.date().optional(),
+  nextActionBy: z.coerce.date().optional(),
+  sellerAction: z.enum([
+    "reattempt",
+    "update_address",
+    "update_phone",
+    "convert_prepaid",
+    "return_to_origin",
+    "hold",
+    "none"
+  ]).optional()
+}).strict();
+
+export const recordNdrActionSchema = z.object({
+  action: z.enum([
+    "reattempt",
+    "update_address",
+    "update_phone",
+    "convert_prepaid",
+    "return_to_origin",
+    "hold",
+    "none"
+  ]),
+  payload: z.record(z.string(), z.unknown()).optional()
+}).strict();
+
+export const resolveNdrCaseSchema = z.object({
+  status: z.enum(["resolved", "failed", "cancelled"]).optional(),
+  resolutionNote: z.string().trim().max(1000).optional()
+}).strict();
+
+export const createRtoCaseSchema = z.object({
+  status: z.enum(["initiated", "in_transit", "received", "lost", "damaged", "closed"]).optional(),
+  reasonCode: z.string().trim().max(120).optional(),
+  reasonLabel: z.string().trim().max(200).optional(),
+  initiatedAt: z.coerce.date().optional(),
+  forwardFreightPaise: z.number().int().nonnegative().optional(),
+  rtoFreightPaise: z.number().int().nonnegative().optional(),
+  codLostPaise: z.number().int().nonnegative().optional(),
+  metadata: z.record(z.string(), z.unknown()).optional()
+}).strict();
+
+export const updateRtoStatusSchema = z.object({
+  status: z.enum(["initiated", "in_transit", "received", "lost", "damaged", "closed"]),
+  receivedAt: z.coerce.date().optional(),
+  closedAt: z.coerce.date().optional(),
+  reasonCode: z.string().trim().max(120).optional(),
+  reasonLabel: z.string().trim().max(200).optional()
+}).strict();
+
+export const listCodLedgerQuerySchema = listOperationalCasesQuerySchema.extend({
+  entryType: z.string().trim().max(80).optional()
+}).strict();
+
+export const codLedgerEntrySchema = z.object({
+  amountPaise: z.number().int().nonnegative().optional(),
+  reference: z.string().trim().max(180).optional(),
+  notes: z.string().trim().max(500).optional(),
+  occurredAt: z.coerce.date().optional(),
+  metadata: z.record(z.string(), z.unknown()).optional()
+}).strict();
+
+export const detectWeightDiscrepancySchema = z.object({
+  billedWeightGrams: z.number().int().nonnegative(),
+  expectedChargePaise: z.number().int().nonnegative().optional(),
+  billedChargePaise: z.number().int().nonnegative().optional(),
+  reasonCode: z.string().trim().max(120).optional(),
+  reasonLabel: z.string().trim().max(200).optional()
+}).strict();
+
+export const updateWeightEvidenceSchema = z.object({
+  productPhotos: z.array(z.string().trim().min(1)).max(10).optional(),
+  packagePhotos: z.array(z.string().trim().min(1)).max(10).optional(),
+  invoiceUrl: z.string().trim().max(500).optional(),
+  sellerNote: z.string().trim().max(1000).optional(),
+  measurementProof: z.string().trim().max(500).optional()
+}).strict();
+
+export const weightDisputeStatusSchema = z.object({
+  providerRef: z.string().trim().max(180).optional(),
+  note: z.string().trim().max(1000).optional()
+}).strict();
+
 export const cancelShipmentSchema = z.object({
   reason: z.string().trim().max(300).optional()
 }).strict();
@@ -224,3 +324,5 @@ export type ListShipmentsQueryInput = z.infer<typeof listShipmentsQuerySchema>;
 export type CreateShipmentFromOrderInput = z.infer<typeof createShipmentFromOrderSchema>;
 export type CreateShippingOrderInput = z.infer<typeof createShippingOrderSchema>;
 export type ListShippingOrdersQueryInput = z.infer<typeof listShippingOrdersQuerySchema>;
+export type ListOperationalCasesQueryInput = z.infer<typeof listOperationalCasesQuerySchema>;
+export type ListCodLedgerQueryInput = z.infer<typeof listCodLedgerQuerySchema>;
