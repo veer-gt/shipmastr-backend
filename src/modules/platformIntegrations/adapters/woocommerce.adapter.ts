@@ -61,8 +61,12 @@ function mapLineItems(lineItems: unknown[], warnings: NormalizedPlatformOrder["m
     const item = asRecord(raw);
     const quantity = Math.max(1, intOrNull(item.quantity) ?? 1);
     const weightGrams = wooItemWeightGrams(item);
+    const requiresShipping = item.requires_shipping !== false && item.virtual !== true;
     if (!weightGrams) {
       addWarning(warnings, "MISSING_ITEM_WEIGHT", `line_items.${index}.weight`, "WooCommerce line item is missing product weight.");
+    }
+    if (!requiresShipping) {
+      addWarning(warnings, "VIRTUAL_NON_SHIPPABLE_ITEM", `line_items.${index}`, "WooCommerce line item is virtual or non-shippable.", "info");
     }
 
     return {
@@ -71,7 +75,7 @@ function mapLineItems(lineItems: unknown[], warnings: NormalizedPlatformOrder["m
       quantity,
       unitPricePaise: parseAmountToPaise(Number(asString(item.total)) / quantity || item.price),
       weightGrams,
-      requiresShipping: item.requires_shipping !== false
+      requiresShipping
     };
   });
 }
@@ -114,6 +118,13 @@ export const woocommerceAdapter: PlatformOrderMapper = {
     }
     if (!items.length) {
       addWarning(warnings, "MISSING_ITEMS", "line_items", "WooCommerce order has no line items.");
+    }
+    const status = asString(order.status).toLowerCase();
+    if (["cancelled", "canceled", "refunded"].includes(status)) {
+      addWarning(warnings, "ORDER_CANCELLED_OR_REFUNDED", "status", "WooCommerce order is cancelled or refunded.");
+    }
+    if (["draft", "checkout-draft", "auto-draft"].includes(status) || order.test === true || asString(order.created_via).toLowerCase().includes("test")) {
+      addWarning(warnings, "WOOCOMMERCE_TEST_OR_DRAFT_ORDER", "status", "WooCommerce order is marked test or draft.", "info");
     }
 
     return {

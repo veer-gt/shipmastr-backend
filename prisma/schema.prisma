@@ -554,6 +554,19 @@ enum ShopifyWebhookStatus {
   ERROR
 }
 
+enum WooCommerceInstallMode {
+  REST_KEY_PLACEHOLDER
+  PLUGIN_PLACEHOLDER
+}
+
+enum WooCommerceWebhookStatus {
+  NOT_CONFIGURED
+  SIMULATED
+  ACTIVE_PLACEHOLDER
+  DISABLED
+  ERROR
+}
+
 enum AutomationEventStatus {
   QUEUED
   PROCESSING
@@ -1429,6 +1442,24 @@ model ShopifyConnectionState {
   @@index([shopDomain])
   @@index([webhookStatus])
   @@map("shopify_connection_states")
+}
+
+model WooCommerceConnectionState {
+  id                         String                   @id @default(cuid())
+  connectionId               String                   @unique @map("connection_id")
+  siteUrl                    String                   @map("site_url")
+  apiVersion                 String?                  @map("api_version")
+  installMode                WooCommerceInstallMode   @default(REST_KEY_PLACEHOLDER) @map("install_mode")
+  webhookStatus              WooCommerceWebhookStatus @default(NOT_CONFIGURED) @map("webhook_status")
+  lastWebhookReceivedAt      DateTime?                @map("last_webhook_received_at")
+  lastOrderWebhookId         String?                  @map("last_order_webhook_id")
+  lastTrackingSyncAttemptAt  DateTime?                @map("last_tracking_sync_attempt_at")
+  createdAt                  DateTime                 @default(now()) @map("created_at")
+  updatedAt                  DateTime                 @default(now()) @updatedAt @map("updated_at")
+
+  @@index([siteUrl])
+  @@index([webhookStatus])
+  @@map("woocommerce_connection_states")
 }
 
 model PlatformOrderImport {
