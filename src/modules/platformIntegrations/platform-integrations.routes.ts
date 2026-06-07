@@ -22,12 +22,15 @@ import {
   listPlatformTrackingSyncsQuerySchema,
   platformOrderPayloadSchema
 } from "./platform-integrations.validation.js";
+import { shopifyPlatformRouter } from "./shopify/shopify.routes.js";
 
 export const platformIntegrationsRouter = Router();
 
 function routeParam(value: string | string[] | undefined) {
   return Array.isArray(value) ? value[0] ?? "" : value ?? "";
 }
+
+platformIntegrationsRouter.use("/", shopifyPlatformRouter);
 
 platformIntegrationsRouter.post("/platform-connections", async (req, res) => {
   const body = createPlatformConnectionSchema.parse(req.body);

@@ -107,6 +107,18 @@ export const shopifyAdapter: PlatformOrderMapper = {
     if (!shippableWeights.length) {
       addWarning(warnings, "MISSING_ITEM_WEIGHT", "line_items.grams", "No shippable Shopify line item has weight.");
     }
+    if (asString(order.cancelled_at)) {
+      addWarning(warnings, "ORDER_CANCELLED", "cancelled_at", "Shopify order is cancelled.");
+    }
+    const fulfillmentStatus = asString(order.fulfillment_status).toLowerCase();
+    if (fulfillmentStatus === "fulfilled") {
+      addWarning(warnings, "ORDER_ALREADY_FULFILLED", "fulfillment_status", "Shopify order is already fulfilled.", "info");
+    } else if (fulfillmentStatus === "partial" || fulfillmentStatus === "partially_fulfilled") {
+      addWarning(warnings, "ORDER_PARTIALLY_FULFILLED", "fulfillment_status", "Shopify order is partially fulfilled.", "info");
+    }
+    if (order.test === true) {
+      addWarning(warnings, "SHOPIFY_TEST_ORDER", "test", "Shopify order is marked as a test order.", "info");
+    }
 
     return {
       platform: StorePlatform.SHOPIFY,

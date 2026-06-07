@@ -541,6 +541,19 @@ enum PlatformTrackingSyncStatus {
   SKIPPED
 }
 
+enum ShopifyInstallMode {
+  CUSTOM_APP
+  PUBLIC_APP_PLACEHOLDER
+}
+
+enum ShopifyWebhookStatus {
+  NOT_CONFIGURED
+  SIMULATED
+  ACTIVE_PLACEHOLDER
+  DISABLED
+  ERROR
+}
+
 enum AutomationEventStatus {
   QUEUED
   PROCESSING
@@ -1398,6 +1411,24 @@ model PlatformConnection {
   @@index([merchantId, platform])
   @@index([merchantId, createdAt])
   @@map("platform_connections")
+}
+
+model ShopifyConnectionState {
+  id                           String               @id @default(cuid())
+  connectionId                 String               @unique @map("connection_id")
+  shopDomain                   String               @map("shop_domain")
+  apiVersion                   String?              @map("api_version")
+  installMode                  ShopifyInstallMode   @default(CUSTOM_APP) @map("install_mode")
+  webhookStatus                ShopifyWebhookStatus @default(NOT_CONFIGURED) @map("webhook_status")
+  lastWebhookReceivedAt        DateTime?            @map("last_webhook_received_at")
+  lastOrderWebhookId           String?              @map("last_order_webhook_id")
+  lastFulfillmentSyncAttemptAt DateTime?            @map("last_fulfillment_sync_attempt_at")
+  createdAt                    DateTime             @default(now()) @map("created_at")
+  updatedAt                    DateTime             @default(now()) @updatedAt @map("updated_at")
+
+  @@index([shopDomain])
+  @@index([webhookStatus])
+  @@map("shopify_connection_states")
 }
 
 model PlatformOrderImport {
