@@ -147,6 +147,32 @@ export const listOperationalCasesQuerySchema = z.object({
   per_page: z.coerce.number().int().min(1).max(50).default(20)
 }).strict();
 
+export const createSellerApiKeySchema = z.object({
+  name: z.string().trim().min(1).max(120),
+  scopes: z.array(z.string().trim().min(1).max(80)).min(1).max(20).optional(),
+  expiresAt: z.coerce.date().nullable().optional()
+}).strict();
+
+export const createWebhookSubscriptionSchema = z.object({
+  url: z.string().trim().url(),
+  description: z.string().trim().max(240).nullable().optional(),
+  events: z.array(z.string().trim().min(1).max(120)).min(1).max(40)
+}).strict();
+
+export const updateWebhookSubscriptionSchema = z.object({
+  url: z.string().trim().url().optional(),
+  description: z.string().trim().max(240).nullable().optional(),
+  events: z.array(z.string().trim().min(1).max(120)).min(1).max(40).optional(),
+  status: z.enum(["ACTIVE", "DISABLED", "FAILING"]).optional()
+}).strict();
+
+export const listWebhookEventsQuerySchema = z.object({
+  status: z.enum(["PENDING", "DELIVERED", "FAILED", "SKIPPED"]).optional(),
+  eventType: z.string().trim().max(120).optional(),
+  page: z.coerce.number().int().min(1).default(1),
+  per_page: z.coerce.number().int().min(1).max(50).default(20)
+}).strict();
+
 export const createNdrCaseSchema = z.object({
   reasonCode: z.string().trim().max(120).optional(),
   reasonLabel: z.string().trim().max(200).optional(),

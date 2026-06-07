@@ -487,6 +487,25 @@ enum WebhookStatus {
   DUPLICATE
 }
 
+enum SellerApiKeyStatus {
+  ACTIVE
+  REVOKED
+  EXPIRED
+}
+
+enum WebhookSubscriptionStatus {
+  ACTIVE
+  DISABLED
+  FAILING
+}
+
+enum WebhookEventOutboxStatus {
+  PENDING
+  DELIVERED
+  FAILED
+  SKIPPED
+}
+
 enum AutomationEventStatus {
   QUEUED
   PROCESSING
@@ -1258,6 +1277,68 @@ model WeightDiscrepancyCase {
   @@index([shipmentId])
   @@index([merchantId, createdAt])
   @@map("weight_discrepancy_cases")
+}
+
+model SellerApiKey {
+  id         String             @id @default(cuid())
+  merchantId String             @map("merchant_id")
+  name       String
+  keyPrefix  String             @map("key_prefix")
+  keyHash    String             @unique @map("key_hash")
+  scopes     String[]           @default([])
+  status     SellerApiKeyStatus @default(ACTIVE)
+  lastUsedAt DateTime?          @map("last_used_at")
+  expiresAt  DateTime?          @map("expires_at")
+  revokedAt  DateTime?          @map("revoked_at")
+  createdAt  DateTime           @default(now()) @map("created_at")
+  updatedAt  DateTime           @default(now()) @updatedAt @map("updated_at")
+
+  @@index([merchantId, status])
+  @@index([keyPrefix])
+  @@index([expiresAt])
+  @@map("seller_api_keys")
+}
+
+model WebhookSubscription {
+  id              String                    @id @default(cuid())
+  merchantId      String                    @map("merchant_id")
+  url             String
+  description     String?
+  events          String[]                  @default([])
+  status          WebhookSubscriptionStatus @default(ACTIVE)
+  secretHash      String?                   @map("secret_hash")
+  failureCount    Int                       @default(0) @map("failure_count")
+  lastDeliveredAt DateTime?                 @map("last_delivered_at")
+  lastFailedAt    DateTime?                 @map("last_failed_at")
+  disabledAt      DateTime?                 @map("disabled_at")
+  createdAt       DateTime                  @default(now()) @map("created_at")
+  updatedAt       DateTime                  @default(now()) @updatedAt @map("updated_at")
+
+  @@index([merchantId, status])
+  @@index([merchantId, createdAt])
+  @@map("webhook_subscriptions")
+}
+
+model WebhookEventOutbox {
+  id             String                   @id @default(cuid())
+  merchantId     String                   @map("merchant_id")
+  subscriptionId String?                  @map("subscription_id")
+  eventType      String                   @map("event_type")
+  payload        Json
+  status         WebhookEventOutboxStatus @default(PENDING)
+  attemptCount   Int                      @default(0) @map("attempt_count")
+  nextAttemptAt  DateTime?                @map("next_attempt_at")
+  lastAttemptAt  DateTime?                @map("last_attempt_at")
+  deliveredAt    DateTime?                @map("delivered_at")
+  failedAt       DateTime?                @map("failed_at")
+  createdAt      DateTime                 @default(now()) @map("created_at")
+  updatedAt      DateTime                 @default(now()) @updatedAt @map("updated_at")
+
+  @@index([merchantId, status])
+  @@index([merchantId, eventType])
+  @@index([subscriptionId])
+  @@index([createdAt])
+  @@map("webhook_event_outbox")
 }
 
 model CourierPartnerApplication {
