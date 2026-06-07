@@ -1,5 +1,6 @@
 import type { ShipmentStatus } from "@prisma/client";
 import type { Prisma } from "@prisma/client";
+import { buildTrackingPublicUrl } from "./shipping-tracking-token.js";
 
 export const PUBLIC_COURIER_NETWORK = "Shipmastr Courier Network" as const;
 
@@ -63,6 +64,18 @@ export function serviceCodeForName(serviceName: string) {
 
 export function trackingUrlForAwb(awb: string | null | undefined) {
   return awb ? `/tracking/?awb=${encodeURIComponent(awb)}` : null;
+}
+
+export function trackingPublicUrlForShipment(shipment: {
+  trackingToken?: string | null;
+  trackingPublicUrl?: string | null;
+  trackingUrl?: string | null;
+  awbNumber?: string | null;
+}) {
+  return shipment.trackingPublicUrl
+    ?? buildTrackingPublicUrl(shipment.trackingToken)
+    ?? shipment.trackingUrl
+    ?? trackingUrlForAwb(shipment.awbNumber);
 }
 
 export const terminalShipmentStatuses = new Set<string>([
@@ -300,6 +313,8 @@ export type PublicShipmentSource = {
   paymentMode: string;
   awbNumber?: string | null;
   trackingUrl?: string | null;
+  trackingToken?: string | null;
+  trackingPublicUrl?: string | null;
   serviceLevel?: string | null;
   deadWeightKg?: unknown;
   volumetricWeightKg?: unknown;
@@ -321,7 +336,8 @@ export function serializeShipment(shipment: PublicShipmentSource) {
     payment_mode: shipment.paymentMode,
     awb,
     tracking_number: awb,
-    tracking_url: shipment.trackingUrl ?? trackingUrlForAwb(awb),
+    tracking_url: trackingPublicUrlForShipment(shipment),
+    tracking_public_url: trackingPublicUrlForShipment(shipment),
     label_url: labelUrl,
     courier_network: PUBLIC_COURIER_NETWORK,
     service_level: shipment.serviceLevel ?? null,
@@ -368,7 +384,8 @@ export function serializeShipmentListItem(shipment: PublicShipmentListSource) {
     pickup_location_id: shipment.pickupLocationId ?? null,
     awb,
     tracking_number: awb,
-    tracking_url: shipment.trackingUrl ?? trackingUrlForAwb(awb),
+    tracking_url: trackingPublicUrlForShipment(shipment),
+    tracking_public_url: trackingPublicUrlForShipment(shipment),
     label_url: stringValue(phase6.labelUrl) || null,
     courier_network: PUBLIC_COURIER_NETWORK,
     service_level: shipment.serviceLevel ?? null,

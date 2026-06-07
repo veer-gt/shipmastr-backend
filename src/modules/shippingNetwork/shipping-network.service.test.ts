@@ -22,11 +22,14 @@ import { selectShippingTiers } from "./shipping-tier-decision.service.js";
 import { fetchShipmentTracking } from "./shipping-tracking.service.js";
 import { listShippingShipments } from "./shipping-list.service.js";
 import { createShipmentFromOrder } from "./shipping-order-bridge.service.js";
+import { getPublicTrackingByToken } from "./shipping-public-tracking.service.js";
 import {
   calculateAttentionReasons,
   calculateShipmentQueue,
   serializeShipmentListItem
 } from "./shipping-public-serializers.js";
+import { isSafeTrackingToken } from "./shipping-tracking-token.js";
+import { buildTrackingTimeline, publicStatusForShipmentStatus } from "./shipping-tracking-timeline.js";
 
 const now = new Date("2026-06-06T10:00:00.000Z");
 
@@ -188,7 +191,25 @@ function createFakeClient() {
     providerRefs: [] as any[],
     rates: [] as any[],
     trackingEvents: [] as any[],
-    orders: [] as any[]
+    orders: [] as any[],
+    merchants: [{
+      id: "seller_1",
+      name: "Skymax Direct",
+      email: "owner@example.test",
+      phone: "+919876543210"
+    }],
+    automationPreferences: [{
+      merchantId: "seller_1",
+      metadata: {
+        sellerSettingsProfile: {
+          trackingBranding: {
+            logoText: "Skymax",
+            supportEmail: "help@skymax.example",
+            supportPhone: "+919876543210"
+          }
+        }
+      }
+    }]
   };
 
   const id = (prefix: string, count: number) => `${prefix}_${count + 1}`;
@@ -222,6 +243,12 @@ function createFakeClient() {
         }
         return true;
       }) ?? null
+    },
+    merchant: {
+      findUnique: async ({ where }: any) => state.merchants.find((row) => row.id === where.id) ?? null
+    },
+    automationPreference: {
+      findUnique: async ({ where }: any) => state.automationPreferences.find((row) => row.merchantId === where.merchantId) ?? null
     },
     courierPartner: {
       findFirst: async () => state.courierPartners[0]
@@ -276,10 +303,27 @@ function createFakeClient() {
     },
     shipment: {
       create: async ({ data }: any) => {
-        const row = { id: id("shipment", state.shipments.length), createdAt: now, updatedAt: now, awbNumber: null, trackingUrl: null, serviceLevel: null, ...data };
+        const row = {
+          id: id("shipment", state.shipments.length),
+          createdAt: now,
+          updatedAt: now,
+          awbNumber: null,
+          trackingUrl: null,
+          trackingToken: null,
+          trackingPublicUrl: null,
+          trackingStatus: null,
+          trackingLastSyncedAt: null,
+          serviceLevel: null,
+          ...data
+        };
         state.shipments.push(row);
         return row;
       },
+      findUnique: async ({ where }: any) => state.shipments.find((row) => {
+        if (where.id !== undefined) return row.id === where.id;
+        if (where.trackingToken !== undefined) return row.trackingToken === where.trackingToken;
+        return false;
+      }) ?? null,
       findFirst: async ({ where }: any) => state.shipments.find((row) => matchesShipmentWhere(row, where)) ?? null,
       findMany: async ({ where, orderBy }: any) => {
         const rows = state.shipments.filter((row) => matchesShipmentWhere(row, where ?? {}));
@@ -530,11 +574,91 @@ describe("Shipmastr Shipping Network services", () => {
     assert.match(created.awbNumber ?? "", /^SM/);
     assert.equal(created.labelUrl, "https://labels.shipmastr.local/mock/shipment_1.pdf");
     assert.equal(second.awbNumber, created.awbNumber);
+    assert.equal(created.trackingUrl, state.shipments[0]?.trackingPublicUrl);
+    assert.equal(created.trackingPublicUrl, state.shipments[0]?.trackingPublicUrl);
+    assert.ok(isSafeTrackingToken(state.shipments[0]?.trackingToken));
+    assert.notEqual(state.shipments[0]?.trackingToken, shipment.shipment_id);
+    assert.notEqual(state.shipments[0]?.trackingToken, created.awbNumber);
     assert.equal(adapter.calls.manifestOrder, 1);
     assert.equal(adapter.calls.getLabel, 1);
     assert.equal(state.providerRefs[0]?.providerAwb, "mock_awb_001");
     assert.equal(state.shipments[0]?.serviceLevel, "Shipmastr Economy");
     assert.doesNotMatch(json, /internal_courier|internal_order|providerOrder|provider_order|bigship/i);
+  });
+
+  it("keeps public tracking tokens stable across repeated Ship Now responses", async () => {
+    const { client, state } = createFakeClient();
+    const adapter = createFakeAdapter();
+    const pickup = await createShippingPickupLocation("seller_1", pickupBody(), { client, adapter });
+    const shipment = await createShipmentDraft("seller_1", shipmentBody(pickup.pickup_location_id), client);
+
+    const first = await shipNowShipment("seller_1", shipment.shipment_id, "smart", { client, adapter });
+    const token = state.shipments[0]?.trackingToken;
+    const second = await shipNowShipment("seller_1", shipment.shipment_id, "smart", { client, adapter });
+
+    assert.ok(isSafeTrackingToken(token));
+    assert.equal(state.shipments[0]?.trackingToken, token);
+    assert.equal(first.trackingPublicUrl, second.trackingPublicUrl);
+    assert.match(first.trackingPublicUrl ?? "", /^\/tracking\/trk_/);
+  });
+
+  it("returns buyer-safe branded tracking data by public token", async () => {
+    const { client, state } = createFakeClient();
+    const adapter = createFakeAdapter();
+    const pickup = await createShippingPickupLocation("seller_1", pickupBody(), { client, adapter });
+    const shipment = await createShipmentDraft("seller_1", shipmentBody(pickup.pickup_location_id), client);
+    await shipNowShipment("seller_1", shipment.shipment_id, "smart", { client, adapter });
+
+    const token = state.shipments[0]?.trackingToken;
+    const tracking = await getPublicTrackingByToken(token, client);
+    const missing = await getPublicTrackingByToken("trk_missing_missing_missing", client);
+    const json = JSON.stringify(tracking);
+
+    assert.equal(missing, null);
+    assert.equal(tracking?.trackingToken, token);
+    assert.equal(tracking?.brand.name, "Skymax");
+    assert.equal(tracking?.shipment.publicStatus, "Shipment ready");
+    assert.equal(tracking?.shipment.awbNumber, state.shipments[0]?.awbNumber);
+    assert.equal(tracking?.shipment.trackingUrl, null);
+    assert.equal(tracking?.order.externalOrderId, "ORD1001");
+    assert.equal(tracking?.delivery.city, "Mumbai");
+    assert.equal(tracking?.delivery.pincode, "400001");
+    assert.equal(tracking?.support.contactEmail, "help@skymax.example");
+    assert.equal(tracking?.support.contactPhoneMasked, "ending 3210");
+    assert.ok((tracking?.timeline.length ?? 0) >= 3);
+    assert.doesNotMatch(json, /internal_order|internal_courier|providerResponseJson|providerErrorJson|courierOverride|8888888888|Buyer line|bigship/i);
+  });
+
+  it("builds public tracking timelines from real available events only", () => {
+    const timeline = buildTrackingTimeline({
+      order: { status: "CREATED", createdAt: new Date("2026-06-06T09:00:00.000Z") },
+      shipment: {
+        status: "label_generated",
+        awbNumber: "SM0001",
+        createdAt: new Date("2026-06-06T09:10:00.000Z"),
+        updatedAt: new Date("2026-06-06T09:20:00.000Z"),
+        metadata: {
+          phase6: {
+            awbAssignedAt: "2026-06-06T09:15:00.000Z",
+            labelGeneratedAt: "2026-06-06T09:20:00.000Z",
+            labelUrl: "https://labels.shipmastr.local/mock/shipment_1.pdf"
+          }
+        }
+      },
+      rates: [{ createdAt: new Date("2026-06-06T09:12:00.000Z") }],
+      trackingEvents: []
+    });
+    const statuses = timeline.map((event) => event.status);
+
+    assert.deepEqual(statuses, [
+      "order_created",
+      "shipment_created",
+      "rates_available",
+      "awb_assigned",
+      "label_generated"
+    ]);
+    assert.equal(publicStatusForShipmentStatus("provider_failed").publicStatus, "Shipment delayed");
+    assert.equal(publicStatusForShipmentStatus("out_for_delivery").publicStatus, "Out for delivery");
   });
 
   it("ship-now handles provider failure safely without leaking internals", async () => {

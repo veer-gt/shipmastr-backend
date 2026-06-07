@@ -5,6 +5,7 @@ import type { InternalCourierProviderAdapter } from "../courierPartners/provider
 import { PUBLIC_COURIER_NETWORK, toPrismaJson } from "./shipping-public-serializers.js";
 import { createMockSafeShippingAdapter } from "./shipping-pickup-location.service.js";
 import { ensureShipmentIsNotTerminal, getSellerShipment } from "./shipping-shipments.service.js";
+import { ensureShipmentTrackingToken } from "./shipping-tracking-token.js";
 
 type Db = Prisma.TransactionClient | typeof prisma;
 
@@ -103,12 +104,15 @@ export async function manifestShipment(
       courierPartnerId: rate.courierPartnerId
     }
   });
+  const tracked = await ensureShipmentTrackingToken(updated, client);
 
   return {
-    shipment_id: updated.id,
-    status: String(updated.status),
+    shipment_id: tracked.id,
+    status: String(tracked.status),
     awb,
     tracking_number: awb,
+    tracking_url: tracked.trackingPublicUrl,
+    tracking_public_url: tracked.trackingPublicUrl,
     courier_network: PUBLIC_COURIER_NETWORK,
     service_level: rate.publicServiceName
   };

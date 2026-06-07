@@ -1,6 +1,7 @@
 import { Router } from "express";
 import admin from "../../lib/firebase.js";
 import { prisma } from "../../lib/prisma.js";
+import { getPublicTrackingByToken } from "../shippingNetwork/shipping-public-tracking.service.js";
 
 export const trackingRouter = Router();
 
@@ -203,4 +204,22 @@ trackingRouter.post("/mobile/verified", async (req, res) => {
     console.error("Firebase mobile tracking verification failed:", err);
     return res.status(401).json({ success: false, error: "Invalid Firebase token" });
   }
+});
+
+trackingRouter.get("/:trackingToken", async (req, res) => {
+  const trackingToken = req.params.trackingToken?.trim();
+  if (invalidLookup(trackingToken)) {
+    return res.status(400).json({ success: false, error: "Invalid tracking link" });
+  }
+
+  const tracking = await getPublicTrackingByToken(trackingToken!, prisma);
+  if (!tracking) {
+    return res.status(404).json({
+      success: false,
+      error: "TRACKING_NOT_FOUND",
+      message: "Tracking link was not found."
+    });
+  }
+
+  return res.json(tracking);
 });

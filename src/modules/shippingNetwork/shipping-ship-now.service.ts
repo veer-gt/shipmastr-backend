@@ -7,8 +7,10 @@ import {
   PUBLIC_COURIER_NETWORK,
   serviceCodeForName,
   toPrismaJson,
+  trackingPublicUrlForShipment,
   trackingUrlForAwb
 } from "./shipping-public-serializers.js";
+import { ensureShipmentTrackingToken } from "./shipping-tracking-token.js";
 import { fetchShipmentRates } from "./shipping-rates.service.js";
 import {
   publicTierSummary,
@@ -34,6 +36,8 @@ type ShipmentForPublicResponse = {
   id: string;
   awbNumber?: string | null;
   trackingUrl?: string | null;
+  trackingToken?: string | null;
+  trackingPublicUrl?: string | null;
   serviceLevel?: string | null;
   metadata?: unknown;
 };
@@ -78,7 +82,8 @@ function publicShipNowResponse(input: {
 }) {
   const awbNumber = input.shipment.awbNumber ?? null;
   const labelUrl = input.labelUrl ?? stringMetadata(phase6Metadata(input.shipment.metadata).labelUrl);
-  const trackingUrl = input.trackingUrl ?? input.shipment.trackingUrl ?? trackingUrlForAwb(awbNumber);
+  const trackingPublicUrl = trackingPublicUrlForShipment(input.shipment);
+  const trackingUrl = trackingPublicUrl ?? input.trackingUrl ?? input.shipment.trackingUrl ?? trackingUrlForAwb(awbNumber);
 
   return {
     shipmentId: input.shipment.id,
@@ -90,6 +95,7 @@ function publicShipNowResponse(input: {
     awbNumber,
     labelUrl,
     trackingUrl,
+    trackingPublicUrl,
     message: labelUrl ? "Shipment created successfully" : "Shipment AWB generated. Label is pending."
   };
 }
@@ -222,13 +228,14 @@ async function tryFetchLabel(input: {
         })
       }
     });
+    const tracked = await ensureShipmentTrackingToken(updated, input.client);
 
     return publicShipNowResponse({
-      shipment: updated,
+      shipment: tracked,
       tier: input.tier,
       serviceLevel: input.serviceLevel,
       labelUrl: label.labelUrl,
-      trackingUrl,
+      trackingUrl: tracked.trackingPublicUrl ?? trackingUrl,
       status: label.labelUrl ? "label_generated" : "awb_assigned"
     });
   } catch (error) {
@@ -238,8 +245,9 @@ async function tryFetchLabel(input: {
       error,
       providerStatus: "awb_assigned"
     });
+    const tracked = await ensureShipmentTrackingToken(input.shipment, input.client);
     return publicShipNowResponse({
-      shipment: input.shipment,
+      shipment: tracked,
       tier: input.tier,
       serviceLevel: input.serviceLevel,
       status: "awb_assigned"
@@ -262,12 +270,13 @@ export async function shipNowShipment(
   const existingLabelUrl = stringMetadata(existingPhase6.labelUrl);
   if (shipment.awbNumber && existingLabelUrl) {
     const existingTier = stringMetadata(existingPhase6.selectedTier) as ShippingTier | null;
+    const tracked = await ensureShipmentTrackingToken(shipment, client);
     return publicShipNowResponse({
-      shipment,
+      shipment: tracked,
       tier: existingTier ?? tier,
       serviceLevel: shipment.serviceLevel ?? null,
       labelUrl: existingLabelUrl,
-      trackingUrl: stringMetadata(existingPhase6.trackingUrl) ?? shipment.trackingUrl
+      trackingUrl: tracked.trackingPublicUrl ?? stringMetadata(existingPhase6.trackingUrl) ?? shipment.trackingUrl
     });
   }
 

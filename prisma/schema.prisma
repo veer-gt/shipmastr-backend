@@ -902,6 +902,10 @@ model Shipment {
   serviceLevel           String?             @map("service_level")
   awbNumber              String?             @unique @map("awb_number")
   trackingUrl            String?             @map("tracking_url")
+  trackingToken          String?             @unique @map("tracking_token")
+  trackingPublicUrl      String?             @map("tracking_public_url")
+  trackingStatus         String?             @map("tracking_status")
+  trackingLastSyncedAt   DateTime?           @map("tracking_last_synced_at")
   metadata               Json?
   createdAt              DateTime            @default(now()) @map("created_at")
   updatedAt              DateTime            @default(now()) @updatedAt @map("updated_at")
@@ -923,6 +927,7 @@ model Shipment {
   @@index([segment])
   @@index([paymentMode])
   @@index([fromPincode, toPincode])
+  @@index([trackingToken])
   @@index([createdAt])
   @@map("shipments")
 }
