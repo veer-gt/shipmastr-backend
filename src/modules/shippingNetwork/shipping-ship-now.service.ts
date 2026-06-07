@@ -12,6 +12,7 @@ import {
 } from "./shipping-public-serializers.js";
 import { ensureShipmentTrackingToken } from "./shipping-tracking-token.js";
 import { fetchShipmentRates } from "./shipping-rates.service.js";
+import { recordSlaEvent } from "./shipping-sla-learning.service.js";
 import {
   publicTierSummary,
   selectShippingTiers,
@@ -141,6 +142,32 @@ function rateCandidate(rate: {
   };
 }
 
+async function recordShipmentSlaEvent(input: {
+  client: Db;
+  adapter: InternalCourierProviderAdapter;
+  sellerId: string;
+  shipment: Awaited<ReturnType<typeof getSellerShipment>>;
+  tier: ShippingTier;
+  serviceType?: string | null;
+  eventType: "awb_assigned" | "label_generated" | "failed";
+  courierCode?: string | null;
+}) {
+  await recordSlaEvent({
+    merchantId: input.sellerId,
+    shipmentId: input.shipment.id,
+    orderId: input.shipment.orderId ?? null,
+    provider: input.adapter.code,
+    courierCode: input.courierCode ?? null,
+    courierName: null,
+    serviceType: input.serviceType ?? null,
+    selectedTier: input.tier,
+    pickupPincode: input.shipment.fromPincode ?? null,
+    deliveryPincode: input.shipment.toPincode ?? null,
+    eventType: input.eventType,
+    metadata: { source: "ship_now" }
+  }, input.client);
+}
+
 async function findRates(client: Db, shipmentId: string, sellerId: string) {
   return client.shipmentRate.findMany({
     where: {
@@ -229,6 +256,17 @@ async function tryFetchLabel(input: {
       }
     });
     const tracked = await ensureShipmentTrackingToken(updated, input.client);
+    if (label.labelUrl) {
+      await recordShipmentSlaEvent({
+        client: input.client,
+        adapter: input.adapter,
+        sellerId: input.sellerId,
+        shipment: tracked,
+        tier: input.tier,
+        serviceType: input.serviceLevel,
+        eventType: "label_generated"
+      });
+    }
 
     return publicShipNowResponse({
       shipment: tracked,
@@ -382,6 +420,16 @@ export async function shipNowShipment(
         })
       }
     });
+    await recordShipmentSlaEvent({
+      client,
+      adapter,
+      sellerId,
+      shipment: updated,
+      tier,
+      serviceType: serviceLevel,
+      eventType: "awb_assigned",
+      courierCode: internalCourierId
+    });
 
     return tryFetchLabel({
       client,
@@ -394,6 +442,15 @@ export async function shipNowShipment(
     });
   } catch (error) {
     await storeProviderError({ client, shipment, error });
+    await recordShipmentSlaEvent({
+      client,
+      adapter,
+      sellerId,
+      shipment,
+      tier,
+      serviceType: null,
+      eventType: "failed"
+    });
     throw new HttpError(502, "SHIPMENT_CREATION_FAILED", {
       retryable: providerErrorJson(error).retryable
     });

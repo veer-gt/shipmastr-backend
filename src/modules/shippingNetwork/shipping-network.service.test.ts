@@ -23,6 +23,15 @@ import { fetchShipmentTracking } from "./shipping-tracking.service.js";
 import { listShippingShipments } from "./shipping-list.service.js";
 import { createShipmentFromOrder } from "./shipping-order-bridge.service.js";
 import { getPublicTrackingByToken } from "./shipping-public-tracking.service.js";
+import { getAutopilotPreferences, upsertAutopilotPreferences } from "./shipping-autopilot-preferences.service.js";
+import { buildAutopilotRecommendation, recommendAutopilotForShipment } from "./shipping-autopilot.service.js";
+import { bulkFetchRates, bulkShipNow } from "./shipping-bulk.service.js";
+import {
+  calculateReliabilityScore,
+  getReliabilityScoreForRate,
+  recalculateCourierSlaStats,
+  recordSlaEvent
+} from "./shipping-sla-learning.service.js";
 import {
   calculateAttentionReasons,
   calculateShipmentQueue,
@@ -209,7 +218,13 @@ function createFakeClient() {
           }
         }
       }
-    }]
+    }],
+    autopilotPreferences: [] as any[],
+    autopilotDecisions: [] as any[],
+    slaEvents: [] as any[],
+    slaStats: [] as any[],
+    bulkBatches: [] as any[],
+    bulkItems: [] as any[]
   };
 
   const id = (prefix: string, count: number) => `${prefix}_${count + 1}`;
@@ -249,6 +264,72 @@ function createFakeClient() {
     },
     automationPreference: {
       findUnique: async ({ where }: any) => state.automationPreferences.find((row) => row.merchantId === where.merchantId) ?? null
+    },
+    autopilotPreference: {
+      findUnique: async ({ where }: any) => state.autopilotPreferences.find((row) => row.merchantId === where.merchantId) ?? null,
+      upsert: async ({ where, create, update }: any) => {
+        const existing = state.autopilotPreferences.find((row) => row.merchantId === where.merchantId);
+        if (existing) {
+          Object.assign(existing, update, { updatedAt: now });
+          return existing;
+        }
+        const row = { id: id("autopilot_pref", state.autopilotPreferences.length), createdAt: now, updatedAt: now, ...create };
+        state.autopilotPreferences.push(row);
+        return row;
+      }
+    },
+    autopilotDecision: {
+      create: async ({ data }: any) => {
+        const row = { id: id("autopilot_decision", state.autopilotDecisions.length), createdAt: now, ...data };
+        state.autopilotDecisions.push(row);
+        return row;
+      }
+    },
+    courierSlaEvent: {
+      create: async ({ data }: any) => {
+        const row = { id: id("sla_event", state.slaEvents.length), createdAt: now, ...data };
+        state.slaEvents.push(row);
+        return row;
+      },
+      findMany: async ({ where }: any = {}) => state.slaEvents.filter((row) => {
+        if (where?.provider !== undefined && row.provider !== where.provider) return false;
+        if (where?.courierCode !== undefined && row.courierCode !== where.courierCode) return false;
+        if (where?.deliveryPincode !== undefined && row.deliveryPincode !== where.deliveryPincode) return false;
+        if (where?.selectedTier !== undefined && row.selectedTier !== where.selectedTier) return false;
+        return true;
+      })
+    },
+    courierSlaStat: {
+      findFirst: async ({ where }: any = {}) => {
+        const rows = state.slaStats.filter((row) => {
+          if (where?.provider !== undefined && row.provider !== where.provider) return false;
+          if (where?.courierCode !== undefined && row.courierCode !== where.courierCode) return false;
+          if (where?.serviceType !== undefined && row.serviceType !== where.serviceType) return false;
+          if (where?.selectedTier !== undefined && row.selectedTier !== where.selectedTier) return false;
+          if (where?.pickupPincode !== undefined && row.pickupPincode !== where.pickupPincode) return false;
+          if (where?.deliveryPincode !== undefined && row.deliveryPincode !== where.deliveryPincode) return false;
+          return true;
+        });
+        return [...rows].sort((left, right) => (right.totalShipments ?? 0) - (left.totalShipments ?? 0))[0] ?? null;
+      },
+      create: async ({ data }: any) => {
+        const row = { id: id("sla_stat", state.slaStats.length), createdAt: now, updatedAt: now, ...data };
+        state.slaStats.push(row);
+        return row;
+      },
+      update: async ({ where, data }: any) => {
+        const row = byId(state.slaStats, where.id);
+        assert.ok(row);
+        Object.assign(row, data, { updatedAt: now });
+        return row;
+      },
+      findMany: async ({ where }: any = {}) => state.slaStats.filter((row) => {
+        if (where?.provider !== undefined && row.provider !== where.provider) return false;
+        if (where?.courierCode !== undefined && row.courierCode !== where.courierCode) return false;
+        if (where?.deliveryPincode !== undefined && row.deliveryPincode !== where.deliveryPincode) return false;
+        if (where?.selectedTier !== undefined && row.selectedTier !== where.selectedTier) return false;
+        return true;
+      }).sort((left, right) => (right.totalShipments ?? 0) - (left.totalShipments ?? 0))
     },
     courierPartner: {
       findFirst: async () => state.courierPartners[0]
@@ -385,6 +466,26 @@ function createFakeClient() {
       findMany: async ({ where }: any) => state.trackingEvents
         .filter((row) => row.shipmentId === where.shipmentId)
         .sort((left, right) => left.occurredAt.getTime() - right.occurredAt.getTime())
+    },
+    bulkShippingBatch: {
+      create: async ({ data }: any) => {
+        const row = { id: id("bulk_batch", state.bulkBatches.length), createdAt: now, updatedAt: now, ...data };
+        state.bulkBatches.push(row);
+        return row;
+      },
+      update: async ({ where, data }: any) => {
+        const row = byId(state.bulkBatches, where.id);
+        assert.ok(row);
+        Object.assign(row, data, { updatedAt: now });
+        return row;
+      }
+    },
+    bulkShippingItem: {
+      create: async ({ data }: any) => {
+        const row = { id: id("bulk_item", state.bulkItems.length), createdAt: now, ...data };
+        state.bulkItems.push(row);
+        return row;
+      }
     }
   };
 
@@ -855,6 +956,212 @@ describe("Shipmastr Shipping Network services", () => {
     assert.equal(tiers.smart.recommended, true);
   });
 
+  it("manages Autopilot preferences and recommends explainable seller-safe tiers", async () => {
+    const { client } = createFakeClient();
+    const defaults = await getAutopilotPreferences("seller_1", client);
+    const updated = await upsertAutopilotPreferences("seller_1", {
+      isEnabled: true,
+      defaultMode: "auto_ship_with_limits",
+      preferredTier: "economy",
+      maxCodAmount: 200000,
+      maxOrderAmount: 300000,
+      maxWeightGrams: 2000
+    }, client);
+    const recommendation = buildAutopilotRecommendation({
+      shipment: {
+        id: "shipment_safe",
+        paymentMode: "cod",
+        codAmountPaise: 149900,
+        declaredValuePaise: 149900,
+        deadWeightKg: 1
+      },
+      preferences: updated
+    });
+    const blocked = buildAutopilotRecommendation({
+      shipment: {
+        id: "shipment_blocked",
+        paymentMode: "cod",
+        codAmountPaise: 500000,
+        declaredValuePaise: 500000,
+        deadWeightKg: 4,
+        metadata: { protection: { codRiskLevel: "HIGH", weightRiskLevel: "HIGH" } }
+      },
+      preferences: updated
+    });
+
+    assert.equal(defaults.isEnabled, false);
+    assert.equal(updated.defaultMode, "auto_ship_with_limits");
+    assert.equal(recommendation.recommendedTier, "economy");
+    assert.equal(recommendation.canAutoShip, true);
+    assert.equal(recommendation.decisionLevel, "safe");
+    assert.equal(blocked.decisionLevel, "blocked");
+    assert.equal(blocked.canAutoShip, false);
+    assert.ok(blocked.reasons.some((reason) => reason.includes("manual review")));
+  });
+
+  it("scopes Autopilot recommendations by authenticated merchant", async () => {
+    const { client } = createFakeClient();
+    const adapter = createFakeAdapter();
+    const pickup = await createShippingPickupLocation("seller_1", pickupBody(), { client, adapter });
+    const shipment = await createShipmentDraft("seller_1", shipmentBody(pickup.pickup_location_id), client);
+
+    const recommendation = await recommendAutopilotForShipment("seller_1", shipment.shipment_id, { client });
+
+    assert.equal(recommendation.shipmentId, shipment.shipment_id);
+    await assert.rejects(
+      () => recommendAutopilotForShipment("seller_2", shipment.shipment_id, { client }),
+      (error) => error instanceof HttpError && error.message === "SHIPMENT_NOT_FOUND"
+    );
+  });
+
+  it("records SLA events, recalculates reliability, and keeps default fallback behavior", async () => {
+    const { client, state } = createFakeClient();
+
+    assert.equal(await getReliabilityScoreForRate({ selectedTier: "smart" }, client), 0.75);
+    assert.equal(calculateReliabilityScore({ totalShipments: 0, deliveredCount: 0, rtoCount: 0, failedCount: 0 }), 0.75);
+
+    await recordSlaEvent({
+      merchantId: "seller_1",
+      shipmentId: "shipment_delivered",
+      provider: "bigship",
+      courierCode: "courier_smart",
+      selectedTier: "smart",
+      deliveryPincode: "110011",
+      eventType: "delivered"
+    }, client);
+    await recordSlaEvent({
+      merchantId: "seller_1",
+      shipmentId: "shipment_rto",
+      provider: "bigship",
+      courierCode: "courier_smart",
+      selectedTier: "smart",
+      deliveryPincode: "110011",
+      eventType: "rto"
+    }, client);
+    await recordSlaEvent({
+      merchantId: "seller_1",
+      shipmentId: "shipment_failed",
+      provider: "bigship",
+      courierCode: "courier_smart",
+      selectedTier: "smart",
+      deliveryPincode: "110011",
+      eventType: "failed"
+    }, client);
+
+    const stats = await recalculateCourierSlaStats({ selectedTier: "smart" }, client);
+    const score = await getReliabilityScoreForRate({
+      provider: "bigship",
+      courierCode: "courier_smart",
+      deliveryPincode: "110011",
+      selectedTier: "smart"
+    }, client);
+
+    assert.equal(state.slaEvents.length, 3);
+    assert.equal(stats[0]?.totalShipments, 3);
+    assert.equal(stats[0]?.deliveredCount, 1);
+    assert.equal(stats[0]?.rtoCount, 1);
+    assert.equal(stats[0]?.failedCount, 1);
+    assert.ok(score < 0.75);
+  });
+
+  it("lets Smart tier use SLA reliability while Economy and Express behavior stay unchanged", () => {
+    const tiers = selectShippingTiers([
+      {
+        id: "cheap_slow",
+        amountPaise: 5000,
+        currency: "INR",
+        estimatedDeliveryDays: 5,
+        reliabilityScore: 0.5
+      },
+      {
+        id: "fast_costly",
+        amountPaise: 9000,
+        currency: "INR",
+        estimatedDeliveryDays: 1,
+        reliabilityScore: 0.5
+      },
+      {
+        id: "reliable_balanced",
+        amountPaise: 6500,
+        currency: "INR",
+        estimatedDeliveryDays: 3,
+        reliabilityScore: 1
+      }
+    ], "prepaid");
+
+    assert.equal(tiers.economy.rateId, "cheap_slow");
+    assert.equal(tiers.express.rateId, "fast_costly");
+    assert.equal(tiers.smart.rateId, "reliable_balanced");
+  });
+
+  it("bulk fetches rates with partial success and persisted item results", async () => {
+    const { client, state } = createFakeClient();
+    const adapter = createFakeAdapter();
+    const pickup = await createShippingPickupLocation("seller_1", pickupBody(), { client, adapter });
+    const shipment = await createShipmentDraft("seller_1", shipmentBody(pickup.pickup_location_id), client);
+
+    const result = await bulkFetchRates("seller_1", {
+      shipmentIds: [shipment.shipment_id, "shipment_missing"],
+      refresh: false
+    }, { client, adapter });
+    const json = JSON.stringify(result);
+
+    assert.equal(result.status, "completed_with_errors");
+    assert.equal(result.successCount, 1);
+    assert.equal(result.failedCount, 1);
+    assert.equal(state.bulkBatches.length, 1);
+    assert.equal(state.bulkItems.length, 2);
+    assert.equal(result.items[0]?.status, "success");
+    assert.equal(result.items[1]?.status, "failed");
+    assert.doesNotMatch(json, /internal_courier|internal_order|providerResponseJson|providerErrorJson|bigship/i);
+  });
+
+  it("bulk Ship Now is idempotent and skips Autopilot-blocked shipments", async () => {
+    const { client, state } = createFakeClient();
+    const adapter = createFakeAdapter();
+    const pickup = await createShippingPickupLocation("seller_1", pickupBody(), { client, adapter });
+    const safeShipment = await createShipmentDraft("seller_1", shipmentBody(pickup.pickup_location_id), client);
+    const riskyShipment = await createShipmentDraft("seller_1", {
+      ...shipmentBody(pickup.pickup_location_id),
+      seller_order_id: "ORD1002"
+    }, client);
+    state.shipments[1]!.metadata = {
+      ...state.shipments[1]!.metadata,
+      protection: { codRiskLevel: "HIGH" }
+    };
+    await upsertAutopilotPreferences("seller_1", {
+      isEnabled: true,
+      defaultMode: "auto_ship_with_limits",
+      preferredTier: "smart",
+      requireManualReviewHigh: true
+    }, client);
+
+    const first = await bulkShipNow("seller_1", {
+      shipmentIds: [safeShipment.shipment_id, riskyShipment.shipment_id],
+      tier: "smart",
+      useAutopilot: true
+    }, { client, adapter });
+    const second = await bulkShipNow("seller_1", {
+      shipmentIds: [safeShipment.shipment_id],
+      tier: "smart",
+      useAutopilot: false
+    }, { client, adapter });
+    const json = JSON.stringify(first);
+
+    assert.equal(first.status, "completed_with_errors");
+    assert.equal(first.successCount, 1);
+    assert.equal(first.skippedCount, 1);
+    assert.equal(second.successCount, 1);
+    assert.equal(adapter.calls.manifestOrder, 1);
+    assert.equal(state.autopilotDecisions.length, 2);
+    assert.equal(state.autopilotDecisions.some((decision) => decision.applied === false && decision.blockedReason === "AUTOPILOT_BLOCKED"), true);
+    assert.equal(state.bulkBatches.length, 2);
+    assert.equal(state.bulkItems.length, 3);
+    assert.equal(state.slaEvents.some((event) => event.eventType === "awb_assigned"), true);
+    assert.equal(state.slaEvents.some((event) => event.eventType === "label_generated"), true);
+    assert.doesNotMatch(json, /internal_courier|internal_order|providerResponseJson|providerErrorJson|bigship/i);
+  });
+
   it("creates a shipment draft from an existing seller order without provider calls", async () => {
     const { client, state } = createFakeClient();
     const adapter = createFakeAdapter();
@@ -923,6 +1230,10 @@ describe("Shipmastr Shipping Network services", () => {
     assert.match(shippingRoutes, /shippingNetworkRouter\.get\("\/shipments"/);
     assert.match(shippingRoutes, /shippingNetworkRouter\.post\("\/orders\/:orderId\/create-shipment"/);
     assert.match(shippingRoutes, /shippingNetworkRouter\.post\("\/shipments\/:shipmentId\/ship-now"/);
+    assert.match(shippingRoutes, /shippingNetworkRouter\.get\("\/autopilot\/preferences"/);
+    assert.match(shippingRoutes, /shippingNetworkRouter\.post\("\/bulk\/rates"/);
+    assert.match(shippingRoutes, /shippingNetworkRouter\.post\("\/bulk\/ship-now"/);
+    assert.match(shippingRoutes, /shippingNetworkRouter\.get\("\/sla\/stats"/);
     assert.match(legacyShipments, /shipmentsRouter\.get\("\/",/);
     assert.match(legacyShipments, /shipmentsRouter\.post\("\/",/);
   });

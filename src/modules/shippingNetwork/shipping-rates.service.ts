@@ -14,6 +14,7 @@ import {
   shippingTierFromServiceCode,
   type ShippingTierCandidate
 } from "./shipping-tier-decision.service.js";
+import { getReliabilityScoreForRate } from "./shipping-sla-learning.service.js";
 import {
   createMockSafeShippingAdapter,
   ensureSystemManagedCourierNetwork
@@ -339,6 +340,14 @@ export async function fetchShipmentRates(
   const rates = [];
   for (const providerRate of providerRates) {
     const publicServiceCode = serviceCodeForName(providerRate.serviceLevel);
+    const selectedTier = shippingTierFromServiceCode(publicServiceCode);
+    const reliabilityScore = await getReliabilityScoreForRate({
+      provider: adapter.code,
+      courierCode: providerRate.providerCourierId ?? null,
+      deliveryPincode: shipment.toPincode ?? null,
+      selectedTier
+    }, client);
+
     rates.push(await client.shipmentRate.create({
       data: {
         shipmentId: shipment.id,
@@ -357,11 +366,11 @@ export async function fetchShipmentRates(
           internalCourierId: providerRate.providerCourierId ?? null,
           result: providerRate.providerMetadata,
           phase6: {
-            tier: shippingTierFromServiceCode(publicServiceCode),
+            tier: selectedTier,
             codSupported: providerRate.codSupported ?? true,
             pickupAvailable: providerRate.pickupAvailable ?? true,
             deliveryAvailable: providerRate.deliveryAvailable ?? true,
-            reliabilityScore: providerRate.reliabilityScore ?? 0.75,
+            reliabilityScore,
             providerResponseJson: providerRate.providerMetadata
           }
         })

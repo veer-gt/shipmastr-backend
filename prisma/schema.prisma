@@ -1012,6 +1012,129 @@ model ShipmentTrackingEvent {
   @@map("shipment_tracking_events")
 }
 
+model AutopilotPreference {
+  id                      String   @id @default(cuid())
+  merchantId              String   @unique @map("merchant_id")
+  isEnabled               Boolean  @default(false) @map("is_enabled")
+  defaultMode             String   @default("recommend_only") @map("default_mode")
+  preferredTier           String   @default("smart") @map("preferred_tier")
+  maxCodAmount            Int?     @map("max_cod_amount")
+  maxOrderAmount          Int?     @map("max_order_amount")
+  maxWeightGrams          Int?     @map("max_weight_grams")
+  allowCodHighRisk        Boolean  @default(false) @map("allow_cod_high_risk")
+  allowWeightHighRisk     Boolean  @default(false) @map("allow_weight_high_risk")
+  requireManualReviewHigh Boolean  @default(true) @map("require_manual_review_high")
+  rulesJson               Json?    @map("rules_json")
+  createdAt               DateTime @default(now()) @map("created_at")
+  updatedAt               DateTime @default(now()) @updatedAt @map("updated_at")
+
+  @@index([merchantId])
+  @@map("autopilot_preferences")
+}
+
+model AutopilotDecision {
+  id               String   @id @default(cuid())
+  merchantId       String   @map("merchant_id")
+  shipmentId       String   @map("shipment_id")
+  orderId          String?  @map("order_id")
+  mode             String
+  recommendedTier  String   @map("recommended_tier")
+  selectedTier     String?  @map("selected_tier")
+  decisionLevel    String   @map("decision_level")
+  reasonsJson      Json?    @map("reasons_json")
+  protectionJson   Json?    @map("protection_json")
+  rateSnapshotJson Json?    @map("rate_snapshot_json")
+  applied          Boolean  @default(false)
+  blockedReason    String?  @map("blocked_reason")
+  createdAt        DateTime @default(now()) @map("created_at")
+
+  @@index([merchantId, shipmentId])
+  @@index([merchantId, createdAt])
+  @@map("autopilot_decisions")
+}
+
+model CourierSlaEvent {
+  id               String   @id @default(cuid())
+  merchantId       String   @map("merchant_id")
+  shipmentId       String   @map("shipment_id")
+  orderId          String?  @map("order_id")
+  provider         String?
+  courierCode      String?  @map("courier_code")
+  courierName      String?  @map("courier_name")
+  serviceType      String?  @map("service_type")
+  selectedTier     String?  @map("selected_tier")
+  pickupPincode    String?  @map("pickup_pincode")
+  deliveryPincode  String?  @map("delivery_pincode")
+  eventType        String   @map("event_type")
+  eventAt          DateTime @default(now()) @map("event_at")
+  metadataJson     Json?    @map("metadata_json")
+  createdAt        DateTime @default(now()) @map("created_at")
+
+  @@index([merchantId, eventType])
+  @@index([provider, courierCode, deliveryPincode])
+  @@index([shipmentId])
+  @@map("courier_sla_events")
+}
+
+model CourierSlaStat {
+  id               String    @id @default(cuid())
+  provider         String?
+  courierCode      String?   @map("courier_code")
+  courierName      String?   @map("courier_name")
+  serviceType      String?   @map("service_type")
+  selectedTier     String?   @map("selected_tier")
+  pickupPincode    String?   @map("pickup_pincode")
+  deliveryPincode  String?   @map("delivery_pincode")
+  totalShipments   Int       @default(0) @map("total_shipments")
+  deliveredCount   Int       @default(0) @map("delivered_count")
+  rtoCount         Int       @default(0) @map("rto_count")
+  failedCount      Int       @default(0) @map("failed_count")
+  avgDeliveryDays  Float?    @map("avg_delivery_days")
+  reliabilityScore Float?    @map("reliability_score")
+  lastCalculatedAt DateTime? @map("last_calculated_at")
+  createdAt        DateTime  @default(now()) @map("created_at")
+  updatedAt        DateTime  @default(now()) @updatedAt @map("updated_at")
+
+  @@index([provider, courierCode, deliveryPincode])
+  @@index([selectedTier])
+  @@map("courier_sla_stats")
+}
+
+model BulkShippingBatch {
+  id            String   @id @default(cuid())
+  merchantId    String   @map("merchant_id")
+  action        String
+  status        String   @default("processing")
+  totalItems    Int      @default(0) @map("total_items")
+  successCount  Int      @default(0) @map("success_count")
+  failedCount   Int      @default(0) @map("failed_count")
+  skippedCount  Int      @default(0) @map("skipped_count")
+  requestedTier String?  @map("requested_tier")
+  errorsJson    Json?    @map("errors_json")
+  createdAt     DateTime @default(now()) @map("created_at")
+  updatedAt     DateTime @default(now()) @updatedAt @map("updated_at")
+
+  @@index([merchantId, status])
+  @@index([merchantId, createdAt])
+  @@map("bulk_shipping_batches")
+}
+
+model BulkShippingItem {
+  id           String   @id @default(cuid())
+  batchId      String   @map("batch_id")
+  merchantId   String   @map("merchant_id")
+  shipmentId   String   @map("shipment_id")
+  status       String
+  resultJson   Json?    @map("result_json")
+  errorCode    String?  @map("error_code")
+  errorMessage String?  @map("error_message")
+  createdAt    DateTime @default(now()) @map("created_at")
+
+  @@index([batchId])
+  @@index([merchantId, shipmentId])
+  @@map("bulk_shipping_items")
+}
+
 model CourierPartnerApplication {
   id                         String                          @id @default(cuid())
   companyName                String

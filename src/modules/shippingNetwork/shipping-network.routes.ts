@@ -1,6 +1,10 @@
 import { Router, type Response } from "express";
 import multer from "multer";
 import {
+  autopilotPreferenceSchema,
+  autopilotRecommendSchema,
+  bulkRatesSchema,
+  bulkShipNowSchema,
   cancelShipmentSchema,
   createPickupLocationSchema,
   createShippingOrderSchema,
@@ -10,6 +14,7 @@ import {
   listShippingOrdersQuerySchema,
   listShipmentsQuerySchema,
   manifestShipmentSchema,
+  slaStatsQuerySchema,
   shipNowSchema,
   updatePickupLocationSchema
 } from "./shipping-validation.js";
@@ -24,6 +29,10 @@ import { fetchShipmentTracking } from "./shipping-tracking.service.js";
 import { cancelShipment } from "./shipping-cancel.service.js";
 import { listShippingShipments } from "./shipping-list.service.js";
 import { createShipmentFromOrder } from "./shipping-order-bridge.service.js";
+import { getAutopilotPreferences, upsertAutopilotPreferences } from "./shipping-autopilot-preferences.service.js";
+import { recommendAutopilotForShipment } from "./shipping-autopilot.service.js";
+import { getCourierSlaStats } from "./shipping-sla-learning.service.js";
+import { bulkFetchRates, bulkShipNow } from "./shipping-bulk.service.js";
 import {
   cancelShippingOrder,
   createShippingOrder,
@@ -74,6 +83,47 @@ shippingNetworkRouter.put("/pickup-locations/:id", async (req, res) => {
 shippingNetworkRouter.delete("/pickup-locations/:id", async (req, res) => {
   const data = await deleteShippingPickupLocation(req.auth!.merchantId, req.params.id);
   return res.json(successEnvelope("Pickup location deleted successfully.", data));
+});
+
+shippingNetworkRouter.get("/autopilot/preferences", async (req, res) => {
+  const data = await getAutopilotPreferences(req.auth!.merchantId);
+  return res.json(successEnvelope("Autopilot preferences fetched successfully.", data));
+});
+
+shippingNetworkRouter.put("/autopilot/preferences", async (req, res) => {
+  const body = autopilotPreferenceSchema.parse(req.body);
+  const data = await upsertAutopilotPreferences(req.auth!.merchantId, Object.fromEntries(
+    Object.entries(body).filter(([, value]) => value !== undefined)
+  ));
+  return res.json(successEnvelope("Autopilot preferences updated successfully.", data));
+});
+
+shippingNetworkRouter.get("/sla/stats", async (req, res) => {
+  const query = slaStatsQuerySchema.parse(req.query);
+  const data = await getCourierSlaStats(Object.fromEntries(
+    Object.entries(query).filter(([, value]) => value !== undefined)
+  ));
+  return res.json(successEnvelope("Courier SLA stats fetched successfully.", data));
+});
+
+shippingNetworkRouter.post("/bulk/rates", async (req, res) => {
+  const body = bulkRatesSchema.parse(req.body);
+  const data = await bulkFetchRates(req.auth!.merchantId, {
+    shipmentIds: body.shipmentIds,
+    ...(body.refresh === undefined ? {} : { refresh: body.refresh })
+  });
+  return res.json(successEnvelope("Bulk rates processed successfully.", data));
+});
+
+shippingNetworkRouter.post("/bulk/ship-now", async (req, res) => {
+  const body = bulkShipNowSchema.parse(req.body);
+  const data = await bulkShipNow(req.auth!.merchantId, {
+    shipmentIds: body.shipmentIds,
+    tier: body.tier,
+    ...(body.useAutopilot === undefined ? {} : { useAutopilot: body.useAutopilot }),
+    ...(body.acknowledgeProtectionWarnings === undefined ? {} : { acknowledgeProtectionWarnings: body.acknowledgeProtectionWarnings })
+  });
+  return res.json(successEnvelope("Bulk Ship Now processed successfully.", data));
 });
 
 shippingNetworkRouter.post("/orders", async (req, res) => {
@@ -180,6 +230,12 @@ shippingNetworkRouter.post("/shipments/:shipmentId/ship-now", async (req, res) =
   const body = shipNowSchema.parse(req.body);
   const data = await shipNowShipment(req.auth!.merchantId, req.params.shipmentId, body.tier);
   return res.json(successEnvelope("Shipment created successfully.", data));
+});
+
+shippingNetworkRouter.post("/shipments/:shipmentId/autopilot/recommend", async (req, res) => {
+  autopilotRecommendSchema.parse(req.body ?? {});
+  const data = await recommendAutopilotForShipment(req.auth!.merchantId, req.params.shipmentId);
+  return res.json(successEnvelope("Autopilot recommendation fetched successfully.", data));
 });
 
 shippingNetworkRouter.post("/shipments/:shipmentId/manifest", async (req, res) => {

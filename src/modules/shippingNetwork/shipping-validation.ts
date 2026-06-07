@@ -107,6 +107,40 @@ export const shipNowSchema = z.object({
   tier: z.enum(["smart", "economy", "express"]).default("smart")
 }).strict();
 
+export const autopilotPreferenceSchema = z.object({
+  isEnabled: z.boolean().optional(),
+  defaultMode: z.enum(["recommend_only", "auto_ship_with_limits"]).optional(),
+  preferredTier: z.enum(["smart", "economy", "express"]).optional(),
+  maxCodAmount: z.number().int().nonnegative().nullable().optional(),
+  maxOrderAmount: z.number().int().nonnegative().nullable().optional(),
+  maxWeightGrams: z.number().int().nonnegative().nullable().optional(),
+  allowCodHighRisk: z.boolean().optional(),
+  allowWeightHighRisk: z.boolean().optional(),
+  requireManualReviewHigh: z.boolean().optional(),
+  rulesJson: z.record(z.string(), z.unknown()).nullable().optional()
+}).strict();
+
+export const autopilotRecommendSchema = z.object({}).strict();
+
+export const slaStatsQuerySchema = z.object({
+  provider: z.string().trim().max(80).optional(),
+  courierCode: z.string().trim().max(120).optional(),
+  deliveryPincode: z.string().trim().max(12).optional(),
+  selectedTier: z.enum(["smart", "economy", "express"]).optional()
+}).strict();
+
+export const bulkRatesSchema = z.object({
+  shipmentIds: z.array(z.string().trim().min(1)).min(1).max(50),
+  refresh: z.boolean().optional()
+}).strict();
+
+export const bulkShipNowSchema = z.object({
+  shipmentIds: z.array(z.string().trim().min(1)).min(1).max(25),
+  tier: z.enum(["smart", "economy", "express"]).default("smart"),
+  useAutopilot: z.boolean().optional(),
+  acknowledgeProtectionWarnings: z.boolean().optional()
+}).strict();
+
 export const cancelShipmentSchema = z.object({
   reason: z.string().trim().max(300).optional()
 }).strict();
