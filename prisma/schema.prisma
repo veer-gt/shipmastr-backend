@@ -567,6 +567,20 @@ enum WooCommerceWebhookStatus {
   ERROR
 }
 
+enum MagentoInstallMode {
+  INTEGRATION_TOKEN_PLACEHOLDER
+  EXTENSION_PLACEHOLDER
+  ADOBE_COMMERCE_PLACEHOLDER
+}
+
+enum MagentoWebhookStatus {
+  NOT_CONFIGURED
+  SIMULATED
+  ACTIVE_PLACEHOLDER
+  DISABLED
+  ERROR
+}
+
 enum AutomationEventStatus {
   QUEUED
   PROCESSING
@@ -1460,6 +1474,27 @@ model WooCommerceConnectionState {
   @@index([siteUrl])
   @@index([webhookStatus])
   @@map("woocommerce_connection_states")
+}
+
+model MagentoConnectionState {
+  id                        String               @id @default(cuid())
+  connectionId              String               @unique @map("connection_id")
+  baseUrl                   String               @map("base_url")
+  storeViewCode             String?              @map("store_view_code")
+  websiteCode               String?              @map("website_code")
+  apiVersion                String?              @map("api_version")
+  installMode               MagentoInstallMode   @default(INTEGRATION_TOKEN_PLACEHOLDER) @map("install_mode")
+  webhookStatus             MagentoWebhookStatus @default(NOT_CONFIGURED) @map("webhook_status")
+  lastWebhookReceivedAt     DateTime?            @map("last_webhook_received_at")
+  lastOrderWebhookId        String?              @map("last_order_webhook_id")
+  lastShippingSyncAttemptAt DateTime?            @map("last_shipping_sync_attempt_at")
+  createdAt                 DateTime             @default(now()) @map("created_at")
+  updatedAt                 DateTime             @default(now()) @updatedAt @map("updated_at")
+
+  @@index([baseUrl])
+  @@index([storeViewCode])
+  @@index([webhookStatus])
+  @@map("magento_connection_states")
 }
 
 model PlatformOrderImport {

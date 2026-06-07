@@ -53,8 +53,12 @@ function mapLineItems(lineItems: unknown[], warnings: NormalizedPlatformOrder["m
       const item = asRecord(raw);
       const quantity = Math.max(1, intOrNull(item.qty_ordered ?? item.qty) ?? 1);
       const weightGrams = magentoItemWeightGrams(item);
+      const requiresShipping = item.is_virtual !== 1 && item.product_type !== "virtual" && item.product_type !== "downloadable";
       if (!weightGrams) {
         addWarning(warnings, "MISSING_ITEM_WEIGHT", `items.${index}.weight`, "Magento item is missing product weight.");
+      }
+      if (!requiresShipping) {
+        addWarning(warnings, "VIRTUAL_NON_SHIPPABLE_ITEM", `items.${index}`, "Magento item is virtual, downloadable, or non-shippable.", "info");
       }
 
       return {
@@ -63,7 +67,7 @@ function mapLineItems(lineItems: unknown[], warnings: NormalizedPlatformOrder["m
         quantity,
         unitPricePaise: parseAmountToPaise(firstString(item.price, item.base_price)),
         weightGrams,
-        requiresShipping: item.is_virtual !== 1 && item.product_type !== "virtual" && item.product_type !== "downloadable"
+        requiresShipping
       };
     })
     .filter((item) => item.quantity > 0);
@@ -99,6 +103,9 @@ export const magentoAdapter: PlatformOrderMapper = {
       .map((item) => (item.weightGrams ?? 0) * item.quantity)
       .filter((weight) => weight > 0);
 
+    if (!Object.keys(shippingAssignment).length || !Object.keys(shipping).length) {
+      addWarning(warnings, "MISSING_SHIPPING_ASSIGNMENT", "extension_attributes.shipping_assignments", "Magento order is missing a shipping assignment.");
+    }
     if (!shippingAddress.phone) {
       addWarning(warnings, "MISSING_PHONE", "shipping.telephone", "Magento order is missing a buyer phone.");
     }
@@ -110,6 +117,15 @@ export const magentoAdapter: PlatformOrderMapper = {
     }
     if (!items.length) {
       addWarning(warnings, "MISSING_ITEMS", "items", "Magento order has no shippable items.");
+    }
+    if (items.length && !items.some((item) => item.requiresShipping)) {
+      addWarning(warnings, "NO_SHIPPABLE_ITEMS", "items", "Magento order contains only virtual or non-shippable items.");
+    }
+    if (["canceled", "cancelled", "closed"].includes(asString(order.status).toLowerCase())) {
+      addWarning(warnings, "ORDER_CANCELLED_OR_CLOSED", "status", "Magento order is cancelled or closed.");
+    }
+    if (!firstNullableString(order.store_name, order.store_code, order.store_id)) {
+      addWarning(warnings, "STORE_VIEW_UNMAPPED", "store", "Magento store view could not be mapped.", "info");
     }
 
     return {
