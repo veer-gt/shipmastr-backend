@@ -107,6 +107,7 @@ import {
   simulateWebhookFailed
 } from "./shipping-webhook-events.service.js";
 import { getMerchantOperationsSummary } from "./shipping-merchant-operations.service.js";
+import { merchantStoreOnboardingRouter } from "../merchantOnboarding/merchant-onboarding.routes.js";
 import { merchantNotificationsRouter } from "../merchantNotifications/merchant-notification.routes.js";
 import { platformIntegrationsRouter } from "../platformIntegrations/platform-integrations.routes.js";
 import { workersRouter } from "../workers/workers.routes.js";
@@ -145,6 +146,7 @@ function routeParam(value: string | string[] | undefined) {
 
 shippingNetworkRouter.use("/", platformIntegrationsRouter);
 shippingNetworkRouter.use("/", merchantNotificationsRouter);
+shippingNetworkRouter.use("/", merchantStoreOnboardingRouter);
 shippingNetworkRouter.use("/", workersRouter);
 
 shippingNetworkRouter.post("/api-keys", async (req, res) => {

@@ -1864,6 +1864,24 @@ model ShipmastrWorkerRun {
   @@map("shipmastr_worker_runs")
 }
 
+model MerchantOnboardingState {
+  id                        String    @id @default(cuid())
+  merchantId                String    @unique @map("merchant_id")
+  currentStep               String    @default("WELCOME") @map("current_step")
+  storeConnected            Boolean   @default(false) @map("store_connected")
+  credentialsReady          Boolean   @default(false) @map("credentials_ready")
+  firstFetchCompleted       Boolean   @default(false) @map("first_fetch_completed")
+  reconciliationViewed      Boolean   @default(false) @map("reconciliation_viewed")
+  firstConversionCompleted  Boolean   @default(false) @map("first_conversion_completed")
+  shippingWorkspaceReady    Boolean   @default(false) @map("shipping_workspace_ready")
+  completedAt               DateTime? @map("completed_at")
+  createdAt                 DateTime  @default(now()) @map("created_at")
+  updatedAt                 DateTime  @default(now()) @updatedAt @map("updated_at")
+
+  @@index([merchantId, currentStep])
+  @@map("merchant_onboarding_states")
+}
+
 model CourierPartnerApplication {
   id                         String                          @id @default(cuid())
   companyName                String
