@@ -26,12 +26,19 @@ export const platformImportSourceSchema = z.enum([
 
 const platformOrderObjectSchema = z.record(z.string(), z.unknown());
 
+export const platformImportReadOptionsSchema = z.object({
+  since: z.string().datetime().optional(),
+  limit: z.coerce.number().int().min(1).max(50).optional(),
+  cursor: z.string().trim().min(1).max(500).nullable().optional()
+}).strict();
+
 export const createPlatformImportJobSchema = z.object({
   connectionId: z.string().trim().min(1),
   mode: platformImportJobModeSchema.default("DRY_RUN"),
   source: platformImportSourceSchema.default("MANUAL_PAYLOAD"),
   requestedBy: z.string().trim().max(160).nullable().optional(),
   pickupLocationId: z.string().trim().min(1).nullable().optional(),
+  readOptions: platformImportReadOptionsSchema.optional(),
   orders: z.array(platformOrderObjectSchema).max(50).default([])
 }).strict();
 

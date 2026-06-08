@@ -17,6 +17,11 @@ import { buildRawPayloadPreview } from "../platform-integrations.serializers.js"
 import { mapPlatformOrder } from "../platform-integrations.service.js";
 import { getPlatformAdapter } from "../platform-registry.js";
 import type { NormalizedPlatformOrder } from "../platform-types.js";
+import {
+  fetchPlatformOrdersReadOnly,
+  type PlatformReadOrderFetchOptions
+} from "../readOnlyFetch/platform-order-fetch.service.js";
+import type { ReadableStorePlatform } from "../readOnlyFetch/platform-order-fetch.types.js";
 import { hasImportedExternalOrder, platformPayloadHash } from "./platform-import-deduplication.service.js";
 import { countImportItems, finalImportJobStatus, retryBackoffMinutes } from "./platform-import-orchestrator.service.js";
 import {
@@ -31,6 +36,7 @@ import type {
 } from "./platform-import-queue.validation.js";
 
 type Db = Prisma.TransactionClient | typeof prisma;
+type ReadFetchQueueOptions = Omit<PlatformReadOrderFetchOptions, "client">;
 
 const terminalJobStatuses = new Set<string>([
   PlatformImportJobStatus.COMPLETED,
@@ -99,6 +105,39 @@ function safeSummary(message: string, extra: Record<string, unknown> = {}) {
     fulfillment_sync: false,
     tracking_sync: false
   };
+}
+
+function safeReadOptions(input: CreatePlatformImportJobInput["readOptions"] | undefined) {
+  return {
+    since: input?.since ?? null,
+    limit: input?.limit ?? null,
+    cursor: input?.cursor ?? null
+  };
+}
+
+function readOptionsFromJob(job: PlatformImportJob) {
+  const summary = job.safeSummary && typeof job.safeSummary === "object"
+    ? job.safeSummary as Record<string, unknown>
+    : {};
+  const options = summary.read_options && typeof summary.read_options === "object"
+    ? summary.read_options as Record<string, unknown>
+    : {};
+  const since = typeof options.since === "string" && options.since ? new Date(options.since) : null;
+  const limit = typeof options.limit === "number" ? options.limit : null;
+  const cursor = typeof options.cursor === "string" ? options.cursor : null;
+  return {
+    since: since && !Number.isNaN(since.getTime()) ? since : null,
+    limit,
+    cursor
+  };
+}
+
+function finalReadFetchStatus(counts: ReturnType<typeof countImportItems>, warnings: string[]) {
+  if (counts.totalItems > 0 && counts.failedItems === counts.totalItems) return PlatformImportJobStatus.FAILED;
+  if (counts.failedItems || counts.duplicateItems || counts.warningCount || warnings.length) {
+    return PlatformImportJobStatus.COMPLETED_WITH_WARNINGS;
+  }
+  return PlatformImportJobStatus.COMPLETED;
 }
 
 function createItemPreview(normalized: NormalizedPlatformOrder) {
@@ -249,14 +288,15 @@ export async function createPlatformImportJob(
       totalItems: input.orders.length,
       safeSummary: toJson(safeSummary("Platform import job queued. Manual run is required in this foundation phase.", {
         order_payloads_received: input.orders.length,
-        dry_run: mode === PlatformImportJobMode.DRY_RUN
+        dry_run: mode === PlatformImportJobMode.DRY_RUN,
+        read_only_fetch: mode === PlatformImportJobMode.READ_ONLY_FETCH_PLACEHOLDER,
+        read_options: safeReadOptions(input.readOptions)
       }))
     }
   });
 
   if (mode === PlatformImportJobMode.READ_ONLY_FETCH_PLACEHOLDER) {
-    const refreshed = await refreshJobCounts(job, client);
-    return serializePlatformImportJobWithItems(refreshed.job, refreshed.items);
+    return serializePlatformImportJobWithItems(job, []);
   }
 
   const seenHashes = new Set<string>();
@@ -334,34 +374,101 @@ export async function cancelPlatformImportJob(
 export async function runPlatformImportJobFoundation(
   merchantId: string,
   jobId: string,
-  client: Db = prisma
+  client: Db = prisma,
+  readOptions: ReadFetchQueueOptions = {}
 ) {
   const job = await findJob(merchantId, jobId, client);
   if (terminalJobStatuses.has(job.status)) throw new HttpError(409, "PLATFORM_IMPORT_JOB_NOT_RUNNABLE");
+  const queuedReadOptions = job.mode === PlatformImportJobMode.READ_ONLY_FETCH_PLACEHOLDER ? readOptionsFromJob(job) : null;
   const now = new Date();
   const running = await client.platformImportJob.update({
     where: { id: job.id },
     data: {
       status: PlatformImportJobStatus.RUNNING,
       startedAt: job.startedAt ?? now,
-      safeSummary: toJson(safeSummary("Platform import job is running in manual foundation mode."))
+      safeSummary: toJson(safeSummary("Platform import job is running in manual foundation mode.", queuedReadOptions ? {
+        read_only_fetch: true,
+        read_options: {
+          since: queuedReadOptions.since?.toISOString() ?? null,
+          limit: queuedReadOptions.limit,
+          cursor: queuedReadOptions.cursor
+        }
+      } : {}))
     }
   });
 
   if (running.mode === PlatformImportJobMode.READ_ONLY_FETCH_PLACEHOLDER) {
-    const current = await client.platformImportItem.findMany({ where: { jobId: running.id }, orderBy: { createdAt: "asc" } });
-    const finalStatus = finalImportJobStatus(countImportItems(current), running.mode);
-    const updated = await client.platformImportJob.update({
-      where: { id: running.id },
-      data: {
-        status: finalStatus,
-        completedAt: new Date(),
-        safeSummary: toJson(safeSummary("Read-only platform fetch is a placeholder. No platform API calls were made.", {
-          result: "skipped"
-        }))
+    try {
+      const options = queuedReadOptions ?? readOptionsFromJob(running);
+      const fetched = await fetchPlatformOrdersReadOnly({
+        merchantId,
+        connectionId: running.connectionId,
+        platform: running.platform as ReadableStorePlatform,
+        since: options.since,
+        limit: options.limit,
+        cursor: options.cursor,
+        mode: "READ_ONLY_FETCH"
+      }, {
+        ...readOptions,
+        client
+      });
+      const seenHashes = new Set<string>();
+      for (const rawOrder of fetched.rawOrders) {
+        await createMappedOrDuplicateItem(running, rawOrder, null, seenHashes, client);
       }
-    });
-    return serializePlatformImportJobWithItems(updated, current);
+      const items = await client.platformImportItem.findMany({
+        where: { jobId: running.id, merchantId },
+        orderBy: { createdAt: "asc" }
+      });
+      const counts = countImportItems(items);
+      const warnings = [...fetched.warnings, ...fetched.rateLimitWarnings];
+      const finalStatus = finalReadFetchStatus(counts, warnings);
+      const updated = await client.platformImportJob.update({
+        where: { id: running.id },
+        data: {
+          status: finalStatus,
+          completedAt: new Date(),
+          totalItems: counts.totalItems,
+          mappedItems: counts.mappedItems,
+          importedItems: counts.importedItems,
+          skippedItems: counts.skippedItems,
+          duplicateItems: counts.duplicateItems,
+          failedItems: counts.failedItems,
+          warningCount: counts.warningCount + warnings.length,
+          safeSummary: toJson(safeSummary("Read-only platform order fetch completed in manual foundation mode.", {
+            ...counts,
+            fetched_count: fetched.fetchedCount,
+            mapped_preview_count: fetched.orders.length,
+            requested_limit: fetched.requestedLimit,
+            effective_limit: fetched.effectiveLimit,
+            has_more: fetched.hasMore,
+            next_cursor: fetched.nextCursor,
+            warnings,
+            retry_after_seconds: fetched.retryAfterSeconds,
+            fetch_details: fetched.safeDetails
+          }))
+        }
+      });
+      return serializePlatformImportJobWithItems(updated, items);
+    } catch (error) {
+      const items = await client.platformImportItem.findMany({
+        where: { jobId: running.id, merchantId },
+        orderBy: { createdAt: "asc" }
+      });
+      const updated = await client.platformImportJob.update({
+        where: { id: running.id },
+        data: {
+          status: PlatformImportJobStatus.FAILED,
+          completedAt: new Date(),
+          failedItems: Math.max(1, items.length ? items.length : 1),
+          safeSummary: toJson(safeSummary("Read-only platform order fetch failed safely.", {
+            error_code: error instanceof HttpError ? error.message : "PLATFORM_READ_REQUEST_FAILED",
+            warning: "Connection is not ready for read-only fetch."
+          }))
+        }
+      });
+      return serializePlatformImportJobWithItems(updated, items);
+    }
   }
 
   if (running.mode === PlatformImportJobMode.IMPORT_FOUNDATION) {
