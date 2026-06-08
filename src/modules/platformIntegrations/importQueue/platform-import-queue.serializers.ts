@@ -2,8 +2,8 @@ function timestamp(value: Date | string | null | undefined) {
   return value ?? null;
 }
 
-const unsafeKeyPattern = /secret|token|password|encrypted|authorization|cookie|headers|raw|api[_-]?key|consumer/i;
-const unsafeStringPattern = /shpat_|ck_|cs_|magentotoken_|bearer\s+|sk_live|sk_test|whsec_|token|secret/i;
+const unsafeKeyPattern = /secret|token|password|encrypted|authorization|cookie|headers|raw|api[_-]?key|consumer|provider|courier/i;
+const unsafeStringPattern = /shpat_|ck_|cs_|magentotoken_|bearer\s+|sk_live|sk_test|whsec_|token|secret|bigship/i;
 
 export function sanitizeImportPreview(value: unknown): unknown {
   if (value == null) return null;
