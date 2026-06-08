@@ -10,7 +10,6 @@ export function serializePlatformCredential(record: {
   credentialType: string;
   name: string;
   status: string;
-  secretFingerprint: string;
   safeMetadata?: unknown;
   lastUsedAt?: Date | string | null;
   expiresAt?: Date | string | null;
@@ -25,7 +24,6 @@ export function serializePlatformCredential(record: {
     credential_type: record.credentialType as SerializedPlatformCredential["credential_type"],
     name: record.name,
     status: record.status as SerializedPlatformCredential["status"],
-    secret_fingerprint: record.secretFingerprint,
     safe_metadata: (record.safeMetadata as SerializedPlatformCredential["safe_metadata"]) ?? null,
     last_used_at: timestamp(record.lastUsedAt),
     expires_at: timestamp(record.expiresAt),

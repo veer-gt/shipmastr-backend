@@ -14,7 +14,6 @@ export type SerializedPlatformCredential = {
   credential_type: PlatformCredentialType;
   name: string;
   status: PlatformCredentialStatus;
-  secret_fingerprint: string;
   safe_metadata: SafeCredentialMetadata | null;
   last_used_at: Date | string | null;
   expires_at: Date | string | null;

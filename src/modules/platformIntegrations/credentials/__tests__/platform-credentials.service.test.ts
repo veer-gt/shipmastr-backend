@@ -193,7 +193,7 @@ describe("Phase 18 platform credential vault foundation", () => {
       name: "Magento integration",
       credentials: { baseUrl: "https://magento.example", integrationToken: "old_magento_secret" }
     }, client, testVault);
-    const oldFingerprint = credential.secret_fingerprint;
+    const oldFingerprint = state.credentials[0]?.secretFingerprint;
     const oldEncrypted = state.secrets[0]?.encryptedValue;
     const rotated = await rotatePlatformCredential("merchant_1", credential.credential_id, {
       credentials: { baseUrl: "https://magento.example", integrationToken: "new_magento_secret" }
@@ -202,9 +202,9 @@ describe("Phase 18 platform credential vault foundation", () => {
 
     assert.equal(rotated.status, PlatformCredentialStatus.ROTATED);
     assert.ok(rotated.rotated_at);
-    assert.notEqual(rotated.secret_fingerprint, oldFingerprint);
+    assert.notEqual(state.credentials[0]?.secretFingerprint, oldFingerprint);
     assert.notEqual(state.secrets[0]?.encryptedValue, oldEncrypted);
-    assert.doesNotMatch(json, /old_magento_secret|new_magento_secret|encryptedValue|secretRef/i);
+    assert.doesNotMatch(json, /old_magento_secret|new_magento_secret|encryptedValue|secretRef|secretFingerprint|fingerprint/i);
   });
 
   it("attaches and detaches credentials with platform scoping and safe connection metadata", async () => {
@@ -267,17 +267,19 @@ describe("Phase 18 platform credential vault foundation", () => {
     const json = JSON.stringify(listed);
 
     assert.equal(listed.credentials.length, 1);
-    assert.doesNotMatch(json, /ck_list_secret|cs_list_secret|secretRef|encryptedValue|consumerSecret/i);
+    assert.doesNotMatch(json, /ck_list_secret|cs_list_secret|secretRef|encryptedValue|consumerSecret|secretFingerprint|fingerprint/i);
   });
 
   it("fails closed outside dev/test when vault key is missing", () => {
     const previousNodeEnv = env.NODE_ENV;
     const previousAppEnv = env.APP_ENV;
     const previousVaultKey = env.SHIPMASTR_CREDENTIAL_VAULT_KEY;
+    const previousEncryptionKey = env.CREDENTIAL_VAULT_ENCRYPTION_KEY;
     try {
       (env as any).NODE_ENV = "production";
       (env as any).APP_ENV = "production";
       (env as any).SHIPMASTR_CREDENTIAL_VAULT_KEY = undefined;
+      (env as any).CREDENTIAL_VAULT_ENCRYPTION_KEY = undefined;
       assert.throws(
         () => createLocalPlatformCredentialVault().storeSecret({ apiKey: "production_secret" }),
         (error: unknown) => error instanceof HttpError && error.message === "PLATFORM_CREDENTIAL_VAULT_KEY_MISSING"
@@ -286,6 +288,7 @@ describe("Phase 18 platform credential vault foundation", () => {
       (env as any).NODE_ENV = previousNodeEnv;
       (env as any).APP_ENV = previousAppEnv;
       (env as any).SHIPMASTR_CREDENTIAL_VAULT_KEY = previousVaultKey;
+      (env as any).CREDENTIAL_VAULT_ENCRYPTION_KEY = previousEncryptionKey;
     }
   });
 });

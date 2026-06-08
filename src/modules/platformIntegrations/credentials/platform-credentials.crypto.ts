@@ -29,7 +29,7 @@ function stableStringify(value: unknown): string {
 }
 
 function keyMaterial() {
-  const configured = env.SHIPMASTR_CREDENTIAL_VAULT_KEY?.trim();
+  const configured = env.CREDENTIAL_VAULT_ENCRYPTION_KEY?.trim() || env.SHIPMASTR_CREDENTIAL_VAULT_KEY?.trim();
   if (configured) return configured;
   if (env.NODE_ENV === "test") return TEST_VAULT_KEY;
   if (env.APP_ENV === "development") return `${env.APP_SECRET_PEPPER}:local-platform-credential-vault`;
