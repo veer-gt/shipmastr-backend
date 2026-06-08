@@ -7,6 +7,7 @@ import {
 } from "@prisma/client";
 import { HttpError } from "../../../lib/httpError.js";
 import { prisma } from "../../../lib/prisma.js";
+import { notifyConversionResult } from "../../merchantNotifications/merchant-notification.service.js";
 import { buildOrUpdateShipmentCandidate } from "../../shippingNetwork/shipping-candidate-builder.js";
 import { normalizeStateName } from "../../shippingNetwork/shipping-indian-states.js";
 import { validateOrder } from "../../shippingNetwork/shipping-order-validation.js";
@@ -247,15 +248,23 @@ export async function convertPlatformImportItem(
         })
       });
     }
-    return blockResult(item.id, eligibility.reasonCodes, eligibility.warnings);
+    const blocked = blockResult(item.id, eligibility.reasonCodes, eligibility.warnings);
+    await notifyConversionResult(merchantId, blocked, client).catch(() => undefined);
+    return blocked;
   }
 
   const orderExternalId = platformOrderExternalId(item);
-  if (!orderExternalId) return blockResult(item.id, ["MISSING_EXTERNAL_ORDER_ID"], eligibility.warnings);
+  if (!orderExternalId) {
+    const blocked = blockResult(item.id, ["MISSING_EXTERNAL_ORDER_ID"], eligibility.warnings);
+    await notifyConversionResult(merchantId, blocked, client).catch(() => undefined);
+    return blocked;
+  }
   const existingOrder = await existingConvertedOrderForExternalId(merchantId, orderExternalId, client);
   const existingSibling = await existingConvertedSibling(item, client);
   if (existingOrder || existingSibling) {
-    return blockResult(item.id, ["ALREADY_CONVERTED"], eligibility.warnings);
+    const blocked = blockResult(item.id, ["ALREADY_CONVERTED"], eligibility.warnings);
+    await notifyConversionResult(merchantId, blocked, client).catch(() => undefined);
+    return blocked;
   }
 
   const pickup = await defaultPickupLocation(merchantId, client);
@@ -365,7 +374,7 @@ export async function convertPlatformImportItem(
     }
   });
 
-  return conversionResult({
+  const result = conversionResult({
     itemId: item.id,
     status,
     orderId: order.id,
@@ -380,6 +389,8 @@ export async function convertPlatformImportItem(
       shipmentId: shipment?.id ?? null
     })
   });
+  await notifyConversionResult(merchantId, result, client).catch(() => undefined);
+  return result;
 }
 
 function itemWhereFromFilters(

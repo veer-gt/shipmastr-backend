@@ -13,6 +13,10 @@ import {
 } from "@prisma/client";
 import { HttpError } from "../../../lib/httpError.js";
 import { prisma } from "../../../lib/prisma.js";
+import {
+  notifyImportJobFailed,
+  recordImportItemNotifications
+} from "../../merchantNotifications/merchant-notification.service.js";
 import { buildRawPayloadPreview } from "../platform-integrations.serializers.js";
 import { mapPlatformOrder } from "../platform-integrations.service.js";
 import { getPlatformAdapter } from "../platform-registry.js";
@@ -178,7 +182,7 @@ async function createFailedItem(
   errorMessage: string,
   client: Db
 ) {
-  return client.platformImportItem.create({
+  const item = await client.platformImportItem.create({
     data: {
       jobId: job.id,
       connectionId: job.connectionId,
@@ -191,6 +195,8 @@ async function createFailedItem(
       safePayloadPreview: toJson({ error_code: errorCode, message: errorMessage })
     }
   });
+  await recordImportItemNotifications(item, client).catch(() => undefined);
+  return item;
 }
 
 async function createMappedOrDuplicateItem(
@@ -202,7 +208,7 @@ async function createMappedOrDuplicateItem(
 ) {
   const hash = platformPayloadHash(payload);
   if (seenHashes.has(hash)) {
-    return client.platformImportItem.create({
+    const duplicate = await client.platformImportItem.create({
       data: {
         jobId: job.id,
         connectionId: job.connectionId,
@@ -215,6 +221,8 @@ async function createMappedOrDuplicateItem(
         safePayloadPreview: toJson({ duplicate_scope: "same_job" })
       }
     });
+    await recordImportItemNotifications(duplicate, client).catch(() => undefined);
+    return duplicate;
   }
   seenHashes.add(hash);
 
@@ -243,7 +251,7 @@ async function createMappedOrDuplicateItem(
     client
   );
 
-  return client.platformImportItem.create({
+  const item = await client.platformImportItem.create({
     data: {
       jobId: job.id,
       connectionId: job.connectionId,
@@ -259,6 +267,8 @@ async function createMappedOrDuplicateItem(
       safePayloadPreview: toJson(createItemPreview(normalized))
     }
   });
+  await recordImportItemNotifications(item, client).catch(() => undefined);
+  return item;
 }
 
 export async function createPlatformImportJob(
@@ -449,6 +459,7 @@ export async function runPlatformImportJobFoundation(
           }))
         }
       });
+      await notifyImportJobFailed(updated, client).catch(() => undefined);
       return serializePlatformImportJobWithItems(updated, items);
     } catch (error) {
       const items = await client.platformImportItem.findMany({
@@ -467,6 +478,7 @@ export async function runPlatformImportJobFoundation(
           }))
         }
       });
+      await notifyImportJobFailed(updated, client).catch(() => undefined);
       return serializePlatformImportJobWithItems(updated, items);
     }
   }
@@ -478,7 +490,7 @@ export async function runPlatformImportJobFoundation(
     });
     for (const item of items) {
       if (!item.externalOrderId) {
-        await client.platformImportItem.update({
+        const updatedItem = await client.platformImportItem.update({
           where: { id: item.id },
           data: {
             status: PlatformImportItemStatus.FAILED,
@@ -486,11 +498,12 @@ export async function runPlatformImportJobFoundation(
             errorMessage: "The platform order is missing an order ID."
           }
         });
+        await recordImportItemNotifications(updatedItem, client).catch(() => undefined);
         continue;
       }
       const existing = await hasImportedExternalOrder(merchantId, running.connectionId, running.platform, item.externalOrderId, client);
       if (existing) {
-        await client.platformImportItem.update({
+        const updatedItem = await client.platformImportItem.update({
           where: { id: item.id },
           data: {
             status: PlatformImportItemStatus.DUPLICATE,
@@ -498,6 +511,7 @@ export async function runPlatformImportJobFoundation(
             errorMessage: "This platform order was already imported for this store connection."
           }
         });
+        await recordImportItemNotifications(updatedItem, client).catch(() => undefined);
         continue;
       }
       const record = await client.platformOrderImport.create({
@@ -552,6 +566,7 @@ export async function runPlatformImportJobFoundation(
       safeSummary: toJson(safeSummary("Platform import job completed in manual foundation mode.", counts))
     }
   });
+  await notifyImportJobFailed(updated, client).catch(() => undefined);
   return serializePlatformImportJobWithItems(updated, items);
 }
 
@@ -576,6 +591,7 @@ export async function retryPlatformImportItem(
       errorMessage: "Manual retry recorded. Background retries are not enabled in this foundation phase."
     }
   });
+  await recordImportItemNotifications(updated, client).catch(() => undefined);
   return serializePlatformImportItem(updated);
 }
 

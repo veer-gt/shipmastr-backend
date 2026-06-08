@@ -107,6 +107,7 @@ import {
   simulateWebhookFailed
 } from "./shipping-webhook-events.service.js";
 import { getMerchantOperationsSummary } from "./shipping-merchant-operations.service.js";
+import { merchantNotificationsRouter } from "../merchantNotifications/merchant-notification.routes.js";
 import { platformIntegrationsRouter } from "../platformIntegrations/platform-integrations.routes.js";
 
 export const shippingNetworkRouter = Router();
@@ -142,6 +143,7 @@ function routeParam(value: string | string[] | undefined) {
 }
 
 shippingNetworkRouter.use("/", platformIntegrationsRouter);
+shippingNetworkRouter.use("/", merchantNotificationsRouter);
 
 shippingNetworkRouter.post("/api-keys", async (req, res) => {
   const body = createSellerApiKeySchema.parse(req.body);
