@@ -98,7 +98,8 @@ const schema = z.object({
   BIGSHIP_ENABLE_REAL_CALLS: envBoolean(false),
   BIGSHIP_ENABLED: envBoolean(false),
   BIGSHIP_MOCK_MODE: envBoolean(true),
-  SHIPMASTR_CREDENTIAL_VAULT_KEY: z.string().optional()
+  SHIPMASTR_CREDENTIAL_VAULT_KEY: z.string().optional(),
+  PLATFORM_INTEGRATIONS_ENABLE_REAL_READS: envBoolean(false)
 });
 
 export const env = schema.parse(process.env);

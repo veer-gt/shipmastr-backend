@@ -564,6 +564,23 @@ enum PlatformCredentialStatus {
   EXPIRED
 }
 
+enum PlatformHealthCheckStatus {
+  HEALTHY
+  DEGRADED
+  FAILED
+  NOT_CONFIGURED
+  SKIPPED
+}
+
+enum PlatformHealthCheckType {
+  AUTHENTICATION
+  READ_PERMISSIONS
+  WEBHOOK_CAPABILITY
+  TRACKING_SYNC_CAPABILITY
+  FULFILLMENT_CAPABILITY
+  OVERALL
+}
+
 enum ShopifyInstallMode {
   CUSTOM_APP
   PUBLIC_APP_PLACEHOLDER
@@ -1600,6 +1617,25 @@ model PlatformCredentialSecret {
 
   @@index([credentialId])
   @@map("platform_credential_secrets")
+}
+
+model PlatformConnectionHealthCheck {
+  id          String                    @id @default(cuid())
+  connectionId String                   @map("connection_id")
+  merchantId  String                    @map("merchant_id")
+  platform    StorePlatform
+  checkType   PlatformHealthCheckType   @map("check_type")
+  status      PlatformHealthCheckStatus
+  message     String
+  safeDetails Json?                     @map("safe_details")
+  errorCode   String?                   @map("error_code")
+  checkedAt   DateTime                  @default(now()) @map("checked_at")
+  createdAt   DateTime                  @default(now()) @map("created_at")
+
+  @@index([merchantId, platform])
+  @@index([connectionId, checkedAt])
+  @@index([merchantId, status])
+  @@map("platform_connection_health_checks")
 }
 
 model CourierPartnerApplication {

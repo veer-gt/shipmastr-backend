@@ -26,6 +26,13 @@ import { shopifyPlatformRouter } from "./shopify/shopify.routes.js";
 import { wooCommercePlatformRouter } from "./woocommerce/woocommerce.routes.js";
 import { magentoPlatformRouter } from "./magento/magento.routes.js";
 import { platformCredentialsRouter } from "./credentials/platform-credentials.routes.js";
+import {
+  getLatestPlatformConnectionHealth,
+  listPlatformConnectionHealthChecks,
+  runAllPlatformConnectionHealthChecks,
+  runPlatformConnectionHealthCheck
+} from "./clients/platform-health-check.service.js";
+import { platformHealthCheckQuerySchema } from "./clients/platform-health-check.validation.js";
 
 export const platformIntegrationsRouter = Router();
 
@@ -50,6 +57,11 @@ platformIntegrationsRouter.get("/platform-connections", async (req, res) => {
   return res.json(successEnvelope("Platform connections fetched successfully.", data));
 });
 
+platformIntegrationsRouter.post("/platform-connections/health-check-all", async (req, res) => {
+  const data = await runAllPlatformConnectionHealthChecks(req.auth!.merchantId);
+  return res.json(successEnvelope("Platform connection health checks completed safely.", data));
+});
+
 platformIntegrationsRouter.get("/platform-connections/:connectionId", async (req, res) => {
   const data = await getConnection(req.auth!.merchantId, routeParam(req.params.connectionId));
   return res.json(successEnvelope("Platform connection fetched successfully.", data));
@@ -58,6 +70,22 @@ platformIntegrationsRouter.get("/platform-connections/:connectionId", async (req
 platformIntegrationsRouter.delete("/platform-connections/:connectionId", async (req, res) => {
   const data = await disableConnection(req.auth!.merchantId, routeParam(req.params.connectionId));
   return res.json(successEnvelope("Platform connection disabled successfully.", data));
+});
+
+platformIntegrationsRouter.post("/platform-connections/:connectionId/health-check", async (req, res) => {
+  const data = await runPlatformConnectionHealthCheck(req.auth!.merchantId, routeParam(req.params.connectionId));
+  return res.status(201).json(successEnvelope("Platform connection health check completed safely.", data));
+});
+
+platformIntegrationsRouter.get("/platform-connections/:connectionId/health-checks", async (req, res) => {
+  const query = platformHealthCheckQuerySchema.parse(req.query);
+  const data = await listPlatformConnectionHealthChecks(req.auth!.merchantId, routeParam(req.params.connectionId), query);
+  return res.json(successEnvelope("Platform connection health checks fetched successfully.", data));
+});
+
+platformIntegrationsRouter.get("/platform-connections/:connectionId/health", async (req, res) => {
+  const data = await getLatestPlatformConnectionHealth(req.auth!.merchantId, routeParam(req.params.connectionId));
+  return res.json(successEnvelope("Platform connection health fetched successfully.", data));
 });
 
 platformIntegrationsRouter.post("/platform-connections/:connectionId/orders/preview", async (req, res) => {
