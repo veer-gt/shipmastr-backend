@@ -37,6 +37,7 @@ function createFakeClient() {
     connections: [] as any[],
     jobs: [] as any[],
     items: [] as any[],
+    conversions: [] as any[],
     orders: [] as any[],
     shipments: [] as any[]
   };
@@ -65,6 +66,16 @@ function createFakeClient() {
       findFirst: async ({ where }: any) => state.items.find((row) => (
         (!where?.id || row.id === where.id) &&
         (!where?.merchantId || row.merchantId === where.merchantId)
+      )) ?? null
+    },
+    platformImportConversion: {
+      findMany: async ({ where }: any = {}) => state.conversions.filter((row) => (
+        (!where?.merchantId || row.merchantId === where.merchantId) &&
+        (!where?.importItemId?.in || where.importItemId.in.includes(row.importItemId))
+      )),
+      findFirst: async ({ where }: any = {}) => state.conversions.find((row) => (
+        (!where?.merchantId || row.merchantId === where.merchantId) &&
+        (!where?.importItemId || row.importItemId === where.importItemId)
       )) ?? null
     }
   };

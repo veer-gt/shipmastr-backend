@@ -155,6 +155,15 @@ async function loadReconciliationState(
       where: { merchantId }
     })
   ]);
+  const conversions = items.length
+    ? await client.platformImportConversion.findMany({
+      where: {
+        merchantId,
+        importItemId: { in: items.map((item) => item.id) }
+      }
+    })
+    : [];
+  const conversionsByItemId = new Map(conversions.map((conversion) => [conversion.importItemId, conversion]));
 
   const from = parseDate(query.dateFrom);
   const to = parseDate(query.dateTo);
@@ -162,7 +171,7 @@ async function loadReconciliationState(
     const createdAt = dateValue(job.createdAt);
     return isSameOrAfter(createdAt, from) && isSameOrBefore(createdAt, to);
   });
-  const itemViews = filterViews(items.map(buildReconciliationItemView), query);
+  const itemViews = filterViews(items.map((item) => buildReconciliationItemView(item, conversionsByItemId.get(item.id))), query);
   const itemJobIds = new Set(itemViews.map((view) => view.item.jobId));
   const matchingJobs = query.status || query.hasWarnings !== undefined || query.hasErrors !== undefined || query.search
     ? dateFilteredJobs.filter((job) => itemJobIds.has(job.id))
@@ -210,7 +219,10 @@ export async function getPlatformImportReconciliationItem(
     where: { id: itemId, merchantId }
   });
   if (!item) throw new HttpError(404, "PLATFORM_IMPORT_ITEM_NOT_FOUND");
-  return serializeReconciliationItemDetail(buildReconciliationItemView(item));
+  const conversion = await client.platformImportConversion.findFirst({
+    where: { merchantId, importItemId: item.id }
+  });
+  return serializeReconciliationItemDetail(buildReconciliationItemView(item, conversion));
 }
 
 export const reconciliationStatusForImportItem = reconciliationStatusForItem;

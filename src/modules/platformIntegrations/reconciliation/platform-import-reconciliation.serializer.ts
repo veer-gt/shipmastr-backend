@@ -1,5 +1,6 @@
 import type { ReconciliationStatusInput } from "./platform-import-reconciliation.validation.js";
 import { sanitizeImportPreview } from "../importQueue/platform-import-queue.serializers.js";
+import { serializePlatformImportConversionRecord } from "../conversion/platform-import-conversion.serializer.js";
 
 type ImportItemRecord = {
   id: string;
@@ -44,12 +45,25 @@ type ConnectionRecord = {
   storeUrl?: string | null;
 };
 
+export type ConversionRecord = {
+  importItemId: string;
+  orderId?: string | null;
+  shipmentId?: string | null;
+  status: string;
+  queue?: string | null;
+  warnings?: unknown;
+  reasonCodes?: unknown;
+  createdAt?: Date | string | null;
+  updatedAt?: Date | string | null;
+};
+
 export type ReconciliationItemView = {
   item: ImportItemRecord;
   status: ReconciliationStatusInput;
   warnings: string[];
   errors: string[];
   duplicateReason: string | null;
+  conversion?: ConversionRecord | null;
 };
 
 function timestamp(value: Date | string | null | undefined) {
@@ -168,18 +182,29 @@ function orderPreview(item: ImportItemRecord, includeLineItems = false) {
   };
 }
 
-export function buildReconciliationItemView(item: ImportItemRecord): ReconciliationItemView {
+export function buildReconciliationItemView(item: ImportItemRecord, conversion?: ConversionRecord | null): ReconciliationItemView {
   const status = reconciliationStatusForItem(item);
   const warnings = reconciliationWarnings(item);
   const errors = reconciliationErrors(item);
   const duplicateReason = status === "DUPLICATE"
     ? item.errorMessage ?? item.errorCode ?? "This platform order already exists in this import scope."
     : null;
-  return { item, status, warnings, errors, duplicateReason };
+  return { item, status, warnings, errors, duplicateReason, conversion: conversion ?? null };
+}
+
+function safeNextActions(view: ReconciliationItemView) {
+  const conversion = serializePlatformImportConversionRecord(view.conversion);
+  if (conversion.status !== "NOT_CONVERTED") return conversion.next_actions;
+  if (view.status === "READY") return ["REVIEW", "CONVERT"];
+  if (view.status === "WARNING") return ["REVIEW", "CONVERT_WITH_NEEDS_ATTENTION"];
+  if (view.status === "FAILED") return ["REVIEW", "RETRY"];
+  if (view.status === "DUPLICATE") return ["REVIEW_DUPLICATE"];
+  return ["REVIEW"];
 }
 
 export function serializeReconciliationItem(view: ReconciliationItemView) {
   const { item, status, warnings, errors } = view;
+  const conversion = serializePlatformImportConversionRecord(view.conversion);
   return {
     item_id: item.id,
     job_id: item.jobId,
@@ -193,6 +218,8 @@ export function serializeReconciliationItem(view: ReconciliationItemView) {
     order_preview: orderPreview(item),
     warnings,
     errors,
+    conversion,
+    safe_next_actions: safeNextActions(view),
     retry_state: {
       can_retry: item.status === "FAILED",
       retry_count: item.attemptCount ?? 0,
@@ -205,9 +232,7 @@ export function serializeReconciliationItem(view: ReconciliationItemView) {
 
 export function serializeReconciliationItemDetail(view: ReconciliationItemView) {
   const { item, status, warnings, errors, duplicateReason } = view;
-  const safeNextActions = status === "FAILED"
-    ? ["REVIEW", "RETRY"]
-    : ["REVIEW"];
+  const conversion = serializePlatformImportConversionRecord(view.conversion);
 
   return {
     item_id: item.id,
@@ -223,7 +248,8 @@ export function serializeReconciliationItemDetail(view: ReconciliationItemView) 
     warnings,
     errors,
     duplicate_reason: duplicateReason,
-    safe_next_actions: safeNextActions,
+    conversion,
+    safe_next_actions: safeNextActions(view),
     created_at: timestamp(item.createdAt),
     updated_at: timestamp(item.updatedAt)
   };

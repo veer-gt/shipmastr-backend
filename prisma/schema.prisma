@@ -1730,6 +1730,27 @@ model PlatformImportItem {
   @@map("platform_import_items")
 }
 
+model PlatformImportConversion {
+  id                    String   @id @default(cuid())
+  merchantId            String   @map("merchant_id")
+  importItemId          String   @map("import_item_id")
+  platformOrderImportId String?  @map("platform_order_import_id")
+  orderId               String?  @map("order_id")
+  shipmentId            String?  @map("shipment_id")
+  status                String
+  queue                 String?
+  warnings              Json?
+  reasonCodes           Json?    @map("reason_codes")
+  createdAt             DateTime @default(now()) @map("created_at")
+  updatedAt             DateTime @default(now()) @updatedAt @map("updated_at")
+
+  @@unique([merchantId, importItemId])
+  @@index([merchantId, status])
+  @@index([orderId])
+  @@index([shipmentId])
+  @@map("platform_import_conversions")
+}
+
 model CourierPartnerApplication {
   id                         String                          @id @default(cuid())
   companyName                String

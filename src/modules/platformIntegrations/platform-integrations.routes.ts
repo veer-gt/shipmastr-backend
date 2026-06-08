@@ -56,6 +56,15 @@ import {
   reconciliationItemsQuerySchema,
   reconciliationSummaryQuerySchema
 } from "./reconciliation/platform-import-reconciliation.validation.js";
+import {
+  bulkConvertPlatformImportItems,
+  convertPlatformImportItem,
+  getPlatformImportItemConversionStatus
+} from "./conversion/platform-import-conversion.service.js";
+import {
+  bulkConvertPlatformImportItemsSchema,
+  convertPlatformImportItemSchema
+} from "./conversion/platform-import-conversion.validation.js";
 
 export const platformIntegrationsRouter = Router();
 
@@ -161,9 +170,26 @@ platformIntegrationsRouter.get("/platform-import-reconciliation/items", async (r
   return res.json(successEnvelope("Platform import reconciliation items fetched successfully.", data));
 });
 
+platformIntegrationsRouter.post("/platform-import-reconciliation/items/bulk-convert", async (req, res) => {
+  const body = bulkConvertPlatformImportItemsSchema.parse(req.body);
+  const data = await bulkConvertPlatformImportItems(req.auth!.merchantId, body);
+  return res.json(successEnvelope("Eligible platform import items converted safely.", data));
+});
+
 platformIntegrationsRouter.get("/platform-import-reconciliation/items/:itemId", async (req, res) => {
   const data = await getPlatformImportReconciliationItem(req.auth!.merchantId, routeParam(req.params.itemId));
   return res.json(successEnvelope("Platform import reconciliation item fetched successfully.", data));
+});
+
+platformIntegrationsRouter.post("/platform-import-reconciliation/items/:itemId/convert", async (req, res) => {
+  const body = convertPlatformImportItemSchema.parse(req.body);
+  const data = await convertPlatformImportItem(req.auth!.merchantId, routeParam(req.params.itemId), body);
+  return res.status(201).json(successEnvelope("Platform import item conversion evaluated safely.", data));
+});
+
+platformIntegrationsRouter.get("/platform-import-reconciliation/items/:itemId/conversion-status", async (req, res) => {
+  const data = await getPlatformImportItemConversionStatus(req.auth!.merchantId, routeParam(req.params.itemId));
+  return res.json(successEnvelope("Platform import item conversion status fetched successfully.", data));
 });
 
 platformIntegrationsRouter.post("/platform-connections/:connectionId/orders/preview", async (req, res) => {
