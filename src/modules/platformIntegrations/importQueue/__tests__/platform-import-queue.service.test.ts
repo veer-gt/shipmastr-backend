@@ -15,10 +15,15 @@ import {
 import { HttpError } from "../../../../lib/httpError.js";
 import {
   cancelPlatformImportJob,
+  continuePlatformImportJob,
   createPlatformImportJob,
+  getPlatformImportJobProgress,
+  listPlatformImportCursors,
   getPlatformImportJob,
   getPlatformImportJobSummary,
   retryPlatformImportItem,
+  resetPlatformImportCursor,
+  runNextPlatformImportCursorPage,
   runPlatformImportJobFoundation
 } from "../platform-import-queue.service.js";
 import type { PlatformCredentialVault } from "../../credentials/platform-credentials.crypto.js";
@@ -27,9 +32,11 @@ import type { PlatformOrderReadClient } from "../../readOnlyFetch/platform-order
 const now = new Date("2026-06-08T05:00:00.000Z");
 
 function pageRows<T>(rows: T[], args: any = {}) {
-  const sorted = args.orderBy?.createdAt === "desc"
-    ? [...rows].sort((left: any, right: any) => right.createdAt.getTime() - left.createdAt.getTime())
-    : rows;
+  const sorted = [...rows];
+  if (args.orderBy?.createdAt === "desc") sorted.sort((left: any, right: any) => right.createdAt.getTime() - left.createdAt.getTime());
+  if (args.orderBy?.createdAt === "asc") sorted.sort((left: any, right: any) => left.createdAt.getTime() - right.createdAt.getTime());
+  if (args.orderBy?.updatedAt === "desc") sorted.sort((left: any, right: any) => right.updatedAt.getTime() - left.updatedAt.getTime());
+  if (args.orderBy?.updatedAt === "asc") sorted.sort((left: any, right: any) => left.updatedAt.getTime() - right.updatedAt.getTime());
   return sorted.slice(args.skip ?? 0, (args.skip ?? 0) + (args.take ?? sorted.length));
 }
 
@@ -41,6 +48,7 @@ function createFakeClient() {
     jobs: [] as any[],
     items: [] as any[],
     imports: [] as any[],
+    cursors: [] as any[],
     healthChecks: [] as any[]
   };
   const id = (prefix: string, count: number) => `${prefix}_${count + 1}`;
@@ -141,7 +149,11 @@ function createFakeClient() {
       },
       findFirst: async ({ where }: any) => state.items.find((row) => (
         (!where?.id || row.id === where.id) &&
-        (!where?.merchantId || row.merchantId === where.merchantId)
+        (!where?.merchantId || row.merchantId === where.merchantId) &&
+        (!where?.connectionId || row.connectionId === where.connectionId) &&
+        (!where?.platform || row.platform === where.platform) &&
+        (!where?.externalOrderId || row.externalOrderId === where.externalOrderId) &&
+        (!where?.NOT?.jobId || row.jobId !== where.NOT.jobId)
       )) ?? null,
       findMany: async (args: any = {}) => pageRows(state.items.filter((row) => (
         (!args.where?.jobId || row.jobId === args.where.jobId) &&
@@ -150,6 +162,53 @@ function createFakeClient() {
       )), args),
       update: async ({ where, data }: any) => {
         const row = byId(state.items, where.id);
+        assert.ok(row);
+        Object.assign(row, data, { updatedAt: now });
+        return row;
+      }
+    },
+    platformImportCursor: {
+      create: async ({ data }: any) => {
+        const row = {
+          id: id("platform_import_cursor", state.cursors.length),
+          cursor: null,
+          page: null,
+          since: null,
+          lastJobId: null,
+          hasMore: false,
+          warningCount: 0,
+          errorCount: 0,
+          createdAt: now,
+          updatedAt: now,
+          ...data
+        };
+        state.cursors.push(row);
+        return row;
+      },
+      findFirst: async (args: any = {}) => {
+        const rows = state.cursors.filter((row) => (
+          (!args.where?.id || row.id === args.where.id) &&
+          (!args.where?.merchantId || row.merchantId === args.where.merchantId) &&
+          (!args.where?.connectionId || row.connectionId === args.where.connectionId) &&
+          (!args.where?.platform || row.platform === args.where.platform) &&
+          (!args.where?.status || row.status === args.where.status)
+        ));
+        return pageRows(rows, args)[0] ?? null;
+      },
+      findMany: async (args: any = {}) => pageRows(state.cursors.filter((row) => (
+        (!args.where?.merchantId || row.merchantId === args.where.merchantId) &&
+        (!args.where?.connectionId || row.connectionId === args.where.connectionId) &&
+        (!args.where?.platform || row.platform === args.where.platform) &&
+        (!args.where?.status || row.status === args.where.status)
+      )), args),
+      count: async ({ where }: any = {}) => state.cursors.filter((row) => (
+        (!where?.merchantId || row.merchantId === where.merchantId) &&
+        (!where?.connectionId || row.connectionId === where.connectionId) &&
+        (!where?.platform || row.platform === where.platform) &&
+        (!where?.status || row.status === where.status)
+      )).length,
+      update: async ({ where, data }: any) => {
+        const row = byId(state.cursors, where.id);
         assert.ok(row);
         Object.assign(row, data, { updatedAt: now });
         return row;
@@ -610,5 +669,109 @@ describe("Phase 20 platform order import queue foundation", () => {
       PlatformImportItemStatus.DUPLICATE
     ]);
     assert.equal(state.imports.length, 1);
+  });
+
+  it("records read-only continuation cursors and exposes safe progress", async () => {
+    const { client, state } = createFakeClient();
+    const connection = addConnection(state, StorePlatform.SHOPIFY);
+    attachCredential(state, connection);
+    const created = await createPlatformImportJob("merchant_1", {
+      connectionId: connection.id,
+      mode: PlatformImportJobMode.READ_ONLY_FETCH_PLACEHOLDER,
+      source: PlatformImportSource.POLLING_PLACEHOLDER,
+      readOptions: { limit: 50 },
+      orders: []
+    }, client);
+
+    const ran = await runPlatformImportJobFoundation("merchant_1", created.job.job_id, client, {
+      vault: testVault,
+      readClients: {
+        [StorePlatform.SHOPIFY]: readClientReturning([shopifyOrder])
+      },
+      realReadsEnabled: false
+    });
+    const cursors = await listPlatformImportCursors("merchant_1", { page: 1, per_page: 20 }, client);
+    const progress = await getPlatformImportJobProgress("merchant_1", ran.job.job_id, client);
+    const json = JSON.stringify({ cursors, progress });
+
+    assert.equal(cursors.cursors.length, 1);
+    assert.equal(cursors.cursors[0]?.has_more, true);
+    assert.equal(cursors.cursors[0]?.next_cursor, "next-page");
+    assert.equal(progress.progress.has_more, true);
+    assert.equal(progress.progress.next_page_ready, true);
+    assert.doesNotMatch(json, /shpat_test_secret|rawHeaders|rawResponse|9876543210|221 Market Street|Bigship/i);
+  });
+
+  it("continues the next read-only page manually and deduplicates across pages", async () => {
+    const { client, state } = createFakeClient();
+    const connection = addConnection(state, StorePlatform.SHOPIFY);
+    attachCredential(state, connection);
+    const first = await createPlatformImportJob("merchant_1", {
+      connectionId: connection.id,
+      mode: PlatformImportJobMode.READ_ONLY_FETCH_PLACEHOLDER,
+      source: PlatformImportSource.POLLING_PLACEHOLDER,
+      orders: []
+    }, client);
+    await runPlatformImportJobFoundation("merchant_1", first.job.job_id, client, {
+      vault: testVault,
+      readClients: {
+        [StorePlatform.SHOPIFY]: readClientReturning([shopifyOrder])
+      },
+      realReadsEnabled: false
+    });
+
+    const nextOrder = { ...shopifyOrder, id: 1002, name: "#1002" };
+    const continued = await continuePlatformImportJob("merchant_1", first.job.job_id, { limit: 50 }, client, {
+      vault: testVault,
+      readClients: {
+        [StorePlatform.SHOPIFY]: readClientReturning([shopifyOrder, nextOrder])
+      },
+      realReadsEnabled: false
+    });
+
+    assert.equal(state.jobs.length, 2);
+    assert.equal(continued.result.items.length, 2);
+    assert.deepEqual(continued.result.items.map((item) => item.status), [
+      PlatformImportItemStatus.DUPLICATE,
+      PlatformImportItemStatus.MAPPED
+    ]);
+    assert.equal(state.cursors[0]?.page, 2);
+  });
+
+  it("runs and resets cursor next pages within merchant scope", async () => {
+    const { client, state } = createFakeClient();
+    const connection = addConnection(state, StorePlatform.WOOCOMMERCE);
+    attachCredential(state, connection);
+    const cursor = await (client as any).platformImportCursor.create({
+      data: {
+        merchantId: "merchant_1",
+        connectionId: connection.id,
+        platform: StorePlatform.WOOCOMMERCE,
+        cursor: "woo-page-2",
+        page: 1,
+        since: now,
+        status: "HAS_MORE",
+        hasMore: true,
+        warningCount: 0,
+        errorCount: 0
+      }
+    });
+
+    const ran = await runNextPlatformImportCursorPage("merchant_1", cursor.id, { limit: 50 }, client, {
+      vault: testVault,
+      readClients: {
+        [StorePlatform.WOOCOMMERCE]: readClientReturning([wooOrder])
+      },
+      realReadsEnabled: false
+    });
+    const reset = await resetPlatformImportCursor("merchant_1", cursor.id, client);
+
+    assert.equal(ran.result.items.length, 1);
+    assert.equal(reset.status, "RESET");
+    assert.equal(reset.has_more, false);
+    await assert.rejects(
+      () => runNextPlatformImportCursorPage("merchant_2", cursor.id, {}, client),
+      (error: unknown) => error instanceof HttpError && error.message === "PLATFORM_IMPORT_CURSOR_NOT_FOUND"
+    );
   });
 });

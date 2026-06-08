@@ -36,16 +36,26 @@ import {
 import { platformHealthCheckQuerySchema } from "./clients/platform-health-check.validation.js";
 import {
   cancelPlatformImportJob,
+  continuePlatformImportJob,
   createPlatformImportJob,
+  getPlatformImportCursor,
   getPlatformImportJob,
+  getPlatformImportJobProgress,
   getPlatformImportJobSummary,
+  listPlatformImportCursors,
   listPlatformImportJobs,
   retryPlatformImportItem,
+  resetPlatformImportCursor,
+  runNextPlatformImportCursorPage,
   runPlatformImportJobFoundation
 } from "./importQueue/platform-import-queue.service.js";
 import {
+  continuePlatformImportJobSchema,
   createPlatformImportJobSchema,
+  listPlatformImportCursorsQuerySchema,
   listPlatformImportJobsQuerySchema,
+  resetPlatformImportCursorSchema,
+  runPlatformImportCursorNextPageSchema,
   runPlatformImportJobSchema
 } from "./importQueue/platform-import-queue.validation.js";
 import {
@@ -145,9 +155,20 @@ platformIntegrationsRouter.post("/platform-import-jobs/:jobId/run", async (req, 
   return res.json(successEnvelope("Platform import job ran safely.", data));
 });
 
+platformIntegrationsRouter.post("/platform-import-jobs/:jobId/continue", async (req, res) => {
+  const body = continuePlatformImportJobSchema.parse(req.body ?? {});
+  const data = await continuePlatformImportJob(req.auth!.merchantId, routeParam(req.params.jobId), body);
+  return res.json(successEnvelope("Platform import next page ran safely.", data));
+});
+
 platformIntegrationsRouter.post("/platform-import-jobs/:jobId/cancel", async (req, res) => {
   const data = await cancelPlatformImportJob(req.auth!.merchantId, routeParam(req.params.jobId));
   return res.json(successEnvelope("Platform import job cancelled successfully.", data));
+});
+
+platformIntegrationsRouter.get("/platform-import-jobs/:jobId/progress", async (req, res) => {
+  const data = await getPlatformImportJobProgress(req.auth!.merchantId, routeParam(req.params.jobId));
+  return res.json(successEnvelope("Platform import job progress fetched safely.", data));
 });
 
 platformIntegrationsRouter.get("/platform-import-jobs/:jobId/summary", async (req, res) => {
@@ -158,6 +179,29 @@ platformIntegrationsRouter.get("/platform-import-jobs/:jobId/summary", async (re
 platformIntegrationsRouter.post("/platform-import-items/:itemId/retry", async (req, res) => {
   const data = await retryPlatformImportItem(req.auth!.merchantId, routeParam(req.params.itemId));
   return res.json(successEnvelope("Platform import item retry state recorded.", data));
+});
+
+platformIntegrationsRouter.get("/platform-import-cursors", async (req, res) => {
+  const query = listPlatformImportCursorsQuerySchema.parse(req.query);
+  const data = await listPlatformImportCursors(req.auth!.merchantId, query);
+  return res.json(successEnvelope("Platform import cursors fetched safely.", data));
+});
+
+platformIntegrationsRouter.get("/platform-import-cursors/:cursorId", async (req, res) => {
+  const data = await getPlatformImportCursor(req.auth!.merchantId, routeParam(req.params.cursorId));
+  return res.json(successEnvelope("Platform import cursor fetched safely.", data));
+});
+
+platformIntegrationsRouter.post("/platform-import-cursors/:cursorId/run-next-page", async (req, res) => {
+  const body = runPlatformImportCursorNextPageSchema.parse(req.body ?? {});
+  const data = await runNextPlatformImportCursorPage(req.auth!.merchantId, routeParam(req.params.cursorId), body);
+  return res.json(successEnvelope("Platform import cursor next page ran safely.", data));
+});
+
+platformIntegrationsRouter.post("/platform-import-cursors/:cursorId/reset", async (req, res) => {
+  resetPlatformImportCursorSchema.parse(req.body ?? {});
+  const data = await resetPlatformImportCursor(req.auth!.merchantId, routeParam(req.params.cursorId));
+  return res.json(successEnvelope("Platform import cursor reset safely.", data));
 });
 
 platformIntegrationsRouter.get("/platform-import-reconciliation/summary", async (req, res) => {

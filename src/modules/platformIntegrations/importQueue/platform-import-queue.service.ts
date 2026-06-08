@@ -9,6 +9,7 @@ import {
   StorePlatform,
   type Prisma,
   type PlatformConnection,
+  type PlatformImportCursor,
   type PlatformImportJob
 } from "@prisma/client";
 import { HttpError } from "../../../lib/httpError.js";
@@ -30,12 +31,16 @@ import { hasImportedExternalOrder, platformPayloadHash } from "./platform-import
 import { countImportItems, finalImportJobStatus, retryBackoffMinutes } from "./platform-import-orchestrator.service.js";
 import {
   sanitizeImportPreview,
+  serializePlatformImportCursor,
+  serializePlatformImportProgress,
   serializePlatformImportItem,
   serializePlatformImportJob,
   serializePlatformImportJobWithItems
 } from "./platform-import-queue.serializers.js";
 import type {
+  ContinuePlatformImportJobInput,
   CreatePlatformImportJobInput,
+  ListPlatformImportCursorsQueryInput,
   ListPlatformImportJobsQueryInput
 } from "./platform-import-queue.validation.js";
 
@@ -136,6 +141,33 @@ function readOptionsFromJob(job: PlatformImportJob) {
   };
 }
 
+function readOptionsFromCursor(cursor: PlatformImportCursor, limit?: number | null) {
+  return {
+    since: cursor.since ?? null,
+    limit: limit ?? null,
+    cursor: cursor.cursor ?? null
+  };
+}
+
+function cursorStatus(hasMore: boolean, failedItems: number, warningCount: number) {
+  if (failedItems > 0) return "ERROR";
+  if (hasMore) return warningCount > 0 ? "HAS_MORE_WITH_WARNINGS" : "HAS_MORE";
+  return warningCount > 0 ? "EXHAUSTED_WITH_WARNINGS" : "EXHAUSTED";
+}
+
+function nextPageFrom(current: number | null | undefined) {
+  return (current ?? 0) + 1;
+}
+
+function processedCount(counts: ReturnType<typeof countImportItems>) {
+  return counts.mappedItems + counts.importedItems + counts.skippedItems + counts.duplicateItems + counts.failedItems;
+}
+
+function progressPercent(processed: number, total: number) {
+  if (!total) return processed ? 100 : 0;
+  return Math.min(100, Math.round((processed / total) * 100));
+}
+
 function finalReadFetchStatus(counts: ReturnType<typeof countImportItems>, warnings: string[]) {
   if (counts.totalItems > 0 && counts.failedItems === counts.totalItems) return PlatformImportJobStatus.FAILED;
   if (counts.failedItems || counts.duplicateItems || counts.warningCount || warnings.length) {
@@ -149,6 +181,61 @@ function createItemPreview(normalized: NormalizedPlatformOrder) {
     ...buildRawPayloadPreview(normalized),
     mapping_warnings: normalized.mappingWarnings
   };
+}
+
+async function findCursor(merchantId: string, cursorId: string, client: Db) {
+  const cursor = await client.platformImportCursor.findFirst({
+    where: { id: cursorId, merchantId }
+  });
+  if (!cursor) throw new HttpError(404, "PLATFORM_IMPORT_CURSOR_NOT_FOUND");
+  return cursor;
+}
+
+async function findConnectionCursor(
+  merchantId: string,
+  connectionId: string,
+  platform: StorePlatform,
+  client: Db
+) {
+  return client.platformImportCursor.findFirst({
+    where: { merchantId, connectionId, platform },
+    orderBy: { updatedAt: "desc" }
+  });
+}
+
+async function upsertReadFetchCursor(
+  job: PlatformImportJob,
+  input: {
+    since?: Date | null;
+    nextCursor?: string | null;
+    hasMore: boolean;
+    warningCount: number;
+    errorCount: number;
+  },
+  client: Db
+) {
+  const existing = await findConnectionCursor(job.merchantId, job.connectionId, job.platform, client);
+  const page = nextPageFrom(existing?.page);
+  const data = {
+    merchantId: job.merchantId,
+    connectionId: job.connectionId,
+    platform: job.platform,
+    cursor: input.nextCursor ?? null,
+    page,
+    since: input.since ?? existing?.since ?? null,
+    status: cursorStatus(input.hasMore, input.errorCount, input.warningCount),
+    lastJobId: job.id,
+    hasMore: input.hasMore,
+    warningCount: input.warningCount,
+    errorCount: input.errorCount
+  };
+  if (existing) {
+    return client.platformImportCursor.update({
+      where: { id: existing.id },
+      data
+    });
+  }
+  return client.platformImportCursor.create({ data });
 }
 
 async function refreshJobCounts(job: PlatformImportJob, client: Db, finalStatus?: PlatformImportJobStatus) {
@@ -250,6 +337,18 @@ async function createMappedOrDuplicateItem(
     normalized.externalOrderId,
     client
   );
+  const findQueuedItem = (client.platformImportItem as unknown as {
+    findFirst?: typeof client.platformImportItem.findFirst;
+  }).findFirst;
+  const alreadyQueued = alreadyImported || !findQueuedItem ? null : await findQueuedItem.call(client.platformImportItem, {
+    where: {
+      merchantId: job.merchantId,
+      connectionId: job.connectionId,
+      platform: job.platform,
+      externalOrderId: normalized.externalOrderId,
+      NOT: { jobId: job.id }
+    }
+  });
 
   const item = await client.platformImportItem.create({
     data: {
@@ -260,9 +359,9 @@ async function createMappedOrDuplicateItem(
       externalOrderId: normalized.externalOrderId,
       externalOrderName: normalized.externalOrderName,
       payloadHash: hash,
-      status: alreadyImported ? PlatformImportItemStatus.DUPLICATE : PlatformImportItemStatus.MAPPED,
-      errorCode: alreadyImported ? "PLATFORM_IMPORT_DUPLICATE_ORDER" : null,
-      errorMessage: alreadyImported ? "This platform order was already imported for this store connection." : null,
+      status: alreadyImported || alreadyQueued ? PlatformImportItemStatus.DUPLICATE : PlatformImportItemStatus.MAPPED,
+      errorCode: alreadyImported || alreadyQueued ? "PLATFORM_IMPORT_DUPLICATE_ORDER" : null,
+      errorMessage: alreadyImported || alreadyQueued ? "This platform order was already imported or queued for this store connection." : null,
       mappingWarnings: toJson(normalized.mappingWarnings),
       safePayloadPreview: toJson(createItemPreview(normalized))
     }
@@ -433,6 +532,13 @@ export async function runPlatformImportJobFoundation(
       const counts = countImportItems(items);
       const warnings = [...fetched.warnings, ...fetched.rateLimitWarnings];
       const finalStatus = finalReadFetchStatus(counts, warnings);
+      const cursor = await upsertReadFetchCursor(running, {
+        since: options.since,
+        nextCursor: fetched.nextCursor,
+        hasMore: fetched.hasMore,
+        warningCount: counts.warningCount + warnings.length,
+        errorCount: counts.failedItems
+      }, client);
       const updated = await client.platformImportJob.update({
         where: { id: running.id },
         data: {
@@ -453,6 +559,9 @@ export async function runPlatformImportJobFoundation(
             effective_limit: fetched.effectiveLimit,
             has_more: fetched.hasMore,
             next_cursor: fetched.nextCursor,
+            cursor_id: cursor.id,
+            cursor_status: cursor.status,
+            next_page_ready: Boolean(cursor.hasMore && cursor.cursor),
             warnings,
             retry_after_seconds: fetched.retryAfterSeconds,
             fetch_details: fetched.safeDetails
@@ -478,6 +587,13 @@ export async function runPlatformImportJobFoundation(
           }))
         }
       });
+      await upsertReadFetchCursor(running, {
+        since: queuedReadOptions?.since ?? null,
+        nextCursor: queuedReadOptions?.cursor ?? null,
+        hasMore: false,
+        warningCount: 1,
+        errorCount: Math.max(1, items.length ? items.length : 1)
+      }, client).catch(() => undefined);
       await notifyImportJobFailed(updated, client).catch(() => undefined);
       return serializePlatformImportJobWithItems(updated, items);
     }
@@ -617,4 +733,153 @@ export async function getPlatformImportJobSummary(
     },
     items: items.map(serializePlatformImportItem)
   };
+}
+
+export async function getPlatformImportJobProgress(
+  merchantId: string,
+  jobId: string,
+  client: Db = prisma
+) {
+  const job = await findJob(merchantId, jobId, client);
+  const items = await client.platformImportItem.findMany({
+    where: { jobId: job.id, merchantId },
+    orderBy: { createdAt: "asc" }
+  });
+  const counts = countImportItems(items);
+  const cursor = await findConnectionCursor(merchantId, job.connectionId, job.platform, client);
+  const summary = job.safeSummary && typeof job.safeSummary === "object"
+    ? job.safeSummary as Record<string, unknown>
+    : {};
+  const processed = processedCount(counts);
+  const total = Math.max(job.totalItems || 0, counts.totalItems);
+  const warningList = Array.isArray(summary.warnings) ? summary.warnings : [];
+  return serializePlatformImportProgress({
+    job,
+    cursor,
+    progress: {
+      processed_items: processed,
+      total_items: total,
+      progress_percent: progressPercent(processed, total),
+      has_more: Boolean(cursor?.hasMore || summary.has_more),
+      next_cursor: cursor?.cursor ?? (typeof summary.next_cursor === "string" ? summary.next_cursor : null),
+      next_page_ready: Boolean((cursor?.hasMore || summary.has_more) && (cursor?.cursor || summary.next_cursor)),
+      rate_limit_warning: typeof warningList[0] === "string" && /rate limit/i.test(warningList[0]) ? warningList[0] : null
+    }
+  });
+}
+
+export async function listPlatformImportCursors(
+  merchantId: string,
+  query: ListPlatformImportCursorsQueryInput = { page: 1, per_page: 20 },
+  client: Db = prisma
+) {
+  const where: Prisma.PlatformImportCursorWhereInput = {
+    merchantId,
+    ...(query.platform ? { platform: query.platform as StorePlatform } : {}),
+    ...(query.connectionId ? { connectionId: query.connectionId } : {}),
+    ...(query.status ? { status: query.status } : {})
+  };
+  const [cursors, total] = await Promise.all([
+    client.platformImportCursor.findMany({
+      where,
+      orderBy: { updatedAt: "desc" },
+      skip: (query.page - 1) * query.per_page,
+      take: query.per_page
+    }),
+    client.platformImportCursor.count({ where })
+  ]);
+  return {
+    cursors: cursors.map(serializePlatformImportCursor),
+    pagination: {
+      page: query.page,
+      per_page: query.per_page,
+      total,
+      has_more: query.page * query.per_page < total
+    }
+  };
+}
+
+export async function getPlatformImportCursor(
+  merchantId: string,
+  cursorId: string,
+  client: Db = prisma
+) {
+  return serializePlatformImportCursor(await findCursor(merchantId, cursorId, client));
+}
+
+async function createAndRunNextPageJob(
+  merchantId: string,
+  cursor: PlatformImportCursor,
+  input: ContinuePlatformImportJobInput = {},
+  client: Db = prisma,
+  fetchOptions: ReadFetchQueueOptions = {}
+) {
+  if (!cursor.hasMore || !cursor.cursor) throw new HttpError(409, "PLATFORM_IMPORT_CURSOR_EXHAUSTED");
+  const readOptions = readOptionsFromCursor(cursor, input.limit ?? null);
+  const created = await createPlatformImportJob(merchantId, {
+    connectionId: cursor.connectionId,
+    mode: PlatformImportJobMode.READ_ONLY_FETCH_PLACEHOLDER,
+    source: PlatformImportSource.POLLING_PLACEHOLDER,
+    readOptions: {
+      ...(readOptions.since ? { since: readOptions.since.toISOString() } : {}),
+      ...(readOptions.limit ? { limit: readOptions.limit } : {}),
+      ...(readOptions.cursor ? { cursor: readOptions.cursor } : {})
+    },
+    orders: []
+  }, client);
+  const ran = await runPlatformImportJobFoundation(merchantId, created.job.job_id, client, fetchOptions);
+  const updatedCursor = await findConnectionCursor(merchantId, cursor.connectionId, cursor.platform, client);
+  return {
+    cursor: updatedCursor ? serializePlatformImportCursor(updatedCursor) : null,
+    result: ran,
+    progress: await getPlatformImportJobProgress(merchantId, ran.job.job_id, client)
+  };
+}
+
+export async function continuePlatformImportJob(
+  merchantId: string,
+  jobId: string,
+  input: ContinuePlatformImportJobInput = {},
+  client: Db = prisma,
+  fetchOptions: ReadFetchQueueOptions = {}
+) {
+  const job = await findJob(merchantId, jobId, client);
+  if (job.mode !== PlatformImportJobMode.READ_ONLY_FETCH_PLACEHOLDER) {
+    throw new HttpError(409, "PLATFORM_IMPORT_JOB_NOT_READ_ONLY_FETCH");
+  }
+  const cursor = await findConnectionCursor(merchantId, job.connectionId, job.platform, client);
+  if (!cursor) throw new HttpError(409, "PLATFORM_IMPORT_CURSOR_NOT_READY");
+  return createAndRunNextPageJob(merchantId, cursor, input, client, fetchOptions);
+}
+
+export async function runNextPlatformImportCursorPage(
+  merchantId: string,
+  cursorId: string,
+  input: ContinuePlatformImportJobInput = {},
+  client: Db = prisma,
+  fetchOptions: ReadFetchQueueOptions = {}
+) {
+  const cursor = await findCursor(merchantId, cursorId, client);
+  return createAndRunNextPageJob(merchantId, cursor, input, client, fetchOptions);
+}
+
+export async function resetPlatformImportCursor(
+  merchantId: string,
+  cursorId: string,
+  client: Db = prisma
+) {
+  const cursor = await findCursor(merchantId, cursorId, client);
+  const updated = await client.platformImportCursor.update({
+    where: { id: cursor.id },
+    data: {
+      cursor: null,
+      hasMore: false,
+      page: 0,
+      status: "RESET",
+      lastJobId: null,
+      warningCount: 0,
+      errorCount: 0
+    }
+  });
+  return serializePlatformImportCursor(updated);
 }

@@ -1700,6 +1700,28 @@ model PlatformImportJob {
   @@map("platform_import_jobs")
 }
 
+model PlatformImportCursor {
+  id           String        @id @default(cuid())
+  merchantId   String        @map("merchant_id")
+  connectionId String        @map("connection_id")
+  platform     StorePlatform
+  cursor       String?
+  page         Int?
+  since        DateTime?
+  status       String
+  lastJobId    String?       @map("last_job_id")
+  hasMore      Boolean       @default(false) @map("has_more")
+  warningCount Int           @default(0) @map("warning_count")
+  errorCount   Int           @default(0) @map("error_count")
+  createdAt    DateTime      @default(now()) @map("created_at")
+  updatedAt    DateTime      @default(now()) @updatedAt @map("updated_at")
+
+  @@index([merchantId, connectionId, platform])
+  @@index([merchantId, status])
+  @@index([connectionId, updatedAt])
+  @@map("platform_import_cursors")
+}
+
 model PlatformImportItem {
   id                String                   @id @default(cuid())
   jobId             String                   @map("job_id")

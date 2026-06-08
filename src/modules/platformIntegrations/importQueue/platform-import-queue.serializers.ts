@@ -117,3 +117,55 @@ export function serializePlatformImportJobWithItems(job: Parameters<typeof seria
     items: items.map(serializePlatformImportItem)
   };
 }
+
+export function serializePlatformImportCursor(record: {
+  id: string;
+  connectionId: string;
+  platform: string;
+  cursor?: string | null;
+  page?: number | null;
+  since?: Date | string | null;
+  status: string;
+  lastJobId?: string | null;
+  hasMore?: boolean | null;
+  warningCount?: number | null;
+  errorCount?: number | null;
+  createdAt?: Date | string | null;
+  updatedAt?: Date | string | null;
+}) {
+  return {
+    cursor_id: record.id,
+    connection_id: record.connectionId,
+    platform: record.platform,
+    next_cursor: record.cursor ?? null,
+    page: record.page ?? null,
+    since: timestamp(record.since),
+    status: record.status,
+    last_job_id: record.lastJobId ?? null,
+    has_more: Boolean(record.hasMore),
+    warning_count: record.warningCount ?? 0,
+    error_count: record.errorCount ?? 0,
+    created_at: timestamp(record.createdAt),
+    updated_at: timestamp(record.updatedAt)
+  };
+}
+
+export function serializePlatformImportProgress(input: {
+  job: Parameters<typeof serializePlatformImportJob>[0];
+  cursor?: Parameters<typeof serializePlatformImportCursor>[0] | null;
+  progress: {
+    processed_items: number;
+    total_items: number;
+    progress_percent: number;
+    has_more: boolean;
+    next_cursor?: string | null;
+    next_page_ready: boolean;
+    rate_limit_warning?: string | null;
+  };
+}) {
+  return {
+    job: serializePlatformImportJob(input.job),
+    cursor: input.cursor ? serializePlatformImportCursor(input.cursor) : null,
+    progress: sanitizeImportPreview(input.progress) as typeof input.progress
+  };
+}

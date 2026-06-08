@@ -53,5 +53,26 @@ export const listPlatformImportJobsQuerySchema = z.object({
 
 export const runPlatformImportJobSchema = z.object({}).strict();
 
+export const continuePlatformImportJobSchema = z.object({
+  limit: z.coerce.number().int().min(1).max(50).optional()
+}).strict();
+
+export const listPlatformImportCursorsQuerySchema = z.object({
+  platform: storePlatformSchema.optional(),
+  connectionId: z.string().trim().min(1).optional(),
+  status: z.string().trim().min(1).max(60).optional(),
+  page: z.coerce.number().int().min(1).default(1),
+  per_page: z.coerce.number().int().min(1).max(50).default(20)
+}).strict();
+
+export const runPlatformImportCursorNextPageSchema = z.object({
+  limit: z.coerce.number().int().min(1).max(50).optional()
+}).strict();
+
+export const resetPlatformImportCursorSchema = z.object({}).strict();
+
 export type CreatePlatformImportJobInput = z.infer<typeof createPlatformImportJobSchema>;
 export type ListPlatformImportJobsQueryInput = z.infer<typeof listPlatformImportJobsQuerySchema>;
+export type ContinuePlatformImportJobInput = z.infer<typeof continuePlatformImportJobSchema>;
+export type ListPlatformImportCursorsQueryInput = z.infer<typeof listPlatformImportCursorsQuerySchema>;
+export type RunPlatformImportCursorNextPageInput = z.infer<typeof runPlatformImportCursorNextPageSchema>;

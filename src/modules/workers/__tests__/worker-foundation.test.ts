@@ -64,6 +64,7 @@ function makeClient() {
   const state = {
     runs: [] as any[],
     jobs: [] as any[],
+    cursors: [] as any[],
     events: [] as any[],
     items: [] as any[],
     conversions: [] as any[],
@@ -104,6 +105,9 @@ function makeClient() {
     platformImportJob: {
       findMany: async (args: any = {}) => pageRows(state.jobs.filter((row) => matches(row, args.where ?? {})), args),
       count: async ({ where = {} }: any = {}) => state.jobs.filter((row) => matches(row, where)).length
+    },
+    platformImportCursor: {
+      findMany: async (args: any = {}) => pageRows(state.cursors.filter((row) => matches(row, args.where ?? {})), args)
     },
     platformWebhookEvent: {
       findMany: async (args: any = {}) => pageRows(state.events.filter((row) => matches(row, args.where ?? {})), args)
@@ -227,6 +231,36 @@ describe("Phase 26 controlled worker foundation", () => {
     assert.equal(result.run.status, "COMPLETED");
     assert.equal(result.run.processed_count, 2);
   });
+
+  it("lets the import worker run bounded cursor next pages through the existing cursor callback", async () => {
+    const { state, client } = makeClient();
+    addJob(state);
+    state.cursors.push({
+      id: "cursor_1",
+      merchantId: "merchant_1",
+      connectionId: "connection_1",
+      platform: StorePlatform.SHOPIFY,
+      status: "HAS_MORE",
+      hasMore: true,
+      updatedAt: now,
+      createdAt: now
+    });
+    const calls: string[] = [];
+
+    const result = await runImportJobWorkerOnce("merchant_1", { dry_run: false }, client, {
+      config: enabledConfig({ dryRun: false, maxBatch: 2 }),
+      runJob: async (_merchantId, jobId) => {
+        calls.push(`job:${jobId}`);
+      },
+      runCursorNextPage: async (_merchantId, cursorId) => {
+        calls.push(`cursor:${cursorId}`);
+      }
+    });
+
+    assert.deepEqual(calls, ["job:job_1", "cursor:cursor_1"]);
+    assert.equal(result.run.processed_count, 2);
+  });
+
 
   it("locks duplicate worker runs inside the configured lock window", async () => {
     const { state, client } = makeClient();
