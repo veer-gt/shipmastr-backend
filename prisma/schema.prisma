@@ -581,6 +581,38 @@ enum PlatformHealthCheckType {
   OVERALL
 }
 
+enum PlatformImportJobStatus {
+  DRAFT
+  QUEUED
+  RUNNING
+  COMPLETED
+  COMPLETED_WITH_WARNINGS
+  FAILED
+  CANCELLED
+}
+
+enum PlatformImportJobMode {
+  DRY_RUN
+  IMPORT_FOUNDATION
+  READ_ONLY_FETCH_PLACEHOLDER
+}
+
+enum PlatformImportItemStatus {
+  PENDING
+  MAPPED
+  IMPORTED
+  SKIPPED
+  FAILED
+  DUPLICATE
+}
+
+enum PlatformImportSource {
+  MANUAL_PAYLOAD
+  WEBHOOK_PAYLOAD
+  POLLING_PLACEHOLDER
+  FILE_UPLOAD_PLACEHOLDER
+}
+
 enum ShopifyInstallMode {
   CUSTOM_APP
   PUBLIC_APP_PLACEHOLDER
@@ -1636,6 +1668,66 @@ model PlatformConnectionHealthCheck {
   @@index([connectionId, checkedAt])
   @@index([merchantId, status])
   @@map("platform_connection_health_checks")
+}
+
+model PlatformImportJob {
+  id             String                  @id @default(cuid())
+  connectionId   String                  @map("connection_id")
+  merchantId     String                  @map("merchant_id")
+  platform       StorePlatform
+  mode           PlatformImportJobMode
+  source         PlatformImportSource
+  status         PlatformImportJobStatus @default(QUEUED)
+  requestedBy    String?                 @map("requested_by")
+  startedAt      DateTime?               @map("started_at")
+  completedAt    DateTime?               @map("completed_at")
+  cancelledAt    DateTime?               @map("cancelled_at")
+  totalItems     Int                     @default(0) @map("total_items")
+  mappedItems    Int                     @default(0) @map("mapped_items")
+  importedItems  Int                     @default(0) @map("imported_items")
+  skippedItems   Int                     @default(0) @map("skipped_items")
+  duplicateItems Int                     @default(0) @map("duplicate_items")
+  failedItems    Int                     @default(0) @map("failed_items")
+  warningCount   Int                     @default(0) @map("warning_count")
+  safeSummary    Json?                   @map("safe_summary")
+  createdAt      DateTime                @default(now()) @map("created_at")
+  updatedAt      DateTime                @default(now()) @updatedAt @map("updated_at")
+
+  @@index([merchantId, status])
+  @@index([connectionId, createdAt])
+  @@index([merchantId, platform])
+  @@index([merchantId, createdAt])
+  @@map("platform_import_jobs")
+}
+
+model PlatformImportItem {
+  id                String                   @id @default(cuid())
+  jobId             String                   @map("job_id")
+  connectionId      String                   @map("connection_id")
+  merchantId        String                   @map("merchant_id")
+  platform          StorePlatform
+  externalOrderId   String?                  @map("external_order_id")
+  externalOrderName String?                  @map("external_order_name")
+  payloadHash       String                   @map("payload_hash")
+  status            PlatformImportItemStatus @default(PENDING)
+  orderImportId     String?                  @map("order_import_id")
+  normalizedOrderId String?                  @map("normalized_order_id")
+  attemptCount      Int                      @default(0) @map("attempt_count")
+  lastAttemptAt     DateTime?                @map("last_attempt_at")
+  nextAttemptAt     DateTime?                @map("next_attempt_at")
+  errorCode         String?                  @map("error_code")
+  errorMessage      String?                  @map("error_message")
+  mappingWarnings   Json?                    @map("mapping_warnings")
+  safePayloadPreview Json?                   @map("safe_payload_preview")
+  createdAt         DateTime                 @default(now()) @map("created_at")
+  updatedAt         DateTime                 @default(now()) @updatedAt @map("updated_at")
+
+  @@index([jobId])
+  @@index([merchantId, status])
+  @@index([connectionId, externalOrderId])
+  @@index([connectionId, payloadHash])
+  @@index([merchantId, createdAt])
+  @@map("platform_import_items")
 }
 
 model CourierPartnerApplication {

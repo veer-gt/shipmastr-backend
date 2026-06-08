@@ -33,6 +33,20 @@ import {
   runPlatformConnectionHealthCheck
 } from "./clients/platform-health-check.service.js";
 import { platformHealthCheckQuerySchema } from "./clients/platform-health-check.validation.js";
+import {
+  cancelPlatformImportJob,
+  createPlatformImportJob,
+  getPlatformImportJob,
+  getPlatformImportJobSummary,
+  listPlatformImportJobs,
+  retryPlatformImportItem,
+  runPlatformImportJobFoundation
+} from "./importQueue/platform-import-queue.service.js";
+import {
+  createPlatformImportJobSchema,
+  listPlatformImportJobsQuerySchema,
+  runPlatformImportJobSchema
+} from "./importQueue/platform-import-queue.validation.js";
 
 export const platformIntegrationsRouter = Router();
 
@@ -86,6 +100,44 @@ platformIntegrationsRouter.get("/platform-connections/:connectionId/health-check
 platformIntegrationsRouter.get("/platform-connections/:connectionId/health", async (req, res) => {
   const data = await getLatestPlatformConnectionHealth(req.auth!.merchantId, routeParam(req.params.connectionId));
   return res.json(successEnvelope("Platform connection health fetched successfully.", data));
+});
+
+platformIntegrationsRouter.post("/platform-import-jobs", async (req, res) => {
+  const body = createPlatformImportJobSchema.parse(req.body);
+  const data = await createPlatformImportJob(req.auth!.merchantId, body);
+  return res.status(201).json(successEnvelope("Platform import job queued successfully.", data));
+});
+
+platformIntegrationsRouter.get("/platform-import-jobs", async (req, res) => {
+  const query = listPlatformImportJobsQuerySchema.parse(req.query);
+  const data = await listPlatformImportJobs(req.auth!.merchantId, query);
+  return res.json(successEnvelope("Platform import jobs fetched successfully.", data));
+});
+
+platformIntegrationsRouter.get("/platform-import-jobs/:jobId", async (req, res) => {
+  const data = await getPlatformImportJob(req.auth!.merchantId, routeParam(req.params.jobId));
+  return res.json(successEnvelope("Platform import job fetched successfully.", data));
+});
+
+platformIntegrationsRouter.post("/platform-import-jobs/:jobId/run", async (req, res) => {
+  runPlatformImportJobSchema.parse(req.body);
+  const data = await runPlatformImportJobFoundation(req.auth!.merchantId, routeParam(req.params.jobId));
+  return res.json(successEnvelope("Platform import job ran safely.", data));
+});
+
+platformIntegrationsRouter.post("/platform-import-jobs/:jobId/cancel", async (req, res) => {
+  const data = await cancelPlatformImportJob(req.auth!.merchantId, routeParam(req.params.jobId));
+  return res.json(successEnvelope("Platform import job cancelled successfully.", data));
+});
+
+platformIntegrationsRouter.get("/platform-import-jobs/:jobId/summary", async (req, res) => {
+  const data = await getPlatformImportJobSummary(req.auth!.merchantId, routeParam(req.params.jobId));
+  return res.json(successEnvelope("Platform import job summary fetched successfully.", data));
+});
+
+platformIntegrationsRouter.post("/platform-import-items/:itemId/retry", async (req, res) => {
+  const data = await retryPlatformImportItem(req.auth!.merchantId, routeParam(req.params.itemId));
+  return res.json(successEnvelope("Platform import item retry state recorded.", data));
 });
 
 platformIntegrationsRouter.post("/platform-connections/:connectionId/orders/preview", async (req, res) => {
