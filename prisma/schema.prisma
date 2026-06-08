@@ -1751,6 +1751,34 @@ model PlatformImportConversion {
   @@map("platform_import_conversions")
 }
 
+model PlatformWebhookEvent {
+  id              String    @id @default(cuid())
+  merchantId      String    @map("merchant_id")
+  connectionId    String?   @map("connection_id")
+  platform        StorePlatform
+  topic           String
+  externalEventId String?   @map("external_event_id")
+  eventHash       String    @map("event_hash")
+  status          String    @default("RECEIVED")
+  receivedAt      DateTime  @default(now()) @map("received_at")
+  processedAt     DateTime? @map("processed_at")
+  safeSummary     Json?     @map("safe_summary")
+  warnings        Json?
+  errors          Json?
+  importJobId     String?   @map("import_job_id")
+  importItemId    String?   @map("import_item_id")
+  dedupeKey       String?   @map("dedupe_key")
+  createdAt       DateTime  @default(now()) @map("created_at")
+  updatedAt       DateTime  @default(now()) @updatedAt @map("updated_at")
+
+  @@unique([merchantId, dedupeKey])
+  @@index([merchantId, platform])
+  @@index([merchantId, status])
+  @@index([connectionId])
+  @@index([receivedAt])
+  @@map("platform_webhook_events")
+}
+
 model MerchantNotification {
   id          String    @id @default(cuid())
   merchantId  String    @map("merchant_id")
