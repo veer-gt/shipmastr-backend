@@ -1821,6 +1821,27 @@ model MerchantNotificationPreference {
   @@map("merchant_notification_preferences")
 }
 
+model ShipmastrWorkerRun {
+  id             String    @id @default(cuid())
+  workerName     String    @map("worker_name")
+  merchantId     String?   @map("merchant_id")
+  status         String
+  mode           String
+  startedAt      DateTime  @default(now()) @map("started_at")
+  finishedAt     DateTime? @map("finished_at")
+  processedCount Int       @default(0) @map("processed_count")
+  failedCount    Int       @default(0) @map("failed_count")
+  warnings       Json?
+  errors         Json?
+  createdAt      DateTime  @default(now()) @map("created_at")
+  updatedAt      DateTime  @default(now()) @updatedAt @map("updated_at")
+
+  @@index([workerName, status])
+  @@index([startedAt])
+  @@index([merchantId, startedAt])
+  @@map("shipmastr_worker_runs")
+}
+
 model CourierPartnerApplication {
   id                         String                          @id @default(cuid())
   companyName                String

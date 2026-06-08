@@ -99,7 +99,15 @@ const schema = z.object({
   BIGSHIP_ENABLED: envBoolean(false),
   BIGSHIP_MOCK_MODE: envBoolean(true),
   SHIPMASTR_CREDENTIAL_VAULT_KEY: z.string().optional(),
-  PLATFORM_INTEGRATIONS_ENABLE_REAL_READS: envBoolean(false)
+  PLATFORM_INTEGRATIONS_ENABLE_REAL_READS: envBoolean(false),
+  SHIPMASTR_WORKERS_ENABLED: envBoolean(false),
+  SHIPMASTR_IMPORT_WORKER_ENABLED: envBoolean(false),
+  SHIPMASTR_WEBHOOK_WORKER_ENABLED: envBoolean(false),
+  SHIPMASTR_NOTIFICATION_WORKER_ENABLED: envBoolean(false),
+  SHIPMASTR_RETRY_WORKER_ENABLED: envBoolean(false),
+  SHIPMASTR_WORKER_MAX_BATCH: z.coerce.number().int().min(1).max(100).default(25),
+  SHIPMASTR_WORKER_LOCK_SECONDS: z.coerce.number().int().min(30).max(3600).default(300),
+  SHIPMASTR_WORKER_DRY_RUN: envBoolean(true)
 });
 
 export const env = schema.parse(process.env);
