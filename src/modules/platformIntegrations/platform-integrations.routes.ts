@@ -47,6 +47,15 @@ import {
   listPlatformImportJobsQuerySchema,
   runPlatformImportJobSchema
 } from "./importQueue/platform-import-queue.validation.js";
+import {
+  getPlatformImportReconciliationItem,
+  getPlatformImportReconciliationSummary,
+  listPlatformImportReconciliationItems
+} from "./reconciliation/platform-import-reconciliation.service.js";
+import {
+  reconciliationItemsQuerySchema,
+  reconciliationSummaryQuerySchema
+} from "./reconciliation/platform-import-reconciliation.validation.js";
 
 export const platformIntegrationsRouter = Router();
 
@@ -138,6 +147,23 @@ platformIntegrationsRouter.get("/platform-import-jobs/:jobId/summary", async (re
 platformIntegrationsRouter.post("/platform-import-items/:itemId/retry", async (req, res) => {
   const data = await retryPlatformImportItem(req.auth!.merchantId, routeParam(req.params.itemId));
   return res.json(successEnvelope("Platform import item retry state recorded.", data));
+});
+
+platformIntegrationsRouter.get("/platform-import-reconciliation/summary", async (req, res) => {
+  const query = reconciliationSummaryQuerySchema.parse(req.query);
+  const data = await getPlatformImportReconciliationSummary(req.auth!.merchantId, query);
+  return res.json(successEnvelope("Platform import reconciliation summary fetched successfully.", data));
+});
+
+platformIntegrationsRouter.get("/platform-import-reconciliation/items", async (req, res) => {
+  const query = reconciliationItemsQuerySchema.parse(req.query);
+  const data = await listPlatformImportReconciliationItems(req.auth!.merchantId, query);
+  return res.json(successEnvelope("Platform import reconciliation items fetched successfully.", data));
+});
+
+platformIntegrationsRouter.get("/platform-import-reconciliation/items/:itemId", async (req, res) => {
+  const data = await getPlatformImportReconciliationItem(req.auth!.merchantId, routeParam(req.params.itemId));
+  return res.json(successEnvelope("Platform import reconciliation item fetched successfully.", data));
 });
 
 platformIntegrationsRouter.post("/platform-connections/:connectionId/orders/preview", async (req, res) => {
