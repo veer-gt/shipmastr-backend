@@ -22,6 +22,8 @@
     "domains:resellerclub-customer-lookup": "node scripts/domains-resellerclub-customer-lookup.mjs",
     "domains:resellerclub-contact-lookup": "node scripts/domains-resellerclub-contact-lookup.mjs",
     "domains:resellerclub-registration-preflight": "node scripts/domains-resellerclub-registration-preflight.mjs",
+    "smoke:production-readiness": "node scripts/smoke/production-readiness-smoke.mjs",
+    "smoke:pilot-live-flow": "node scripts/smoke/pilot-live-flow-smoke.mjs",
     "seed:local-admin": "node scripts/seed-local-admin.mjs",
     "seed:storefront-demo": "node scripts/seed-storefront-demo.mjs"
   },
