@@ -176,7 +176,11 @@ export function productionReadinessPlan() {
 
 export function buildProductionReadinessReport(
   source: ProductionReadinessSource = env,
-  options: { checkedAt?: Date | string; betaAuditDocExists?: boolean } = {}
+  options: {
+    checkedAt?: Date | string;
+    betaAuditDocExists?: boolean;
+    pilotReadiness?: ProductionReadinessReport["pilotReadiness"];
+  } = {}
 ): ProductionReadinessReport {
   const checkedAt = options.checkedAt instanceof Date
     ? options.checkedAt.toISOString()
@@ -213,7 +217,17 @@ export function buildProductionReadinessReport(
     || boolValue(source, "SHIPMASTR_COURIER_LIVE_CALLS_ENABLED", false);
   const awbLabelLiveEnabled = boolValue(source, "SHIPMASTR_AWB_LABEL_LIVE_ENABLED", false)
     || boolValue(source, "SHIPMASTR_SHIP_NOW_LIVE_ENABLED", false);
-  const merchantAllowlistConfigured = Boolean(stringValue(source, "SHIPMASTR_LIVE_MERCHANT_ALLOWLIST"));
+  const pilotReadiness = options.pilotReadiness ?? {
+    merchantId: stringValue(source, "SHIPMASTR_PILOT_MERCHANT_ID", "current_merchant"),
+    allowlisted: false,
+    merchantStatus: "DISABLED",
+    enabledCapabilities: [],
+    approvedCapabilities: [],
+    rollbackReady: true,
+    blockers: ["MISSING_PILOT_MERCHANT_ALLOWLIST"]
+  };
+  const merchantAllowlistConfigured = Boolean(stringValue(source, "SHIPMASTR_LIVE_MERCHANT_ALLOWLIST"))
+    || pilotReadiness.allowlisted;
   const betaDocExists = options.betaAuditDocExists ?? migrationDocExists();
 
   const categories = [
@@ -239,6 +253,39 @@ export function buildProductionReadinessReport(
         recommendation: vaultIsLiveReady
           ? "Credential vault mode is ready for controlled pilot review."
           : "Configure a live KMS-backed credential provider before live merchant launch."
+      })
+    ]),
+    category("live_pilot_gate", "Controlled Live Pilot Gate", [
+      check({
+        key: "pilot_merchant_allowlisted",
+        label: "Pilot merchant allowlist is explicit",
+        status: pilotReadiness.allowlisted ? "PASS" : "WARNING",
+        safeValue: pilotReadiness.merchantStatus,
+        blockerCode: pilotReadiness.allowlisted ? undefined : "MISSING_PILOT_MERCHANT_ALLOWLIST",
+        recommendation: "Add a merchant to the controlled pilot allowlist before any live capability can be enabled."
+      }),
+      check({
+        key: "pilot_live_kms_approval",
+        label: "Live KMS capability is approved for pilot",
+        status: pilotReadiness.approvedCapabilities.includes("LIVE_KMS") ? "PASS" : "WARNING",
+        safeValue: pilotReadiness.approvedCapabilities.includes("LIVE_KMS"),
+        blockerCode: pilotReadiness.approvedCapabilities.includes("LIVE_KMS") ? undefined : "LIVE_KMS_CAPABILITY_NOT_APPROVED",
+        recommendation: "Approve the LIVE_KMS capability before resolving live pilot credentials."
+      }),
+      check({
+        key: "pilot_capability_gates",
+        label: "Live capabilities are per-merchant gated",
+        status: pilotReadiness.enabledCapabilities.length ? "WARNING" : "PASS",
+        safeValue: pilotReadiness.enabledCapabilities.length,
+        recommendation: "Enable live capabilities one at a time only after approval and rollback review."
+      }),
+      check({
+        key: "pilot_rollback_ready",
+        label: "Pilot rollback controls are available",
+        status: pilotReadiness.rollbackReady ? "PASS" : "BLOCKED",
+        safeValue: pilotReadiness.rollbackReady,
+        blockerCode: pilotReadiness.rollbackReady ? undefined : "PILOT_ROLLBACK_NOT_READY",
+        recommendation: "Disable controls must remain available for every pilot capability."
       })
     ]),
     category("workers", "Workers and Scheduler", [
@@ -356,7 +403,7 @@ export function buildProductionReadinessReport(
   const liveRequirementsMet = !hasHardBlockers
     && !vaultIsMock
     && merchantAllowlistConfigured
-    && approval(source, "LIVE_KMS_PROVIDER_APPROVED")
+    && (approval(source, "LIVE_KMS_PROVIDER_APPROVED") || pilotReadiness.approvedCapabilities.includes("LIVE_KMS"))
     && approval(source, "PRODUCTION_DEPLOY_APPROVED");
   const liveVerdict: ProductionReadinessVerdict = hasHardBlockers
     ? "BLOCKED"
@@ -380,8 +427,10 @@ export function buildProductionReadinessReport(
       emailMode: liveEmailEnabled ? (emailProviderConfigured ? "CONFIGURED" : "INCOMPLETE") : "DISABLED",
       platformReadMode: platformRealReads ? "READ_ONLY_LIVE_FLAG_ON" : "MOCK_OR_DISABLED",
       platformWriteMode: platformWritesEnabled ? "LIVE_FLAG_ON" : "DISABLED",
-      shippingNetworkMode: shippingNetworkLiveCalls ? "LIVE_FLAG_ON" : "MOCK_OR_DISABLED"
+      shippingNetworkMode: shippingNetworkLiveCalls ? "LIVE_FLAG_ON" : "MOCK_OR_DISABLED",
+      pilotMerchantMode: pilotReadiness.allowlisted ? "ALLOWLISTED" : "NOT_ALLOWLISTED"
     },
+    pilotReadiness,
     approvalChecklist: {
       approvalRequired: true,
       approvals: Object.values(approvalFlags)

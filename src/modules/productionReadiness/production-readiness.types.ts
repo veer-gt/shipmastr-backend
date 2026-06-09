@@ -61,6 +61,16 @@ export type ProductionReadinessReport = {
     platformReadMode: string;
     platformWriteMode: string;
     shippingNetworkMode: string;
+    pilotMerchantMode: string;
+  };
+  pilotReadiness: {
+    merchantId: string;
+    allowlisted: boolean;
+    merchantStatus: string;
+    enabledCapabilities: string[];
+    approvedCapabilities: string[];
+    rollbackReady: boolean;
+    blockers: string[];
   };
   approvalChecklist: ProductionReadinessApprovalChecklist;
   liveEnablementPlan: LiveEnablementStep[];

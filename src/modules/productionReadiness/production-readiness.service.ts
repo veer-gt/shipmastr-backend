@@ -1,4 +1,5 @@
 import { buildProductionReadinessReport } from "./production-readiness.rules.js";
+import { getLivePilotReadinessSnapshot } from "../livePilot/live-pilot.service.js";
 import {
   serializeLiveEnablementPlan,
   serializeProductionReadinessChecks,
@@ -6,14 +7,17 @@ import {
 } from "./production-readiness.serializer.js";
 import type { ProductionReadinessQueryInput } from "./production-readiness.validation.js";
 
-export function getProductionReadinessReport(_merchantId: string, _query: ProductionReadinessQueryInput = { include_plan: true }) {
-  return serializeProductionReadinessReport(buildProductionReadinessReport());
+export async function getProductionReadinessReport(merchantId: string, _query: ProductionReadinessQueryInput = { include_plan: true }) {
+  const pilotReadiness = await getLivePilotReadinessSnapshot(merchantId);
+  return serializeProductionReadinessReport(buildProductionReadinessReport(undefined, { pilotReadiness }));
 }
 
-export function getProductionReadinessChecks(_merchantId: string) {
-  return serializeProductionReadinessChecks(buildProductionReadinessReport());
+export async function getProductionReadinessChecks(merchantId: string) {
+  const pilotReadiness = await getLivePilotReadinessSnapshot(merchantId);
+  return serializeProductionReadinessChecks(buildProductionReadinessReport(undefined, { pilotReadiness }));
 }
 
-export function getProductionReadinessLiveEnablementPlan(_merchantId: string) {
-  return serializeLiveEnablementPlan(buildProductionReadinessReport());
+export async function getProductionReadinessLiveEnablementPlan(merchantId: string) {
+  const pilotReadiness = await getLivePilotReadinessSnapshot(merchantId);
+  return serializeLiveEnablementPlan(buildProductionReadinessReport(undefined, { pilotReadiness }));
 }

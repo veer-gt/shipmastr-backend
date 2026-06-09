@@ -11,16 +11,16 @@ export const productionReadinessRouter = Router();
 
 productionReadinessRouter.get("/production-readiness/report", async (req, res) => {
   const query = productionReadinessQuerySchema.parse(req.query ?? {});
-  const data = getProductionReadinessReport(req.auth!.merchantId, query);
+  const data = await getProductionReadinessReport(req.auth!.merchantId, query);
   return res.json(successEnvelope("Production readiness report generated safely.", data));
 });
 
 productionReadinessRouter.get("/production-readiness/checks", async (req, res) => {
-  const data = getProductionReadinessChecks(req.auth!.merchantId);
+  const data = await getProductionReadinessChecks(req.auth!.merchantId);
   return res.json(successEnvelope("Production readiness checks fetched safely.", data));
 });
 
 productionReadinessRouter.get("/production-readiness/live-enablement-plan", async (req, res) => {
-  const data = getProductionReadinessLiveEnablementPlan(req.auth!.merchantId);
+  const data = await getProductionReadinessLiveEnablementPlan(req.auth!.merchantId);
   return res.json(successEnvelope("Live enablement plan fetched safely.", data));
 });

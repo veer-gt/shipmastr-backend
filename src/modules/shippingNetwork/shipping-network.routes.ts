@@ -109,6 +109,7 @@ import {
 import { getMerchantOperationsSummary } from "./shipping-merchant-operations.service.js";
 import { merchantStoreOnboardingRouter } from "../merchantOnboarding/merchant-onboarding.routes.js";
 import { merchantNotificationsRouter } from "../merchantNotifications/merchant-notification.routes.js";
+import { livePilotRouter } from "../livePilot/live-pilot.routes.js";
 import { platformIntegrationsRouter } from "../platformIntegrations/platform-integrations.routes.js";
 import { productionReadinessRouter } from "../productionReadiness/production-readiness.routes.js";
 import { workersRouter } from "../workers/workers.routes.js";
@@ -150,6 +151,7 @@ shippingNetworkRouter.use("/", merchantNotificationsRouter);
 shippingNetworkRouter.use("/", merchantStoreOnboardingRouter);
 shippingNetworkRouter.use("/", workersRouter);
 shippingNetworkRouter.use("/", productionReadinessRouter);
+shippingNetworkRouter.use("/", livePilotRouter);
 
 shippingNetworkRouter.post("/api-keys", async (req, res) => {
   const body = createSellerApiKeySchema.parse(req.body);

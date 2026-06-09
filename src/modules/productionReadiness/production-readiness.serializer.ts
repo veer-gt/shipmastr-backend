@@ -67,6 +67,15 @@ export function serializeProductionReadinessReport(report: ProductionReadinessRe
     checked_at: report.checkedAt,
     summary: report.summary,
     environment: report.environment,
+    pilot_readiness: {
+      merchant_id: report.pilotReadiness.merchantId,
+      allowlisted: report.pilotReadiness.allowlisted,
+      merchant_status: report.pilotReadiness.merchantStatus,
+      enabled_capabilities: report.pilotReadiness.enabledCapabilities,
+      approved_capabilities: report.pilotReadiness.approvedCapabilities,
+      rollback_ready: report.pilotReadiness.rollbackReady,
+      blockers: report.pilotReadiness.blockers
+    },
     categories: report.categories.map(serializeCategory),
     approval_checklist: {
       approval_required: report.approvalChecklist.approvalRequired,
@@ -85,6 +94,15 @@ export function serializeProductionReadinessChecks(report: ProductionReadinessRe
     live_verdict: report.liveVerdict,
     checked_at: report.checkedAt,
     summary: report.summary,
+    pilot_readiness: {
+      merchant_id: report.pilotReadiness.merchantId,
+      allowlisted: report.pilotReadiness.allowlisted,
+      merchant_status: report.pilotReadiness.merchantStatus,
+      enabled_capabilities: report.pilotReadiness.enabledCapabilities,
+      approved_capabilities: report.pilotReadiness.approvedCapabilities,
+      rollback_ready: report.pilotReadiness.rollbackReady,
+      blockers: report.pilotReadiness.blockers
+    },
     categories: report.categories.map(serializeCategory),
     hard_stops: report.hardStops
   };
