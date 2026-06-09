@@ -92,10 +92,16 @@ describe("Phase 30 end-to-end merchant shipping beta audit", () => {
       },
       vault: {
         provider: "LOCAL_MOCK",
+        mode: "MOCK",
+        configured: true,
         kms_key_configured: false,
         encryption_key_configured: true,
         rotation_enabled: false,
         production_kms_ready: false,
+        live_ready: false,
+        pilot_ready: false,
+        requires_live_for_pilot: true,
+        local_mock_override_for_pilot: false,
         local_mock: true
       },
       actions: {

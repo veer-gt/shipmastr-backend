@@ -3,7 +3,11 @@ import type {
   PlatformCredentialStatus,
   PlatformCredentialType
 } from "@prisma/client";
-import type { ConnectionCredentialReadiness } from "./credential-vault.types.js";
+import type {
+  ConnectionCredentialReadiness,
+  CredentialVaultProviderTestResult,
+  CredentialVaultReadiness
+} from "./credential-vault.types.js";
 
 const unsafeKeyPattern = /secret|token|password|encrypted|raw|authorization|api[_-]?key|consumer|fingerprint|hash|ref/i;
 const unsafeStringPattern = /shpat_|ck_|cs_|magentotoken_|bearer\s+|basic\s+|sk_live|sk_test|whsec_|token|secret/i;
@@ -59,5 +63,40 @@ export function serializeConnectionCredentialReadiness(
     } : null,
     vault: input.vault,
     actions: input.actions
+  };
+}
+
+export function serializeCredentialVaultReadiness(input: CredentialVaultReadiness): CredentialVaultReadiness {
+  return {
+    status: input.status,
+    ready: input.ready,
+    message: input.message,
+    runtime: input.runtime,
+    checks: input.checks.map((check) => ({
+      key: check.key,
+      label: check.label,
+      status: check.status,
+      safe_value: check.safe_value,
+      recommendation: check.recommendation
+    })),
+    warnings: input.warnings.filter((warning) => typeof warning === "string" && !unsafeStringPattern.test(warning))
+  };
+}
+
+export function serializeCredentialVaultProviderTest(
+  input: CredentialVaultProviderTestResult
+): CredentialVaultProviderTestResult {
+  return {
+    status: input.status,
+    ready: input.ready,
+    message: input.message,
+    runtime: input.runtime,
+    checked_at: input.checked_at,
+    safe_details: {
+      provider_round_trip: Boolean(input.safe_details.provider_round_trip),
+      internal_resolution_only: true,
+      plaintext_exposed: false,
+      encrypted_value_exposed: false
+    }
   };
 }

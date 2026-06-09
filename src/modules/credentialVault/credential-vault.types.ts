@@ -5,7 +5,19 @@ import type {
   StorePlatform
 } from "@prisma/client";
 
-export type CredentialVaultProviderMode = "LOCAL_MOCK" | "LOCAL_ENCRYPTED" | "KMS_PLACEHOLDER";
+export type CredentialVaultProviderMode =
+  | "LOCAL_MOCK"
+  | "LOCAL_ENCRYPTED"
+  | "ENV_ENCRYPTION_KEY"
+  | "KMS_PLACEHOLDER"
+  | "KMS_INTERFACE";
+
+export type CredentialVaultReadinessStatus =
+  | "READY"
+  | "MOCK_ONLY"
+  | "NOT_CONFIGURED"
+  | "BLOCKED"
+  | "TEST_FAILED";
 
 export type ConnectionCredentialReadinessStatus =
   | "READY"
@@ -18,11 +30,46 @@ export type ConnectionCredentialReadinessStatus =
 
 export type SafeCredentialVaultRuntime = {
   provider: CredentialVaultProviderMode;
+  mode: "MOCK" | "LOCAL_ENCRYPTED" | "KMS_INTERFACE" | "KMS_PLACEHOLDER";
+  configured: boolean;
   kms_key_configured: boolean;
   encryption_key_configured: boolean;
   rotation_enabled: boolean;
   production_kms_ready: boolean;
+  live_ready: boolean;
+  pilot_ready: boolean;
+  requires_live_for_pilot: boolean;
+  local_mock_override_for_pilot: boolean;
   local_mock: boolean;
+};
+
+export type CredentialVaultReadiness = {
+  status: CredentialVaultReadinessStatus;
+  ready: boolean;
+  message: string;
+  runtime: SafeCredentialVaultRuntime;
+  checks: Array<{
+    key: string;
+    label: string;
+    status: "PASS" | "WARNING" | "BLOCKED";
+    safe_value: string | boolean | number | null;
+    recommendation: string;
+  }>;
+  warnings: string[];
+};
+
+export type CredentialVaultProviderTestResult = {
+  status: CredentialVaultReadinessStatus;
+  ready: boolean;
+  message: string;
+  runtime: SafeCredentialVaultRuntime;
+  checked_at: string;
+  safe_details: {
+    provider_round_trip: boolean;
+    internal_resolution_only: boolean;
+    plaintext_exposed: false;
+    encrypted_value_exposed: false;
+  };
 };
 
 export type SafeConnectionCredentialSummary = {

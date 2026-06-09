@@ -19,9 +19,14 @@ import {
   type ShipmastrCredentialVault
 } from "./credential-vault.crypto.js";
 import { getCredentialVaultRuntime } from "./credential-vault.providers.js";
-import { serializeConnectionCredentialReadiness } from "./credential-vault.serializer.js";
+import {
+  serializeConnectionCredentialReadiness,
+  serializeCredentialVaultProviderTest,
+  serializeCredentialVaultReadiness
+} from "./credential-vault.serializer.js";
 import type {
   ConnectionCredentialReadinessStatus,
+  CredentialVaultReadiness,
   SafeConnectionCredentialSummary
 } from "./credential-vault.types.js";
 import type {
@@ -30,6 +35,7 @@ import type {
 } from "./credential-vault.validation.js";
 
 type Db = Prisma.TransactionClient | typeof prisma;
+type Source = Record<string, unknown>;
 
 function toJson(value: unknown): Prisma.InputJsonValue {
   return JSON.parse(JSON.stringify(value)) as Prisma.InputJsonValue;
@@ -88,6 +94,133 @@ function readinessMessage(status: ConnectionCredentialReadinessStatus) {
     RESOLUTION_FAILED: "Credential could not be resolved by the vault. Rotate it before use."
   };
   return messages[status];
+}
+
+function vaultStatusMessage(status: CredentialVaultReadiness["status"]) {
+  const messages: Record<CredentialVaultReadiness["status"], string> = {
+    READY: "Credential vault provider is configured for controlled pilot readiness.",
+    MOCK_ONLY: "Credential vault is using local mock mode and blocks live pilot use by default.",
+    NOT_CONFIGURED: "Credential vault provider configuration is incomplete.",
+    BLOCKED: "Credential vault is blocked for live pilot until configuration and approvals are complete.",
+    TEST_FAILED: "Credential vault provider test failed without exposing secret material."
+  };
+  return messages[status];
+}
+
+export function getCredentialVaultReadiness(source: Source = process.env) {
+  const runtime = getCredentialVaultRuntime(source);
+  const checks: CredentialVaultReadiness["checks"] = [
+    {
+      key: "provider_configured",
+      label: "Credential vault provider configured",
+      status: runtime.configured ? "PASS" : "BLOCKED",
+      safe_value: runtime.configured,
+      recommendation: runtime.configured
+        ? "Keep provider configuration secret values out of public responses."
+        : "Configure the selected vault provider before storing or resolving pilot credentials."
+    },
+    {
+      key: "live_pilot_provider",
+      label: "Provider is acceptable for live pilot",
+      status: runtime.pilot_ready ? "PASS" : runtime.local_mock ? "WARNING" : "BLOCKED",
+      safe_value: runtime.local_mock ? "LOCAL_MOCK" : runtime.mode,
+      recommendation: runtime.pilot_ready
+        ? "Provider meets the current pilot-readiness gate."
+        : "Use ENV_ENCRYPTION_KEY or KMS_INTERFACE before enabling live pilot credentials."
+    },
+    {
+      key: "kms_key_configured",
+      label: "KMS key reference configured when required",
+      status: runtime.provider === "KMS_INTERFACE"
+        ? runtime.kms_key_configured ? "PASS" : "BLOCKED"
+        : "PASS",
+      safe_value: runtime.provider === "KMS_INTERFACE" ? runtime.kms_key_configured : "NOT_REQUIRED",
+      recommendation: "Configure only safe key identifiers; never expose key material."
+    },
+    {
+      key: "encryption_key_configured",
+      label: "Encryption key material available to internal vault",
+      status: runtime.encryption_key_configured ? "PASS" : "BLOCKED",
+      safe_value: runtime.encryption_key_configured,
+      recommendation: "Set CREDENTIAL_VAULT_ENCRYPTION_KEY or a production KMS-backed resolver before pilot use."
+    }
+  ];
+  const status: CredentialVaultReadiness["status"] = !runtime.configured
+    ? "NOT_CONFIGURED"
+    : !runtime.pilot_ready
+      ? runtime.local_mock ? "MOCK_ONLY" : "BLOCKED"
+      : "READY";
+  const warnings = [
+    ...(!runtime.live_ready ? ["Live KMS-backed vault readiness is still pending."] : []),
+    ...(runtime.local_mock ? ["LOCAL_MOCK is for local/dev use and is blocked for live pilot unless explicitly overridden."] : [])
+  ];
+  return serializeCredentialVaultReadiness({
+    status,
+    ready: status === "READY",
+    message: vaultStatusMessage(status),
+    runtime,
+    checks,
+    warnings
+  });
+}
+
+export function testCredentialVaultProvider(
+  source: Source = process.env,
+  vault: ShipmastrCredentialVault | null = null
+) {
+  const runtime = getCredentialVaultRuntime(source);
+  if (!runtime.configured) {
+    return serializeCredentialVaultProviderTest({
+      status: "NOT_CONFIGURED",
+      ready: false,
+      message: vaultStatusMessage("NOT_CONFIGURED"),
+      runtime,
+      checked_at: new Date().toISOString(),
+      safe_details: {
+        provider_round_trip: false,
+        internal_resolution_only: true,
+        plaintext_exposed: false,
+        encrypted_value_exposed: false
+      }
+    });
+  }
+
+  try {
+    const activeVault = vault ?? createConfiguredCredentialVault();
+    const stored = activeVault.storeSecret({
+      purpose: "credential-vault-provider-test",
+      nonce: "safe-sentinel"
+    });
+    const resolved = activeVault.readSecretForInternalUse(stored) as Record<string, unknown>;
+    const passed = resolved?.purpose === "credential-vault-provider-test";
+    return serializeCredentialVaultProviderTest({
+      status: passed ? "READY" : "TEST_FAILED",
+      ready: passed,
+      message: passed ? "Credential vault provider resolved a safe internal sentinel." : vaultStatusMessage("TEST_FAILED"),
+      runtime,
+      checked_at: new Date().toISOString(),
+      safe_details: {
+        provider_round_trip: passed,
+        internal_resolution_only: true,
+        plaintext_exposed: false,
+        encrypted_value_exposed: false
+      }
+    });
+  } catch {
+    return serializeCredentialVaultProviderTest({
+      status: "TEST_FAILED",
+      ready: false,
+      message: vaultStatusMessage("TEST_FAILED"),
+      runtime,
+      checked_at: new Date().toISOString(),
+      safe_details: {
+        provider_round_trip: false,
+        internal_resolution_only: true,
+        plaintext_exposed: false,
+        encrypted_value_exposed: false
+      }
+    });
+  }
 }
 
 function credentialSummary(credential: NonNullable<Awaited<ReturnType<typeof findCredentialByRef>>>): SafeConnectionCredentialSummary {

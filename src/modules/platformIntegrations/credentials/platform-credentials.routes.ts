@@ -17,9 +17,11 @@ import {
   validateCredentialShapeSchema
 } from "./platform-credentials.validation.js";
 import {
+  getCredentialVaultReadiness,
   getConnectionCredentialStatus,
   revokeConnectionCredential,
   rotateConnectionCredential,
+  testCredentialVaultProvider,
   testConnectionCredentialReadiness,
   upsertConnectionCredential
 } from "../../credentialVault/credential-vault.service.js";
@@ -100,9 +102,25 @@ platformCredentialsRouter.post("/platform-connections/:connectionId/credentials/
   return res.json(successEnvelope("Platform connection credential readiness tested safely.", data));
 });
 
+platformCredentialsRouter.post("/platform-connections/:connectionId/credentials/test-resolution", async (req, res) => {
+  testConnectionCredentialReadinessSchema.parse(req.body ?? {});
+  const data = await testConnectionCredentialReadiness(req.auth!.merchantId, routeParam(req.params.connectionId));
+  return res.json(successEnvelope("Platform connection credential resolution tested safely.", data));
+});
+
 platformCredentialsRouter.delete("/platform-connections/:connectionId/credentials", async (req, res) => {
   const data = await detachCredentialFromConnection(req.auth!.merchantId, routeParam(req.params.connectionId));
   return res.json(successEnvelope("Platform credential detached successfully.", data));
+});
+
+platformCredentialsRouter.get("/credential-vault/readiness", async (_req, res) => {
+  const data = getCredentialVaultReadiness();
+  return res.json(successEnvelope("Credential vault readiness fetched safely.", data));
+});
+
+platformCredentialsRouter.post("/credential-vault/test-provider", async (_req, res) => {
+  const data = testCredentialVaultProvider();
+  return res.json(successEnvelope("Credential vault provider tested safely.", data));
 });
 
 platformCredentialsRouter.post("/platform-credentials/validate-foundation", async (req, res) => {

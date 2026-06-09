@@ -1,6 +1,7 @@
 import { existsSync } from "node:fs";
 import { resolve } from "node:path";
 import { env } from "../../config/env.js";
+import { getCredentialVaultRuntime } from "../credentialVault/credential-vault.providers.js";
 import type {
   LiveEnablementStep,
   ProductionReadinessCategory,
@@ -157,14 +158,6 @@ function category(key: string, label: string, checks: ProductionReadinessCheck[]
   return { key, label, status, checks };
 }
 
-function safeProviderName(provider: string) {
-  if (!provider) return "UNKNOWN";
-  if (/mock/i.test(provider)) return "LOCAL_MOCK";
-  if (/encrypted/i.test(provider)) return "LOCAL_ENCRYPTED";
-  if (/kms/i.test(provider)) return "KMS_PLACEHOLDER";
-  return "CONFIGURED";
-}
-
 function migrationDocExists() {
   return existsSync(resolve(process.cwd(), "../docs/shipping/phase-30-end-to-end-merchant-shipping-beta-audit.md"))
     || existsSync(resolve(process.cwd(), "docs/shipping/phase-30-end-to-end-merchant-shipping-beta-audit.md"));
@@ -187,10 +180,10 @@ export function buildProductionReadinessReport(
     : options.checkedAt ?? new Date().toISOString();
   const nodeEnv = stringValue(source, "NODE_ENV", "development");
   const appEnv = stringValue(source, "APP_ENV", "development");
-  const vaultProvider = stringValue(source, "CREDENTIAL_VAULT_PROVIDER", "LOCAL_MOCK");
-  const vaultMode = safeProviderName(vaultProvider);
-  const vaultIsMock = vaultMode === "LOCAL_MOCK";
-  const vaultIsLiveReady = !vaultIsMock && (vaultMode !== "KMS_PLACEHOLDER" || approval(source, "LIVE_KMS_PROVIDER_APPROVED"));
+  const vaultRuntime = getCredentialVaultRuntime(source);
+  const vaultMode = vaultRuntime.provider;
+  const vaultIsMock = vaultRuntime.local_mock;
+  const vaultIsLiveReady = vaultRuntime.live_ready;
   const workersEnabled = boolValue(source, "SHIPMASTR_WORKERS_ENABLED", false);
   const importWorkerEnabled = boolValue(source, "SHIPMASTR_IMPORT_WORKER_ENABLED", false);
   const webhookWorkerEnabled = boolValue(source, "SHIPMASTR_WEBHOOK_WORKER_ENABLED", false);
@@ -253,6 +246,16 @@ export function buildProductionReadinessReport(
         recommendation: vaultIsLiveReady
           ? "Credential vault mode is ready for controlled pilot review."
           : "Configure a live KMS-backed credential provider before live merchant launch."
+      }),
+      check({
+        key: "credential_vault_pilot_provider",
+        label: "Credential vault is acceptable for pilot credentials",
+        status: vaultRuntime.pilot_ready ? "PASS" : vaultRuntime.local_mock ? "WARNING" : "BLOCKED",
+        safeValue: vaultRuntime.pilot_ready ? "PILOT_READY" : vaultRuntime.provider,
+        blockerCode: vaultRuntime.pilot_ready ? undefined : "MOCK_CREDENTIAL_VAULT",
+        recommendation: vaultRuntime.pilot_ready
+          ? "Credential vault satisfies the current pilot gate."
+          : "Use ENV_ENCRYPTION_KEY or KMS_INTERFACE, or record an explicit local mock pilot override."
       })
     ]),
     category("live_pilot_gate", "Controlled Live Pilot Gate", [
@@ -402,6 +405,7 @@ export function buildProductionReadinessReport(
   const hasHardBlockers = summary.blockers > 0;
   const liveRequirementsMet = !hasHardBlockers
     && !vaultIsMock
+    && vaultRuntime.pilot_ready
     && merchantAllowlistConfigured
     && (approval(source, "LIVE_KMS_PROVIDER_APPROVED") || pilotReadiness.approvedCapabilities.includes("LIVE_KMS"))
     && approval(source, "PRODUCTION_DEPLOY_APPROVED");
