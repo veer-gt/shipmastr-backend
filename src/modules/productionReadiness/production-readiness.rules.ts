@@ -195,6 +195,10 @@ export function buildProductionReadinessReport(
   const emailProviderConfigured = Boolean(stringValue(source, "SMTP_HOST"))
     && Boolean(stringValue(source, "SMTP_USER"))
     && Boolean(stringValue(source, "SMTP_PASS"));
+  const pilotEmailEnabled = boolValue(source, "SHIPMASTR_EMAIL_ENABLED", false);
+  const pilotEmailMode = stringValue(source, "SHIPMASTR_EMAIL_MODE", "SANDBOX").toUpperCase();
+  const pilotEmailProvider = stringValue(source, "SHIPMASTR_EMAIL_PROVIDER", "LOCAL_LOG").toUpperCase();
+  const pilotEmailPilotOnly = boolValue(source, "SHIPMASTR_EMAIL_PILOT_ONLY", true);
   const liveEmailEnabled = boolValue(source, "SHIPMASTR_EMAIL_LIVE_SEND", false)
     || boolValue(source, "MERCHANT_EMAIL_LIVE_SEND", false)
     || boolValue(source, "JOURNAL_EMAIL_LIVE_SEND", false);
@@ -317,6 +321,32 @@ export function buildProductionReadinessReport(
         safeValue: liveEmailEnabled ? (emailProviderConfigured ? "CONFIGURED" : "NOT_CONFIGURED") : "DISABLED",
         blockerCode: liveEmailEnabled && !emailProviderConfigured ? "EMAIL_ENABLED_WITHOUT_PROVIDER" : undefined,
         recommendation: "Keep merchant email disabled until provider, sender authentication, and approval are complete."
+      }),
+      check({
+        key: "pilot_email_sandbox_gate",
+        label: "Pilot email sandbox is allowlist and capability gated",
+        status: !pilotEmailEnabled
+          ? "PASS"
+          : pilotEmailMode !== "SANDBOX" || !pilotEmailPilotOnly
+            ? "BLOCKED"
+            : pilotReadiness.allowlisted && pilotReadiness.enabledCapabilities.includes("LIVE_EMAIL_SANDBOX")
+              ? "WARNING"
+              : "BLOCKED",
+        safeValue: pilotEmailEnabled
+          ? `${pilotEmailMode}:${pilotEmailProvider}:${pilotEmailPilotOnly ? "PILOT_ONLY" : "BROAD"}`
+          : "DISABLED",
+        blockerCode: !pilotEmailEnabled
+          ? undefined
+          : pilotEmailMode !== "SANDBOX"
+            ? "EMAIL_LIVE_MODE_BLOCKED"
+            : !pilotEmailPilotOnly
+              ? "EMAIL_SANDBOX_NOT_PILOT_ONLY"
+              : !pilotReadiness.allowlisted
+                ? "MISSING_PILOT_MERCHANT_ALLOWLIST"
+                : !pilotReadiness.enabledCapabilities.includes("LIVE_EMAIL_SANDBOX")
+                  ? "LIVE_EMAIL_SANDBOX_CAPABILITY_REQUIRED"
+                  : undefined,
+        recommendation: "Use sandbox email only for allowlisted pilot merchants with LIVE_EMAIL_SANDBOX enabled."
       })
     ]),
     category("platform_integrations", "Platform Integrations", [
@@ -429,6 +459,7 @@ export function buildProductionReadinessReport(
       credentialVaultMode: vaultMode,
       workerMode: workersEnabled ? (workerDryRun ? "DRY_RUN" : "ACTIVE") : "DISABLED",
       emailMode: liveEmailEnabled ? (emailProviderConfigured ? "CONFIGURED" : "INCOMPLETE") : "DISABLED",
+      pilotEmailMode: pilotEmailEnabled ? `${pilotEmailMode}:${pilotEmailProvider}` : "DISABLED",
       platformReadMode: platformRealReads ? "READ_ONLY_LIVE_FLAG_ON" : "MOCK_OR_DISABLED",
       platformWriteMode: platformWritesEnabled ? "LIVE_FLAG_ON" : "DISABLED",
       shippingNetworkMode: shippingNetworkLiveCalls ? "LIVE_FLAG_ON" : "MOCK_OR_DISABLED",

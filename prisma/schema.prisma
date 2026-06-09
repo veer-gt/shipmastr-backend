@@ -1843,6 +1843,26 @@ model MerchantNotificationPreference {
   @@map("merchant_notification_preferences")
 }
 
+model EmailDeliveryAttempt {
+  id             String    @id @default(cuid())
+  merchantId     String?   @map("merchant_id")
+  notificationId String?   @map("notification_id")
+  recipientSafe  String?   @map("recipient_safe")
+  provider       String
+  mode           String
+  status         String
+  subject        String?
+  safeMeta       Json?     @map("safe_meta")
+  sentAt         DateTime? @map("sent_at")
+  createdAt      DateTime  @default(now()) @map("created_at")
+  updatedAt      DateTime  @default(now()) @updatedAt @map("updated_at")
+
+  @@index([merchantId, status])
+  @@index([notificationId])
+  @@index([createdAt])
+  @@map("email_delivery_attempts")
+}
+
 model ShipmastrWorkerRun {
   id             String    @id @default(cuid())
   workerName     String    @map("worker_name")

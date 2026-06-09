@@ -58,6 +58,7 @@ export type ProductionReadinessReport = {
     credentialVaultMode: string;
     workerMode: string;
     emailMode: string;
+    pilotEmailMode: string;
     platformReadMode: string;
     platformWriteMode: string;
     shippingNetworkMode: string;

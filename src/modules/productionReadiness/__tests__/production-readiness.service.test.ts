@@ -90,6 +90,18 @@ describe("production readiness gate", () => {
     assert.match(serialized, /TRACKING_SYNC_ENABLED/);
   });
 
+  it("blocks pilot email sandbox when it is not merchant-allowlisted and capability-gated", () => {
+    const blocked = report({
+      SHIPMASTR_EMAIL_ENABLED: "true",
+      SHIPMASTR_EMAIL_MODE: "SANDBOX",
+      SHIPMASTR_EMAIL_PROVIDER: "LOCAL_LOG",
+      SHIPMASTR_EMAIL_PILOT_ONLY: "true"
+    });
+    const serialized = json(blocked);
+    assert.equal(blocked.verdict, "BLOCKED");
+    assert.match(serialized, /MISSING_PILOT_MERCHANT_ALLOWLIST|LIVE_EMAIL_SANDBOX_CAPABILITY_REQUIRED/);
+  });
+
   it("blocks live shipping network calls and live AWB/label flags without approval and allowlist", () => {
     const blocked = report({
       BIGSHIP_ENABLE_REAL_CALLS: "true",
