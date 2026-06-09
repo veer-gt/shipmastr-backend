@@ -110,6 +110,7 @@ import { getMerchantOperationsSummary } from "./shipping-merchant-operations.ser
 import { merchantStoreOnboardingRouter } from "../merchantOnboarding/merchant-onboarding.routes.js";
 import { merchantNotificationsRouter } from "../merchantNotifications/merchant-notification.routes.js";
 import { platformIntegrationsRouter } from "../platformIntegrations/platform-integrations.routes.js";
+import { productionReadinessRouter } from "../productionReadiness/production-readiness.routes.js";
 import { workersRouter } from "../workers/workers.routes.js";
 
 export const shippingNetworkRouter = Router();
@@ -148,6 +149,7 @@ shippingNetworkRouter.use("/", platformIntegrationsRouter);
 shippingNetworkRouter.use("/", merchantNotificationsRouter);
 shippingNetworkRouter.use("/", merchantStoreOnboardingRouter);
 shippingNetworkRouter.use("/", workersRouter);
+shippingNetworkRouter.use("/", productionReadinessRouter);
 
 shippingNetworkRouter.post("/api-keys", async (req, res) => {
   const body = createSellerApiKeySchema.parse(req.body);
