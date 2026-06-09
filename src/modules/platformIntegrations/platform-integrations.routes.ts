@@ -27,6 +27,7 @@ import { wooCommercePlatformRouter } from "./woocommerce/woocommerce.routes.js";
 import { magentoPlatformRouter } from "./magento/magento.routes.js";
 import { platformCredentialsRouter } from "./credentials/platform-credentials.routes.js";
 import { platformWebhookIngestionRouter } from "./webhookIngestion/platform-webhook-ingestion.routes.js";
+import { platformWebhookRegistrationRouter } from "./webhookRegistration/platform-webhook-registration.routes.js";
 import {
   getLatestPlatformConnectionHealth,
   listPlatformConnectionHealthChecks,
@@ -88,6 +89,7 @@ platformIntegrationsRouter.use("/", wooCommercePlatformRouter);
 platformIntegrationsRouter.use("/", magentoPlatformRouter);
 platformIntegrationsRouter.use("/", platformCredentialsRouter);
 platformIntegrationsRouter.use("/", platformWebhookIngestionRouter);
+platformIntegrationsRouter.use("/", platformWebhookRegistrationRouter);
 
 platformIntegrationsRouter.post("/platform-connections", async (req, res) => {
   const body = createPlatformConnectionSchema.parse(req.body);

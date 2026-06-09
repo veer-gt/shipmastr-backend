@@ -59,6 +59,7 @@ export type ProductionReadinessReport = {
     workerMode: string;
     emailMode: string;
     pilotEmailMode: string;
+    webhookRegistrationMode: string;
     platformReadMode: string;
     platformWriteMode: string;
     shippingNetworkMode: string;

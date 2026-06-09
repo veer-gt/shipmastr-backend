@@ -203,8 +203,12 @@ export function buildProductionReadinessReport(
     || boolValue(source, "MERCHANT_EMAIL_LIVE_SEND", false)
     || boolValue(source, "JOURNAL_EMAIL_LIVE_SEND", false);
   const platformRealReads = boolValue(source, "PLATFORM_INTEGRATIONS_ENABLE_REAL_READS", false);
-  const webhookRegistrationEnabled = boolValue(source, "PLATFORM_WEBHOOK_REGISTRATION_ENABLED", false)
+  const webhookRegistrationEnabled = boolValue(source, "SHIPMASTR_WEBHOOK_REGISTRATION_ENABLED", false)
+    || boolValue(source, "PLATFORM_WEBHOOK_REGISTRATION_ENABLED", false)
     || boolValue(source, "SHIPMASTR_PLATFORM_WEBHOOK_REGISTRATION_ENABLED", false);
+  const webhookRegistrationMode = stringValue(source, "SHIPMASTR_WEBHOOK_REGISTRATION_MODE", "DRY_RUN").toUpperCase();
+  const webhookRegistrationPilotOnly = boolValue(source, "SHIPMASTR_WEBHOOK_REGISTRATION_PILOT_ONLY", true);
+  const webhookRegistrationCallbackConfigured = Boolean(stringValue(source, "PUBLIC_WEBHOOK_BASE_URL"));
   const platformWritesEnabled = boolValue(source, "PLATFORM_WRITES_ENABLED", false)
     || boolValue(source, "SHIPMASTR_PLATFORM_WRITES_ENABLED", false);
   const trackingSyncEnabled = boolValue(source, "PLATFORM_TRACKING_SYNC_ENABLED", false)
@@ -359,11 +363,35 @@ export function buildProductionReadinessReport(
       }),
       check({
         key: "webhook_registration_disabled",
-        label: "Platform webhook registration remains disabled",
-        status: webhookRegistrationEnabled && !approval(source, "LIVE_WEBHOOK_REGISTRATION_APPROVED") ? "BLOCKED" : "PASS",
-        safeValue: webhookRegistrationEnabled,
-        blockerCode: webhookRegistrationEnabled && !approval(source, "LIVE_WEBHOOK_REGISTRATION_APPROVED") ? "WEBHOOK_REGISTRATION_ENABLED" : undefined,
-        recommendation: "Do not register platform webhooks until signature storage and rollback are approved."
+        label: "Platform webhook registration remains pilot-gated",
+        status: !webhookRegistrationEnabled
+          ? "PASS"
+          : !webhookRegistrationPilotOnly || !webhookRegistrationCallbackConfigured
+            ? "BLOCKED"
+            : webhookRegistrationMode === "LIVE" && (
+                !approval(source, "LIVE_WEBHOOK_REGISTRATION_APPROVED")
+                || !pilotReadiness.allowlisted
+                || !pilotReadiness.enabledCapabilities.includes("LIVE_WEBHOOK_REGISTRATION")
+              )
+              ? "BLOCKED"
+              : "WARNING",
+        safeValue: webhookRegistrationEnabled
+          ? `${webhookRegistrationMode}:${webhookRegistrationPilotOnly ? "PILOT_ONLY" : "BROAD"}`
+          : "DISABLED",
+        blockerCode: !webhookRegistrationEnabled
+          ? undefined
+          : !webhookRegistrationPilotOnly
+            ? "WEBHOOK_REGISTRATION_NOT_PILOT_ONLY"
+            : !webhookRegistrationCallbackConfigured
+              ? "WEBHOOK_CALLBACK_URL_MISSING"
+              : webhookRegistrationMode === "LIVE" && !approval(source, "LIVE_WEBHOOK_REGISTRATION_APPROVED")
+                ? "WEBHOOK_REGISTRATION_ENABLED"
+                : webhookRegistrationMode === "LIVE" && !pilotReadiness.allowlisted
+                  ? "MISSING_PILOT_MERCHANT_ALLOWLIST"
+                  : webhookRegistrationMode === "LIVE" && !pilotReadiness.enabledCapabilities.includes("LIVE_WEBHOOK_REGISTRATION")
+                    ? "LIVE_WEBHOOK_REGISTRATION_CAPABILITY_REQUIRED"
+                    : undefined,
+        recommendation: "Use dry-run registration unless the merchant is allowlisted, approved, credential-ready, and rollback controls are confirmed."
       }),
       check({
         key: "platform_writes_disabled",
@@ -460,6 +488,7 @@ export function buildProductionReadinessReport(
       workerMode: workersEnabled ? (workerDryRun ? "DRY_RUN" : "ACTIVE") : "DISABLED",
       emailMode: liveEmailEnabled ? (emailProviderConfigured ? "CONFIGURED" : "INCOMPLETE") : "DISABLED",
       pilotEmailMode: pilotEmailEnabled ? `${pilotEmailMode}:${pilotEmailProvider}` : "DISABLED",
+      webhookRegistrationMode: webhookRegistrationEnabled ? `${webhookRegistrationMode}:${webhookRegistrationPilotOnly ? "PILOT_ONLY" : "BROAD"}` : "DISABLED",
       platformReadMode: platformRealReads ? "READ_ONLY_LIVE_FLAG_ON" : "MOCK_OR_DISABLED",
       platformWriteMode: platformWritesEnabled ? "LIVE_FLAG_ON" : "DISABLED",
       shippingNetworkMode: shippingNetworkLiveCalls ? "LIVE_FLAG_ON" : "MOCK_OR_DISABLED",

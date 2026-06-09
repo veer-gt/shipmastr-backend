@@ -1801,6 +1801,28 @@ model PlatformWebhookEvent {
   @@map("platform_webhook_events")
 }
 
+model PlatformWebhookRegistration {
+  id                String        @id @default(cuid())
+  merchantId        String        @map("merchant_id")
+  connectionId      String        @map("connection_id")
+  platform          StorePlatform
+  topic             String
+  callbackUrlSafe   String        @map("callback_url_safe")
+  status            String        @default("DRAFT")
+  externalWebhookId String?       @map("external_webhook_id")
+  registeredAt      DateTime?     @map("registered_at")
+  disabledAt        DateTime?     @map("disabled_at")
+  safeMeta          Json?         @map("safe_meta")
+  createdAt         DateTime      @default(now()) @map("created_at")
+  updatedAt         DateTime      @default(now()) @updatedAt @map("updated_at")
+
+  @@unique([connectionId, topic])
+  @@index([merchantId, connectionId])
+  @@index([merchantId, status])
+  @@index([platform, topic])
+  @@map("platform_webhook_registrations")
+}
+
 model MerchantNotification {
   id          String    @id @default(cuid())
   merchantId  String    @map("merchant_id")

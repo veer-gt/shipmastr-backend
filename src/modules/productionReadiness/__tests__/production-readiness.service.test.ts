@@ -77,7 +77,9 @@ describe("production readiness gate", () => {
       SHIPMASTR_SCHEDULER_ENABLED: "true",
       SHIPMASTR_EMAIL_LIVE_SEND: "true",
       SMTP_HOST: "",
-      PLATFORM_WEBHOOK_REGISTRATION_ENABLED: "true",
+      SHIPMASTR_WEBHOOK_REGISTRATION_ENABLED: "true",
+      SHIPMASTR_WEBHOOK_REGISTRATION_MODE: "LIVE",
+      PUBLIC_WEBHOOK_BASE_URL: "https://hooks.shipmastr.test",
       PLATFORM_WRITES_ENABLED: "true",
       PLATFORM_TRACKING_SYNC_ENABLED: "true"
     });
@@ -88,6 +90,41 @@ describe("production readiness gate", () => {
     assert.match(serialized, /WEBHOOK_REGISTRATION_ENABLED/);
     assert.match(serialized, /PLATFORM_WRITES_ENABLED/);
     assert.match(serialized, /TRACKING_SYNC_ENABLED/);
+  });
+
+  it("blocks live webhook registration without pilot capability and callback readiness", () => {
+    const blocked = report({
+      SHIPMASTR_WEBHOOK_REGISTRATION_ENABLED: "true",
+      SHIPMASTR_WEBHOOK_REGISTRATION_MODE: "LIVE",
+      SHIPMASTR_WEBHOOK_REGISTRATION_PILOT_ONLY: "true",
+      PUBLIC_WEBHOOK_BASE_URL: ""
+    });
+    const serialized = json(blocked);
+    assert.equal(blocked.verdict, "BLOCKED");
+    assert.match(serialized, /WEBHOOK_CALLBACK_URL_MISSING/);
+
+    const capabilityBlocked = buildProductionReadinessReport({
+      ...baseSource,
+      SHIPMASTR_WEBHOOK_REGISTRATION_ENABLED: "true",
+      SHIPMASTR_WEBHOOK_REGISTRATION_MODE: "LIVE",
+      SHIPMASTR_WEBHOOK_REGISTRATION_PILOT_ONLY: "true",
+      PUBLIC_WEBHOOK_BASE_URL: "https://hooks.shipmastr.test",
+      LIVE_WEBHOOK_REGISTRATION_APPROVED: "true"
+    }, {
+      checkedAt: "2026-06-09T00:00:00.000Z",
+      betaAuditDocExists: true,
+      pilotReadiness: {
+        merchantId: "merchant_1",
+        allowlisted: true,
+        merchantStatus: "ENABLED",
+        enabledCapabilities: [],
+        approvedCapabilities: ["LIVE_WEBHOOK_REGISTRATION"],
+        rollbackReady: true,
+        blockers: []
+      }
+    });
+    assert.equal(capabilityBlocked.verdict, "BLOCKED");
+    assert.match(json(capabilityBlocked), /LIVE_WEBHOOK_REGISTRATION_CAPABILITY_REQUIRED/);
   });
 
   it("blocks pilot email sandbox when it is not merchant-allowlisted and capability-gated", () => {
