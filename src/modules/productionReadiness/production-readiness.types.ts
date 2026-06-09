@@ -62,6 +62,7 @@ export type ProductionReadinessReport = {
     webhookRegistrationMode: string;
     liveCourierRatesMode?: string;
     liveAwbLabelMode?: string;
+    platformTrackingSyncMode?: string;
     platformReadMode: string;
     platformWriteMode: string;
     shippingNetworkMode: string;

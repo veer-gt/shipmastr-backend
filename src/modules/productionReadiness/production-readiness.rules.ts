@@ -221,6 +221,8 @@ export function buildProductionReadinessReport(
     || boolValue(source, "SHIPMASTR_PLATFORM_WRITES_ENABLED", false);
   const trackingSyncEnabled = boolValue(source, "PLATFORM_TRACKING_SYNC_ENABLED", false)
     || boolValue(source, "SHIPMASTR_PLATFORM_TRACKING_SYNC_ENABLED", false);
+  const trackingSyncMode = stringValue(source, "SHIPMASTR_PLATFORM_TRACKING_SYNC_MODE", "DRY_RUN").toUpperCase();
+  const trackingSyncPilotOnly = boolValue(source, "SHIPMASTR_PLATFORM_TRACKING_SYNC_PILOT_ONLY", true);
   const shippingNetworkLiveCalls = boolValue(source, "BIGSHIP_ENABLE_REAL_CALLS", false)
     || stringValue(source, "BIGSHIP_MODE", "mock").toLowerCase() === "live"
     || boolValue(source, "SHIPMASTR_COURIER_LIVE_CALLS_ENABLED", false)
@@ -411,11 +413,31 @@ export function buildProductionReadinessReport(
       }),
       check({
         key: "tracking_sync_disabled",
-        label: "Tracking sync remains disabled",
-        status: trackingSyncEnabled && !approval(source, "LIVE_PLATFORM_WRITE_APPROVED") ? "BLOCKED" : "PASS",
-        safeValue: trackingSyncEnabled,
-        blockerCode: trackingSyncEnabled && !approval(source, "LIVE_PLATFORM_WRITE_APPROVED") ? "TRACKING_SYNC_ENABLED" : undefined,
-        recommendation: "Keep tracking sync simulation-only until platform write approval and merchant allowlist are in place."
+        label: "Tracking sync remains pilot-gated",
+        status: !trackingSyncEnabled
+          ? "PASS"
+          : !trackingSyncPilotOnly
+            ? "BLOCKED"
+            : trackingSyncMode === "LIVE" && (
+                !approval(source, "LIVE_PLATFORM_WRITE_APPROVED")
+                || !pilotReadiness.allowlisted
+                || !pilotReadiness.enabledCapabilities.includes("LIVE_PLATFORM_TRACKING_SYNC")
+              )
+              ? "BLOCKED"
+              : "WARNING",
+        safeValue: trackingSyncEnabled ? `${trackingSyncMode}:${trackingSyncPilotOnly ? "PILOT_ONLY" : "BROAD"}` : "DISABLED",
+        blockerCode: !trackingSyncEnabled
+          ? undefined
+          : !trackingSyncPilotOnly
+            ? "PLATFORM_TRACKING_SYNC_NOT_PILOT_ONLY"
+            : trackingSyncMode === "LIVE" && !pilotReadiness.allowlisted
+              ? "MISSING_PILOT_MERCHANT_ALLOWLIST"
+              : trackingSyncMode === "LIVE" && !approval(source, "LIVE_PLATFORM_WRITE_APPROVED")
+                ? "TRACKING_SYNC_ENABLED"
+                : trackingSyncMode === "LIVE" && !pilotReadiness.enabledCapabilities.includes("LIVE_PLATFORM_TRACKING_SYNC")
+                  ? "LIVE_PLATFORM_TRACKING_SYNC_CAPABILITY_REQUIRED"
+                  : undefined,
+        recommendation: "Enable live tracking sync only for allowlisted merchants after platform-write approval and LIVE_PLATFORM_TRACKING_SYNC capability enablement."
       })
     ]),
     category("shipping_network", "Shipping Network Live Calls", [
@@ -546,6 +568,7 @@ export function buildProductionReadinessReport(
       webhookRegistrationMode: webhookRegistrationEnabled ? `${webhookRegistrationMode}:${webhookRegistrationPilotOnly ? "PILOT_ONLY" : "BROAD"}` : "DISABLED",
       liveCourierRatesMode: liveCourierRatesEnabled ? `${liveCourierRatesMode}:${liveCourierRatesPilotOnly ? "PILOT_ONLY" : "BROAD"}` : "DISABLED",
       liveAwbLabelMode: liveAwbLabelEnabled ? `${liveAwbLabelMode}:${liveAwbLabelPilotOnly ? "PILOT_ONLY" : "BROAD"}` : "DISABLED",
+      platformTrackingSyncMode: trackingSyncEnabled ? `${trackingSyncMode}:${trackingSyncPilotOnly ? "PILOT_ONLY" : "BROAD"}` : "DISABLED",
       platformReadMode: platformRealReads ? "READ_ONLY_LIVE_FLAG_ON" : "MOCK_OR_DISABLED",
       platformWriteMode: platformWritesEnabled ? "LIVE_FLAG_ON" : "DISABLED",
       shippingNetworkMode: shippingNetworkLiveCalls ? "LIVE_FLAG_ON" : "MOCK_OR_DISABLED",

@@ -81,7 +81,8 @@ describe("production readiness gate", () => {
       SHIPMASTR_WEBHOOK_REGISTRATION_MODE: "LIVE",
       PUBLIC_WEBHOOK_BASE_URL: "https://hooks.shipmastr.test",
       PLATFORM_WRITES_ENABLED: "true",
-      PLATFORM_TRACKING_SYNC_ENABLED: "true"
+      SHIPMASTR_PLATFORM_TRACKING_SYNC_ENABLED: "true",
+      SHIPMASTR_PLATFORM_TRACKING_SYNC_PILOT_ONLY: "false"
     });
     const serialized = json(blocked);
     assert.equal(blocked.verdict, "BLOCKED");
@@ -89,7 +90,60 @@ describe("production readiness gate", () => {
     assert.match(serialized, /EMAIL_ENABLED_WITHOUT_PROVIDER/);
     assert.match(serialized, /WEBHOOK_REGISTRATION_ENABLED/);
     assert.match(serialized, /PLATFORM_WRITES_ENABLED/);
-    assert.match(serialized, /TRACKING_SYNC_ENABLED/);
+    assert.match(serialized, /PLATFORM_TRACKING_SYNC_NOT_PILOT_ONLY/);
+  });
+
+  it("blocks live platform tracking sync unless pilot-only, approved, allowlisted, and capability-enabled", () => {
+    const broad = report({
+      SHIPMASTR_PLATFORM_TRACKING_SYNC_ENABLED: "true",
+      SHIPMASTR_PLATFORM_TRACKING_SYNC_MODE: "LIVE",
+      SHIPMASTR_PLATFORM_TRACKING_SYNC_PILOT_ONLY: "false"
+    });
+    assert.equal(broad.verdict, "BLOCKED");
+    assert.match(json(broad), /PLATFORM_TRACKING_SYNC_NOT_PILOT_ONLY/);
+
+    const capabilityBlocked = buildProductionReadinessReport({
+      ...baseSource,
+      SHIPMASTR_PLATFORM_TRACKING_SYNC_ENABLED: "true",
+      SHIPMASTR_PLATFORM_TRACKING_SYNC_MODE: "LIVE",
+      SHIPMASTR_PLATFORM_TRACKING_SYNC_PILOT_ONLY: "true",
+      LIVE_PLATFORM_WRITE_APPROVED: "true"
+    }, {
+      checkedAt: "2026-06-09T00:00:00.000Z",
+      betaAuditDocExists: true,
+      pilotReadiness: {
+        merchantId: "merchant_1",
+        allowlisted: true,
+        merchantStatus: "ENABLED",
+        enabledCapabilities: [],
+        approvedCapabilities: ["LIVE_PLATFORM_TRACKING_SYNC"],
+        rollbackReady: true,
+        blockers: []
+      }
+    });
+    assert.equal(capabilityBlocked.verdict, "BLOCKED");
+    assert.match(json(capabilityBlocked), /LIVE_PLATFORM_TRACKING_SYNC_CAPABILITY_REQUIRED/);
+
+    const dryRun = buildProductionReadinessReport({
+      ...baseSource,
+      SHIPMASTR_PLATFORM_TRACKING_SYNC_ENABLED: "true",
+      SHIPMASTR_PLATFORM_TRACKING_SYNC_MODE: "DRY_RUN",
+      SHIPMASTR_PLATFORM_TRACKING_SYNC_PILOT_ONLY: "true"
+    }, {
+      checkedAt: "2026-06-09T00:00:00.000Z",
+      betaAuditDocExists: true,
+      pilotReadiness: {
+        merchantId: "merchant_1",
+        allowlisted: true,
+        merchantStatus: "ENABLED",
+        enabledCapabilities: ["LIVE_PLATFORM_TRACKING_SYNC"],
+        approvedCapabilities: ["LIVE_PLATFORM_TRACKING_SYNC"],
+        rollbackReady: true,
+        blockers: []
+      }
+    });
+    assert.equal(dryRun.environment.platformTrackingSyncMode, "DRY_RUN:PILOT_ONLY");
+    assert.notEqual(dryRun.verdict, "BLOCKED");
   });
 
   it("blocks live webhook registration without pilot capability and callback readiness", () => {

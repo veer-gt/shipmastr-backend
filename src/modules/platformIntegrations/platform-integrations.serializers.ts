@@ -134,6 +134,8 @@ export function serializePlatformTrackingSync(record: {
   trackingNumber?: string | null;
   trackingUrl?: string | null;
   status: string;
+  mode?: string | null;
+  safeMeta?: unknown;
   lastAttemptAt?: Date | string | null;
   syncedAt?: Date | string | null;
   errorMessage?: string | null;
@@ -149,6 +151,8 @@ export function serializePlatformTrackingSync(record: {
     tracking_number: record.trackingNumber ?? null,
     tracking_url: record.trackingUrl ?? null,
     status: record.status,
+    mode: record.mode ?? "DRY_RUN",
+    safe_meta: record.safeMeta ?? null,
     last_attempt_at: timestamp(record.lastAttemptAt),
     synced_at: timestamp(record.syncedAt),
     error_message: record.errorMessage ?? null,

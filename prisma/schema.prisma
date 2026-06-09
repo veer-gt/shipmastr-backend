@@ -1602,6 +1602,8 @@ model PlatformTrackingSync {
   trackingNumber String?                    @map("tracking_number")
   trackingUrl    String?                    @map("tracking_url")
   status         PlatformTrackingSyncStatus @default(PENDING)
+  mode           String                     @default("DRY_RUN")
+  safeMeta       Json?                      @map("safe_meta")
   lastAttemptAt  DateTime?                  @map("last_attempt_at")
   syncedAt       DateTime?                  @map("synced_at")
   errorMessage   String?                    @map("error_message")

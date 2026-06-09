@@ -116,6 +116,13 @@ import { livePilotRouter } from "../livePilot/live-pilot.routes.js";
 import { platformIntegrationsRouter } from "../platformIntegrations/platform-integrations.routes.js";
 import { productionReadinessRouter } from "../productionReadiness/production-readiness.routes.js";
 import { workersRouter } from "../workers/workers.routes.js";
+import {
+  getPlatformTrackingSyncReadiness,
+  listShipmentPlatformTrackingSyncAttempts,
+  runShipmentPlatformTrackingSync,
+  runShipmentPlatformTrackingSyncDryRun,
+  serializePlatformTrackingSyncReadiness
+} from "../platformIntegrations/trackingSync/pilot-platform-tracking-sync.service.js";
 
 export const shippingNetworkRouter = Router();
 export const shippingSellerApiRouter = Router();
@@ -570,6 +577,29 @@ shippingNetworkRouter.post("/shipments/:shipmentId/manifest", async (req, res) =
 shippingNetworkRouter.get("/shipments/:shipmentId/tracking", async (req, res) => {
   const data = await fetchShipmentTracking(req.auth!.merchantId, req.params.shipmentId);
   return res.json(successEnvelope("Tracking fetched successfully.", data));
+});
+
+shippingNetworkRouter.get("/shipments/:shipmentId/platform-tracking-sync", async (req, res) => {
+  const data = await listShipmentPlatformTrackingSyncAttempts(req.auth!.merchantId, req.params.shipmentId);
+  return res.json(successEnvelope("Platform tracking sync attempts fetched safely.", data));
+});
+
+shippingNetworkRouter.get("/shipments/:shipmentId/platform-tracking-sync/readiness", async (req, res) => {
+  const readiness = await getPlatformTrackingSyncReadiness(req.auth!.merchantId, req.params.shipmentId);
+  return res.json(successEnvelope(
+    "Platform tracking sync readiness fetched safely.",
+    serializePlatformTrackingSyncReadiness(readiness)
+  ));
+});
+
+shippingNetworkRouter.post("/shipments/:shipmentId/platform-tracking-sync/dry-run", async (req, res) => {
+  const data = await runShipmentPlatformTrackingSyncDryRun(req.auth!.merchantId, req.params.shipmentId);
+  return res.status(201).json(successEnvelope("Platform tracking sync dry-run recorded safely.", data));
+});
+
+shippingNetworkRouter.post("/shipments/:shipmentId/platform-tracking-sync", async (req, res) => {
+  const data = await runShipmentPlatformTrackingSync(req.auth!.merchantId, req.params.shipmentId);
+  return res.status(201).json(successEnvelope("Pilot platform tracking sync attempt recorded safely.", data));
 });
 
 shippingNetworkRouter.post("/shipments/:shipmentId/cancel", async (req, res) => {
