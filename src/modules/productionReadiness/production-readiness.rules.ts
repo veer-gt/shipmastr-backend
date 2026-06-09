@@ -209,13 +209,17 @@ export function buildProductionReadinessReport(
   const webhookRegistrationMode = stringValue(source, "SHIPMASTR_WEBHOOK_REGISTRATION_MODE", "DRY_RUN").toUpperCase();
   const webhookRegistrationPilotOnly = boolValue(source, "SHIPMASTR_WEBHOOK_REGISTRATION_PILOT_ONLY", true);
   const webhookRegistrationCallbackConfigured = Boolean(stringValue(source, "PUBLIC_WEBHOOK_BASE_URL"));
+  const liveCourierRatesEnabled = boolValue(source, "SHIPMASTR_LIVE_COURIER_RATES_ENABLED", false);
+  const liveCourierRatesMode = stringValue(source, "SHIPMASTR_LIVE_COURIER_RATES_MODE", "DRY_RUN").toUpperCase();
+  const liveCourierRatesPilotOnly = boolValue(source, "SHIPMASTR_LIVE_COURIER_RATES_PILOT_ONLY", true);
   const platformWritesEnabled = boolValue(source, "PLATFORM_WRITES_ENABLED", false)
     || boolValue(source, "SHIPMASTR_PLATFORM_WRITES_ENABLED", false);
   const trackingSyncEnabled = boolValue(source, "PLATFORM_TRACKING_SYNC_ENABLED", false)
     || boolValue(source, "SHIPMASTR_PLATFORM_TRACKING_SYNC_ENABLED", false);
   const shippingNetworkLiveCalls = boolValue(source, "BIGSHIP_ENABLE_REAL_CALLS", false)
     || stringValue(source, "BIGSHIP_MODE", "mock").toLowerCase() === "live"
-    || boolValue(source, "SHIPMASTR_COURIER_LIVE_CALLS_ENABLED", false);
+    || boolValue(source, "SHIPMASTR_COURIER_LIVE_CALLS_ENABLED", false)
+    || (liveCourierRatesEnabled && liveCourierRatesMode === "LIVE");
   const awbLabelLiveEnabled = boolValue(source, "SHIPMASTR_AWB_LABEL_LIVE_ENABLED", false)
     || boolValue(source, "SHIPMASTR_SHIP_NOW_LIVE_ENABLED", false);
   const pilotReadiness = options.pilotReadiness ?? {
@@ -414,10 +418,36 @@ export function buildProductionReadinessReport(
       check({
         key: "live_shipping_network_calls",
         label: "Live shipping network calls remain gated",
-        status: shippingNetworkLiveCalls && !approval(source, "LIVE_COURIER_PROVIDER_APPROVED") ? "BLOCKED" : shippingNetworkLiveCalls ? "WARNING" : "PASS",
-        safeValue: shippingNetworkLiveCalls ? "LIVE_FLAG_ON" : "MOCK_OR_DISABLED",
-        blockerCode: shippingNetworkLiveCalls && !approval(source, "LIVE_COURIER_PROVIDER_APPROVED") ? "COURIER_LIVE_CALLS_ENABLED" : undefined,
-        recommendation: "Enable live rates only for allowlisted merchants after approval."
+        status: liveCourierRatesEnabled
+          ? !liveCourierRatesPilotOnly
+            ? "BLOCKED"
+            : liveCourierRatesMode === "LIVE" && (
+                !approval(source, "LIVE_COURIER_PROVIDER_APPROVED")
+                || !pilotReadiness.allowlisted
+                || !pilotReadiness.enabledCapabilities.includes("LIVE_COURIER_RATES")
+              )
+              ? "BLOCKED"
+              : "WARNING"
+          : shippingNetworkLiveCalls && !approval(source, "LIVE_COURIER_PROVIDER_APPROVED")
+            ? "BLOCKED"
+            : shippingNetworkLiveCalls
+              ? "WARNING"
+              : "PASS",
+        safeValue: liveCourierRatesEnabled
+          ? `${liveCourierRatesMode}:${liveCourierRatesPilotOnly ? "PILOT_ONLY" : "BROAD"}`
+          : shippingNetworkLiveCalls ? "LIVE_FLAG_ON" : "MOCK_OR_DISABLED",
+        blockerCode: liveCourierRatesEnabled && !liveCourierRatesPilotOnly
+          ? "LIVE_COURIER_RATES_NOT_PILOT_ONLY"
+          : liveCourierRatesEnabled && liveCourierRatesMode === "LIVE" && !approval(source, "LIVE_COURIER_PROVIDER_APPROVED")
+            ? "COURIER_LIVE_CALLS_ENABLED"
+            : liveCourierRatesEnabled && liveCourierRatesMode === "LIVE" && !pilotReadiness.allowlisted
+              ? "MISSING_PILOT_MERCHANT_ALLOWLIST"
+              : liveCourierRatesEnabled && liveCourierRatesMode === "LIVE" && !pilotReadiness.enabledCapabilities.includes("LIVE_COURIER_RATES")
+                ? "LIVE_COURIER_RATES_CAPABILITY_REQUIRED"
+                : shippingNetworkLiveCalls && !approval(source, "LIVE_COURIER_PROVIDER_APPROVED")
+                  ? "COURIER_LIVE_CALLS_ENABLED"
+                  : undefined,
+        recommendation: "Enable live rates only for allowlisted merchants after approval and LIVE_COURIER_RATES capability enablement."
       }),
       check({
         key: "awb_label_live_behavior",
@@ -489,6 +519,7 @@ export function buildProductionReadinessReport(
       emailMode: liveEmailEnabled ? (emailProviderConfigured ? "CONFIGURED" : "INCOMPLETE") : "DISABLED",
       pilotEmailMode: pilotEmailEnabled ? `${pilotEmailMode}:${pilotEmailProvider}` : "DISABLED",
       webhookRegistrationMode: webhookRegistrationEnabled ? `${webhookRegistrationMode}:${webhookRegistrationPilotOnly ? "PILOT_ONLY" : "BROAD"}` : "DISABLED",
+      liveCourierRatesMode: liveCourierRatesEnabled ? `${liveCourierRatesMode}:${liveCourierRatesPilotOnly ? "PILOT_ONLY" : "BROAD"}` : "DISABLED",
       platformReadMode: platformRealReads ? "READ_ONLY_LIVE_FLAG_ON" : "MOCK_OR_DISABLED",
       platformWriteMode: platformWritesEnabled ? "LIVE_FLAG_ON" : "DISABLED",
       shippingNetworkMode: shippingNetworkLiveCalls ? "LIVE_FLAG_ON" : "MOCK_OR_DISABLED",

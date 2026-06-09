@@ -15,6 +15,7 @@ import {
   type ShippingTierCandidate
 } from "./shipping-tier-decision.service.js";
 import { getReliabilityScoreForRate } from "./shipping-sla-learning.service.js";
+import { assertLiveCourierRatesAllowed } from "./shipping-live-rates-gate.service.js";
 import {
   createMockSafeShippingAdapter,
   ensureSystemManagedCourierNetwork
@@ -32,6 +33,7 @@ type RateOptions = {
   client?: Db;
   adapter?: InternalCourierProviderAdapter;
   refresh?: boolean;
+  liveRatesSource?: Record<string, unknown>;
 };
 
 function metadataObject(value: unknown) {
@@ -293,6 +295,10 @@ export async function fetchShipmentRates(
   const adapter = options.adapter ?? createMockSafeShippingAdapter();
   const shipment = await getSellerShipment(sellerId, shipmentId, client);
   ensureShipmentIsNotTerminal(shipment.status);
+  const liveRatesReadiness = await assertLiveCourierRatesAllowed(sellerId, {
+    client,
+    ...(options.liveRatesSource ? { source: options.liveRatesSource } : {})
+  });
 
   if (!options.refresh) {
     const existingRates = await findExistingRates(client, shipment.id, sellerId);
@@ -371,7 +377,9 @@ export async function fetchShipmentRates(
             pickupAvailable: providerRate.pickupAvailable ?? true,
             deliveryAvailable: providerRate.deliveryAvailable ?? true,
             reliabilityScore,
-            providerResponseJson: providerRate.providerMetadata
+            providerResponseJson: providerRate.providerMetadata,
+            livePilotRatesMode: liveRatesReadiness.runtime.mode,
+            livePilotRatesReady: liveRatesReadiness.ready
           }
         })
       }
@@ -400,7 +408,9 @@ export async function fetchShipmentRates(
             ratedAt: new Date().toISOString(),
             providerResponseJson: {
               rateCount: providerRates.length
-            }
+            },
+            livePilotRatesMode: liveRatesReadiness.runtime.mode,
+            livePilotRatesReady: liveRatesReadiness.ready
           }
         })
       }
@@ -419,7 +429,9 @@ export async function fetchShipmentRates(
             ratedAt: new Date().toISOString(),
             providerResponseJson: {
               rateCount: providerRates.length
-            }
+            },
+            livePilotRatesMode: liveRatesReadiness.runtime.mode,
+            livePilotRatesReady: liveRatesReadiness.ready
           }
         })
       }

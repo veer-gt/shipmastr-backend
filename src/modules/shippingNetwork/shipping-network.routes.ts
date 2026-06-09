@@ -39,6 +39,7 @@ import { createShippingPickupLocation, listShippingPickupLocations } from "./shi
 import { deleteShippingPickupLocation, updateShippingPickupLocation } from "./shipping-pickup-crud.service.js";
 import { createShipmentDraft, getShipmentDetails } from "./shipping-shipments.service.js";
 import { fetchShipmentRates } from "./shipping-rates.service.js";
+import { getLiveCourierRatesReadiness, serializeLiveCourierRatesReadiness } from "./shipping-live-rates-gate.service.js";
 import { manifestShipment } from "./shipping-manifest.service.js";
 import { shipNowShipment } from "./shipping-ship-now.service.js";
 import { fetchShipmentTracking } from "./shipping-tracking.service.js";
@@ -274,6 +275,14 @@ shippingNetworkRouter.post("/bulk/rates", async (req, res) => {
     ...(body.refresh === undefined ? {} : { refresh: body.refresh })
   });
   return res.json(successEnvelope("Bulk rates processed successfully.", data));
+});
+
+shippingNetworkRouter.get("/live-rates/readiness", async (req, res) => {
+  const readiness = await getLiveCourierRatesReadiness(req.auth!.merchantId);
+  return res.json(successEnvelope(
+    "Pilot live shipping rate readiness fetched successfully.",
+    serializeLiveCourierRatesReadiness(readiness)
+  ));
 });
 
 shippingNetworkRouter.post("/bulk/ship-now", async (req, res) => {

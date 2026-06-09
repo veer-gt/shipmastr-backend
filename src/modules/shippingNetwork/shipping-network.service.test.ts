@@ -16,6 +16,10 @@ import { cancelShipment } from "./shipping-cancel.service.js";
 import { manifestShipment } from "./shipping-manifest.service.js";
 import { createShippingPickupLocation, listShippingPickupLocations } from "./shipping-pickup-location.service.js";
 import { fetchShipmentRates } from "./shipping-rates.service.js";
+import {
+  getLiveCourierRatesReadiness,
+  serializeLiveCourierRatesReadiness
+} from "./shipping-live-rates-gate.service.js";
 import { shipNowShipment } from "./shipping-ship-now.service.js";
 import { createShipmentDraft } from "./shipping-shipments.service.js";
 import { selectShippingTiers } from "./shipping-tier-decision.service.js";
@@ -256,7 +260,9 @@ function createFakeClient() {
     ndrActionAttempts: [] as any[],
     rtoCases: [] as any[],
     codLedgerEntries: [] as any[],
-    weightDiscrepancyCases: [] as any[]
+    weightDiscrepancyCases: [] as any[],
+    livePilotMerchants: [] as any[],
+    livePilotCapabilities: [] as any[]
   };
 
   const id = (prefix: string, count: number) => `${prefix}_${count + 1}`;
@@ -314,6 +320,14 @@ function createFakeClient() {
     },
     merchant: {
       findUnique: async ({ where }: any) => state.merchants.find((row) => row.id === where.id) ?? null
+    },
+    livePilotMerchant: {
+      findUnique: async ({ where }: any) => state.livePilotMerchants.find((row) => row.merchantId === where.merchantId) ?? null
+    },
+    livePilotCapability: {
+      findMany: async ({ where }: any) => state.livePilotCapabilities.filter((row) => (
+        where?.merchantId === undefined || row.merchantId === where.merchantId
+      ))
     },
     automationPreference: {
       findUnique: async ({ where }: any) => state.automationPreferences.find((row) => row.merchantId === where.merchantId) ?? null
@@ -768,6 +782,75 @@ describe("Shipmastr Shipping Network services", () => {
     assert.equal(first.tiers.express.label, "Shipmastr Express");
     assert.equal(first.rates[0]?.courier_network, "Shipmastr Courier Network");
     assert.doesNotMatch(json, /internal_courier|internal_order|providerOrder|provider_order|bigship/i);
+  });
+
+  it("blocks live pilot rate calls when the merchant is not allowlisted", async () => {
+    const { client } = createFakeClient();
+    const adapter = createFakeAdapter();
+    const pickup = await createShippingPickupLocation("seller_1", pickupBody(), { client, adapter });
+    const shipment = await createShipmentDraft("seller_1", shipmentBody(pickup.pickup_location_id), client);
+
+    await assert.rejects(
+      () => fetchShipmentRates("seller_1", shipment.shipment_id, {
+        client,
+        adapter,
+        liveRatesSource: {
+          SHIPMASTR_LIVE_COURIER_RATES_ENABLED: "true",
+          SHIPMASTR_LIVE_COURIER_RATES_MODE: "LIVE",
+          SHIPMASTR_LIVE_COURIER_RATES_PILOT_ONLY: "true"
+        }
+      }),
+      (error) => error instanceof HttpError && error.message === "LIVE_PILOT_MERCHANT_NOT_ALLOWLISTED"
+    );
+    assert.equal(adapter.calls.createDraftOrder, 0);
+    assert.equal(adapter.calls.getRates, 0);
+  });
+
+  it("allows live pilot rate calls only for allowlisted merchants with the rates capability", async () => {
+    const { client, state } = createFakeClient();
+    state.livePilotMerchants.push({ merchantId: "seller_1", status: "ENABLED" });
+    state.livePilotCapabilities.push({
+      merchantId: "seller_1",
+      capability: "LIVE_COURIER_RATES",
+      status: "ENABLED"
+    });
+    const adapter = createFakeAdapter();
+    const pickup = await createShippingPickupLocation("seller_1", pickupBody(), { client, adapter });
+    const shipment = await createShipmentDraft("seller_1", shipmentBody(pickup.pickup_location_id), client);
+
+    const result = await fetchShipmentRates("seller_1", shipment.shipment_id, {
+      client,
+      adapter,
+      liveRatesSource: {
+        SHIPMASTR_LIVE_COURIER_RATES_ENABLED: "true",
+        SHIPMASTR_LIVE_COURIER_RATES_MODE: "LIVE",
+        SHIPMASTR_LIVE_COURIER_RATES_PILOT_ONLY: "true"
+      }
+    });
+
+    const json = JSON.stringify(result);
+    assert.equal(adapter.calls.getRates, 1);
+    assert.equal(result.tiers.smart.label, "Shipmastr Smart");
+    assert.doesNotMatch(json, /internal_courier|providerMetadata|providerResponseJson|bigship/i);
+  });
+
+  it("serializes live rate readiness without provider or credential details", async () => {
+    const { client, state } = createFakeClient();
+    state.livePilotMerchants.push({ merchantId: "seller_1", status: "ENABLED" });
+    const readiness = await getLiveCourierRatesReadiness("seller_1", {
+      client,
+      source: {
+        SHIPMASTR_LIVE_COURIER_RATES_ENABLED: "true",
+        SHIPMASTR_LIVE_COURIER_RATES_MODE: "DRY_RUN",
+        SHIPMASTR_LIVE_COURIER_RATES_PILOT_ONLY: "true"
+      }
+    });
+    const serialized = serializeLiveCourierRatesReadiness(readiness);
+    const json = JSON.stringify(serialized);
+
+    assert.equal(serialized.status, "DRY_RUN");
+    assert.equal(serialized.runtime.mode, "DRY_RUN");
+    assert.doesNotMatch(json, /Bigship|bigship|provider|Authorization|Bearer|credentialHash|secretHash|rawPayload|rawHeaders|rawResponse/i);
   });
 
   it("manifests a shipment, stores internal AWB, and returns Shipmastr tracking fields", async () => {

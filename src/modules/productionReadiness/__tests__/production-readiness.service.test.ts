@@ -154,6 +154,59 @@ describe("production readiness gate", () => {
     assert.equal(blocked.safetyBoundaries.liveAwbLabelBehaviorNewlyEnabled, false);
   });
 
+  it("blocks pilot live courier rates unless pilot-only, approved, allowlisted, and capability-enabled", () => {
+    const notPilotOnly = report({
+      SHIPMASTR_LIVE_COURIER_RATES_ENABLED: "true",
+      SHIPMASTR_LIVE_COURIER_RATES_MODE: "LIVE",
+      SHIPMASTR_LIVE_COURIER_RATES_PILOT_ONLY: "false"
+    });
+    assert.equal(notPilotOnly.verdict, "BLOCKED");
+    assert.match(json(notPilotOnly), /LIVE_COURIER_RATES_NOT_PILOT_ONLY/);
+
+    const capabilityBlocked = buildProductionReadinessReport({
+      ...baseSource,
+      SHIPMASTR_LIVE_COURIER_RATES_ENABLED: "true",
+      SHIPMASTR_LIVE_COURIER_RATES_MODE: "LIVE",
+      SHIPMASTR_LIVE_COURIER_RATES_PILOT_ONLY: "true",
+      LIVE_COURIER_PROVIDER_APPROVED: "true"
+    }, {
+      checkedAt: "2026-06-09T00:00:00.000Z",
+      betaAuditDocExists: true,
+      pilotReadiness: {
+        merchantId: "merchant_1",
+        allowlisted: true,
+        merchantStatus: "ENABLED",
+        enabledCapabilities: [],
+        approvedCapabilities: ["LIVE_COURIER_RATES"],
+        rollbackReady: true,
+        blockers: []
+      }
+    });
+    assert.equal(capabilityBlocked.verdict, "BLOCKED");
+    assert.match(json(capabilityBlocked), /LIVE_COURIER_RATES_CAPABILITY_REQUIRED/);
+
+    const gatedWarning = buildProductionReadinessReport({
+      ...baseSource,
+      SHIPMASTR_LIVE_COURIER_RATES_ENABLED: "true",
+      SHIPMASTR_LIVE_COURIER_RATES_MODE: "DRY_RUN",
+      SHIPMASTR_LIVE_COURIER_RATES_PILOT_ONLY: "true"
+    }, {
+      checkedAt: "2026-06-09T00:00:00.000Z",
+      betaAuditDocExists: true,
+      pilotReadiness: {
+        merchantId: "merchant_1",
+        allowlisted: true,
+        merchantStatus: "ENABLED",
+        enabledCapabilities: ["LIVE_COURIER_RATES"],
+        approvedCapabilities: ["LIVE_COURIER_RATES"],
+        rollbackReady: true,
+        blockers: []
+      }
+    });
+    assert.notEqual(gatedWarning.verdict, "BLOCKED");
+    assert.equal(gatedWarning.environment.liveCourierRatesMode, "DRY_RUN:PILOT_ONLY");
+  });
+
   it("can only mark controlled live pilot ready when live prerequisites and approvals are explicit", () => {
     const ready = report({
       CREDENTIAL_VAULT_PROVIDER: "LOCAL_ENCRYPTED",
