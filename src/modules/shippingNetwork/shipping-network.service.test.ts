@@ -20,6 +20,10 @@ import {
   getLiveCourierRatesReadiness,
   serializeLiveCourierRatesReadiness
 } from "./shipping-live-rates-gate.service.js";
+import {
+  getLiveAwbLabelReadiness,
+  serializeLiveAwbLabelReadiness
+} from "./shipping-live-ship-gate.service.js";
 import { shipNowShipment } from "./shipping-ship-now.service.js";
 import { createShipmentDraft } from "./shipping-shipments.service.js";
 import { selectShippingTiers } from "./shipping-tier-decision.service.js";
@@ -902,6 +906,90 @@ describe("Shipmastr Shipping Network services", () => {
     assert.equal(state.providerRefs[0]?.providerAwb, "mock_awb_001");
     assert.equal(state.shipments[0]?.serviceLevel, "Shipmastr Economy");
     assert.doesNotMatch(json, /internal_courier|internal_order|providerOrder|provider_order|bigship/i);
+  });
+
+  it("blocks live pilot Ship Now before AWB or label adapter calls when capability gates are missing", async () => {
+    const { client } = createFakeClient();
+    const adapter = createFakeAdapter();
+    const pickup = await createShippingPickupLocation("seller_1", pickupBody(), { client, adapter });
+    const shipment = await createShipmentDraft("seller_1", shipmentBody(pickup.pickup_location_id), client);
+
+    await assert.rejects(
+      () => shipNowShipment("seller_1", shipment.shipment_id, "smart", {
+        client,
+        adapter,
+        liveAwbLabelSource: {
+          SHIPMASTR_LIVE_AWB_LABEL_ENABLED: "true",
+          SHIPMASTR_LIVE_AWB_LABEL_MODE: "LIVE",
+          SHIPMASTR_LIVE_AWB_LABEL_PILOT_ONLY: "true"
+        }
+      }),
+      (error) => error instanceof HttpError && error.message === "LIVE_PILOT_MERCHANT_NOT_ALLOWLISTED"
+    );
+    assert.equal(adapter.calls.getRates, 0);
+    assert.equal(adapter.calls.manifestOrder, 0);
+    assert.equal(adapter.calls.getLabel, 0);
+  });
+
+  it("allows live pilot Ship Now only with rates and AWB label capabilities and stays idempotent", async () => {
+    const { client, state } = createFakeClient();
+    state.livePilotMerchants.push({ merchantId: "seller_1", status: "ENABLED" });
+    state.livePilotCapabilities.push(
+      { merchantId: "seller_1", capability: "LIVE_COURIER_RATES", status: "ENABLED" },
+      { merchantId: "seller_1", capability: "LIVE_AWB_LABEL", status: "ENABLED" }
+    );
+    const adapter = createFakeAdapter();
+    const pickup = await createShippingPickupLocation("seller_1", pickupBody(), { client, adapter });
+    const shipment = await createShipmentDraft("seller_1", shipmentBody(pickup.pickup_location_id), client);
+
+    const first = await shipNowShipment("seller_1", shipment.shipment_id, "smart", {
+      client,
+      adapter,
+      liveAwbLabelSource: {
+        SHIPMASTR_LIVE_AWB_LABEL_ENABLED: "true",
+        SHIPMASTR_LIVE_AWB_LABEL_MODE: "LIVE",
+        SHIPMASTR_LIVE_AWB_LABEL_PILOT_ONLY: "true"
+      }
+    });
+    const second = await shipNowShipment("seller_1", shipment.shipment_id, "smart", {
+      client,
+      adapter,
+      liveAwbLabelSource: {
+        SHIPMASTR_LIVE_AWB_LABEL_ENABLED: "true",
+        SHIPMASTR_LIVE_AWB_LABEL_MODE: "LIVE",
+        SHIPMASTR_LIVE_AWB_LABEL_PILOT_ONLY: "true"
+      }
+    });
+    const json = JSON.stringify(first);
+
+    assert.equal(adapter.calls.manifestOrder, 1);
+    assert.equal(adapter.calls.getLabel, 1);
+    assert.equal(first.awbNumber, second.awbNumber);
+    assert.equal(first.courierNetwork, "Shipmastr Courier Network");
+    assert.doesNotMatch(json, /internal_courier|providerMetadata|providerResponseJson|bigship/i);
+  });
+
+  it("serializes live Ship Now readiness without provider, raw response, or credential details", async () => {
+    const { client, state } = createFakeClient();
+    state.livePilotMerchants.push({ merchantId: "seller_1", status: "ENABLED" });
+    const pickup = await createShippingPickupLocation("seller_1", pickupBody(), { client, adapter: createFakeAdapter() });
+    const shipment = await createShipmentDraft("seller_1", shipmentBody(pickup.pickup_location_id), client);
+    const readiness = await getLiveAwbLabelReadiness("seller_1", {
+      client,
+      shipmentId: shipment.shipment_id,
+      source: {
+        SHIPMASTR_LIVE_AWB_LABEL_ENABLED: "true",
+        SHIPMASTR_LIVE_AWB_LABEL_MODE: "DRY_RUN",
+        SHIPMASTR_LIVE_AWB_LABEL_PILOT_ONLY: "true"
+      }
+    });
+    const serialized = serializeLiveAwbLabelReadiness(readiness);
+    const json = JSON.stringify(serialized);
+
+    assert.equal(serialized.status, "DRY_RUN");
+    assert.equal(serialized.runtime.mode, "DRY_RUN");
+    assert.equal(serialized.shipment?.ready_for_ship_now, true);
+    assert.doesNotMatch(json, /Bigship|bigship|provider|Authorization|Bearer|credentialHash|secretHash|rawPayload|rawHeaders|rawResponse/i);
   });
 
   it("keeps public tracking tokens stable across repeated Ship Now responses", async () => {

@@ -6,12 +6,14 @@ import { PUBLIC_COURIER_NETWORK, toPrismaJson } from "./shipping-public-serializ
 import { createMockSafeShippingAdapter } from "./shipping-pickup-location.service.js";
 import { ensureShipmentIsNotTerminal, getSellerShipment } from "./shipping-shipments.service.js";
 import { ensureShipmentTrackingToken } from "./shipping-tracking-token.js";
+import { assertLiveAwbLabelAllowed } from "./shipping-live-ship-gate.service.js";
 
 type Db = Prisma.TransactionClient | typeof prisma;
 
 type ManifestOptions = {
   client?: Db;
   adapter?: InternalCourierProviderAdapter;
+  liveAwbLabelSource?: Record<string, unknown>;
 };
 
 function metadataObject(value: unknown) {
@@ -41,6 +43,11 @@ export async function manifestShipment(
   const adapter = options.adapter ?? createMockSafeShippingAdapter();
   const shipment = await getSellerShipment(sellerId, shipmentId, client);
   ensureShipmentIsNotTerminal(shipment.status);
+  await assertLiveAwbLabelAllowed(sellerId, {
+    client,
+    shipmentId: shipment.id,
+    ...(options.liveAwbLabelSource ? { source: options.liveAwbLabelSource } : {})
+  });
 
   const rate = await client.shipmentRate.findFirst({
     where: {

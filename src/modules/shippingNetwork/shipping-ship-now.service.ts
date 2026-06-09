@@ -12,6 +12,7 @@ import {
 } from "./shipping-public-serializers.js";
 import { ensureShipmentTrackingToken } from "./shipping-tracking-token.js";
 import { fetchShipmentRates } from "./shipping-rates.service.js";
+import { assertLiveAwbLabelAllowed } from "./shipping-live-ship-gate.service.js";
 import { recordSlaEvent } from "./shipping-sla-learning.service.js";
 import {
   publicTierSummary,
@@ -26,6 +27,7 @@ type Db = Prisma.TransactionClient | typeof prisma;
 type ShipNowOptions = {
   client?: Db;
   adapter?: InternalCourierProviderAdapter;
+  liveAwbLabelSource?: Record<string, unknown>;
 };
 
 type ProviderRefForLabel = {
@@ -303,6 +305,11 @@ export async function shipNowShipment(
   const adapter = options.adapter ?? createMockSafeShippingAdapter();
   const shipment = await getSellerShipment(sellerId, shipmentId, client);
   ensureShipmentIsNotTerminal(shipment.status);
+  const liveAwbLabelReadiness = await assertLiveAwbLabelAllowed(sellerId, {
+    client,
+    shipmentId: shipment.id,
+    ...(options.liveAwbLabelSource ? { source: options.liveAwbLabelSource } : {})
+  });
 
   const existingPhase6 = phase6Metadata(shipment.metadata);
   const existingLabelUrl = stringMetadata(existingPhase6.labelUrl);
@@ -415,7 +422,9 @@ export async function shipNowShipment(
             providerResponseJson: {
               ...metadataObject(phase6.providerResponseJson),
               manifest: manifested.providerMetadata
-            }
+            },
+            livePilotAwbLabelMode: liveAwbLabelReadiness.runtime.mode,
+            livePilotAwbLabelReady: liveAwbLabelReadiness.ready
           }
         })
       }

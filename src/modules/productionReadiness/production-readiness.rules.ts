@@ -212,6 +212,11 @@ export function buildProductionReadinessReport(
   const liveCourierRatesEnabled = boolValue(source, "SHIPMASTR_LIVE_COURIER_RATES_ENABLED", false);
   const liveCourierRatesMode = stringValue(source, "SHIPMASTR_LIVE_COURIER_RATES_MODE", "DRY_RUN").toUpperCase();
   const liveCourierRatesPilotOnly = boolValue(source, "SHIPMASTR_LIVE_COURIER_RATES_PILOT_ONLY", true);
+  const liveAwbLabelEnabled = boolValue(source, "SHIPMASTR_LIVE_AWB_LABEL_ENABLED", false)
+    || boolValue(source, "SHIPMASTR_AWB_LABEL_LIVE_ENABLED", false)
+    || boolValue(source, "SHIPMASTR_SHIP_NOW_LIVE_ENABLED", false);
+  const liveAwbLabelMode = stringValue(source, "SHIPMASTR_LIVE_AWB_LABEL_MODE", "DRY_RUN").toUpperCase();
+  const liveAwbLabelPilotOnly = boolValue(source, "SHIPMASTR_LIVE_AWB_LABEL_PILOT_ONLY", true);
   const platformWritesEnabled = boolValue(source, "PLATFORM_WRITES_ENABLED", false)
     || boolValue(source, "SHIPMASTR_PLATFORM_WRITES_ENABLED", false);
   const trackingSyncEnabled = boolValue(source, "PLATFORM_TRACKING_SYNC_ENABLED", false)
@@ -220,8 +225,7 @@ export function buildProductionReadinessReport(
     || stringValue(source, "BIGSHIP_MODE", "mock").toLowerCase() === "live"
     || boolValue(source, "SHIPMASTR_COURIER_LIVE_CALLS_ENABLED", false)
     || (liveCourierRatesEnabled && liveCourierRatesMode === "LIVE");
-  const awbLabelLiveEnabled = boolValue(source, "SHIPMASTR_AWB_LABEL_LIVE_ENABLED", false)
-    || boolValue(source, "SHIPMASTR_SHIP_NOW_LIVE_ENABLED", false);
+  const awbLabelLiveEnabled = liveAwbLabelEnabled && liveAwbLabelMode === "LIVE";
   const pilotReadiness = options.pilotReadiness ?? {
     merchantId: stringValue(source, "SHIPMASTR_PILOT_MERCHANT_ID", "current_merchant"),
     allowlisted: false,
@@ -452,10 +456,31 @@ export function buildProductionReadinessReport(
       check({
         key: "awb_label_live_behavior",
         label: "Live AWB and label behavior remains gated",
-        status: awbLabelLiveEnabled && (!approval(source, "LIVE_COURIER_PROVIDER_APPROVED") || !merchantAllowlistConfigured) ? "BLOCKED" : awbLabelLiveEnabled ? "WARNING" : "PASS",
-        safeValue: awbLabelLiveEnabled,
-        blockerCode: awbLabelLiveEnabled && !merchantAllowlistConfigured ? "MISSING_MERCHANT_ALLOWLIST" : awbLabelLiveEnabled ? "AWB_LABEL_LIVE_ENABLED" : undefined,
-        recommendation: "Do not enable live AWB or label behavior without approval and merchant allowlist."
+        status: liveAwbLabelEnabled
+          ? !liveAwbLabelPilotOnly
+            ? "BLOCKED"
+            : liveAwbLabelMode === "LIVE" && (
+                !approval(source, "LIVE_COURIER_PROVIDER_APPROVED")
+                || !pilotReadiness.allowlisted
+                || !pilotReadiness.enabledCapabilities.includes("LIVE_COURIER_RATES")
+                || !pilotReadiness.enabledCapabilities.includes("LIVE_AWB_LABEL")
+              )
+              ? "BLOCKED"
+              : "WARNING"
+          : "PASS",
+        safeValue: liveAwbLabelEnabled ? `${liveAwbLabelMode}:${liveAwbLabelPilotOnly ? "PILOT_ONLY" : "BROAD"}` : "DISABLED",
+        blockerCode: liveAwbLabelEnabled && !liveAwbLabelPilotOnly
+          ? "LIVE_AWB_LABEL_NOT_PILOT_ONLY"
+          : liveAwbLabelEnabled && liveAwbLabelMode === "LIVE" && !pilotReadiness.allowlisted
+            ? "MISSING_MERCHANT_ALLOWLIST"
+            : liveAwbLabelEnabled && liveAwbLabelMode === "LIVE" && !approval(source, "LIVE_COURIER_PROVIDER_APPROVED")
+              ? "AWB_LABEL_LIVE_ENABLED"
+              : liveAwbLabelEnabled && liveAwbLabelMode === "LIVE" && !pilotReadiness.enabledCapabilities.includes("LIVE_COURIER_RATES")
+                ? "LIVE_COURIER_RATES_CAPABILITY_REQUIRED"
+                : liveAwbLabelEnabled && liveAwbLabelMode === "LIVE" && !pilotReadiness.enabledCapabilities.includes("LIVE_AWB_LABEL")
+                  ? "LIVE_AWB_LABEL_CAPABILITY_REQUIRED"
+                  : undefined,
+        recommendation: "Do not enable live AWB or label behavior without explicit Ship Now, approval, merchant allowlist, live rates readiness, and LIVE_AWB_LABEL capability."
       })
     ]),
     category("serializer_safety", "Serializer and Route Safety", [
@@ -520,6 +545,7 @@ export function buildProductionReadinessReport(
       pilotEmailMode: pilotEmailEnabled ? `${pilotEmailMode}:${pilotEmailProvider}` : "DISABLED",
       webhookRegistrationMode: webhookRegistrationEnabled ? `${webhookRegistrationMode}:${webhookRegistrationPilotOnly ? "PILOT_ONLY" : "BROAD"}` : "DISABLED",
       liveCourierRatesMode: liveCourierRatesEnabled ? `${liveCourierRatesMode}:${liveCourierRatesPilotOnly ? "PILOT_ONLY" : "BROAD"}` : "DISABLED",
+      liveAwbLabelMode: liveAwbLabelEnabled ? `${liveAwbLabelMode}:${liveAwbLabelPilotOnly ? "PILOT_ONLY" : "BROAD"}` : "DISABLED",
       platformReadMode: platformRealReads ? "READ_ONLY_LIVE_FLAG_ON" : "MOCK_OR_DISABLED",
       platformWriteMode: platformWritesEnabled ? "LIVE_FLAG_ON" : "DISABLED",
       shippingNetworkMode: shippingNetworkLiveCalls ? "LIVE_FLAG_ON" : "MOCK_OR_DISABLED",

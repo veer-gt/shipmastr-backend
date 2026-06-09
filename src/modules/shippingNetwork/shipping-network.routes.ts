@@ -40,6 +40,7 @@ import { deleteShippingPickupLocation, updateShippingPickupLocation } from "./sh
 import { createShipmentDraft, getShipmentDetails } from "./shipping-shipments.service.js";
 import { fetchShipmentRates } from "./shipping-rates.service.js";
 import { getLiveCourierRatesReadiness, serializeLiveCourierRatesReadiness } from "./shipping-live-rates-gate.service.js";
+import { getLiveAwbLabelReadiness, serializeLiveAwbLabelReadiness } from "./shipping-live-ship-gate.service.js";
 import { manifestShipment } from "./shipping-manifest.service.js";
 import { shipNowShipment } from "./shipping-ship-now.service.js";
 import { fetchShipmentTracking } from "./shipping-tracking.service.js";
@@ -536,6 +537,16 @@ shippingNetworkRouter.post("/shipments/:shipmentId/rates", async (req, res) => {
     body.refresh === undefined ? {} : { refresh: body.refresh }
   );
   return res.json(successEnvelope("Rates fetched successfully.", data));
+});
+
+shippingNetworkRouter.get("/shipments/:shipmentId/live-ship-readiness", async (req, res) => {
+  const readiness = await getLiveAwbLabelReadiness(req.auth!.merchantId, {
+    shipmentId: req.params.shipmentId
+  });
+  return res.json(successEnvelope(
+    "Pilot live Ship Now readiness fetched successfully.",
+    serializeLiveAwbLabelReadiness(readiness)
+  ));
 });
 
 shippingNetworkRouter.post("/shipments/:shipmentId/ship-now", async (req, res) => {

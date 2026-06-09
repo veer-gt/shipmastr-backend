@@ -143,6 +143,7 @@ describe("production readiness gate", () => {
     const blocked = report({
       BIGSHIP_ENABLE_REAL_CALLS: "true",
       SHIPMASTR_AWB_LABEL_LIVE_ENABLED: "true",
+      SHIPMASTR_LIVE_AWB_LABEL_MODE: "LIVE",
       LIVE_COURIER_PROVIDER_APPROVED: "false",
       SHIPMASTR_LIVE_MERCHANT_ALLOWLIST: ""
     });
@@ -205,6 +206,59 @@ describe("production readiness gate", () => {
     });
     assert.notEqual(gatedWarning.verdict, "BLOCKED");
     assert.equal(gatedWarning.environment.liveCourierRatesMode, "DRY_RUN:PILOT_ONLY");
+  });
+
+  it("blocks pilot live AWB and label creation unless pilot-only, approved, allowlisted, and capability-enabled", () => {
+    const notPilotOnly = report({
+      SHIPMASTR_LIVE_AWB_LABEL_ENABLED: "true",
+      SHIPMASTR_LIVE_AWB_LABEL_MODE: "LIVE",
+      SHIPMASTR_LIVE_AWB_LABEL_PILOT_ONLY: "false"
+    });
+    assert.equal(notPilotOnly.verdict, "BLOCKED");
+    assert.match(json(notPilotOnly), /LIVE_AWB_LABEL_NOT_PILOT_ONLY/);
+
+    const capabilityBlocked = buildProductionReadinessReport({
+      ...baseSource,
+      SHIPMASTR_LIVE_AWB_LABEL_ENABLED: "true",
+      SHIPMASTR_LIVE_AWB_LABEL_MODE: "LIVE",
+      SHIPMASTR_LIVE_AWB_LABEL_PILOT_ONLY: "true",
+      LIVE_COURIER_PROVIDER_APPROVED: "true"
+    }, {
+      checkedAt: "2026-06-09T00:00:00.000Z",
+      betaAuditDocExists: true,
+      pilotReadiness: {
+        merchantId: "merchant_1",
+        allowlisted: true,
+        merchantStatus: "ENABLED",
+        enabledCapabilities: ["LIVE_COURIER_RATES"],
+        approvedCapabilities: ["LIVE_COURIER_RATES", "LIVE_AWB_LABEL"],
+        rollbackReady: true,
+        blockers: []
+      }
+    });
+    assert.equal(capabilityBlocked.verdict, "BLOCKED");
+    assert.match(json(capabilityBlocked), /LIVE_AWB_LABEL_CAPABILITY_REQUIRED/);
+
+    const dryRun = buildProductionReadinessReport({
+      ...baseSource,
+      SHIPMASTR_LIVE_AWB_LABEL_ENABLED: "true",
+      SHIPMASTR_LIVE_AWB_LABEL_MODE: "DRY_RUN",
+      SHIPMASTR_LIVE_AWB_LABEL_PILOT_ONLY: "true"
+    }, {
+      checkedAt: "2026-06-09T00:00:00.000Z",
+      betaAuditDocExists: true,
+      pilotReadiness: {
+        merchantId: "merchant_1",
+        allowlisted: true,
+        merchantStatus: "ENABLED",
+        enabledCapabilities: ["LIVE_COURIER_RATES", "LIVE_AWB_LABEL"],
+        approvedCapabilities: ["LIVE_COURIER_RATES", "LIVE_AWB_LABEL"],
+        rollbackReady: true,
+        blockers: []
+      }
+    });
+    assert.notEqual(dryRun.verdict, "BLOCKED");
+    assert.equal(dryRun.environment.liveAwbLabelMode, "DRY_RUN:PILOT_ONLY");
   });
 
   it("can only mark controlled live pilot ready when live prerequisites and approvals are explicit", () => {
