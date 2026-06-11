@@ -759,6 +759,52 @@ function liveShiprocketSource(shipmentId: string, merchantId = "seller_1") {
   };
 }
 
+function seedShipmentRate(
+  state: ReturnType<typeof createFakeClient>["state"],
+  input: {
+    shipmentId: string;
+    sellerId?: string;
+    internalCourierId: string | null;
+    serviceName?: "Shipmastr Smart" | "Shipmastr Economy" | "Shipmastr Express";
+  }
+) {
+  const serviceName = input.serviceName ?? "Shipmastr Smart";
+  const serviceCode = serviceName === "Shipmastr Economy"
+    ? "shipmastr_economy"
+    : serviceName === "Shipmastr Express"
+      ? "shipmastr_express"
+      : "shipmastr_smart";
+  state.rates.push({
+    id: `rate_${state.rates.length + 1}`,
+    shipmentId: input.shipmentId,
+    sellerId: input.sellerId ?? "seller_1",
+    sellerCourierPartnerId: "seller_courier_1",
+    courierPartnerId: "courier_internal_1",
+    publicServiceCode: serviceCode,
+    publicServiceName: serviceName,
+    segment: ShipmentSegment.domestic_b2c,
+    chargeableWeightKg: 1,
+    amountPaise: 7200,
+    currency: "INR",
+    estimatedDeliveryDays: 2,
+    rateBreakup: {
+      internalRateId: "shiprocket_rate_smart",
+      internalCourierId: input.internalCourierId,
+      phase6: {
+        tier: "smart",
+        codSupported: true,
+        pickupAvailable: true,
+        deliveryAvailable: true,
+        reliabilityScore: 0.9,
+        livePilotRatesMode: "LIVE",
+        livePilotRatesReady: true
+      }
+    },
+    createdAt: now,
+    updatedAt: now
+  });
+}
+
 function pickupBody() {
   return {
     name: "Main warehouse",
@@ -1058,6 +1104,7 @@ describe("Shipmastr Shipping Network services", () => {
     const adapter = createFakeShiprocketAdapter();
     const pickup = await createShippingPickupLocation("seller_1", pickupBody(), { client, adapter });
     const shipment = await createShipmentDraft("seller_1", shipmentBody(pickup.pickup_location_id), client);
+    seedShipmentRate(state, { shipmentId: shipment.shipment_id, internalCourierId: "12345" });
 
     const first = await shipNowShipment("seller_1", shipment.shipment_id, "smart", {
       client,
@@ -1075,8 +1122,38 @@ describe("Shipmastr Shipping Network services", () => {
     assert.equal(adapter.calls.manifestOrder, 1);
     assert.equal(adapter.calls.getLabel, 1);
     assert.equal(first.awbNumber, second.awbNumber);
+    assert.match(first.awbNumber ?? "", /^SM/);
+    assert.notEqual(first.awbNumber, "190123456789");
     assert.equal(first.courierNetwork, "Shipmastr Courier Network");
-    assert.doesNotMatch(json, /internal_courier|providerMetadata|providerResponseJson|bigship|shiprocket|providerAwb|providerShipmentId/i);
+    assert.equal(state.providerRefs[0]?.providerOrderId, "987654321");
+    assert.equal(state.providerRefs[0]?.providerAwb, "190123456789");
+    assert.doesNotMatch(json, /internal_courier|providerMetadata|providerResponseJson|bigship|shiprocket|providerAwb|providerShipmentId|190123456789|987654321/i);
+  });
+
+  it("blocks live Ship Now when the selected rate has no Shiprocket courier id", async () => {
+    const { client, state } = createFakeClient();
+    state.livePilotMerchants.push({ merchantId: "seller_1", status: "ENABLED" });
+    state.livePilotCapabilities.push(
+      { merchantId: "seller_1", capability: "LIVE_COURIER_RATES", status: "ENABLED" },
+      { merchantId: "seller_1", capability: "LIVE_AWB_LABEL", status: "ENABLED" }
+    );
+    seedActiveLiveCourierProvider(state);
+    const adapter = createFakeShiprocketAdapter();
+    const pickup = await createShippingPickupLocation("seller_1", pickupBody(), { client, adapter });
+    const shipment = await createShipmentDraft("seller_1", shipmentBody(pickup.pickup_location_id), client);
+    seedShipmentRate(state, { shipmentId: shipment.shipment_id, internalCourierId: "shipmastr_smart" });
+
+    await assert.rejects(
+      () => shipNowShipment("seller_1", shipment.shipment_id, "smart", {
+        client,
+        adapter,
+        liveAwbLabelSource: liveShiprocketSource(shipment.shipment_id)
+      }),
+      (error) => error instanceof HttpError && error.message === "SHIPROCKET_LIVE_RATE_PROVIDER_ID_MISSING"
+    );
+    assert.equal(adapter.calls.createDraftOrder, 0);
+    assert.equal(adapter.calls.manifestOrder, 0);
+    assert.equal(adapter.calls.getLabel, 0);
   });
 
   it("blocks live Ship Now without one-shot approval before provider calls", async () => {

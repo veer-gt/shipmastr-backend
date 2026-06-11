@@ -41,6 +41,15 @@ function metadataObject(value: unknown) {
   return value as Record<string, unknown>;
 }
 
+function shipmentProducts(metadata: ReturnType<typeof shipmentMetadata>) {
+  return metadata.boxes.flatMap((box) => box.products ?? []).map((product) => ({
+    name: product.name,
+    sku: product.sku ?? null,
+    quantity: product.quantity,
+    unitPrice: product.unit_price
+  }));
+}
+
 function boolMetadata(value: unknown, fallback = true) {
   return typeof value === "boolean" ? value : fallback;
 }
@@ -252,7 +261,8 @@ async function ensureShipmentProviderRef(input: {
       state: metadata.buyer.address.state,
       country: metadata.buyer.address.country.toUpperCase(),
       pincode: metadata.buyer.address.pincode
-    }
+    },
+    products: shipmentProducts(metadata)
   });
 
   if (existing) {

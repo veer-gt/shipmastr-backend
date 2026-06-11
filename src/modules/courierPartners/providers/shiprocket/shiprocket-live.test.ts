@@ -50,7 +50,13 @@ function draftInput(): ProviderDraftOrderInput {
       state: "MH",
       country: "IN",
       pincode: "400001"
-    }
+    },
+    products: [{
+      name: "Cotton Shirt",
+      sku: "SKU-1",
+      quantity: 1,
+      unitPrice: 1499
+    }]
   };
 }
 
@@ -83,6 +89,23 @@ describe("Shiprocket live credential resolver", () => {
 });
 
 describe("Shiprocket live client and mapper", () => {
+  it("maps a complete Shiprocket adhoc order payload from safe shipment fields", () => {
+    const request = mapProviderDraftToShiprocketOrder(draftInput());
+    const items = request.order_items as Array<Record<string, unknown>>;
+
+    assert.equal(request.order_id, "ORD-1");
+    assert.equal(request.pickup_location, "Primary Warehouse");
+    assert.equal(request.payment_method, "COD");
+    assert.equal(request.collectable_amount, 1499);
+    assert.equal(request.billing_customer_name, "Demo");
+    assert.equal(request.billing_last_name, "Buyer");
+    assert.equal(items[0]?.name, "Cotton Shirt");
+    assert.equal(items[0]?.sku, "SKU-1");
+    assert.equal(items[0]?.units, 1);
+    assert.equal(items[0]?.selling_price, 1499);
+    assert.doesNotMatch(JSON.stringify(request), /token|secret|credential|rawPayload|rawHeaders|Authorization|Bearer/i);
+  });
+
   it("uses mocked HTTP for login, order creation, AWB assignment, and label generation", async () => {
     const calls: Array<{ url: string; body: unknown; authorization: boolean }> = [];
     const fetchImpl: ShiprocketLiveFetch = async (url, init) => {
@@ -111,6 +134,30 @@ describe("Shiprocket live client and mapper", () => {
     assert.equal(calls[0]?.authorization, false);
     assert.equal(calls.slice(1).every((call) => call.authorization), true);
     assert.doesNotMatch(JSON.stringify({ order, awb, label }), /ephemeral-token|not-a-real-provider-password|Authorization|Bearer/i);
+  });
+
+  it("returns safe provider errors without raw response details", async () => {
+    const fetchImpl: ShiprocketLiveFetch = async () => ({
+      ok: false,
+      status: 401,
+      json: async () => ({
+        message: "provider says password not-a-real-provider-password failed",
+        token: "raw-provider-token"
+      })
+    });
+    const client = new ShiprocketLiveClient({ baseUrl: "https://apiv2.shiprocket.in" }, fetchImpl);
+
+    await assert.rejects(
+      () => client.login({ email: "pilot@example.test", password: "not-a-real-provider-password" }),
+      (error: any) => {
+        const json = JSON.stringify(error);
+        assert.equal(error.code, "SHIPROCKET_AUTH_FAILED");
+        assert.equal(error.statusCode, 401);
+        assert.equal(error.retryable, false);
+        assert.doesNotMatch(json, /not-a-real-provider-password|raw-provider-token|provider says/i);
+        return true;
+      }
+    );
   });
 
   it("adapter keeps tokens in memory and returns safe provider-shaped results", async () => {

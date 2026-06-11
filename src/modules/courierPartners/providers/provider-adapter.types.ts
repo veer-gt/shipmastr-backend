@@ -75,6 +75,12 @@ export type ProviderDraftOrderInput = {
   deadWeightKg: number;
   dimensions: ProviderDimensionsInput;
   buyer: ProviderAddressInput;
+  products?: Array<{
+    name: string;
+    sku?: string | null;
+    quantity: number;
+    unitPrice: number;
+  }>;
 };
 
 export type ProviderDraftOrderResult = {

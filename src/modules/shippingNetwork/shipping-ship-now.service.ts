@@ -76,7 +76,7 @@ function boolMetadata(value: unknown, fallback = true) {
 }
 
 function publicAwb(shipmentId: string, fallback: string | null | undefined) {
-  if (fallback && !fallback.toLowerCase().startsWith("mock_")) return fallback;
+  if (fallback?.startsWith("SM")) return fallback;
   const suffix = shipmentId.replace(/[^a-z0-9]/gi, "").slice(-10).toUpperCase();
   return `SM${suffix || "SHIPMENT"}`;
 }
@@ -115,9 +115,42 @@ function selectedCourierId(rateBreakup: unknown) {
   return typeof value === "string" && value.trim() ? value.trim() : null;
 }
 
+function firstStringMetadata(...values: unknown[]) {
+  for (const value of values) {
+    if (typeof value === "string" && value.trim()) return value.trim();
+    if (typeof value === "number" && Number.isFinite(value)) return String(value);
+  }
+  return null;
+}
+
 function liveShiprocketCourierId(rateBreakup: unknown) {
-  const value = selectedCourierId(rateBreakup);
+  const metadata = metadataObject(rateBreakup);
+  const phase6 = metadataObject(metadata.phase6);
+  const result = metadataObject(metadata.result);
+  const value = firstStringMetadata(
+    metadata.shiprocketCourierId,
+    metadata.providerCourierId,
+    metadata.courier_id,
+    metadata.courierId,
+    metadata.internalCourierId,
+    phase6.shiprocketCourierId,
+    phase6.providerCourierId,
+    phase6.courier_id,
+    phase6.courierId,
+    result.courier_id,
+    result.courierId,
+    result.providerCourierId
+  );
   return value && /^[0-9]+$/.test(value) ? value : null;
+}
+
+function shipmentProducts(metadata: ReturnType<typeof shipmentMetadata>) {
+  return metadata.boxes.flatMap((box) => box.products ?? []).map((product) => ({
+    name: product.name,
+    sku: product.sku ?? null,
+    quantity: product.quantity,
+    unitPrice: product.unit_price
+  }));
 }
 
 function liveAwbSource(source?: Record<string, unknown>) {
@@ -381,7 +414,8 @@ async function ensureLiveShiprocketProviderRef(input: {
       state: metadata.buyer.address.state,
       country: metadata.buyer.address.country.toUpperCase(),
       pincode: metadata.buyer.address.pincode
-    }
+    },
+    products: shipmentProducts(metadata)
   });
 
   const safeMetadata = toPrismaJson({
@@ -449,6 +483,10 @@ export async function shipNowShipment(
   });
 
   let rates = await findRates(client, shipment.id, sellerId);
+  const liveShiprocketReady = liveAwbLabelReadiness.ready;
+  if (!rates.length && liveShiprocketReady) {
+    throw new HttpError(409, "SHIPMENT_RATE_NOT_FOUND");
+  }
   if (!rates.length) {
     await fetchShipmentRates(sellerId, shipment.id, { client, adapter });
     rates = await findRates(client, shipment.id, sellerId);
@@ -462,7 +500,6 @@ export async function shipNowShipment(
     throw new HttpError(409, "SHIPMENT_RATE_NOT_FOUND");
   }
 
-  const liveShiprocketReady = liveAwbLabelReadiness.ready;
   const activeAdapter = liveShiprocketReady
     ? liveShiprocketAdapter({
       ...(options.liveAwbLabelSource ? { source: options.liveAwbLabelSource } : {}),
@@ -479,7 +516,7 @@ export async function shipNowShipment(
   });
 
   if (liveShiprocketReady && !liveShiprocketCourierId(selectedRate.rateBreakup)) {
-    throw new HttpError(409, "SHIPROCKET_LIVE_AWB_ADAPTER_INCOMPLETE");
+    throw new HttpError(409, "SHIPROCKET_LIVE_RATE_PROVIDER_ID_MISSING");
   }
 
   const providerRef = liveShiprocketReady

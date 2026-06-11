@@ -35,9 +35,31 @@ function safeMetadata(values: Record<string, unknown>) {
   };
 }
 
+function positiveNumber(value: unknown, fallback: number) {
+  const parsed = typeof value === "number" ? value : Number(value);
+  return Number.isFinite(parsed) && parsed > 0 ? parsed : fallback;
+}
+
+function splitName(name: string) {
+  const parts = name.trim().split(/\s+/).filter(Boolean);
+  if (parts.length <= 1) return { firstName: name.trim(), lastName: "" };
+  return {
+    firstName: parts.slice(0, -1).join(" "),
+    lastName: parts.at(-1) ?? ""
+  };
+}
+
 function productItems(input: ProviderDraftOrderInput) {
-  const metadataProducts = objectValue(input as unknown);
-  void metadataProducts;
+  const products = input.products?.length ? input.products : null;
+  if (products) {
+    return products.map((product, index) => ({
+      name: product.name.trim() || input.sellerOrderId,
+      sku: product.sku?.trim() || `${input.sellerOrderId}-${index + 1}`,
+      units: Math.max(1, Math.round(positiveNumber(product.quantity, 1))),
+      selling_price: positiveNumber(product.unitPrice, input.invoiceAmount)
+    }));
+  }
+
   return [{
     name: input.sellerOrderId,
     sku: input.sellerOrderId,
@@ -48,13 +70,18 @@ function productItems(input: ProviderDraftOrderInput) {
 
 export function mapProviderDraftToShiprocketOrder(input: ProviderDraftOrderInput): ShiprocketCreateOrderRequest {
   const paymentMethod = input.paymentMode === "cod" ? "COD" : "Prepaid";
+  const buyerName = splitName(input.buyer.name);
+  const collectableAmount = input.paymentMode === "cod"
+    ? positiveNumber(input.collectableAmount, input.invoiceAmount)
+    : 0;
+
   return {
     order_id: input.sellerOrderId,
     order_date: new Date().toISOString().slice(0, 19).replace("T", " "),
     pickup_location: input.pickupLocationProviderId,
     channel_id: "",
-    billing_customer_name: input.buyer.name,
-    billing_last_name: "",
+    billing_customer_name: buyerName.firstName,
+    billing_last_name: buyerName.lastName,
     billing_address: input.buyer.addressLine1,
     billing_address_2: input.buyer.addressLine2 ?? "",
     billing_city: input.buyer.city,
@@ -71,6 +98,7 @@ export function mapProviderDraftToShiprocketOrder(input: ProviderDraftOrderInput
     transaction_charges: 0,
     total_discount: 0,
     sub_total: input.invoiceAmount,
+    collectable_amount: collectableAmount,
     length: input.dimensions.lengthCm,
     breadth: input.dimensions.breadthCm,
     height: input.dimensions.heightCm,
