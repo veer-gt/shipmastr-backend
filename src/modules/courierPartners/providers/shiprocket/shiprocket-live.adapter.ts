@@ -27,11 +27,15 @@ import {
   shiprocketLiveClientConfigFromEnv,
   type ShiprocketCreateOrderResponse,
   type ShiprocketLiveClientConfig,
-  type ShiprocketLiveFetch
+  type ShiprocketLiveFetch,
+  type ShiprocketServiceabilityRequest,
+  type ShiprocketServiceabilityResponse
 } from "./shiprocket-live.client.js";
 import {
+  mapProviderRateInputToShiprocketServiceability,
   mapProviderDraftToShiprocketOrder,
   mapShiprocketAwbToProviderManifest,
+  mapShiprocketServiceabilityToProviderRates,
   mapShiprocketLabelToProviderLabel,
   mapShiprocketOrderToProviderDraft
 } from "./shiprocket-live.mapper.js";
@@ -39,6 +43,7 @@ import {
 type ShiprocketLiveAdapterClient = {
   login(credentials: ShiprocketLiveCredentials): Promise<{ token?: string; expires_in?: number; expiresIn?: number }>;
   createAdhocOrder(input: Record<string, unknown>, token: string): Promise<ShiprocketCreateOrderResponse>;
+  getServiceability(input: ShiprocketServiceabilityRequest, token: string): Promise<ShiprocketServiceabilityResponse>;
   assignAwb(input: { shipment_id: string | number; courier_id: string | number }, token: string): Promise<Record<string, unknown>>;
   generateLabel(input: { shipment_id: Array<string | number> }, token: string): Promise<Record<string, unknown>>;
 };
@@ -135,8 +140,24 @@ export class ShiprocketLiveAdapter implements InternalCourierProviderAdapter {
     }
   }
 
-  async getRates(_input: ProviderRateInput): Promise<ProviderRateResult[]> {
-    throw new ShiprocketLiveConfigError("Courier provider live rates are not enabled by this bridge.");
+  async getRates(input: ProviderRateInput): Promise<ProviderRateResult[]> {
+    try {
+      const token = await this.ensureToken();
+      const response = await this.client.getServiceability(
+        mapProviderRateInputToShiprocketServiceability(input),
+        token.token
+      );
+      const rates = mapShiprocketServiceabilityToProviderRates(response);
+      if (!rates.length) {
+        throw new ShiprocketLiveProviderError({
+          code: "SHIPROCKET_LIVE_RATE_PROVIDER_ID_MISSING",
+          retryable: false
+        });
+      }
+      return rates;
+    } catch (error) {
+      safeProviderError(error);
+    }
   }
 
   async manifestOrder(input: ProviderManifestInput): Promise<ProviderManifestResult> {

@@ -43,6 +43,15 @@ export type ShiprocketGenerateLabelRequest = {
 };
 export type ShiprocketGenerateLabelResponse = Record<string, unknown>;
 
+export type ShiprocketServiceabilityRequest = {
+  pickup_postcode: string;
+  delivery_postcode: string;
+  weight: number;
+  cod: 0 | 1;
+  declared_value?: number;
+};
+export type ShiprocketServiceabilityResponse = Record<string, unknown>;
+
 export class ShiprocketLiveConfigError extends Error {
   constructor(message = "Courier provider live configuration is incomplete.") {
     super(message);
@@ -171,5 +180,22 @@ export class ShiprocketLiveClient {
       },
       body: JSON.stringify(input)
     }, "SHIPROCKET_LABEL_GENERATION_FAILED");
+  }
+
+  getServiceability(input: ShiprocketServiceabilityRequest, token: string): Promise<ShiprocketServiceabilityResponse> {
+    const params = new URLSearchParams();
+    params.set("pickup_postcode", input.pickup_postcode);
+    params.set("delivery_postcode", input.delivery_postcode);
+    params.set("weight", String(input.weight));
+    params.set("cod", String(input.cod));
+    if (input.declared_value !== undefined) params.set("declared_value", String(input.declared_value));
+
+    return this.requestJson<ShiprocketServiceabilityResponse>(`/v1/external/courier/serviceability/?${params.toString()}`, {
+      method: "GET",
+      headers: {
+        "content-type": "application/json",
+        authorization: `Bearer ${token}`
+      }
+    }, "SHIPROCKET_RATE_SERVICEABILITY_FAILED");
   }
 }

@@ -2,13 +2,17 @@ import type {
   ProviderDraftOrderInput,
   ProviderDraftOrderResult,
   ProviderLabelResult,
-  ProviderManifestResult
+  ProviderManifestResult,
+  ProviderRateInput,
+  ProviderRateResult
 } from "../provider-adapter.types.js";
 import type {
   ShiprocketAssignAwbResponse,
   ShiprocketCreateOrderRequest,
   ShiprocketCreateOrderResponse,
-  ShiprocketGenerateLabelResponse
+  ShiprocketGenerateLabelResponse,
+  ShiprocketServiceabilityRequest,
+  ShiprocketServiceabilityResponse
 } from "./shiprocket-live.client.js";
 
 function firstString(...values: unknown[]) {
@@ -23,8 +27,25 @@ function objectValue(value: unknown): Record<string, unknown> {
   return value && typeof value === "object" && !Array.isArray(value) ? value as Record<string, unknown> : {};
 }
 
+function arrayValue(value: unknown): Record<string, unknown>[] {
+  return Array.isArray(value)
+    ? value.filter((item): item is Record<string, unknown> => Boolean(item && typeof item === "object" && !Array.isArray(item)))
+    : [];
+}
+
 function dataObject(value: Record<string, unknown>) {
   return objectValue(value.data);
+}
+
+function firstNumber(...values: unknown[]) {
+  for (const value of values) {
+    if (typeof value === "number" && Number.isFinite(value)) return value;
+    if (typeof value === "string") {
+      const parsed = Number(value.replace(/[^\d.]/g, ""));
+      if (Number.isFinite(parsed)) return parsed;
+    }
+  }
+  return null;
 }
 
 function safeMetadata(values: Record<string, unknown>) {
@@ -38,6 +59,11 @@ function safeMetadata(values: Record<string, unknown>) {
 function positiveNumber(value: unknown, fallback: number) {
   const parsed = typeof value === "number" ? value : Number(value);
   return Number.isFinite(parsed) && parsed > 0 ? parsed : fallback;
+}
+
+function positiveInt(value: unknown, fallback: number) {
+  const parsed = firstNumber(value);
+  return parsed && parsed > 0 ? Math.max(1, Math.round(parsed)) : fallback;
 }
 
 function splitName(name: string) {
@@ -104,6 +130,163 @@ export function mapProviderDraftToShiprocketOrder(input: ProviderDraftOrderInput
     height: input.dimensions.heightCm,
     weight: input.deadWeightKg
   };
+}
+
+export function mapProviderRateInputToShiprocketServiceability(input: ProviderRateInput): ShiprocketServiceabilityRequest {
+  return {
+    pickup_postcode: input.pickupPincode,
+    delivery_postcode: input.deliveryPincode,
+    weight: positiveNumber(input.deadWeightKg, 0.5),
+    cod: input.paymentMode === "cod" ? 1 : 0,
+    ...(input.collectableAmount !== undefined && input.collectableAmount !== null
+      ? { declared_value: positiveNumber(input.collectableAmount, 0) }
+      : {})
+  };
+}
+
+function serviceabilityRows(response: ShiprocketServiceabilityResponse) {
+  const data = dataObject(response);
+  return [
+    ...arrayValue(data.available_courier_companies),
+    ...arrayValue(data.availableCourierCompanies),
+    ...arrayValue(response.available_courier_companies),
+    ...arrayValue(response.availableCourierCompanies),
+    ...arrayValue(data.couriers),
+    ...arrayValue(response.couriers)
+  ];
+}
+
+function recommendedCourierId(response: ShiprocketServiceabilityResponse) {
+  const data = dataObject(response);
+  return firstString(
+    data.recommended_courier_company_id,
+    data.recommendedCourierCompanyId,
+    response.recommended_courier_company_id,
+    response.recommendedCourierCompanyId
+  );
+}
+
+function truthyAvailability(value: unknown) {
+  if (typeof value === "boolean") return value;
+  if (typeof value === "number") return value > 0;
+  if (typeof value === "string") return !["0", "false", "no", "n", "not available"].includes(value.trim().toLowerCase());
+  return true;
+}
+
+type ShiprocketRateCandidate = {
+  courierId: string;
+  serviceId: string | null;
+  rateId: string;
+  amount: number;
+  tatDays: number;
+  chargedWeightKg: number;
+  codSupported: boolean;
+  pickupAvailable: boolean;
+  deliveryAvailable: boolean;
+  recommendationBoost: number;
+};
+
+function candidateFromRow(row: Record<string, unknown>, recommendedId: string | null, index: number): ShiprocketRateCandidate | null {
+  const courierId = firstString(
+    row.courier_company_id,
+    row.courierCompanyId,
+    row.courier_id,
+    row.courierId,
+    row.id
+  );
+  if (!courierId || !/^[0-9]+$/.test(courierId)) return null;
+
+  const amount = firstNumber(
+    row.rate,
+    row.freight_charge,
+    row.freightCharge,
+    row.total_charges,
+    row.totalCharges,
+    row.shipping_charges,
+    row.shippingCharges
+  );
+  if (!amount || amount <= 0) return null;
+
+  const tatDays = positiveInt(row.estimated_delivery_days ?? row.estimatedDeliveryDays ?? row.etd ?? row.estimated_days, 3);
+  const serviceId = firstString(row.service_id, row.serviceId, row.courier_service_id, row.courierServiceId);
+  return {
+    courierId,
+    serviceId,
+    rateId: firstString(row.rate_id, row.rateId, row.id) ?? `${courierId}-${index + 1}`,
+    amount,
+    tatDays,
+    chargedWeightKg: positiveNumber(row.charge_weight ?? row.chargedWeight ?? row.weight, 0.5),
+    codSupported: truthyAvailability(row.cod ?? row.cod_available ?? row.codAvailable ?? row.is_cod),
+    pickupAvailable: truthyAvailability(row.pickup_availability ?? row.pickupAvailability),
+    deliveryAvailable: truthyAvailability(row.delivery_availability ?? row.deliveryAvailability),
+    recommendationBoost: recommendedId && courierId === recommendedId ? 1 : 0
+  };
+}
+
+function chooseEconomy(candidates: ShiprocketRateCandidate[]) {
+  return [...candidates].sort((left, right) => left.amount - right.amount || left.tatDays - right.tatDays)[0]!;
+}
+
+function chooseExpress(candidates: ShiprocketRateCandidate[]) {
+  return [...candidates].sort((left, right) => left.tatDays - right.tatDays || left.amount - right.amount)[0]!;
+}
+
+function chooseSmart(candidates: ShiprocketRateCandidate[], economy: ShiprocketRateCandidate, express: ShiprocketRateCandidate) {
+  const minAmount = Math.min(...candidates.map((item) => item.amount));
+  const maxAmount = Math.max(...candidates.map((item) => item.amount));
+  const minTat = Math.min(...candidates.map((item) => item.tatDays));
+  const maxTat = Math.max(...candidates.map((item) => item.tatDays));
+  const score = (item: ShiprocketRateCandidate) => {
+    const costScore = maxAmount === minAmount ? 1 : 1 - ((item.amount - minAmount) / (maxAmount - minAmount));
+    const speedScore = maxTat === minTat ? 1 : 1 - ((item.tatDays - minTat) / (maxTat - minTat));
+    return costScore * 0.35 + speedScore * 0.45 + item.recommendationBoost * 0.2;
+  };
+  return [...candidates].sort((left, right) => score(right) - score(left) || left.tatDays - right.tatDays || left.amount - right.amount)[0]
+    ?? express
+    ?? economy;
+}
+
+function toProviderRate(candidate: ShiprocketRateCandidate, serviceLevel: ProviderRateResult["serviceLevel"]): ProviderRateResult {
+  return {
+    rateId: `${candidate.rateId}:${serviceLevel.toLowerCase().replace(/\s+/g, "_")}`,
+    serviceLevel,
+    courierNetwork: "Shipmastr Courier Network",
+    totalCharge: candidate.amount,
+    currency: "INR",
+    tatDays: candidate.tatDays,
+    chargedWeightKg: candidate.chargedWeightKg,
+    codSupported: candidate.codSupported,
+    pickupAvailable: candidate.pickupAvailable,
+    deliveryAvailable: candidate.deliveryAvailable,
+    reliabilityScore: candidate.recommendationBoost ? 0.9 : 0.8,
+    providerCourierId: candidate.courierId,
+    providerMetadata: {
+      providerCourierId: candidate.courierId,
+      providerServiceId: candidate.serviceId,
+      providerRateId: candidate.rateId,
+      providerStatus: "serviceable",
+      rawProviderResponseStored: false
+    }
+  };
+}
+
+export function mapShiprocketServiceabilityToProviderRates(response: ShiprocketServiceabilityResponse): ProviderRateResult[] {
+  const recommendedId = recommendedCourierId(response);
+  const candidates = serviceabilityRows(response)
+    .map((row, index) => candidateFromRow(row, recommendedId, index))
+    .filter((item): item is ShiprocketRateCandidate => Boolean(item));
+
+  if (!candidates.length) return [];
+
+  const economy = chooseEconomy(candidates);
+  const express = chooseExpress(candidates);
+  const smart = chooseSmart(candidates, economy, express);
+
+  return [
+    toProviderRate(smart, "Shipmastr Smart"),
+    toProviderRate(economy, "Shipmastr Economy"),
+    toProviderRate(express, "Shipmastr Express")
+  ];
 }
 
 export function mapShiprocketOrderToProviderDraft(response: ShiprocketCreateOrderResponse): ProviderDraftOrderResult {

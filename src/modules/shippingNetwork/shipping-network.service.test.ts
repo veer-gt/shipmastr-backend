@@ -212,24 +212,41 @@ function createFakeAdapter(): InternalCourierProviderAdapter & { calls: Record<s
   };
 }
 
-function createFakeShiprocketAdapter(): InternalCourierProviderAdapter & { calls: Record<string, number> } {
+function createFakeShiprocketAdapter(options: { providerCourierId?: string | null } = {}): InternalCourierProviderAdapter & { calls: Record<string, number> } {
   const base = createFakeAdapter();
+  const providerCourierId = options.providerCourierId === undefined ? "12345" : options.providerCourierId;
+  const rate = (
+    rateId: string,
+    serviceLevel: "Shipmastr Smart" | "Shipmastr Economy" | "Shipmastr Express",
+    totalCharge: number,
+    tatDays: number,
+    providerRateId: string
+  ) => ({
+    rateId,
+    serviceLevel,
+    courierNetwork: "Shipmastr Courier Network" as const,
+    totalCharge,
+    currency: "INR" as const,
+    tatDays,
+    chargedWeightKg: 1,
+    ...(providerCourierId ? { providerCourierId } : {}),
+    providerMetadata: {
+      providerCourierId,
+      providerServiceId: `svc_${providerRateId}`,
+      providerRateId,
+      rawProviderResponseStored: false
+    }
+  });
   return {
     ...base,
     code: "shiprocket",
     getRates: async () => {
       base.calls.getRates = (base.calls.getRates ?? 0) + 1;
-      return [{
-        rateId: "shiprocket_rate_smart",
-        serviceLevel: "Shipmastr Smart",
-        courierNetwork: "Shipmastr Courier Network",
-        totalCharge: 72,
-        currency: "INR",
-        tatDays: 2,
-        chargedWeightKg: 1,
-        providerCourierId: "12345",
-        providerMetadata: { live_provider: true }
-      }];
+      return [
+        rate("shiprocket_rate_smart", "Shipmastr Smart", 72, 2, "rate_smart"),
+        rate("shiprocket_rate_economy", "Shipmastr Economy", 58, 4, "rate_economy"),
+        rate("shiprocket_rate_express", "Shipmastr Express", 96, 1, "rate_express")
+      ];
     },
     createDraftOrder: async () => {
       base.calls.createDraftOrder = (base.calls.createDraftOrder ?? 0) + 1;
@@ -759,6 +776,18 @@ function liveShiprocketSource(shipmentId: string, merchantId = "seller_1") {
   };
 }
 
+function liveRatesSource() {
+  return {
+    SHIPMASTR_LIVE_COURIER_RATES_ENABLED: "true",
+    SHIPMASTR_LIVE_COURIER_RATES_MODE: "LIVE",
+    SHIPMASTR_LIVE_COURIER_RATES_PILOT_ONLY: "true",
+    SHIPROCKET_LIVE_CREDENTIALS: JSON.stringify({
+      email: "pilot@example.test",
+      password: "redacted-password"
+    })
+  };
+}
+
 function seedShipmentRate(
   state: ReturnType<typeof createFakeClient>["state"],
   input: {
@@ -980,7 +1009,35 @@ describe("Shipmastr Shipping Network services", () => {
       status: "ENABLED"
     });
     seedActiveLiveCourierProvider(state);
-    const adapter = createFakeAdapter();
+    const adapter = createFakeShiprocketAdapter();
+    const pickup = await createShippingPickupLocation("seller_1", pickupBody(), { client, adapter });
+    const shipment = await createShipmentDraft("seller_1", shipmentBody(pickup.pickup_location_id), client);
+    adapter.calls.createPickupLocation = 0;
+    adapter.calls.createDraftOrder = 0;
+    adapter.calls.getRates = 0;
+
+    const result = await fetchShipmentRates("seller_1", shipment.shipment_id, {
+      client,
+      adapter,
+      liveRatesSource: liveRatesSource()
+    });
+
+    const json = JSON.stringify(result);
+    const storedRateBreakup = state.rates.map((rate) => rate.rateBreakup);
+    assert.equal(adapter.calls.getRates, 1);
+    assert.equal(adapter.calls.createPickupLocation, 0);
+    assert.equal(adapter.calls.createDraftOrder, 0);
+    assert.equal(result.rates.length, 3);
+    assert.equal(result.tiers.smart.label, "Shipmastr Smart");
+    assert.equal(storedRateBreakup.every((metadata) => metadata.phase6.livePilotRatesMode === "LIVE"), true);
+    assert.equal(storedRateBreakup.every((metadata) => metadata.phase6.livePilotRatesReady === true), true);
+    assert.equal(storedRateBreakup.every((metadata) => /^[0-9]+$/.test(metadata.providerCourierId)), true);
+    assert.doesNotMatch(json, /internal_courier|providerCourierId|providerServiceId|providerRateId|providerMetadata|providerResponseJson|bigship|shiprocket|12345|svc_rate|rate_smart/i);
+  });
+
+  it("keeps dry-run rates on the mock path without a Shiprocket serviceability call", async () => {
+    const { client, state } = createFakeClient();
+    const adapter = createFakeShiprocketAdapter();
     const pickup = await createShippingPickupLocation("seller_1", pickupBody(), { client, adapter });
     const shipment = await createShipmentDraft("seller_1", shipmentBody(pickup.pickup_location_id), client);
 
@@ -989,15 +1046,43 @@ describe("Shipmastr Shipping Network services", () => {
       adapter,
       liveRatesSource: {
         SHIPMASTR_LIVE_COURIER_RATES_ENABLED: "true",
-        SHIPMASTR_LIVE_COURIER_RATES_MODE: "LIVE",
+        SHIPMASTR_LIVE_COURIER_RATES_MODE: "DRY_RUN",
         SHIPMASTR_LIVE_COURIER_RATES_PILOT_ONLY: "true"
       }
     });
 
-    const json = JSON.stringify(result);
+    assert.equal(adapter.calls.createPickupLocation, 1);
+    assert.equal(adapter.calls.createDraftOrder, 1);
     assert.equal(adapter.calls.getRates, 1);
+    assert.equal(state.rates.every((rate) => rate.rateBreakup.phase6.livePilotRatesMode === "DRY_RUN"), true);
+    assert.equal(state.rates.every((rate) => rate.rateBreakup.phase6.livePilotRatesReady === false), true);
     assert.equal(result.tiers.smart.label, "Shipmastr Smart");
-    assert.doesNotMatch(json, /internal_courier|providerMetadata|providerResponseJson|bigship/i);
+  });
+
+  it("fails live rates safely when serviceability has no numeric provider courier id", async () => {
+    const { client, state } = createFakeClient();
+    state.livePilotMerchants.push({ merchantId: "seller_1", status: "ENABLED" });
+    state.livePilotCapabilities.push({
+      merchantId: "seller_1",
+      capability: "LIVE_COURIER_RATES",
+      status: "ENABLED"
+    });
+    seedActiveLiveCourierProvider(state);
+    const adapter = createFakeShiprocketAdapter({ providerCourierId: null });
+    const pickup = await createShippingPickupLocation("seller_1", pickupBody(), { client, adapter });
+    const shipment = await createShipmentDraft("seller_1", shipmentBody(pickup.pickup_location_id), client);
+
+    await assert.rejects(
+      () => fetchShipmentRates("seller_1", shipment.shipment_id, {
+        client,
+        adapter,
+        liveRatesSource: liveRatesSource()
+      }),
+      (error) => error instanceof HttpError && error.message === "SHIPROCKET_LIVE_RATE_PROVIDER_ID_MISSING"
+    );
+    assert.equal(adapter.calls.getRates, 1);
+    assert.equal(state.providerRefs.length, 0);
+    assert.equal(state.rates.length, 0);
   });
 
   it("serializes live rate readiness without provider or credential details", async () => {
@@ -1016,7 +1101,7 @@ describe("Shipmastr Shipping Network services", () => {
 
     assert.equal(serialized.status, "DRY_RUN");
     assert.equal(serialized.runtime.mode, "DRY_RUN");
-    assert.doesNotMatch(json, /Bigship|bigship|provider|Authorization|Bearer|credentialHash|secretHash|rawPayload|rawHeaders|rawResponse/i);
+    assert.doesNotMatch(json, /Bigship|bigship|Shiprocket|shiprocket|providerCourierId|providerServiceId|providerRateId|Authorization|Bearer|credentialHash|secretHash|rawPayload|rawHeaders|rawResponse|env:SHIPROCKET/i);
   });
 
   it("manifests a shipment, stores internal AWB, and returns Shipmastr tracking fields", async () => {

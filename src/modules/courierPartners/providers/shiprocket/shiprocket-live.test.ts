@@ -9,8 +9,10 @@ import {
 import { ShiprocketLiveAdapter } from "./shiprocket-live.adapter.js";
 import { ShiprocketLiveClient, type ShiprocketLiveFetch } from "./shiprocket-live.client.js";
 import {
+  mapProviderRateInputToShiprocketServiceability,
   mapProviderDraftToShiprocketOrder,
   mapShiprocketAwbToProviderManifest,
+  mapShiprocketServiceabilityToProviderRates,
   mapShiprocketLabelToProviderLabel,
   mapShiprocketOrderToProviderDraft
 } from "./shiprocket-live.mapper.js";
@@ -106,7 +108,7 @@ describe("Shiprocket live client and mapper", () => {
     assert.doesNotMatch(JSON.stringify(request), /token|secret|credential|rawPayload|rawHeaders|Authorization|Bearer/i);
   });
 
-  it("uses mocked HTTP for login, order creation, AWB assignment, and label generation", async () => {
+  it("uses mocked HTTP for login, order creation, serviceability, AWB assignment, and label generation", async () => {
     const calls: Array<{ url: string; body: unknown; authorization: boolean }> = [];
     const fetchImpl: ShiprocketLiveFetch = async (url, init) => {
       calls.push({
@@ -116,6 +118,27 @@ describe("Shiprocket live client and mapper", () => {
       });
       if (url.endsWith("/auth/login")) return { ok: true, status: 200, json: async () => ({ token: "ephemeral-token", expires_in: 60 }) };
       if (url.endsWith("/orders/create/adhoc")) return { ok: true, status: 200, json: async () => ({ shipment_id: 987654321, order_id: "ORD-1" }) };
+      if (url.includes("/v1/external/courier/serviceability/")) {
+        assert.match(url, /pickup_postcode=560001/);
+        assert.match(url, /delivery_postcode=400001/);
+        assert.match(url, /weight=0.5/);
+        assert.match(url, /cod=1/);
+        return {
+          ok: true,
+          status: 200,
+          json: async () => ({
+            data: {
+              recommended_courier_company_id: 12345,
+              available_courier_companies: [{
+                courier_company_id: 12345,
+                rate: 72,
+                estimated_delivery_days: 2,
+                freight_charge: 72
+              }]
+            }
+          })
+        };
+      }
       if (url.endsWith("/courier/assign/awb")) return { ok: true, status: 200, json: async () => ({ awb_code: "190123456789", shipment_id: 987654321 }) };
       if (url.endsWith("/courier/generate/label")) return { ok: true, status: 200, json: async () => ({ label_url: "https://label.example.test/safe.pdf" }) };
       return { ok: false, status: 404, json: async () => ({}) };
@@ -123,17 +146,92 @@ describe("Shiprocket live client and mapper", () => {
     const client = new ShiprocketLiveClient({ baseUrl: "https://apiv2.shiprocket.in" }, fetchImpl);
     const login = await client.login({ email: "pilot@example.test", password: "not-a-real-provider-password" });
     const order = await client.createAdhocOrder(mapProviderDraftToShiprocketOrder(draftInput()), login.token!);
+    const serviceability = await client.getServiceability({
+      pickup_postcode: "560001",
+      delivery_postcode: "400001",
+      weight: 0.5,
+      cod: 1,
+      declared_value: 1499
+    }, login.token!);
     const awb = await client.assignAwb({ shipment_id: 987654321, courier_id: 12345 }, login.token!);
     const label = await client.generateLabel({ shipment_id: [987654321] }, login.token!);
 
     assert.equal(login.token, "ephemeral-token");
     assert.equal(mapShiprocketOrderToProviderDraft(order).providerOrderId, "987654321");
+    assert.equal(mapShiprocketServiceabilityToProviderRates(serviceability)[0]?.providerCourierId, "12345");
     assert.equal(mapShiprocketAwbToProviderManifest(awb).providerAwb, "190123456789");
     assert.equal(mapShiprocketLabelToProviderLabel(label).labelUrl, "https://label.example.test/safe.pdf");
-    assert.equal(calls.length, 4);
+    assert.equal(calls.length, 5);
     assert.equal(calls[0]?.authorization, false);
     assert.equal(calls.slice(1).every((call) => call.authorization), true);
-    assert.doesNotMatch(JSON.stringify({ order, awb, label }), /ephemeral-token|not-a-real-provider-password|Authorization|Bearer/i);
+    assert.doesNotMatch(JSON.stringify({ order, serviceability: mapShiprocketServiceabilityToProviderRates(serviceability), awb, label }), /ephemeral-token|not-a-real-provider-password|Authorization|Bearer/i);
+  });
+
+  it("maps Shiprocket serviceability into Shipmastr-branded rates with internal numeric ids", () => {
+    const serviceabilityRequest = mapProviderRateInputToShiprocketServiceability({
+      sellerId: "merchant_1",
+      shipmentId: "shipment_1",
+      providerOrderId: null,
+      pickupPincode: "560001",
+      deliveryPincode: "400001",
+      paymentMode: "cod",
+      collectableAmount: 1499,
+      deadWeightKg: 0.5,
+      dimensions: {
+        lengthCm: 20,
+        breadthCm: 15,
+        heightCm: 10
+      }
+    });
+    const rates = mapShiprocketServiceabilityToProviderRates({
+      data: {
+        recommended_courier_company_id: 2002,
+        available_courier_companies: [{
+          courier_company_id: 1001,
+          rate: 58,
+          estimated_delivery_days: 5,
+          service_id: "surface"
+        }, {
+          courier_company_id: 2002,
+          rate: 72,
+          estimated_delivery_days: 2,
+          service_id: "standard"
+        }, {
+          courier_company_id: 3003,
+          rate: 96,
+          estimated_delivery_days: 1,
+          service_id: "air"
+        }]
+      }
+    });
+    const json = JSON.stringify(rates);
+
+    assert.equal(serviceabilityRequest.pickup_postcode, "560001");
+    assert.equal(serviceabilityRequest.delivery_postcode, "400001");
+    assert.equal(serviceabilityRequest.cod, 1);
+    assert.equal(serviceabilityRequest.declared_value, 1499);
+    assert.equal(rates.map((rate) => rate.serviceLevel).join(","), "Shipmastr Smart,Shipmastr Economy,Shipmastr Express");
+    assert.equal(rates[0]?.providerCourierId, "2002");
+    assert.equal(rates[1]?.providerCourierId, "1001");
+    assert.equal(rates[2]?.providerCourierId, "3003");
+    assert.doesNotMatch(json, /Authorization|Bearer|token|password|rawPayload|rawHeaders|rawResponse|courier_name|courier_company_name/i);
+  });
+
+  it("skips serviceability rows without usable numeric courier ids", () => {
+    const rates = mapShiprocketServiceabilityToProviderRates({
+      data: {
+        available_courier_companies: [{
+          courier_company_id: "mock_courier_smart",
+          rate: 50,
+          estimated_delivery_days: 2
+        }, {
+          rate: 60,
+          estimated_delivery_days: 3
+        }]
+      }
+    });
+
+    assert.deepEqual(rates, []);
   });
 
   it("returns safe provider errors without raw response details", async () => {
@@ -167,6 +265,7 @@ describe("Shiprocket live client and mapper", () => {
       client: {
         login: async () => ({ token: "ephemeral-token", expires_in: 60 }),
         createAdhocOrder: async () => ({ shipment_id: 987654321, order_id: "ORD-1" }),
+        getServiceability: async () => ({ data: { available_courier_companies: [{ courier_company_id: 12345, rate: 72 }] } }),
         assignAwb: async () => ({ awb_code: "190123456789", shipment_id: 987654321 }),
         generateLabel: async () => ({ label_url: "https://label.example.test/safe.pdf" })
       }
@@ -203,6 +302,7 @@ describe("Shiprocket live client and mapper", () => {
       client: {
         login: async () => ({ token: "ephemeral-token", expires_in: 60 }),
         createAdhocOrder: async () => ({ shipment_id: 987654321 }),
+        getServiceability: async () => ({}),
         assignAwb: async () => { throw new Error("should not be called"); },
         generateLabel: async () => ({})
       }

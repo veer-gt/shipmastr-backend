@@ -2,6 +2,7 @@ import { ShipmentStatus, type Prisma } from "@prisma/client";
 import { HttpError } from "../../lib/httpError.js";
 import { prisma } from "../../lib/prisma.js";
 import type { InternalCourierProviderAdapter } from "../courierPartners/providers/provider-adapter.types.js";
+import { createShiprocketLiveAdapter } from "../courierPartners/providers/shiprocket/shiprocket-live.adapter.js";
 import {
   moneyToPaise,
   serializeRate,
@@ -60,6 +61,20 @@ function numberMetadata(value: unknown, fallback: number | null = null) {
   return fallback;
 }
 
+function stringMetadata(value: unknown) {
+  if (typeof value === "string" && value.trim()) return value.trim();
+  if (typeof value === "number" && Number.isFinite(value)) return String(value);
+  return null;
+}
+
+function firstStringMetadata(...values: unknown[]) {
+  for (const value of values) {
+    const normalized = stringMetadata(value);
+    if (normalized) return normalized;
+  }
+  return null;
+}
+
 function rateBreakupObject(value: unknown) {
   return metadataObject(value);
 }
@@ -95,6 +110,45 @@ function tierCandidateFromRate(rate: {
 
   if (rate.publicServiceName !== undefined) candidate.publicServiceName = rate.publicServiceName;
   return candidate;
+}
+
+function liveRatesSource(source?: Record<string, unknown>) {
+  return source ?? {};
+}
+
+function liveShiprocketRatesAdapter(input: {
+  source?: Record<string, unknown>;
+  credentialRef?: string | null;
+  override?: InternalCourierProviderAdapter;
+}) {
+  if (input.override) return input.override;
+  if (!input.credentialRef) throw new HttpError(409, "LIVE_SHIPROCKET_CREDENTIAL_REF_UNRESOLVED");
+  return createShiprocketLiveAdapter({
+    credentialRef: input.credentialRef,
+    source: liveRatesSource(input.source)
+  });
+}
+
+function providerErrorCode(error: unknown) {
+  const maybe = error as { code?: unknown; message?: unknown };
+  if (typeof maybe?.code === "string" && maybe.code.trim()) return maybe.code.trim();
+  if (typeof maybe?.message === "string" && maybe.message.trim()) return maybe.message.trim();
+  return "COURIER_PROVIDER_RATE_ERROR";
+}
+
+function numericProviderCourierId(value: unknown) {
+  const normalized = stringMetadata(value);
+  return normalized && /^[0-9]+$/.test(normalized) ? normalized : null;
+}
+
+function providerRateSafeMetadata(value: unknown) {
+  const metadata = metadataObject(value);
+  return {
+    providerCourierId: firstStringMetadata(metadata.providerCourierId, metadata.courier_id, metadata.courierId),
+    providerServiceId: firstStringMetadata(metadata.providerServiceId, metadata.service_id, metadata.serviceId),
+    providerRateId: firstStringMetadata(metadata.providerRateId, metadata.rate_id, metadata.rateId),
+    providerStatus: firstStringMetadata(metadata.providerStatus, metadata.status)
+  };
 }
 
 function rateTierResponse(
@@ -309,6 +363,14 @@ export async function fetchShipmentRates(
     client,
     ...(options.liveRatesSource ? { source: options.liveRatesSource } : {})
   });
+  const liveShiprocketReady = liveRatesReadiness.ready;
+  const activeAdapter = liveShiprocketReady
+    ? liveShiprocketRatesAdapter({
+      ...(options.liveRatesSource ? { source: options.liveRatesSource } : {}),
+      ...(liveRatesReadiness.shiprocket.credentialRef ? { credentialRef: liveRatesReadiness.shiprocket.credentialRef } : {}),
+      ...(options.adapter ? { override: options.adapter } : {})
+    })
+    : adapter;
 
   if (!options.refresh) {
     const existingRates = await findExistingRates(client, shipment.id, sellerId);
@@ -318,48 +380,61 @@ export async function fetchShipmentRates(
   }
 
   const { partner, mapping } = await ensureSystemManagedCourierNetwork(sellerId, client);
-  const pickupMapping = await ensurePickupProviderMapping({
-    sellerId,
-    shipment,
-    courierPartnerId: partner.id,
-    sellerCourierPartnerId: mapping.id,
-    client,
-    adapter
-  });
+  let providerOrderId: string | null = null;
+  if (!liveShiprocketReady) {
+    const pickupMapping = await ensurePickupProviderMapping({
+      sellerId,
+      shipment,
+      courierPartnerId: partner.id,
+      sellerCourierPartnerId: mapping.id,
+      client,
+      adapter
+    });
 
-  if (!pickupMapping.providerPickupId) {
-    throw new HttpError(409, "PICKUP_PROVIDER_MAPPING_MISSING");
+    if (!pickupMapping.providerPickupId) {
+      throw new HttpError(409, "PICKUP_PROVIDER_MAPPING_MISSING");
+    }
+
+    const providerRef = await ensureShipmentProviderRef({
+      sellerId,
+      shipment,
+      courierPartnerId: partner.id,
+      pickupProviderId: pickupMapping.providerPickupId,
+      client,
+      adapter
+    });
+    providerOrderId = providerRef.providerOrderId;
   }
-
-  const providerRef = await ensureShipmentProviderRef({
-    sellerId,
-    shipment,
-    courierPartnerId: partner.id,
-    pickupProviderId: pickupMapping.providerPickupId,
-    client,
-    adapter
-  });
   const weight = shipmentWeightForProvider(shipment);
 
-  const providerRates = await adapter.getRates({
-    sellerId,
-    shipmentId: shipment.id,
-    providerOrderId: providerRef.providerOrderId,
-    pickupPincode: shipment.fromPincode ?? "",
-    deliveryPincode: shipment.toPincode ?? "",
-    paymentMode: shipment.paymentMode,
-    collectableAmount: shipment.codAmountPaise / 100,
-    deadWeightKg: weight.deadWeightKg,
-    dimensions: weight.dimensions
-  });
+  let providerRates;
+  try {
+    providerRates = await activeAdapter.getRates({
+      sellerId,
+      shipmentId: shipment.id,
+      providerOrderId,
+      pickupPincode: shipment.fromPincode ?? "",
+      deliveryPincode: shipment.toPincode ?? "",
+      paymentMode: shipment.paymentMode,
+      collectableAmount: shipment.codAmountPaise / 100,
+      deadWeightKg: weight.deadWeightKg,
+      dimensions: weight.dimensions
+    });
+  } catch (error) {
+    const code = providerErrorCode(error);
+    throw new HttpError(code === "SHIPROCKET_LIVE_RATE_PROVIDER_ID_MISSING" ? 409 : 502, code);
+  }
 
   const rates = [];
   for (const providerRate of providerRates) {
+    const providerMetadata = providerRateSafeMetadata(providerRate.providerMetadata);
+    const providerCourierId = numericProviderCourierId(providerRate.providerCourierId ?? providerMetadata.providerCourierId);
+    if (liveShiprocketReady && !providerCourierId) continue;
     const publicServiceCode = serviceCodeForName(providerRate.serviceLevel);
     const selectedTier = shippingTierFromServiceCode(publicServiceCode);
     const reliabilityScore = await getReliabilityScoreForRate({
-      provider: adapter.code,
-      courierCode: providerRate.providerCourierId ?? null,
+      provider: activeAdapter.code,
+      courierCode: providerCourierId ?? providerRate.providerCourierId ?? null,
       deliveryPincode: shipment.toPincode ?? null,
       selectedTier
     }, client);
@@ -379,7 +454,10 @@ export async function fetchShipmentRates(
         estimatedDeliveryDays: providerRate.tatDays,
         rateBreakup: toPrismaJson({
           internalRateId: providerRate.rateId,
-          internalCourierId: providerRate.providerCourierId ?? null,
+          internalCourierId: providerCourierId ?? providerRate.providerCourierId ?? null,
+          providerCourierId,
+          providerServiceId: providerMetadata.providerServiceId,
+          providerRateId: providerMetadata.providerRateId ?? providerRate.rateId,
           result: providerRate.providerMetadata,
           phase6: {
             tier: selectedTier,
@@ -387,6 +465,9 @@ export async function fetchShipmentRates(
             pickupAvailable: providerRate.pickupAvailable ?? true,
             deliveryAvailable: providerRate.deliveryAvailable ?? true,
             reliabilityScore,
+            providerCourierId,
+            providerServiceId: providerMetadata.providerServiceId,
+            providerRateId: providerMetadata.providerRateId ?? providerRate.rateId,
             providerResponseJson: providerRate.providerMetadata,
             livePilotRatesMode: liveRatesReadiness.runtime.mode,
             livePilotRatesReady: liveRatesReadiness.ready
@@ -397,7 +478,7 @@ export async function fetchShipmentRates(
   }
 
   if (!rates.length) {
-    throw new HttpError(409, "NO_ELIGIBLE_SHIPPING_RATES");
+    throw new HttpError(409, liveShiprocketReady ? "SHIPROCKET_LIVE_RATE_PROVIDER_ID_MISSING" : "NO_ELIGIBLE_SHIPPING_RATES");
   }
 
   const existingMetadata = metadataObject(shipment.metadata);
