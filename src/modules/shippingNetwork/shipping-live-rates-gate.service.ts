@@ -2,6 +2,7 @@ import { Prisma } from "@prisma/client";
 import { env } from "../../config/env.js";
 import { HttpError } from "../../lib/httpError.js";
 import { prisma } from "../../lib/prisma.js";
+import { getCourierLiveReadinessSnapshot } from "../courierPartners/liveReadiness/courier-live-readiness.service.js";
 import { getLivePilotReadinessSnapshot } from "../livePilot/live-pilot.service.js";
 
 type Db = Prisma.TransactionClient | typeof prisma;
@@ -22,6 +23,10 @@ export type LiveCourierRatesReadiness = {
     merchantId: string;
     allowlisted: boolean;
     capabilityEnabled: boolean;
+  };
+  providerReadiness: {
+    hasActiveProvider: boolean;
+    activeProviderCount: number;
   };
   blockers: string[];
   warnings: string[];
@@ -67,7 +72,9 @@ export async function getLiveCourierRatesReadiness(
   } = {}
 ): Promise<LiveCourierRatesReadiness> {
   const runtime = getLiveCourierRatesRuntime(options.source ?? env);
-  const pilot = await getLivePilotReadinessSnapshot(merchantId, options.client ?? prisma);
+  const client = options.client ?? prisma;
+  const pilot = await getLivePilotReadinessSnapshot(merchantId, client);
+  const providerReadiness = await getCourierLiveReadinessSnapshot(merchantId, client);
   const capabilityEnabled = pilot.enabledCapabilities.includes("LIVE_COURIER_RATES");
   const blockers: string[] = [];
   const warnings: string[] = [];
@@ -78,6 +85,7 @@ export async function getLiveCourierRatesReadiness(
     if (!runtime.pilotOnly) blockers.push("LIVE_COURIER_RATES_NOT_PILOT_ONLY");
     if (runtime.mode === "LIVE" && !pilot.allowlisted) blockers.push("LIVE_PILOT_MERCHANT_NOT_ALLOWLISTED");
     if (runtime.mode === "LIVE" && !capabilityEnabled) blockers.push("LIVE_COURIER_RATES_CAPABILITY_REQUIRED");
+    if (runtime.mode === "LIVE" && !providerReadiness.has_active_provider) blockers.push("LIVE_PROVIDER_CREDENTIALS_MISSING");
     if (runtime.mode === "DRY_RUN") warnings.push("Live shipping rates are in dry-run mode; no live shipping network call is allowed.");
   }
 
@@ -85,7 +93,8 @@ export async function getLiveCourierRatesReadiness(
     && runtime.pilotOnly
     && runtime.mode === "LIVE"
     && pilot.allowlisted
-    && capabilityEnabled;
+    && capabilityEnabled
+    && providerReadiness.has_active_provider;
   const status = !runtime.enabled
     ? "DISABLED"
     : blockers.length
@@ -102,6 +111,10 @@ export async function getLiveCourierRatesReadiness(
       merchantId,
       allowlisted: pilot.allowlisted,
       capabilityEnabled
+    },
+    providerReadiness: {
+      hasActiveProvider: providerReadiness.has_active_provider,
+      activeProviderCount: providerReadiness.active_provider_count
     },
     blockers,
     warnings,
@@ -125,6 +138,7 @@ export async function assertLiveCourierRatesAllowed(
   if (!readiness.runtime.pilotOnly) throw new HttpError(409, "LIVE_COURIER_RATES_NOT_PILOT_ONLY");
   if (!readiness.pilot.allowlisted) throw new HttpError(409, "LIVE_PILOT_MERCHANT_NOT_ALLOWLISTED");
   if (!readiness.pilot.capabilityEnabled) throw new HttpError(409, "LIVE_COURIER_RATES_CAPABILITY_REQUIRED");
+  if (!readiness.providerReadiness.hasActiveProvider) throw new HttpError(409, "LIVE_PROVIDER_CREDENTIALS_MISSING");
   return readiness;
 }
 
@@ -141,6 +155,10 @@ export function serializeLiveCourierRatesReadiness(readiness: LiveCourierRatesRe
       merchant_id: readiness.pilot.merchantId,
       allowlisted: readiness.pilot.allowlisted,
       capability_enabled: readiness.pilot.capabilityEnabled
+    },
+    shipping_network_readiness: {
+      has_active_live_credential: readiness.providerReadiness.hasActiveProvider,
+      active_live_credential_count: readiness.providerReadiness.activeProviderCount
     },
     blockers: readiness.blockers,
     warnings: readiness.warnings,

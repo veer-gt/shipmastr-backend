@@ -316,11 +316,26 @@ describe("production readiness gate", () => {
   });
 
   it("can only mark controlled live pilot ready when live prerequisites and approvals are explicit", () => {
-    const ready = report({
+    const ready = buildProductionReadinessReport({
+      ...baseSource,
       CREDENTIAL_VAULT_PROVIDER: "LOCAL_ENCRYPTED",
       LIVE_KMS_PROVIDER_APPROVED: "true",
       PRODUCTION_DEPLOY_APPROVED: "true",
       SHIPMASTR_LIVE_MERCHANT_ALLOWLIST: "merchant_pilot_1"
+    }, {
+      checkedAt: "2026-06-09T00:00:00.000Z",
+      betaAuditDocExists: true,
+      courierProviderReadiness: {
+        hasActiveProvider: true,
+        activeProviderCount: 1,
+        providers: [{
+          providerKey: "BIGSHIP",
+          status: "ACTIVE",
+          mode: "LIVE",
+          liveReady: true,
+          blockers: []
+        }]
+      }
     });
     assert.equal(ready.verdict, "READY_WITH_LIMITED_MOCKS");
     assert.equal(ready.liveVerdict, "READY_FOR_CONTROLLED_LIVE_PILOT");

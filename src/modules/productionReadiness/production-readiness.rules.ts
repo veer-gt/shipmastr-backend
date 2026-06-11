@@ -173,6 +173,7 @@ export function buildProductionReadinessReport(
     checkedAt?: Date | string;
     betaAuditDocExists?: boolean;
     pilotReadiness?: ProductionReadinessReport["pilotReadiness"];
+    courierProviderReadiness?: ProductionReadinessReport["courierProviderReadiness"];
   } = {}
 ): ProductionReadinessReport {
   const checkedAt = options.checkedAt instanceof Date
@@ -236,6 +237,11 @@ export function buildProductionReadinessReport(
     approvedCapabilities: [],
     rollbackReady: true,
     blockers: ["MISSING_PILOT_MERCHANT_ALLOWLIST"]
+  };
+  const courierProviderReadiness = options.courierProviderReadiness ?? {
+    hasActiveProvider: false,
+    activeProviderCount: 0,
+    providers: []
   };
   const merchantAllowlistConfigured = Boolean(stringValue(source, "SHIPMASTR_LIVE_MERCHANT_ALLOWLIST"))
     || pilotReadiness.allowlisted;
@@ -442,6 +448,14 @@ export function buildProductionReadinessReport(
     ]),
     category("shipping_network", "Shipping Network Live Calls", [
       check({
+        key: "courier_provider_live_readiness",
+        label: "At least one live courier provider credential is tested",
+        status: courierProviderReadiness.hasActiveProvider ? "PASS" : "WARNING",
+        safeValue: courierProviderReadiness.activeProviderCount,
+        blockerCode: courierProviderReadiness.hasActiveProvider ? undefined : "LIVE_PROVIDER_CREDENTIALS_MISSING",
+        recommendation: "Configure and pass a non-destructive readiness probe for at least one live courier provider before live rates or AWB/label retry."
+      }),
+      check({
         key: "live_shipping_network_calls",
         label: "Live shipping network calls remain gated",
         status: liveCourierRatesEnabled
@@ -541,6 +555,7 @@ export function buildProductionReadinessReport(
   const liveRequirementsMet = !hasHardBlockers
     && !vaultIsMock
     && vaultRuntime.pilot_ready
+    && courierProviderReadiness.hasActiveProvider
     && merchantAllowlistConfigured
     && (approval(source, "LIVE_KMS_PROVIDER_APPROVED") || pilotReadiness.approvedCapabilities.includes("LIVE_KMS"))
     && approval(source, "PRODUCTION_DEPLOY_APPROVED");
@@ -575,6 +590,7 @@ export function buildProductionReadinessReport(
       pilotMerchantMode: pilotReadiness.allowlisted ? "ALLOWLISTED" : "NOT_ALLOWLISTED"
     },
     pilotReadiness,
+    courierProviderReadiness,
     approvalChecklist: {
       approvalRequired: true,
       approvals: Object.values(approvalFlags)

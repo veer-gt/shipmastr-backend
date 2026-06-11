@@ -266,7 +266,8 @@ function createFakeClient() {
     codLedgerEntries: [] as any[],
     weightDiscrepancyCases: [] as any[],
     livePilotMerchants: [] as any[],
-    livePilotCapabilities: [] as any[]
+    livePilotCapabilities: [] as any[],
+    courierProviderCredentials: [] as any[]
   };
 
   const id = (prefix: string, count: number) => `${prefix}_${count + 1}`;
@@ -332,6 +333,25 @@ function createFakeClient() {
       findMany: async ({ where }: any) => state.livePilotCapabilities.filter((row) => (
         where?.merchantId === undefined || row.merchantId === where.merchantId
       ))
+    },
+    courierProviderCredential: {
+      findMany: async ({ where, orderBy, take }: any = {}) => {
+        let rows = state.courierProviderCredentials.filter((row) => {
+          if (where?.providerKey !== undefined && row.providerKey !== where.providerKey) return false;
+          if (where?.mode !== undefined && row.mode !== where.mode) return false;
+          if (where?.status !== undefined && row.status !== where.status) return false;
+          if (where?.credentialRef?.not === null && row.credentialRef === null) return false;
+          if (where?.lastTestStatus !== undefined && row.lastTestStatus !== where.lastTestStatus) return false;
+          if (where?.lastTestedAt?.not === null && row.lastTestedAt === null) return false;
+          if (where?.OR?.length) {
+            return where.OR.some((clause: any) => clause.merchantId === row.merchantId);
+          }
+          return true;
+        });
+        if (orderBy?.lastTestedAt === "desc") rows = [...rows].sort((left, right) => (right.lastTestedAt?.getTime() ?? 0) - (left.lastTestedAt?.getTime() ?? 0));
+        if (orderBy?.updatedAt === "desc") rows = [...rows].sort((left, right) => (right.updatedAt?.getTime() ?? 0) - (left.updatedAt?.getTime() ?? 0));
+        return take ? rows.slice(0, take) : rows;
+      }
     },
     automationPreference: {
       findUnique: async ({ where }: any) => state.automationPreferences.find((row) => row.merchantId === where.merchantId) ?? null
@@ -644,6 +664,29 @@ function createFakeClient() {
   return { client: client as any, state };
 }
 
+function seedActiveLiveCourierProvider(state: ReturnType<typeof createFakeClient>["state"], merchantId = "seller_1") {
+  state.courierProviderCredentials.push({
+    id: `courier_credential_${state.courierProviderCredentials.length + 1}`,
+    merchantId,
+    providerKey: "BIGSHIP",
+    mode: "LIVE",
+    status: "ACTIVE",
+    credentialRef: "vault:bigship/live/test",
+    requiredFields: ["clientId", "clientSecret", "accessKey"],
+    safeMeta: {
+      required_fields_present: ["clientId", "clientSecret", "accessKey"]
+    },
+    lastTestedAt: now,
+    lastTestStatus: "PASS",
+    lastTestSummary: {
+      non_destructive: true,
+      raw_response_stored: false
+    },
+    createdAt: now,
+    updatedAt: now
+  });
+}
+
 function pickupBody() {
   return {
     name: "Main warehouse",
@@ -818,6 +861,7 @@ describe("Shipmastr Shipping Network services", () => {
       capability: "LIVE_COURIER_RATES",
       status: "ENABLED"
     });
+    seedActiveLiveCourierProvider(state);
     const adapter = createFakeAdapter();
     const pickup = await createShippingPickupLocation("seller_1", pickupBody(), { client, adapter });
     const shipment = await createShipmentDraft("seller_1", shipmentBody(pickup.pickup_location_id), client);
@@ -938,6 +982,7 @@ describe("Shipmastr Shipping Network services", () => {
       { merchantId: "seller_1", capability: "LIVE_COURIER_RATES", status: "ENABLED" },
       { merchantId: "seller_1", capability: "LIVE_AWB_LABEL", status: "ENABLED" }
     );
+    seedActiveLiveCourierProvider(state);
     const adapter = createFakeAdapter();
     const pickup = await createShippingPickupLocation("seller_1", pickupBody(), { client, adapter });
     const shipment = await createShipmentDraft("seller_1", shipmentBody(pickup.pickup_location_id), client);

@@ -1994,6 +1994,47 @@ model LivePilotAuditLog {
   @@map("live_pilot_audit_logs")
 }
 
+model CourierProviderCredential {
+  id              String   @id @default(cuid())
+  merchantId      String?  @map("merchant_id")
+  providerKey     String   @map("provider_key")
+  mode            String
+  status          String   @default("DRAFT")
+  credentialRef   String?  @map("credential_ref")
+  requiredFields  Json?    @map("required_fields")
+  safeMeta        Json?    @map("safe_meta")
+  lastTestedAt    DateTime? @map("last_tested_at")
+  lastTestStatus  String?  @map("last_test_status")
+  lastTestSummary Json?    @map("last_test_summary")
+  createdAt       DateTime @default(now()) @map("created_at")
+  updatedAt       DateTime @default(now()) @updatedAt @map("updated_at")
+
+  @@index([merchantId, providerKey, mode])
+  @@index([providerKey, status])
+  @@index([lastTestedAt])
+  @@map("courier_provider_credentials")
+}
+
+model CourierProviderReadinessProbe {
+  id            String   @id @default(cuid())
+  credentialId  String?  @map("credential_id")
+  merchantId    String?  @map("merchant_id")
+  providerKey   String   @map("provider_key")
+  probeType     String   @map("probe_type")
+  mode          String
+  status        String
+  safeSummary   Json?    @map("safe_summary")
+  warnings      Json?
+  errors        Json?
+  testedAt      DateTime @default(now()) @map("tested_at")
+  createdAt     DateTime @default(now()) @map("created_at")
+
+  @@index([merchantId, providerKey])
+  @@index([providerKey, status])
+  @@index([testedAt])
+  @@map("courier_provider_readiness_probes")
+}
+
 model CourierPartnerApplication {
   id                         String                          @id @default(cuid())
   companyName                String

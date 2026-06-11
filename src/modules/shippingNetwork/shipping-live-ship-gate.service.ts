@@ -2,6 +2,7 @@ import { Prisma, ShipmentStatus } from "@prisma/client";
 import { env } from "../../config/env.js";
 import { HttpError } from "../../lib/httpError.js";
 import { prisma } from "../../lib/prisma.js";
+import { getCourierLiveReadinessSnapshot } from "../courierPartners/liveReadiness/courier-live-readiness.service.js";
 import { getLivePilotReadinessSnapshot } from "../livePilot/live-pilot.service.js";
 import { getSellerShipment } from "./shipping-shipments.service.js";
 
@@ -24,6 +25,10 @@ export type LiveAwbLabelReadiness = {
     allowlisted: boolean;
     liveRatesCapabilityEnabled: boolean;
     awbLabelCapabilityEnabled: boolean;
+  };
+  providerReadiness: {
+    hasActiveProvider: boolean;
+    activeProviderCount: number;
   };
   shipment?: {
     shipmentId: string;
@@ -78,6 +83,7 @@ export async function getLiveAwbLabelReadiness(
   const client = options.client ?? prisma;
   const runtime = getLiveAwbLabelRuntime(options.source ?? env);
   const pilot = await getLivePilotReadinessSnapshot(merchantId, client);
+  const providerReadiness = await getCourierLiveReadinessSnapshot(merchantId, client);
   const liveRatesCapabilityEnabled = pilot.enabledCapabilities.includes("LIVE_COURIER_RATES");
   const awbLabelCapabilityEnabled = pilot.enabledCapabilities.includes("LIVE_AWB_LABEL");
   const blockers: string[] = [];
@@ -109,6 +115,7 @@ export async function getLiveAwbLabelReadiness(
     if (runtime.mode === "LIVE" && !pilot.allowlisted) blockers.push("LIVE_PILOT_MERCHANT_NOT_ALLOWLISTED");
     if (runtime.mode === "LIVE" && !liveRatesCapabilityEnabled) blockers.push("LIVE_COURIER_RATES_CAPABILITY_REQUIRED");
     if (runtime.mode === "LIVE" && !awbLabelCapabilityEnabled) blockers.push("LIVE_AWB_LABEL_CAPABILITY_REQUIRED");
+    if (runtime.mode === "LIVE" && !providerReadiness.has_active_provider) blockers.push("LIVE_PROVIDER_CREDENTIALS_MISSING");
     if (runtime.mode === "DRY_RUN") warnings.push("Pilot live AWB and label creation is in dry-run mode; no live document call is allowed.");
   }
 
@@ -118,6 +125,7 @@ export async function getLiveAwbLabelReadiness(
     && pilot.allowlisted
     && liveRatesCapabilityEnabled
     && awbLabelCapabilityEnabled
+    && providerReadiness.has_active_provider
     && (!shipment || shipment.readyForShipNow);
   const status = !runtime.enabled
     ? "DISABLED"
@@ -136,6 +144,10 @@ export async function getLiveAwbLabelReadiness(
       allowlisted: pilot.allowlisted,
       liveRatesCapabilityEnabled,
       awbLabelCapabilityEnabled
+    },
+    providerReadiness: {
+      hasActiveProvider: providerReadiness.has_active_provider,
+      activeProviderCount: providerReadiness.active_provider_count
     },
     ...(shipment ? { shipment } : {}),
     blockers,
@@ -162,6 +174,7 @@ export async function assertLiveAwbLabelAllowed(
   if (!readiness.pilot.allowlisted) throw new HttpError(409, "LIVE_PILOT_MERCHANT_NOT_ALLOWLISTED");
   if (!readiness.pilot.liveRatesCapabilityEnabled) throw new HttpError(409, "LIVE_COURIER_RATES_CAPABILITY_REQUIRED");
   if (!readiness.pilot.awbLabelCapabilityEnabled) throw new HttpError(409, "LIVE_AWB_LABEL_CAPABILITY_REQUIRED");
+  if (!readiness.providerReadiness.hasActiveProvider) throw new HttpError(409, "LIVE_PROVIDER_CREDENTIALS_MISSING");
   if (readiness.shipment && !readiness.shipment.readyForShipNow) throw new HttpError(409, "SHIPMENT_STATUS_TERMINAL");
   return readiness;
 }
@@ -180,6 +193,10 @@ export function serializeLiveAwbLabelReadiness(readiness: LiveAwbLabelReadiness)
       allowlisted: readiness.pilot.allowlisted,
       live_rates_capability_enabled: readiness.pilot.liveRatesCapabilityEnabled,
       awb_label_capability_enabled: readiness.pilot.awbLabelCapabilityEnabled
+    },
+    shipping_network_readiness: {
+      has_active_live_credential: readiness.providerReadiness.hasActiveProvider,
+      active_live_credential_count: readiness.providerReadiness.activeProviderCount
     },
     ...(readiness.shipment ? {
       shipment: {

@@ -77,6 +77,17 @@ export type ProductionReadinessReport = {
     rollbackReady: boolean;
     blockers: string[];
   };
+  courierProviderReadiness: {
+    hasActiveProvider: boolean;
+    activeProviderCount: number;
+    providers: Array<{
+      providerKey: string;
+      status: string;
+      mode: string | null;
+      liveReady: boolean;
+      blockers: string[];
+    }>;
+  };
   approvalChecklist: ProductionReadinessApprovalChecklist;
   liveEnablementPlan: LiveEnablementStep[];
   deferredGaps: string[];

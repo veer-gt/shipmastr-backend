@@ -76,6 +76,17 @@ export function serializeProductionReadinessReport(report: ProductionReadinessRe
       rollback_ready: report.pilotReadiness.rollbackReady,
       blockers: report.pilotReadiness.blockers
     },
+    courier_provider_readiness: {
+      has_active_provider: report.courierProviderReadiness.hasActiveProvider,
+      active_provider_count: report.courierProviderReadiness.activeProviderCount,
+      providers: report.courierProviderReadiness.providers.map((provider) => ({
+        provider_key: provider.providerKey,
+        status: provider.status,
+        mode: provider.mode,
+        live_ready: provider.liveReady,
+        blockers: provider.blockers
+      }))
+    },
     categories: report.categories.map(serializeCategory),
     approval_checklist: {
       approval_required: report.approvalChecklist.approvalRequired,
@@ -102,6 +113,17 @@ export function serializeProductionReadinessChecks(report: ProductionReadinessRe
       approved_capabilities: report.pilotReadiness.approvedCapabilities,
       rollback_ready: report.pilotReadiness.rollbackReady,
       blockers: report.pilotReadiness.blockers
+    },
+    courier_provider_readiness: {
+      has_active_provider: report.courierProviderReadiness.hasActiveProvider,
+      active_provider_count: report.courierProviderReadiness.activeProviderCount,
+      providers: report.courierProviderReadiness.providers.map((provider) => ({
+        provider_key: provider.providerKey,
+        status: provider.status,
+        mode: provider.mode,
+        live_ready: provider.liveReady,
+        blockers: provider.blockers
+      }))
     },
     categories: report.categories.map(serializeCategory),
     hard_stops: report.hardStops
