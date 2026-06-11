@@ -26,6 +26,9 @@ export const courierLiveProbeTypes = [
 ] as const;
 export type CourierLiveProbeType = typeof courierLiveProbeTypes[number];
 
+export const courierLiveProbeStatuses = ["PASS", "FAIL", "TIMEOUT", "BLOCKED"] as const;
+export type CourierLiveProbeStatus = typeof courierLiveProbeStatuses[number];
+
 export const forbiddenCourierLiveProbeTypes = [
   "CREATE_SHIPMENT",
   "CREATE_AWB",
@@ -48,10 +51,32 @@ export type CourierLiveReadinessBlocker =
   | "LIVE_PROVIDER_SECRET_STORAGE_INVALID"
   | "LIVE_PROVIDER_UNSUPPORTED";
 
+export type CourierProviderRequiredField = {
+  name: string;
+  label: string;
+  sensitive: boolean;
+  required: boolean;
+  format?: string;
+  provisional?: boolean;
+};
+
+export type CourierProviderRequiredFields = {
+  fields: CourierProviderRequiredField[];
+};
+
+export type CourierProviderSafeTestSummary = {
+  probeType: CourierLiveProbeType;
+  status: CourierLiveProbeStatus;
+  testedAt: string;
+  latencyMs?: number;
+  safeMessage?: string;
+  warnings?: string[];
+};
+
 export type CourierLiveProviderDefinition = {
   providerKey: CourierLiveProviderKey;
   label: string;
-  requiredFields: string[];
+  requiredFields: CourierProviderRequiredFields;
   supportedProbeTypes: CourierLiveProbeType[];
   supportsAwbLabelReadiness: boolean;
   defaultLiveBaseUrl: string | null;
@@ -61,6 +86,7 @@ export type CourierLiveProviderSummary = {
   provider_key: CourierLiveProviderKey;
   label: string;
   required_fields: string[];
+  required_field_schema: CourierProviderRequiredFields;
   supported_probe_types: CourierLiveProbeType[];
   supports_awb_label_readiness: boolean;
   default_live_base_url_configured: boolean;
@@ -75,6 +101,7 @@ export type CourierLiveCredentialSummary = {
   configured: boolean;
   credential_ref_configured: boolean;
   required_fields: string[];
+  required_field_schema: CourierProviderRequiredFields;
   required_fields_present: string[];
   missing_fields: string[];
   safe_meta: Record<string, unknown> | null;
@@ -94,8 +121,8 @@ export type CourierLiveProbeResult = {
   provider_key: CourierLiveProviderKey;
   probe_type: CourierLiveProbeType;
   mode: CourierLiveReadinessMode;
-  status: "PASS" | "FAIL" | "SKIPPED";
-  safe_summary: Record<string, unknown>;
+  status: CourierLiveProbeStatus;
+  safe_summary: CourierProviderSafeTestSummary | Record<string, unknown>;
   warnings: string[];
   errors: string[];
   tested_at: Date | string;

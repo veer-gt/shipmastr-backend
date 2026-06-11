@@ -3,11 +3,16 @@ import { describe, it } from "node:test";
 import {
   createCourierProviderCredential,
   getCourierLiveReadinessSnapshot,
+  listCourierProviderCredentials,
   listCourierLiveProviders,
+  listPlatformLevelCourierProviderCredentialsForAdmin,
   revokeCourierProviderCredential,
   testCourierProviderCredential
 } from "../courier-live-readiness.service.js";
 import { serializeCourierCredential } from "../courier-live-readiness.serializer.js";
+import { assertRequiredFieldsSchema } from "../courier-live-readiness.providers.js";
+import { courierLiveProbeStatuses } from "../courier-live-readiness.types.js";
+import { courierCredentialInputSchema, courierProbeInputSchema } from "../courier-live-readiness.validation.js";
 
 function makeClient() {
   const state = {
@@ -57,6 +62,7 @@ function makeClient() {
         if (where?.credentialRef?.not === null) rows = rows.filter((row) => row.credentialRef !== null);
         if (where?.lastTestStatus) rows = rows.filter((row) => row.lastTestStatus === where.lastTestStatus);
         if (where?.lastTestedAt?.not === null) rows = rows.filter((row) => row.lastTestedAt !== null);
+        if (Object.prototype.hasOwnProperty.call(where ?? {}, "merchantId")) rows = rows.filter((row) => row.merchantId === where.merchantId);
         if (where?.OR) {
           const merchantIds = where.OR.map((item: any) => item.merchantId);
           rows = rows.filter((row) => merchantIds.includes(row.merchantId));
@@ -106,7 +112,19 @@ describe("multi-provider courier live readiness foundation", () => {
     const result = await listCourierLiveProviders();
     assert.deepEqual(result.providers.map((provider) => provider.provider_key), ["BIGSHIP", "SHIPMOZO", "SHIPROCKET"]);
     assert.match(JSON.stringify(result), /clientId|publicKey|email/);
+    assert.ok(result.providers.every((provider) => Array.isArray(provider.required_field_schema.fields)));
+    assert.ok(result.providers.every((provider) => provider.required_field_schema.fields.every((field) => field.sensitive === true)));
     assert.doesNotMatch(JSON.stringify(result), /secret-value|credentialRef|rawHeaders|rawResponse/);
+  });
+
+  it("validates modes, probe statuses, and requiredFields schema through application-level constants", () => {
+    assert.deepEqual([...courierLiveProbeStatuses], ["PASS", "FAIL", "TIMEOUT", "BLOCKED"]);
+    assert.throws(() => courierCredentialInputSchema.parse({ mode: "LIVE_NOW", required_fields_present: [] }));
+    assert.throws(() => courierProbeInputSchema.parse({ probe_type: "DELETE_ALL_SHIPMENTS" }));
+    assert.doesNotThrow(() => assertRequiredFieldsSchema({
+      fields: [{ name: "email", label: "Account email", sensitive: true, required: true }]
+    }));
+    assert.throws(() => assertRequiredFieldsSchema({ fields: [{ name: "bad space", label: "", sensitive: true }] }));
   });
 
   it("stores credentialRef only and never serializes secret-like metadata", async () => {
@@ -124,6 +142,7 @@ describe("multi-provider courier live readiness foundation", () => {
 
     const json = JSON.stringify(result);
     assert.equal(result.credential.credential_ref_configured, true);
+    assert.ok(Array.isArray(result.credential.required_field_schema.fields));
     assert.doesNotMatch(json, /vault:shiprocket|credentialHash|rawHeaders|password-value|secret/i);
   });
 
@@ -166,6 +185,7 @@ describe("multi-provider courier live readiness foundation", () => {
     assert.equal(tested.credential.status, "ACTIVE");
     assert.equal(tested.credential.live_ready, true);
     assert.equal(tested.probe.status, "PASS");
+    assert.deepEqual(Object.keys(tested.probe.safe_summary).sort(), ["latencyMs", "probeType", "safeMessage", "status", "testedAt", "warnings"].sort());
     assert.doesNotMatch(JSON.stringify(tested), /rawPayload|rawHeaders|credentialHash|secretHash|createLabel|getLabel|manifestOrder/i);
   });
 
@@ -228,6 +248,34 @@ describe("multi-provider courier live readiness foundation", () => {
       }, client),
       /COURIER_PROVIDER_CREDENTIAL_SCOPE_MISMATCH/
     );
+  });
+
+  it("does not expose platform-level credentials through merchant-scoped routes but allows internal admin lookup", async () => {
+    const { client, state } = makeClient();
+    state.credentials.push({
+      id: "platform_credential_1",
+      merchantId: null,
+      providerKey: "BIGSHIP",
+      mode: "LIVE",
+      status: "ACTIVE",
+      credentialRef: "vault:bigship/live/platform",
+      requiredFields: { fields: [] },
+      safeMeta: { required_fields_present: ["clientId", "clientSecret", "accessKey"] },
+      lastTestedAt: new Date("2026-06-11T10:00:00.000Z"),
+      lastTestStatus: "PASS",
+      lastTestSummary: { probeType: "ACCOUNT_INFO", status: "PASS", testedAt: "2026-06-11T10:00:00.000Z" },
+      createdAt: new Date("2026-06-11T10:00:00.000Z"),
+      updatedAt: new Date("2026-06-11T10:00:00.000Z")
+    });
+
+    await assert.rejects(
+      () => testCourierProviderCredential("merchant_1", "BIGSHIP", "platform_credential_1", { probe_type: "ACCOUNT_INFO" }, client),
+      /COURIER_PROVIDER_CREDENTIAL_NOT_FOUND/
+    );
+    const merchantList = await listCourierProviderCredentials("merchant_1", "BIGSHIP", {}, client);
+    assert.equal(merchantList.credentials.length, 0);
+    const adminList = await listPlatformLevelCourierProviderCredentialsForAdmin("BIGSHIP", {}, client);
+    assert.equal(adminList.credentials.length, 1);
   });
 
   it("serializer hides refs, hashes, raw payloads, and secret-like values", () => {

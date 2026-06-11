@@ -1,5 +1,9 @@
 import type { CourierProviderCredential, CourierProviderReadinessProbe } from "@prisma/client";
-import { getCourierLiveProviderDefinition } from "./courier-live-readiness.providers.js";
+import {
+  assertRequiredFieldsSchema,
+  getCourierLiveProviderDefinition,
+  requiredFieldNames
+} from "./courier-live-readiness.providers.js";
 import type {
   CourierLiveCredentialSummary,
   CourierLiveProbeResult,
@@ -49,10 +53,12 @@ function asFieldNameArray(value: unknown): string[] {
 
 export function serializeCourierLiveProvider(providerKey: CourierLiveProviderKey): CourierLiveProviderSummary {
   const definition = getCourierLiveProviderDefinition(providerKey);
+  assertRequiredFieldsSchema(definition.requiredFields);
   return {
     provider_key: definition.providerKey,
     label: definition.label,
-    required_fields: definition.requiredFields,
+    required_fields: requiredFieldNames(definition.requiredFields),
+    required_field_schema: definition.requiredFields,
     supported_probe_types: definition.supportedProbeTypes,
     supports_awb_label_readiness: definition.supportsAwbLabelReadiness,
     default_live_base_url_configured: Boolean(definition.defaultLiveBaseUrl)
@@ -82,10 +88,12 @@ export function isCourierCredentialLiveReady(record: CourierProviderCredential |
 
 export function serializeCourierCredential(record: CourierProviderCredential): CourierLiveCredentialSummary {
   const definition = getCourierLiveProviderDefinition(record.providerKey as CourierLiveProviderKey);
+  assertRequiredFieldsSchema(definition.requiredFields);
+  const requiredFields = requiredFieldNames(definition.requiredFields);
   const requiredFieldsPresent = asFieldNameArray(record.safeMeta && typeof record.safeMeta === "object"
     ? (record.safeMeta as Record<string, unknown>).required_fields_present
     : []);
-  const missingFields = definition.requiredFields.filter((field) => !requiredFieldsPresent.includes(field));
+  const missingFields = requiredFields.filter((field) => !requiredFieldsPresent.includes(field));
   return {
     credential_id: record.id,
     merchant_id: record.merchantId ?? null,
@@ -94,7 +102,8 @@ export function serializeCourierCredential(record: CourierProviderCredential): C
     status: record.status as CourierLiveReadinessStatus,
     configured: Boolean(record.credentialRef),
     credential_ref_configured: Boolean(record.credentialRef),
-    required_fields: definition.requiredFields,
+    required_fields: requiredFields,
+    required_field_schema: definition.requiredFields,
     required_fields_present: requiredFieldsPresent,
     missing_fields: missingFields,
     safe_meta: safeObject(record.safeMeta),

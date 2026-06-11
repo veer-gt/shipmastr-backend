@@ -3,8 +3,10 @@ import { HttpError } from "../../../lib/httpError.js";
 import { prisma } from "../../../lib/prisma.js";
 import { getLivePilotReadinessSnapshot } from "../../livePilot/live-pilot.service.js";
 import {
+  assertRequiredFieldsSchema,
   getCourierLiveProviderDefinition,
-  providerSupportsProbe
+  providerSupportsProbe,
+  requiredFieldNames
 } from "./courier-live-readiness.providers.js";
 import {
   isCourierCredentialLiveReady,
@@ -39,9 +41,11 @@ function fieldList(value: unknown): string[] {
 }
 
 function requiredFieldsPresent(input: CourierCredentialInput, definition = getCourierLiveProviderDefinition("BIGSHIP")) {
+  assertRequiredFieldsSchema(definition.requiredFields);
+  const requiredFields = requiredFieldNames(definition.requiredFields);
   const explicit = fieldList(input.required_fields_present);
   const safeMetaPresent = fieldList(input.safe_meta?.required_fields_present);
-  return [...new Set([...explicit, ...safeMetaPresent])].filter((field) => definition.requiredFields.includes(field));
+  return [...new Set([...explicit, ...safeMetaPresent])].filter((field) => requiredFields.includes(field));
 }
 
 function credentialStatus(input: {
@@ -71,7 +75,7 @@ async function getCredentialRecord(
   client: Db
 ) {
   const record = await client.courierProviderCredential.findFirst({
-    where: { id: credentialId, providerKey, OR: [{ merchantId }, { merchantId: null }] }
+    where: { id: credentialId, providerKey, merchantId }
   });
   if (!record) throw new HttpError(404, "COURIER_PROVIDER_CREDENTIAL_NOT_FOUND");
   return record;
@@ -82,27 +86,24 @@ function safeProbeSummary(input: {
   probeType: CourierLiveProbeType;
   mode: string;
   passed: boolean;
-  safeContext?: Record<string, unknown>;
+  status: "PASS" | "FAIL" | "TIMEOUT" | "BLOCKED";
+  testedAt: string;
+  warnings?: string[];
 }) {
   const definition = getCourierLiveProviderDefinition(input.providerKey);
   return {
-    provider_key: input.providerKey,
-    probe_type: input.probeType,
-    mode: input.mode,
-    passed: input.passed,
-    non_destructive: true,
-    mock_safe_default: true,
-    provider_round_trip: false,
-    raw_response_stored: false,
-    raw_headers_stored: false,
-    credential_values_exposed: false,
-    supports_awb_label_readiness: definition.supportsAwbLabelReadiness,
-    request_builder_ready: true,
-    checked_context: {
-      pincode_present: Boolean(input.safeContext?.pincode),
-      pickup_context_present: Boolean(input.safeContext?.pickup_reference),
-      amount_context_present: Boolean(input.safeContext?.declared_value)
-    }
+    probeType: input.probeType,
+    status: input.status,
+    testedAt: input.testedAt,
+    latencyMs: 0,
+    safeMessage: input.passed
+      ? "Non-destructive readiness probe passed without storing provider output."
+      : "Non-destructive readiness probe did not pass; no provider output was stored.",
+    warnings: [
+      `Mode ${input.mode} remained non-destructive.`,
+      `AWB/label readiness support recorded: ${definition.supportsAwbLabelReadiness ? "yes" : "no"}.`,
+      ...(input.warnings ?? [])
+    ].map((warning) => warning.slice(0, 160))
   };
 }
 
@@ -127,7 +128,7 @@ export async function listCourierProviderCredentials(
   const records = await client.courierProviderCredential.findMany({
     where: {
       providerKey,
-      OR: [{ merchantId }, { merchantId: null }],
+      merchantId,
       ...(query.mode ? { mode: query.mode } : {})
     },
     orderBy: { updatedAt: "desc" },
@@ -146,11 +147,12 @@ export async function createCourierProviderCredential(
   client: Db = prisma
 ) {
   const definition = getCourierLiveProviderDefinition(providerKey);
+  assertRequiredFieldsSchema(definition.requiredFields);
   const scopedMerchantId = input.merchant_id ?? merchantId;
   if (scopedMerchantId !== merchantId) throw new HttpError(403, "COURIER_PROVIDER_CREDENTIAL_SCOPE_MISMATCH");
   await assertLiveModeGate(scopedMerchantId, input.mode, client);
   const presentFields = requiredFieldsPresent(input, definition);
-  const missingFields = definition.requiredFields.filter((field) => !presentFields.includes(field));
+  const missingFields = requiredFieldNames(definition.requiredFields).filter((field) => !presentFields.includes(field));
   const safeMeta = {
     ...(input.safe_meta ?? {}),
     required_fields_present: presentFields,
@@ -250,12 +252,16 @@ export async function testCourierProviderCredential(
     "No live provider call was made by this foundation probe.",
     ...((input.mode ?? credential.mode) === "LIVE" ? ["LIVE mode remained pilot-gated and non-destructive."] : [])
   ];
+  const status = passed ? "PASS" : "FAIL";
+  const testedAt = new Date().toISOString();
   const safeSummary = safeProbeSummary({
     providerKey,
     probeType,
     mode: input.mode ?? credential.mode,
     passed,
-    ...(input.safe_context ? { safeContext: input.safe_context } : {})
+    status,
+    testedAt,
+    warnings
   });
   const probe = await client.courierProviderReadinessProbe.create({
     data: {
@@ -264,7 +270,7 @@ export async function testCourierProviderCredential(
       providerKey,
       probeType,
       mode: input.mode ?? credential.mode,
-      status: passed ? "PASS" : "FAIL",
+      status,
       safeSummary: toJson(safeSummary),
       warnings: toJson(warnings),
       errors: toJson(errors)
@@ -275,7 +281,7 @@ export async function testCourierProviderCredential(
     data: {
       status: passed ? "ACTIVE" : "FAILED",
       lastTestedAt: probe.testedAt,
-      lastTestStatus: passed ? "PASS" : "FAIL",
+      lastTestStatus: status,
       lastTestSummary: toJson(safeSummary)
     }
   });
@@ -292,7 +298,7 @@ export async function getCourierLiveReadinessSnapshot(
   const model = (client as Db & { courierProviderCredential?: Db["courierProviderCredential"] }).courierProviderCredential;
   const records = model ? await model.findMany({
     where: {
-      OR: [{ merchantId }, { merchantId: null }]
+      merchantId
     },
     orderBy: { updatedAt: "desc" }
   }) : [];
@@ -316,6 +322,26 @@ export async function getCourierLiveReadinessSnapshot(
     active_provider_count: activeProviderCount,
     has_active_provider: activeProviderCount > 0,
     blockers: activeProviderCount ? [] : ["LIVE_PROVIDER_CREDENTIALS_MISSING"]
+  };
+}
+
+export async function listPlatformLevelCourierProviderCredentialsForAdmin(
+  providerKey: CourierLiveProviderKey,
+  query: CourierCredentialQuery = {},
+  client: Db = prisma
+) {
+  const records = await client.courierProviderCredential.findMany({
+    where: {
+      providerKey,
+      merchantId: null,
+      ...(query.mode ? { mode: query.mode } : {})
+    },
+    orderBy: { updatedAt: "desc" },
+    take: 50
+  });
+  return {
+    provider: serializeCourierLiveProvider(providerKey),
+    credentials: records.map(serializeCourierCredential)
   };
 }
 

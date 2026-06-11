@@ -2008,6 +2008,7 @@ model CourierProviderCredential {
   lastTestSummary Json?    @map("last_test_summary")
   createdAt       DateTime @default(now()) @map("created_at")
   updatedAt       DateTime @default(now()) @updatedAt @map("updated_at")
+  readinessProbes CourierProviderReadinessProbe[]
 
   @@index([merchantId, providerKey, mode])
   @@index([providerKey, status])
@@ -2018,6 +2019,7 @@ model CourierProviderCredential {
 model CourierProviderReadinessProbe {
   id            String   @id @default(cuid())
   credentialId  String?  @map("credential_id")
+  credential    CourierProviderCredential? @relation(fields: [credentialId], references: [id], onDelete: SetNull)
   merchantId    String?  @map("merchant_id")
   providerKey   String   @map("provider_key")
   probeType     String   @map("probe_type")
