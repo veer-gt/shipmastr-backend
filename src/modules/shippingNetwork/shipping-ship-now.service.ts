@@ -2,6 +2,7 @@ import { ShipmentStatus, type Prisma } from "@prisma/client";
 import { HttpError } from "../../lib/httpError.js";
 import { prisma } from "../../lib/prisma.js";
 import type { InternalCourierProviderAdapter } from "../courierPartners/providers/provider-adapter.types.js";
+import { createShiprocketLiveAdapter } from "../courierPartners/providers/shiprocket/shiprocket-live.adapter.js";
 import { createMockSafeShippingAdapter } from "./shipping-pickup-location.service.js";
 import {
   PUBLIC_COURIER_NETWORK,
@@ -20,7 +21,12 @@ import {
   type ShippingTier,
   type ShippingTierCandidate
 } from "./shipping-tier-decision.service.js";
-import { ensureShipmentIsNotTerminal, getSellerShipment } from "./shipping-shipments.service.js";
+import {
+  ensureShipmentIsNotTerminal,
+  getSellerShipment,
+  shipmentMetadata,
+  shipmentWeightForProvider
+} from "./shipping-shipments.service.js";
 
 type Db = Prisma.TransactionClient | typeof prisma;
 
@@ -107,6 +113,28 @@ function selectedCourierId(rateBreakup: unknown) {
   const metadata = metadataObject(rateBreakup);
   const value = metadata.internalCourierId;
   return typeof value === "string" && value.trim() ? value.trim() : null;
+}
+
+function liveShiprocketCourierId(rateBreakup: unknown) {
+  const value = selectedCourierId(rateBreakup);
+  return value && /^[0-9]+$/.test(value) ? value : null;
+}
+
+function liveAwbSource(source?: Record<string, unknown>) {
+  return source ?? {};
+}
+
+function liveShiprocketAdapter(input: {
+  source?: Record<string, unknown>;
+  credentialRef?: string | null;
+  override?: InternalCourierProviderAdapter;
+}) {
+  if (input.override) return input.override;
+  if (!input.credentialRef) throw new HttpError(409, "LIVE_SHIPROCKET_CREDENTIAL_REF_UNRESOLVED");
+  return createShiprocketLiveAdapter({
+    credentialRef: input.credentialRef,
+    source: liveAwbSource(input.source)
+  });
 }
 
 function providerErrorJson(error: unknown) {
@@ -295,6 +323,101 @@ async function tryFetchLabel(input: {
   }
 }
 
+async function ensureLiveShiprocketProviderRef(input: {
+  client: Db;
+  adapter: InternalCourierProviderAdapter;
+  sellerId: string;
+  shipment: Awaited<ReturnType<typeof getSellerShipment>>;
+  courierPartnerId: string | null;
+  existingProviderRef: ProviderRefForLabel & { id?: string | null; providerPickupId?: string | null; metadata?: unknown } | null;
+}) {
+  const existingOrderId = stringMetadata(input.existingProviderRef?.providerOrderId);
+  if (existingOrderId && /^[0-9]+$/.test(existingOrderId)) return input.existingProviderRef!;
+  if (!input.courierPartnerId) throw new HttpError(409, "SHIPROCKET_LIVE_AWB_ADAPTER_INCOMPLETE");
+  if (!input.shipment.pickupLocationId) throw new HttpError(409, "SHIPMENT_PICKUP_LOCATION_MISSING");
+
+  const pickupLocation = await input.client.pickupLocation.findFirst({
+    where: {
+      id: input.shipment.pickupLocationId,
+      sellerId: input.sellerId
+    }
+  });
+  if (!pickupLocation) throw new HttpError(404, "PICKUP_LOCATION_NOT_FOUND");
+
+  const pickupMapping = await input.client.pickupLocationProviderMapping.findUnique({
+    where: {
+      pickupLocationId_courierPartnerId: {
+        pickupLocationId: pickupLocation.id,
+        courierPartnerId: input.courierPartnerId
+      }
+    }
+  });
+  const pickupLocationProviderId = stringMetadata(pickupMapping?.providerPickupId)
+    ?? stringMetadata(pickupLocation.label)
+    ?? pickupLocation.id;
+  const metadata = shipmentMetadata(input.shipment.metadata);
+  const weight = shipmentWeightForProvider(input.shipment);
+  const draft = await input.adapter.createDraftOrder({
+    sellerId: input.sellerId,
+    shipmentId: input.shipment.id,
+    sellerOrderId: input.shipment.externalOrderId ?? input.shipment.id,
+    segment: input.shipment.segment,
+    paymentMode: input.shipment.paymentMode,
+    pickupLocationProviderId,
+    returnLocationProviderId: pickupLocationProviderId,
+    invoiceNumber: metadata.invoice.invoice_number ?? null,
+    invoiceAmount: metadata.invoice.invoice_amount,
+    collectableAmount: metadata.invoice.collectable_amount ?? null,
+    deadWeightKg: weight.deadWeightKg,
+    dimensions: weight.dimensions,
+    buyer: {
+      name: metadata.buyer.name,
+      phone: metadata.buyer.phone,
+      email: metadata.buyer.email ?? null,
+      addressLine1: metadata.buyer.address.line1,
+      addressLine2: metadata.buyer.address.line2 ?? null,
+      landmark: metadata.buyer.address.landmark ?? null,
+      city: metadata.buyer.address.city,
+      state: metadata.buyer.address.state,
+      country: metadata.buyer.address.country.toUpperCase(),
+      pincode: metadata.buyer.address.pincode
+    }
+  });
+
+  const safeMetadata = toPrismaJson({
+    phase41b: {
+      status: draft.status,
+      reference: draft.providerReferenceNumber,
+      liveProviderBridge: true,
+      rawProviderResponseStored: false
+    }
+  });
+
+  if (input.existingProviderRef?.id) {
+    return input.client.shipmentProviderRef.update({
+      where: { id: input.existingProviderRef.id },
+      data: {
+        courierPartnerId: input.courierPartnerId,
+        providerShipmentId: draft.providerOrderId,
+        providerOrderId: draft.providerOrderId,
+        providerPickupId: pickupLocationProviderId,
+        metadata: safeMetadata
+      }
+    });
+  }
+
+  return input.client.shipmentProviderRef.create({
+    data: {
+      shipmentId: input.shipment.id,
+      courierPartnerId: input.courierPartnerId,
+      providerShipmentId: draft.providerOrderId,
+      providerOrderId: draft.providerOrderId,
+      providerPickupId: pickupLocationProviderId,
+      metadata: safeMetadata
+    }
+  });
+}
+
 export async function shipNowShipment(
   sellerId: string,
   shipmentId: string,
@@ -305,12 +428,6 @@ export async function shipNowShipment(
   const adapter = options.adapter ?? createMockSafeShippingAdapter();
   const shipment = await getSellerShipment(sellerId, shipmentId, client);
   ensureShipmentIsNotTerminal(shipment.status);
-  const liveAwbLabelReadiness = await assertLiveAwbLabelAllowed(sellerId, {
-    client,
-    shipmentId: shipment.id,
-    ...(options.liveAwbLabelSource ? { source: options.liveAwbLabelSource } : {})
-  });
-
   const existingPhase6 = phase6Metadata(shipment.metadata);
   const existingLabelUrl = stringMetadata(existingPhase6.labelUrl);
   if (shipment.awbNumber && existingLabelUrl) {
@@ -324,6 +441,12 @@ export async function shipNowShipment(
       trackingUrl: tracked.trackingPublicUrl ?? stringMetadata(existingPhase6.trackingUrl) ?? shipment.trackingUrl
     });
   }
+
+  const liveAwbLabelReadiness = await assertLiveAwbLabelAllowed(sellerId, {
+    client,
+    shipmentId: shipment.id,
+    ...(options.liveAwbLabelSource ? { source: options.liveAwbLabelSource } : {})
+  });
 
   let rates = await findRates(client, shipment.id, sellerId);
   if (!rates.length) {
@@ -339,13 +462,36 @@ export async function shipNowShipment(
     throw new HttpError(409, "SHIPMENT_RATE_NOT_FOUND");
   }
 
-  const providerRef = await client.shipmentProviderRef.findFirst({
+  const liveShiprocketReady = liveAwbLabelReadiness.ready;
+  const activeAdapter = liveShiprocketReady
+    ? liveShiprocketAdapter({
+      ...(options.liveAwbLabelSource ? { source: options.liveAwbLabelSource } : {}),
+      ...(liveAwbLabelReadiness.shiprocket.credentialRef ? { credentialRef: liveAwbLabelReadiness.shiprocket.credentialRef } : {}),
+      ...(options.adapter ? { override: options.adapter } : {})
+    })
+    : adapter;
+  const existingProviderRef = await client.shipmentProviderRef.findFirst({
     where: {
       shipmentId: shipment.id,
       courierPartnerId: selectedRate.courierPartnerId
     },
     orderBy: { createdAt: "desc" }
   });
+
+  if (liveShiprocketReady && !liveShiprocketCourierId(selectedRate.rateBreakup)) {
+    throw new HttpError(409, "SHIPROCKET_LIVE_AWB_ADAPTER_INCOMPLETE");
+  }
+
+  const providerRef = liveShiprocketReady
+    ? await ensureLiveShiprocketProviderRef({
+      client,
+      adapter: activeAdapter,
+      sellerId,
+      shipment,
+      courierPartnerId: selectedRate.courierPartnerId,
+      existingProviderRef
+    })
+    : existingProviderRef;
 
   if (!providerRef?.providerOrderId) {
     throw new HttpError(409, "SHIPMENT_PROVIDER_DRAFT_MISSING");
@@ -354,7 +500,7 @@ export async function shipNowShipment(
   if (shipment.awbNumber) {
     return tryFetchLabel({
       client,
-      adapter,
+      adapter: activeAdapter,
       sellerId,
       shipment,
       providerRef,
@@ -363,13 +509,16 @@ export async function shipNowShipment(
     });
   }
 
-  const internalCourierId = selectedCourierId(selectedRate.rateBreakup);
+  const internalCourierId = liveShiprocketReady
+    ? liveShiprocketCourierId(selectedRate.rateBreakup)
+    : selectedCourierId(selectedRate.rateBreakup);
   if (!internalCourierId) {
     throw new HttpError(409, "SHIPMENT_RATE_INTERNAL_MAPPING_MISSING");
   }
 
   try {
-    const manifested = await adapter.manifestOrder({
+    if (!providerRef.id) throw new HttpError(409, "SHIPMENT_PROVIDER_DRAFT_MISSING");
+    const manifested = await activeAdapter.manifestOrder({
       sellerId,
       shipmentId: shipment.id,
       providerOrderId: providerRef.providerOrderId,
@@ -431,7 +580,7 @@ export async function shipNowShipment(
     });
     await recordShipmentSlaEvent({
       client,
-      adapter,
+      adapter: activeAdapter,
       sellerId,
       shipment: updated,
       tier,
@@ -453,7 +602,7 @@ export async function shipNowShipment(
     await storeProviderError({ client, shipment, error });
     await recordShipmentSlaEvent({
       client,
-      adapter,
+      adapter: activeAdapter,
       sellerId,
       shipment,
       tier,

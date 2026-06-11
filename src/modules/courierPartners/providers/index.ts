@@ -6,6 +6,5 @@ export function getInternalCourierProvider(code: InternalCourierProviderCode) {
     return createBigshipAdapter();
   }
 
-  const exhaustive: never = code;
-  throw new Error(`Unsupported internal courier provider: ${exhaustive}`);
+  throw new Error(`Unsupported internal courier provider: ${code}`);
 }

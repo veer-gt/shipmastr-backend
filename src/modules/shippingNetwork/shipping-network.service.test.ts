@@ -212,6 +212,60 @@ function createFakeAdapter(): InternalCourierProviderAdapter & { calls: Record<s
   };
 }
 
+function createFakeShiprocketAdapter(): InternalCourierProviderAdapter & { calls: Record<string, number> } {
+  const base = createFakeAdapter();
+  return {
+    ...base,
+    code: "shiprocket",
+    getRates: async () => {
+      base.calls.getRates = (base.calls.getRates ?? 0) + 1;
+      return [{
+        rateId: "shiprocket_rate_smart",
+        serviceLevel: "Shipmastr Smart",
+        courierNetwork: "Shipmastr Courier Network",
+        totalCharge: 72,
+        currency: "INR",
+        tatDays: 2,
+        chargedWeightKg: 1,
+        providerCourierId: "12345",
+        providerMetadata: { live_provider: true }
+      }];
+    },
+    createDraftOrder: async () => {
+      base.calls.createDraftOrder = (base.calls.createDraftOrder ?? 0) + 1;
+      return {
+        providerOrderId: "987654321",
+        providerReferenceNumber: "SR-ORDER-001",
+        status: "draft",
+        message: "created",
+        providerMetadata: { raw_response_stored: false }
+      };
+    },
+    manifestOrder: async () => {
+      base.calls.manifestOrder = (base.calls.manifestOrder ?? 0) + 1;
+      return {
+        awb: "190123456789",
+        trackingNumber: "190123456789",
+        status: "manifested",
+        providerReferenceNumber: "987654321",
+        providerAwb: "190123456789",
+        message: "manifested",
+        providerMetadata: { raw_response_stored: false }
+      };
+    },
+    getLabel: async () => {
+      base.calls.getLabel = (base.calls.getLabel ?? 0) + 1;
+      return {
+        labelUrl: "https://labels.shipmastr.local/live/sm-safe-label.pdf",
+        trackingUrl: "https://track.shipmastr.local/190123456789",
+        status: "manifested",
+        message: "label generated",
+        providerMetadata: { raw_response_stored: false }
+      };
+    }
+  };
+}
+
 function createFakeClient() {
   const state = {
     courierPartners: [{
@@ -337,6 +391,7 @@ function createFakeClient() {
     courierProviderCredential: {
       findMany: async ({ where, orderBy, take }: any = {}) => {
         let rows = state.courierProviderCredentials.filter((row) => {
+          if (where?.merchantId !== undefined && row.merchantId !== where.merchantId) return false;
           if (where?.providerKey !== undefined && row.providerKey !== where.providerKey) return false;
           if (where?.mode !== undefined && row.mode !== where.mode) return false;
           if (where?.status !== undefined && row.status !== where.status) return false;
@@ -668,13 +723,13 @@ function seedActiveLiveCourierProvider(state: ReturnType<typeof createFakeClient
   state.courierProviderCredentials.push({
     id: `courier_credential_${state.courierProviderCredentials.length + 1}`,
     merchantId,
-    providerKey: "BIGSHIP",
+    providerKey: "SHIPROCKET",
     mode: "LIVE",
     status: "ACTIVE",
-    credentialRef: "vault:bigship/live/test",
-    requiredFields: ["clientId", "clientSecret", "accessKey"],
+    credentialRef: "env:SHIPROCKET_LIVE_CREDENTIALS",
+    requiredFields: ["email", "password"],
     safeMeta: {
-      required_fields_present: ["clientId", "clientSecret", "accessKey"]
+      required_fields_present: ["email", "password"]
     },
     lastTestedAt: now,
     lastTestStatus: "PASS",
@@ -685,6 +740,23 @@ function seedActiveLiveCourierProvider(state: ReturnType<typeof createFakeClient
     createdAt: now,
     updatedAt: now
   });
+}
+
+function liveShiprocketSource(shipmentId: string, merchantId = "seller_1") {
+  return {
+    SHIPMASTR_LIVE_AWB_LABEL_ENABLED: "true",
+    SHIPMASTR_LIVE_AWB_LABEL_MODE: "LIVE",
+    SHIPMASTR_LIVE_AWB_LABEL_PILOT_ONLY: "true",
+    SHIPMASTR_ENABLE_LIVE_SHIPROCKET_AWB: "1",
+    SHIPMASTR_LIVE_SHIPROCKET_ALLOWED_MERCHANT_ID: merchantId,
+    SHIPMASTR_LIVE_SHIPROCKET_ALLOWED_SHIPMENT_ID: shipmentId,
+    SHIPMASTR_LIVE_SHIPROCKET_ONE_SHOT_TOKEN: "operator-one-shot",
+    SHIPMASTR_LIVE_SHIPROCKET_ONE_SHOT_HEADER: "operator-one-shot",
+    SHIPROCKET_LIVE_CREDENTIALS: JSON.stringify({
+      email: "pilot@example.test",
+      password: "redacted-password"
+    })
+  };
 }
 
 function pickupBody() {
@@ -983,35 +1055,57 @@ describe("Shipmastr Shipping Network services", () => {
       { merchantId: "seller_1", capability: "LIVE_AWB_LABEL", status: "ENABLED" }
     );
     seedActiveLiveCourierProvider(state);
-    const adapter = createFakeAdapter();
+    const adapter = createFakeShiprocketAdapter();
     const pickup = await createShippingPickupLocation("seller_1", pickupBody(), { client, adapter });
     const shipment = await createShipmentDraft("seller_1", shipmentBody(pickup.pickup_location_id), client);
 
     const first = await shipNowShipment("seller_1", shipment.shipment_id, "smart", {
       client,
       adapter,
-      liveAwbLabelSource: {
-        SHIPMASTR_LIVE_AWB_LABEL_ENABLED: "true",
-        SHIPMASTR_LIVE_AWB_LABEL_MODE: "LIVE",
-        SHIPMASTR_LIVE_AWB_LABEL_PILOT_ONLY: "true"
-      }
+      liveAwbLabelSource: liveShiprocketSource(shipment.shipment_id)
     });
     const second = await shipNowShipment("seller_1", shipment.shipment_id, "smart", {
       client,
       adapter,
-      liveAwbLabelSource: {
-        SHIPMASTR_LIVE_AWB_LABEL_ENABLED: "true",
-        SHIPMASTR_LIVE_AWB_LABEL_MODE: "LIVE",
-        SHIPMASTR_LIVE_AWB_LABEL_PILOT_ONLY: "true"
-      }
+      liveAwbLabelSource: liveShiprocketSource(shipment.shipment_id)
     });
     const json = JSON.stringify(first);
 
+    assert.equal(adapter.calls.createDraftOrder, 1);
     assert.equal(adapter.calls.manifestOrder, 1);
     assert.equal(adapter.calls.getLabel, 1);
     assert.equal(first.awbNumber, second.awbNumber);
     assert.equal(first.courierNetwork, "Shipmastr Courier Network");
-    assert.doesNotMatch(json, /internal_courier|providerMetadata|providerResponseJson|bigship/i);
+    assert.doesNotMatch(json, /internal_courier|providerMetadata|providerResponseJson|bigship|shiprocket|providerAwb|providerShipmentId/i);
+  });
+
+  it("blocks live Ship Now without one-shot approval before provider calls", async () => {
+    const { client, state } = createFakeClient();
+    state.livePilotMerchants.push({ merchantId: "seller_1", status: "ENABLED" });
+    state.livePilotCapabilities.push(
+      { merchantId: "seller_1", capability: "LIVE_COURIER_RATES", status: "ENABLED" },
+      { merchantId: "seller_1", capability: "LIVE_AWB_LABEL", status: "ENABLED" }
+    );
+    seedActiveLiveCourierProvider(state);
+    const adapter = createFakeShiprocketAdapter();
+    const pickup = await createShippingPickupLocation("seller_1", pickupBody(), { client, adapter });
+    const shipment = await createShipmentDraft("seller_1", shipmentBody(pickup.pickup_location_id), client);
+
+    await assert.rejects(
+      () => shipNowShipment("seller_1", shipment.shipment_id, "smart", {
+        client,
+        adapter,
+        liveAwbLabelSource: {
+          ...liveShiprocketSource(shipment.shipment_id),
+          SHIPMASTR_LIVE_SHIPROCKET_ONE_SHOT_HEADER: ""
+        }
+      }),
+      (error) => error instanceof HttpError && error.message === "LIVE_SHIPROCKET_ONE_SHOT_APPROVAL_REQUIRED"
+    );
+    assert.equal(adapter.calls.getRates, 0);
+    assert.equal(adapter.calls.createDraftOrder, 0);
+    assert.equal(adapter.calls.manifestOrder, 0);
+    assert.equal(adapter.calls.getLabel, 0);
   });
 
   it("serializes live Ship Now readiness without provider, raw response, or credential details", async () => {

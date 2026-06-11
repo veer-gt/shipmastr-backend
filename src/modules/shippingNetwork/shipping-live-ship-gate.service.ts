@@ -2,6 +2,9 @@ import { Prisma, ShipmentStatus } from "@prisma/client";
 import { env } from "../../config/env.js";
 import { HttpError } from "../../lib/httpError.js";
 import { prisma } from "../../lib/prisma.js";
+import {
+  canResolveShiprocketLiveCredentials
+} from "../courierPartners/providers/shiprocket/shiprocket-live-credentials.js";
 import { getCourierLiveReadinessSnapshot } from "../courierPartners/liveReadiness/courier-live-readiness.service.js";
 import { getLivePilotReadinessSnapshot } from "../livePilot/live-pilot.service.js";
 import { getSellerShipment } from "./shipping-shipments.service.js";
@@ -29,6 +32,16 @@ export type LiveAwbLabelReadiness = {
   providerReadiness: {
     hasActiveProvider: boolean;
     activeProviderCount: number;
+  };
+  shiprocket: {
+    oneShotEnabled: boolean;
+    oneShotApprovalPresent: boolean;
+    allowedMerchantMatched: boolean;
+    allowedShipmentMatched: boolean;
+    credentialId: string | null;
+    credentialRef?: string | null;
+    credentialRefConfigured: boolean;
+    credentialResolved: boolean;
   };
   shipment?: {
     shipmentId: string;
@@ -61,6 +74,22 @@ function stringValue(source: Source, key: string, fallback = "") {
   return String(value).trim() || fallback;
 }
 
+function sourceWithEnv(source?: Source) {
+  return {
+    ...env,
+    ...(source ?? {})
+  };
+}
+
+function oneShotHeader(source: Source) {
+  return stringValue(source, "SHIPMASTR_LIVE_SHIPROCKET_ONE_SHOT_HEADER")
+    || stringValue(source, "x-shipmastr-live-awb-approval");
+}
+
+function shipmentAllowedForLive(status: string) {
+  return status === ShipmentStatus.draft || status === ShipmentStatus.rates_fetched;
+}
+
 export function getLiveAwbLabelRuntime(source: Source = env): LiveAwbLabelRuntime {
   const mode = stringValue(source, "SHIPMASTR_LIVE_AWB_LABEL_MODE", "DRY_RUN").toUpperCase() === "LIVE"
     ? "LIVE"
@@ -81,9 +110,23 @@ export async function getLiveAwbLabelReadiness(
   } = {}
 ): Promise<LiveAwbLabelReadiness> {
   const client = options.client ?? prisma;
-  const runtime = getLiveAwbLabelRuntime(options.source ?? env);
+  const source = sourceWithEnv(options.source);
+  const runtime = getLiveAwbLabelRuntime(source);
   const pilot = await getLivePilotReadinessSnapshot(merchantId, client);
   const providerReadiness = await getCourierLiveReadinessSnapshot(merchantId, client);
+  const shiprocketRecord = await client.courierProviderCredential.findMany({
+    where: {
+      merchantId,
+      providerKey: "SHIPROCKET",
+      mode: "LIVE",
+      status: "ACTIVE",
+      credentialRef: { not: null },
+      lastTestStatus: "PASS",
+      lastTestedAt: { not: null }
+    },
+    orderBy: { lastTestedAt: "desc" },
+    take: 1
+  }).then((rows) => rows[0] ?? null);
   const liveRatesCapabilityEnabled = pilot.enabledCapabilities.includes("LIVE_COURIER_RATES");
   const awbLabelCapabilityEnabled = pilot.enabledCapabilities.includes("LIVE_AWB_LABEL");
   const blockers: string[] = [];
@@ -106,7 +149,26 @@ export async function getLiveAwbLabelReadiness(
       readyForShipNow: !terminalStatuses.has(String(record.status))
     };
     if (!shipment.readyForShipNow) blockers.push("SHIPMENT_STATUS_TERMINAL");
+    if (shipment.hasAwb) blockers.push("SHIPMENT_ALREADY_HAS_AWB");
+    if (!shipmentAllowedForLive(shipment.status)) blockers.push("SHIPMENT_NOT_READY_TO_SHIP");
   }
+
+  const oneShotToken = stringValue(source, "SHIPMASTR_LIVE_SHIPROCKET_ONE_SHOT_TOKEN");
+  const approvalHeader = oneShotHeader(source);
+  const allowedMerchant = stringValue(source, "SHIPMASTR_LIVE_SHIPROCKET_ALLOWED_MERCHANT_ID");
+  const allowedShipment = stringValue(source, "SHIPMASTR_LIVE_SHIPROCKET_ALLOWED_SHIPMENT_ID");
+  const oneShotEnabled = boolValue(source, "SHIPMASTR_ENABLE_LIVE_SHIPROCKET_AWB", false);
+  const credentialResolution = canResolveShiprocketLiveCredentials(shiprocketRecord?.credentialRef, source);
+  const shiprocket = {
+    oneShotEnabled,
+    oneShotApprovalPresent: Boolean(oneShotToken && approvalHeader && oneShotToken === approvalHeader),
+    allowedMerchantMatched: Boolean(allowedMerchant && allowedMerchant === merchantId),
+    allowedShipmentMatched: Boolean(!options.shipmentId || (allowedShipment && allowedShipment === options.shipmentId)),
+    credentialId: shiprocketRecord?.id ?? null,
+    credentialRef: shiprocketRecord?.credentialRef ?? null,
+    credentialRefConfigured: Boolean(shiprocketRecord?.credentialRef),
+    credentialResolved: credentialResolution.ok
+  };
 
   if (!runtime.enabled) {
     warnings.push("Pilot live AWB and label creation is disabled. Existing explicit Ship Now remains in safe mock or dry-run mode.");
@@ -116,6 +178,13 @@ export async function getLiveAwbLabelReadiness(
     if (runtime.mode === "LIVE" && !liveRatesCapabilityEnabled) blockers.push("LIVE_COURIER_RATES_CAPABILITY_REQUIRED");
     if (runtime.mode === "LIVE" && !awbLabelCapabilityEnabled) blockers.push("LIVE_AWB_LABEL_CAPABILITY_REQUIRED");
     if (runtime.mode === "LIVE" && !providerReadiness.has_active_provider) blockers.push("LIVE_PROVIDER_CREDENTIALS_MISSING");
+    if (runtime.mode === "LIVE" && !shiprocketRecord) blockers.push("LIVE_SHIPPING_PROVIDER_NOT_READY");
+    if (runtime.mode === "LIVE" && shiprocketRecord && !shiprocket.credentialRefConfigured) blockers.push("LIVE_SHIPROCKET_CREDENTIAL_REF_UNRESOLVED");
+    if (runtime.mode === "LIVE" && shiprocketRecord && !credentialResolution.ok) blockers.push(credentialResolution.code);
+    if (runtime.mode === "LIVE" && !shiprocket.oneShotEnabled) blockers.push("LIVE_SHIPROCKET_ONE_SHOT_APPROVAL_REQUIRED");
+    if (runtime.mode === "LIVE" && !shiprocket.oneShotApprovalPresent) blockers.push("LIVE_SHIPROCKET_ONE_SHOT_APPROVAL_REQUIRED");
+    if (runtime.mode === "LIVE" && !shiprocket.allowedMerchantMatched) blockers.push("LIVE_SHIPROCKET_ALLOWED_MERCHANT_MISMATCH");
+    if (runtime.mode === "LIVE" && !shiprocket.allowedShipmentMatched) blockers.push("LIVE_SHIPROCKET_ALLOWED_SHIPMENT_MISMATCH");
     if (runtime.mode === "DRY_RUN") warnings.push("Pilot live AWB and label creation is in dry-run mode; no live document call is allowed.");
   }
 
@@ -126,7 +195,14 @@ export async function getLiveAwbLabelReadiness(
     && liveRatesCapabilityEnabled
     && awbLabelCapabilityEnabled
     && providerReadiness.has_active_provider
-    && (!shipment || shipment.readyForShipNow);
+    && Boolean(shiprocketRecord)
+    && shiprocket.credentialRefConfigured
+    && shiprocket.credentialResolved
+    && shiprocket.oneShotEnabled
+    && shiprocket.oneShotApprovalPresent
+    && shiprocket.allowedMerchantMatched
+    && shiprocket.allowedShipmentMatched
+    && (!shipment || (shipment.readyForShipNow && !shipment.hasAwb && shipmentAllowedForLive(shipment.status)));
   const status = !runtime.enabled
     ? "DISABLED"
     : blockers.length
@@ -149,8 +225,9 @@ export async function getLiveAwbLabelReadiness(
       hasActiveProvider: providerReadiness.has_active_provider,
       activeProviderCount: providerReadiness.active_provider_count
     },
+    shiprocket,
     ...(shipment ? { shipment } : {}),
-    blockers,
+    blockers: [...new Set(blockers)],
     warnings,
     message: ready
       ? "Pilot live Ship Now is available for this merchant and shipment. Public responses remain Shipmastr-branded."
@@ -175,6 +252,17 @@ export async function assertLiveAwbLabelAllowed(
   if (!readiness.pilot.liveRatesCapabilityEnabled) throw new HttpError(409, "LIVE_COURIER_RATES_CAPABILITY_REQUIRED");
   if (!readiness.pilot.awbLabelCapabilityEnabled) throw new HttpError(409, "LIVE_AWB_LABEL_CAPABILITY_REQUIRED");
   if (!readiness.providerReadiness.hasActiveProvider) throw new HttpError(409, "LIVE_PROVIDER_CREDENTIALS_MISSING");
+  if (!readiness.shiprocket.credentialId) throw new HttpError(409, "LIVE_SHIPPING_PROVIDER_NOT_READY");
+  if (!readiness.shiprocket.credentialRefConfigured || !readiness.shiprocket.credentialResolved) {
+    throw new HttpError(409, "LIVE_SHIPROCKET_CREDENTIAL_REF_UNRESOLVED");
+  }
+  if (!readiness.shiprocket.oneShotEnabled || !readiness.shiprocket.oneShotApprovalPresent) {
+    throw new HttpError(409, "LIVE_SHIPROCKET_ONE_SHOT_APPROVAL_REQUIRED");
+  }
+  if (!readiness.shiprocket.allowedMerchantMatched) throw new HttpError(409, "LIVE_SHIPROCKET_ALLOWED_MERCHANT_MISMATCH");
+  if (!readiness.shiprocket.allowedShipmentMatched) throw new HttpError(409, "LIVE_SHIPROCKET_ALLOWED_SHIPMENT_MISMATCH");
+  if (readiness.shipment?.hasAwb) throw new HttpError(409, "SHIPMENT_ALREADY_HAS_AWB");
+  if (readiness.shipment && !shipmentAllowedForLive(readiness.shipment.status)) throw new HttpError(409, "SHIPMENT_NOT_READY_TO_SHIP");
   if (readiness.shipment && !readiness.shipment.readyForShipNow) throw new HttpError(409, "SHIPMENT_STATUS_TERMINAL");
   return readiness;
 }
@@ -197,6 +285,14 @@ export function serializeLiveAwbLabelReadiness(readiness: LiveAwbLabelReadiness)
     shipping_network_readiness: {
       has_active_live_credential: readiness.providerReadiness.hasActiveProvider,
       active_live_credential_count: readiness.providerReadiness.activeProviderCount
+    },
+    live_awb_one_shot: {
+      enabled: readiness.shiprocket.oneShotEnabled,
+      approval_present: readiness.shiprocket.oneShotApprovalPresent,
+      allowed_merchant_matched: readiness.shiprocket.allowedMerchantMatched,
+      allowed_shipment_matched: readiness.shiprocket.allowedShipmentMatched,
+      credential_configured: readiness.shiprocket.credentialRefConfigured,
+      credential_resolved: readiness.shiprocket.credentialResolved
     },
     ...(readiness.shipment ? {
       shipment: {

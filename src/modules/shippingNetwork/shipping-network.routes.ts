@@ -552,7 +552,10 @@ shippingNetworkRouter.post("/shipments/:shipmentId/rates", async (req, res) => {
 
 shippingNetworkRouter.get("/shipments/:shipmentId/live-ship-readiness", async (req, res) => {
   const readiness = await getLiveAwbLabelReadiness(req.auth!.merchantId, {
-    shipmentId: req.params.shipmentId
+    shipmentId: req.params.shipmentId,
+    source: {
+      SHIPMASTR_LIVE_SHIPROCKET_ONE_SHOT_HEADER: req.get("x-shipmastr-live-awb-approval") ?? ""
+    }
   });
   return res.json(successEnvelope(
     "Pilot live Ship Now readiness fetched successfully.",
@@ -562,7 +565,11 @@ shippingNetworkRouter.get("/shipments/:shipmentId/live-ship-readiness", async (r
 
 shippingNetworkRouter.post("/shipments/:shipmentId/ship-now", async (req, res) => {
   const body = shipNowSchema.parse(req.body);
-  const data = await shipNowShipment(req.auth!.merchantId, req.params.shipmentId, body.tier);
+  const data = await shipNowShipment(req.auth!.merchantId, req.params.shipmentId, body.tier, {
+    liveAwbLabelSource: {
+      SHIPMASTR_LIVE_SHIPROCKET_ONE_SHOT_HEADER: req.get("x-shipmastr-live-awb-approval") ?? ""
+    }
+  });
   return res.json(successEnvelope("Shipment created successfully.", data));
 });
 
@@ -669,7 +676,11 @@ shippingSellerApiRouter.post("/shipments/:shipmentId/rates", requireSellerApiKey
 
 shippingSellerApiRouter.post("/shipments/:shipmentId/ship-now", requireSellerApiKey(["shipments:write"]), async (req, res) => {
   const body = shipNowSchema.parse(req.body);
-  const data = await shipNowShipment(req.auth!.merchantId, routeParam(req.params.shipmentId), body.tier);
+  const data = await shipNowShipment(req.auth!.merchantId, routeParam(req.params.shipmentId), body.tier, {
+    liveAwbLabelSource: {
+      SHIPMASTR_LIVE_SHIPROCKET_ONE_SHOT_HEADER: req.get("x-shipmastr-live-awb-approval") ?? ""
+    }
+  });
   await enqueueWebhookEvent(req.auth!.merchantId, "shipment.shipped", data);
   return res.json(sellerApiEnvelope("Shipment created successfully.", data));
 });

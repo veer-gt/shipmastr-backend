@@ -1,4 +1,4 @@
-export type InternalCourierProviderCode = "bigship";
+export type InternalCourierProviderCode = "bigship" | "shiprocket";
 
 export type ProviderShipmentStatus =
   | "draft"
