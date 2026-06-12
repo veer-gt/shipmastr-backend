@@ -58,11 +58,13 @@ function makeClient(input: {
   credentials?: any[];
   rates?: any[];
   probes?: any[];
+  shipments?: any[];
 } = {}) {
   const state = {
     credentials: input.credentials ?? [],
     rates: input.rates ?? [],
-    probes: input.probes ?? []
+    probes: input.probes ?? [],
+    shipments: input.shipments ?? []
   };
   return {
     courierProviderCredential: {
@@ -95,9 +97,16 @@ function makeClient(input: {
       findMany: async ({ where, orderBy, take }: any = {}) => {
         let rows = [...state.rates];
         if (where?.sellerId) rows = rows.filter((row) => row.sellerId === where.sellerId);
+        if (where?.shipmentId) rows = rows.filter((row) => row.shipmentId === where.shipmentId);
         if (orderBy?.createdAt === "desc") rows.sort((a, b) => b.createdAt.getTime() - a.createdAt.getTime());
         return take ? rows.slice(0, take) : rows;
       }
+    },
+    shipment: {
+      findFirst: async ({ where }: any = {}) => state.shipments.find((row) => (
+        (!where?.id || row.id === where.id)
+        && (!where?.sellerId || row.sellerId === where.sellerId)
+      )) ?? null
     }
   } as any;
 }
@@ -186,6 +195,58 @@ describe("courier partner certification layer", () => {
     assert.equal(result.provider.live_ready, false);
     assert.ok(result.provider.blockers.includes("PROVIDER_AWB_NOT_CERTIFIED"));
     assert.ok(result.provider.blockers.includes("PROVIDER_LABEL_NOT_CERTIFIED"));
+  });
+
+  it("keeps Shiprocket rates failed when latest refresh has no eligible rates", async () => {
+    const result = await getCourierCertificationProvider("merchant_1", "SHIPROCKET", {
+      shipmentId: "shipment_1",
+      client: makeClient({
+        credentials: [activeCredential()],
+        rates: [{
+          ...smartLiveRate(),
+          shipmentId: "shipment_1"
+        }],
+        shipments: [{
+          id: "shipment_1",
+          sellerId: "merchant_1",
+          metadata: {
+            phase6: {
+              latestRateRefresh: {
+                status: "NO_ELIGIBLE_SHIPPING_RATES",
+                selected_pickup_pincode: "201301",
+                delivery_pincode: "400001",
+                live_provider_checked: true,
+                live_serviceability_returned_count: 3,
+                live_rate_candidates_count: 3,
+                eligible_rate_count: 0,
+                rejected_rate_reasons: [{ safe_reason: "PICKUP_UNAVAILABLE", count: 3 }],
+                provider_pickup_available_any: false,
+                provider_delivery_available_any: true,
+                stale_selected_rate_ignored: true,
+                checked_at: now().toISOString()
+              }
+            }
+          }
+        }],
+        probes: [{
+          providerKey: "SHIPROCKET",
+          merchantId: "merchant_1",
+          probeType: "RATE_SERVICEABILITY",
+          status: "PASS",
+          testedAt: now()
+        }]
+      }),
+      pickupDiagnostics: pickupAligned
+    });
+    const rates = result.provider.dimensions.find((dimension) => dimension.key === "RATES")!;
+    const json = JSON.stringify(result.provider);
+
+    assert.equal(rates.status, "FAIL");
+    assert.ok(result.provider.blockers.includes("PROVIDER_LATEST_RATE_REFRESH_NO_ELIGIBLE_RATES"));
+    assert.equal(rates.safe_summary.latest_refresh_status, "NO_ELIGIBLE_SHIPPING_RATES");
+    assert.equal(rates.safe_summary.eligible_rate_count, 0);
+    assert.equal(rates.safe_summary.stale_selected_rate_ignored, true);
+    assert.doesNotMatch(json, /Bigship|Shipmozo|providerCourierId|providerServiceId|rawPayload|rawHeaders|rawResponse|Authorization|Bearer/i);
   });
 
   it("keeps mock-only providers dry-run ready and not live-ready", async () => {

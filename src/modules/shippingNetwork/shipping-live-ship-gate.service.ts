@@ -16,6 +16,10 @@ import { getCourierLiveReadinessSnapshot } from "../courierPartners/liveReadines
 import { getLivePilotReadinessSnapshot } from "../livePilot/live-pilot.service.js";
 import { getSellerShipment } from "./shipping-shipments.service.js";
 import {
+  latestRateRefreshDiagnosticFromShipment,
+  type LiveRateRefreshDiagnostic
+} from "./shipping-rates.service.js";
+import {
   getShiprocketPickupDiagnostics,
   serializeShiprocketPickupDiagnostics
 } from "./shipping-shiprocket-pickup-alignment.service.js";
@@ -67,7 +71,10 @@ export type LiveAwbLabelReadiness = {
     liveReady: boolean;
     pickupAvailable: boolean | null;
     providerCourierIdPresent: boolean;
+    staleSelectedRateIgnored?: boolean;
+    latestRefreshStatus?: LiveRateRefreshDiagnostic["status"] | null;
   };
+  latestRateRefresh?: LiveRateRefreshDiagnostic | null;
   pickupAlignment?: Awaited<ReturnType<typeof getShiprocketPickupDiagnostics>>;
   certificationDecision?: CourierCertificationDecision;
   blockers: string[];
@@ -311,6 +318,7 @@ export async function getLiveAwbLabelReadiness(
   const warnings: string[] = [];
   let shipment: LiveAwbLabelReadiness["shipment"];
   let selectedRate: LiveAwbLabelReadiness["selectedRate"];
+  let latestRateRefresh: LiveAwbLabelReadiness["latestRateRefresh"];
   let pickupAlignment: LiveAwbLabelReadiness["pickupAlignment"];
 
   if (options.shipmentId) {
@@ -331,6 +339,10 @@ export async function getLiveAwbLabelReadiness(
     if (!shipment.readyForShipNow) blockers.push("SHIPMENT_STATUS_TERMINAL");
     if (shipment.hasAwb) blockers.push("SHIPMENT_ALREADY_HAS_AWB");
     if (!shipmentAllowedForLive(shipment.status)) blockers.push("SHIPMENT_NOT_READY_TO_SHIP");
+    latestRateRefresh = latestRateRefreshDiagnosticFromShipment(record);
+    const latestRefreshNoEligible = latestRateRefresh
+      && ["NO_ELIGIBLE_SHIPPING_RATES", "PROVIDER_SERVICEABILITY_NO_CANDIDATES"].includes(latestRateRefresh.status);
+    if (latestRefreshNoEligible) blockers.push("PROVIDER_LATEST_RATE_REFRESH_NO_ELIGIBLE_RATES");
 
     const rates = await client.shipmentRate.findMany({
       where: {
@@ -345,14 +357,17 @@ export async function getLiveAwbLabelReadiness(
       selectedRate = {
         tier: "smart",
         found: true,
-        liveMode: rateMetadata.liveMode,
-        liveReady: rateMetadata.liveReady,
+        liveMode: latestRefreshNoEligible ? false : rateMetadata.liveMode,
+        liveReady: latestRefreshNoEligible ? false : rateMetadata.liveReady,
         pickupAvailable: rateMetadata.pickupAvailable,
-        providerCourierIdPresent: rateMetadata.providerCourierIdPresent
+        providerCourierIdPresent: latestRefreshNoEligible ? false : rateMetadata.providerCourierIdPresent,
+        staleSelectedRateIgnored: Boolean(latestRefreshNoEligible),
+        latestRefreshStatus: latestRateRefresh?.status ?? null
       };
       if (
         runtime.enabled
         && runtime.mode === "LIVE"
+        && !latestRefreshNoEligible
         && rateMetadata.liveMode
         && rateMetadata.liveReady
         && rateMetadata.pickupAvailable !== true
@@ -366,7 +381,9 @@ export async function getLiveAwbLabelReadiness(
         liveMode: false,
         liveReady: false,
         pickupAvailable: null,
-        providerCourierIdPresent: false
+        providerCourierIdPresent: false,
+        staleSelectedRateIgnored: Boolean(latestRefreshNoEligible),
+        latestRefreshStatus: latestRateRefresh?.status ?? null
       };
     }
   }
@@ -482,6 +499,7 @@ export async function getLiveAwbLabelReadiness(
     shiprocket,
     ...(shipment ? { shipment } : {}),
     ...(selectedRate ? { selectedRate } : {}),
+    latestRateRefresh: latestRateRefresh ?? null,
     ...(pickupAlignment ? { pickupAlignment } : {}),
     certificationDecision,
     blockers: [...new Set(blockers)],
@@ -520,6 +538,9 @@ export async function assertLiveAwbLabelAllowed(
   }
   if (!readiness.shiprocket.allowedMerchantMatched) throw new HttpError(409, "LIVE_SHIPROCKET_ALLOWED_MERCHANT_MISMATCH");
   if (!readiness.shiprocket.allowedShipmentMatched) throw new HttpError(409, "LIVE_SHIPROCKET_ALLOWED_SHIPMENT_MISMATCH");
+  if (readiness.blockers.includes("PROVIDER_LATEST_RATE_REFRESH_NO_ELIGIBLE_RATES")) {
+    throw new HttpError(409, "PROVIDER_LATEST_RATE_REFRESH_NO_ELIGIBLE_RATES");
+  }
   if (readiness.blockers.includes("SHIPROCKET_PICKUP_NOT_FOUND")) throw new HttpError(409, "SHIPROCKET_PICKUP_NOT_FOUND");
   if (readiness.blockers.includes("SHIPROCKET_PICKUP_PINCODE_MISMATCH")) throw new HttpError(409, "SHIPROCKET_PICKUP_PINCODE_MISMATCH");
   if (readiness.blockers.includes("SHIPROCKET_PICKUP_NOT_ACTIVE")) throw new HttpError(409, "SHIPROCKET_PICKUP_NOT_ACTIVE");
@@ -573,8 +594,13 @@ export function serializeLiveAwbLabelReadiness(readiness: LiveAwbLabelReadiness)
         found: readiness.selectedRate.found,
         live_mode: readiness.selectedRate.liveMode,
         live_ready: readiness.selectedRate.liveReady,
-        pickup_available: readiness.selectedRate.pickupAvailable
+        pickup_available: readiness.selectedRate.pickupAvailable,
+        stale_selected_rate_ignored: readiness.selectedRate.staleSelectedRateIgnored ?? false,
+        latest_refresh_status: readiness.selectedRate.latestRefreshStatus ?? null
       }
+    } : {}),
+    ...(readiness.latestRateRefresh ? {
+      latest_rate_refresh: readiness.latestRateRefresh
     } : {}),
     ...(readiness.pickupAlignment ? {
       pickup_alignment: serializeShiprocketPickupDiagnostics(readiness.pickupAlignment)

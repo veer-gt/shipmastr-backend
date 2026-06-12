@@ -84,6 +84,14 @@ function providerScopedNextActions(input) {
 }
 
 function rateContextAction(input) {
+  const latestRefresh = input.liveShipReadiness?.latest_rate_refresh;
+  const noEligible = latestRefresh?.status === "NO_ELIGIBLE_SHIPPING_RATES"
+    || latestRefresh?.status === "PROVIDER_SERVICEABILITY_NO_CANDIDATES"
+    || input.liveShipReadiness?.selected_rate?.latest_refresh_status === "NO_ELIGIBLE_SHIPPING_RATES"
+    || input.liveShipReadiness?.selected_rate?.latest_refresh_status === "PROVIDER_SERVICEABILITY_NO_CANDIDATES";
+  if (noEligible) {
+    return "No eligible Shipmastr shipping option is available for this pickup right now. Fix provider pickup/serviceability or try another pickup, then refresh rates again.";
+  }
   const pickupAligned = input.pickup?.provider_pickup_pincode_match === true
     || dimension(input.provider, "PICKUPS")?.status === "PASS";
   const ratePickupUnavailable = input.liveShipReadiness?.selected_rate?.pickup_available === false;
@@ -97,6 +105,19 @@ function boolText(value) {
   if (value === true) return "true";
   if (value === false) return "false";
   return "unknown";
+}
+
+function yesNoText(value) {
+  if (value === true) return "yes";
+  if (value === false) return "no";
+  return "unknown";
+}
+
+function countRejectedReason(latestRefresh, reason) {
+  const rows = Array.isArray(latestRefresh?.rejected_rate_reasons) ? latestRefresh.rejected_rate_reasons : [];
+  return rows
+    .filter((row) => row?.safe_reason === reason)
+    .reduce((sum, row) => sum + (Number.isFinite(Number(row.count)) ? Number(row.count) : 0), 0);
 }
 
 function safeLine(value) {
@@ -117,6 +138,9 @@ function renderReport(input) {
   const provider = input.provider;
   const pickup = input.pickup;
   const liveShipReadiness = input.liveShipReadiness;
+  const latestRefresh = liveShipReadiness?.latest_rate_refresh;
+  const ratesDimension = dimension(provider, "RATES");
+  const pickupUnavailableCount = countRejectedReason(latestRefresh, "PICKUP_UNAVAILABLE");
   const readyForLiveShipNow = Boolean(liveShipReadiness?.ready);
   const blockers = providerScopedBlockers(input);
   const nextActions = providerScopedNextActions(input);
@@ -147,6 +171,13 @@ function renderReport(input) {
     `  awb: ${status(provider, "AWB")}`,
     `  label: ${status(provider, "LABEL")}`,
     `  tracking: ${status(provider, "TRACKING")}`,
+    "",
+    "Rates:",
+    `  status: ${status(provider, "RATES")}`,
+    `  latest refresh: ${latestRefresh?.status ?? ratesDimension?.safe_summary?.latest_refresh_status ?? "unknown"}`,
+    `  eligible rate count: ${latestRefresh?.eligible_rate_count ?? ratesDimension?.safe_summary?.eligible_rate_count ?? "unknown"}`,
+    `  pickup unavailable candidates: ${pickupUnavailableCount || yesNoText(latestRefresh?.provider_pickup_available_any === false ? true : null)}`,
+    `  stale selected rate ignored: ${boolText(liveShipReadiness?.selected_rate?.stale_selected_rate_ignored ?? latestRefresh?.stale_selected_rate_ignored)}`,
     "",
     "Pickup context:",
     `  selected context: ${pickup?.selected_context ?? "unknown"}`,

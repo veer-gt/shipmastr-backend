@@ -217,7 +217,12 @@ function createFakeAdapter(): InternalCourierProviderAdapter & { calls: Record<s
   };
 }
 
-function createFakeShiprocketAdapter(options: { providerCourierId?: string | null } = {}): InternalCourierProviderAdapter & { calls: Record<string, number> } {
+function createFakeShiprocketAdapter(options: {
+  providerCourierId?: string | null;
+  pickupAvailable?: boolean;
+  deliveryAvailable?: boolean;
+  emptyRates?: boolean;
+} = {}): InternalCourierProviderAdapter & { calls: Record<string, number> } {
   const base = createFakeAdapter();
   const providerCourierId = options.providerCourierId === undefined ? "12345" : options.providerCourierId;
   const rate = (
@@ -235,6 +240,8 @@ function createFakeShiprocketAdapter(options: { providerCourierId?: string | nul
     tatDays,
     chargedWeightKg: 1,
     ...(providerCourierId ? { providerCourierId } : {}),
+    ...(options.pickupAvailable !== undefined ? { pickupAvailable: options.pickupAvailable } : {}),
+    ...(options.deliveryAvailable !== undefined ? { deliveryAvailable: options.deliveryAvailable } : {}),
     providerMetadata: {
       providerCourierId,
       providerServiceId: `svc_${providerRateId}`,
@@ -247,6 +254,7 @@ function createFakeShiprocketAdapter(options: { providerCourierId?: string | nul
     code: "shiprocket",
     getRates: async () => {
       base.calls.getRates = (base.calls.getRates ?? 0) + 1;
+      if (options.emptyRates) return [];
       return [
         rate("shiprocket_rate_smart", "Shipmastr Smart", 72, 2, "rate_smart"),
         rate("shiprocket_rate_economy", "Shipmastr Economy", 58, 4, "rate_economy"),
@@ -1200,11 +1208,89 @@ describe("Shipmastr Shipping Network services", () => {
         adapter,
         liveRatesSource: liveRatesSource()
       }),
-      (error) => error instanceof HttpError && error.message === "SHIPROCKET_LIVE_RATE_PROVIDER_ID_MISSING"
+      (error) => error instanceof HttpError && error.message === "NO_ELIGIBLE_SHIPPING_RATES"
     );
     assert.equal(adapter.calls.getRates, 1);
     assert.equal(state.providerRefs.length, 0);
     assert.equal(state.rates.length, 0);
+    assert.equal(state.shipments[0]?.metadata?.phase6?.latestRateRefresh?.status, "NO_ELIGIBLE_SHIPPING_RATES");
+    assert.deepEqual(state.shipments[0]?.metadata?.phase6?.latestRateRefresh?.rejected_rate_reasons, [
+      { safe_reason: "MISSING_COURIER_ID", count: 3 }
+    ]);
+  });
+
+  it("records safe no-eligible diagnostics when live rate candidates have pickup unavailable", async () => {
+    const { client, state } = createFakeClient();
+    state.livePilotMerchants.push({ merchantId: "seller_1", status: "ENABLED" });
+    state.livePilotCapabilities.push({
+      merchantId: "seller_1",
+      capability: "LIVE_COURIER_RATES",
+      status: "ENABLED"
+    });
+    seedActiveLiveCourierProvider(state);
+    const adapter = createFakeShiprocketAdapter({ pickupAvailable: false });
+    const pickup = await createShippingPickupLocation("seller_1", pickupBody(), { client, adapter });
+    const shipment = await createShipmentDraft("seller_1", shipmentBody(pickup.pickup_location_id), client);
+
+    await assert.rejects(
+      () => fetchShipmentRates("seller_1", shipment.shipment_id, {
+        client,
+        adapter,
+        refresh: true,
+        liveRatesSource: liveRatesSource()
+      }),
+      (error) => {
+        assert.ok(error instanceof HttpError);
+        assert.equal(error.message, "NO_ELIGIBLE_SHIPPING_RATES");
+        assert.equal(error.details, undefined);
+        return true;
+      }
+    );
+
+    const diagnostic = state.shipments[0]?.metadata?.phase6?.latestRateRefresh;
+    assert.equal(adapter.calls.getRates, 1);
+    assert.equal(diagnostic.status, "NO_ELIGIBLE_SHIPPING_RATES");
+    assert.equal(diagnostic.live_provider_checked, true);
+    assert.equal(diagnostic.live_serviceability_returned_count, 3);
+    assert.equal(diagnostic.live_rate_candidates_count, 3);
+    assert.equal(diagnostic.eligible_rate_count, 0);
+    assert.equal(diagnostic.provider_pickup_available_any, false);
+    assert.deepEqual(diagnostic.rejected_rate_reasons, [{ safe_reason: "PICKUP_UNAVAILABLE", count: 3 }]);
+    assert.doesNotMatch(JSON.stringify(diagnostic), /Shiprocket|shiprocket|providerCourierId|providerServiceId|providerRateId|rawPayload|rawHeaders|rawResponse|Authorization|Bearer|12345|svc_rate/i);
+    assert.equal(adapter.calls.manifestOrder, 0);
+    assert.equal(adapter.calls.getLabel, 0);
+  });
+
+  it("records safe no-candidate diagnostics when live serviceability returns no rates", async () => {
+    const { client, state } = createFakeClient();
+    state.livePilotMerchants.push({ merchantId: "seller_1", status: "ENABLED" });
+    state.livePilotCapabilities.push({
+      merchantId: "seller_1",
+      capability: "LIVE_COURIER_RATES",
+      status: "ENABLED"
+    });
+    seedActiveLiveCourierProvider(state);
+    const adapter = createFakeShiprocketAdapter({ emptyRates: true });
+    const pickup = await createShippingPickupLocation("seller_1", pickupBody(), { client, adapter });
+    const shipment = await createShipmentDraft("seller_1", shipmentBody(pickup.pickup_location_id), client);
+
+    await assert.rejects(
+      () => fetchShipmentRates("seller_1", shipment.shipment_id, {
+        client,
+        adapter,
+        refresh: true,
+        liveRatesSource: liveRatesSource()
+      }),
+      (error) => error instanceof HttpError && error.message === "NO_ELIGIBLE_SHIPPING_RATES"
+    );
+
+    const diagnostic = state.shipments[0]?.metadata?.phase6?.latestRateRefresh;
+    assert.equal(diagnostic.status, "PROVIDER_SERVICEABILITY_NO_CANDIDATES");
+    assert.equal(diagnostic.live_serviceability_returned_count, 0);
+    assert.equal(diagnostic.live_rate_candidates_count, 0);
+    assert.equal(diagnostic.eligible_rate_count, 0);
+    assert.equal(diagnostic.provider_pickup_available_any, null);
+    assert.deepEqual(diagnostic.rejected_rate_reasons, []);
   });
 
   it("serializes live rate readiness without provider or credential details", async () => {
@@ -1563,6 +1649,60 @@ describe("Shipmastr Shipping Network services", () => {
     assert.equal(readiness.status, "BLOCKED");
     assert.ok(readiness.blockers.includes("SHIPROCKET_LIVE_PICKUP_UNAVAILABLE"));
     assert.equal(serialized.selected_rate?.pickup_available, false);
+    assert.doesNotMatch(json, /providerCourierId|providerServiceId|providerRateId|rawPayload|rawHeaders|rawResponse|Authorization|Bearer/i);
+  });
+
+  it("does not treat a stale selected rate as usable after a failed latest refresh", async () => {
+    const { client, state } = createFakeClient();
+    state.livePilotMerchants.push({ merchantId: "seller_1", status: "ENABLED" });
+    state.livePilotCapabilities.push(
+      { merchantId: "seller_1", capability: "LIVE_COURIER_RATES", status: "ENABLED" },
+      { merchantId: "seller_1", capability: "LIVE_AWB_LABEL", status: "ENABLED" }
+    );
+    seedActiveLiveCourierProvider(state);
+    const pickupClient = createFakeShiprocketPickupClient();
+    const pickup = await createShippingPickupLocation("seller_1", pickupBody(), { client, adapter: createFakeAdapter() });
+    const shipment = await createShipmentDraft("seller_1", shipmentBody(pickup.pickup_location_id), client);
+    seedShipmentRate(state, {
+      shipmentId: shipment.shipment_id,
+      internalCourierId: "12345",
+      pickupAvailable: true
+    });
+    state.shipments[0]!.metadata = {
+      ...state.shipments[0]!.metadata,
+      phase6: {
+        ...(state.shipments[0]!.metadata?.phase6 ?? {}),
+        latestRateRefresh: {
+          status: "NO_ELIGIBLE_SHIPPING_RATES",
+          selected_pickup_pincode: "560001",
+          delivery_pincode: "400001",
+          live_provider_checked: true,
+          live_serviceability_returned_count: 3,
+          live_rate_candidates_count: 3,
+          eligible_rate_count: 0,
+          rejected_rate_reasons: [{ safe_reason: "PICKUP_UNAVAILABLE", count: 3 }],
+          provider_pickup_available_any: false,
+          provider_delivery_available_any: true,
+          stale_selected_rate_ignored: true,
+          checked_at: now.toISOString()
+        }
+      }
+    };
+
+    const readiness = await getLiveAwbLabelReadiness("seller_1", {
+      client,
+      shipmentId: shipment.shipment_id,
+      source: liveShiprocketSource(shipment.shipment_id),
+      includePickupAlignment: true,
+      shiprocketPickupClient: pickupClient.client
+    });
+    const serialized = serializeLiveAwbLabelReadiness(readiness);
+    const json = JSON.stringify(serialized);
+
+    assert.equal(serialized.selected_rate?.live_ready, false);
+    assert.equal(serialized.selected_rate?.stale_selected_rate_ignored, true);
+    assert.equal(serialized.latest_rate_refresh?.status, "NO_ELIGIBLE_SHIPPING_RATES");
+    assert.ok(readiness.blockers.includes("PROVIDER_LATEST_RATE_REFRESH_NO_ELIGIBLE_RATES"));
     assert.doesNotMatch(json, /providerCourierId|providerServiceId|providerRateId|rawPayload|rawHeaders|rawResponse|Authorization|Bearer/i);
   });
 

@@ -7,6 +7,10 @@ import type {
   CourierLiveProviderKey
 } from "../liveReadiness/courier-live-readiness.types.js";
 import { getShiprocketPickupDiagnostics } from "../../shippingNetwork/shipping-shiprocket-pickup-alignment.service.js";
+import {
+  latestRateRefreshDiagnosticFromShipment,
+  type LiveRateRefreshDiagnostic
+} from "../../shippingNetwork/shipping-rates.service.js";
 import type {
   CourierCertificationBlocker,
   CourierCertificationDimension,
@@ -103,19 +107,40 @@ function liveRateMetadata(rate: RateRecord | null) {
     liveReady: phase6.livePilotRatesReady === true || metadata.livePilotRatesReady === true,
     pickupAvailable: strictBool(phase6.pickupAvailable),
     providerCourierIdPresent: Boolean(providerCourierId && /^[0-9]+$/.test(providerCourierId)),
-    checkedAt: rate?.createdAt ?? null
+    checkedAt: rate?.createdAt ?? null,
+    latestRefresh: null as LiveRateRefreshDiagnostic | null
   };
 }
 
-async function latestSmartRate(merchantId: string, client: Db): Promise<RateRecord | null> {
+async function latestSmartRate(merchantId: string, client: Db, shipmentId?: string): Promise<RateRecord | null> {
   const model = (client as Db & { shipmentRate?: { findMany?: Function } }).shipmentRate;
   if (!model?.findMany) return null;
   const rows = await model.findMany({
-    where: { sellerId: merchantId },
+    where: {
+      sellerId: merchantId,
+      ...(shipmentId ? { shipmentId } : {})
+    },
     orderBy: { createdAt: "desc" },
     take: 25
   }) as RateRecord[];
   return rows.find(isSmartRate) ?? rows[0] ?? null;
+}
+
+async function latestRateRefreshDiagnostic(
+  merchantId: string,
+  shipmentId: string | undefined,
+  client: Db
+) {
+  if (!shipmentId) return null;
+  const model = (client as Db & { shipment?: { findFirst?: Function } }).shipment;
+  if (!model?.findFirst) return null;
+  const shipment = await model.findFirst({
+    where: {
+      id: shipmentId,
+      sellerId: merchantId
+    }
+  });
+  return shipment ? latestRateRefreshDiagnosticFromShipment(shipment) : null;
 }
 
 async function latestProbe(
@@ -227,6 +252,19 @@ function serviceabilityDimension(input: {
   serviceabilityProbe: ProbeRecord | null;
   rateMeta: ReturnType<typeof liveRateMetadata>;
 }): CourierCertificationDimension {
+  if (input.rateMeta.latestRefresh?.status === "PROVIDER_SERVICEABILITY_NO_CANDIDATES") {
+    return {
+      key: "SERVICEABILITY",
+      status: "FAIL",
+      blockers: ["PROVIDER_SERVICEABILITY_NO_CANDIDATES"],
+      warnings: ["Latest live rate refresh returned no serviceable candidates for this pickup and delivery context."],
+      safe_summary: {
+        latest_refresh_status: input.rateMeta.latestRefresh.status,
+        live_serviceability_returned_count: input.rateMeta.latestRefresh.live_serviceability_returned_count,
+        checked_at: input.rateMeta.latestRefresh.checked_at
+      }
+    };
+  }
   if (input.rateMeta.liveReady || input.serviceabilityProbe?.status === "PASS") {
     return {
       key: "SERVICEABILITY",
@@ -260,16 +298,26 @@ function serviceabilityDimension(input: {
 
 function ratesDimension(rateMeta: ReturnType<typeof liveRateMetadata>): CourierCertificationDimension {
   const blockers: CourierCertificationBlocker[] = [];
-  if (!rateMeta.liveMode || !rateMeta.liveReady) blockers.push("PROVIDER_RATES_NOT_LIVE");
-  if (!rateMeta.providerCourierIdPresent) blockers.push("PROVIDER_COURIER_ID_MISSING");
-  if (rateMeta.pickupAvailable === false) blockers.push("PROVIDER_PICKUP_UNAVAILABLE");
+  const latestNoEligible = rateMeta.latestRefresh
+    && ["NO_ELIGIBLE_SHIPPING_RATES", "PROVIDER_SERVICEABILITY_NO_CANDIDATES"].includes(rateMeta.latestRefresh.status);
+  if (latestNoEligible) blockers.push("PROVIDER_LATEST_RATE_REFRESH_NO_ELIGIBLE_RATES");
+  if (!latestNoEligible && (!rateMeta.liveMode || !rateMeta.liveReady)) blockers.push("PROVIDER_RATES_NOT_LIVE");
+  if (!latestNoEligible && !rateMeta.providerCourierIdPresent) blockers.push("PROVIDER_COURIER_ID_MISSING");
+  if (rateMeta.pickupAvailable === false || rateMeta.latestRefresh?.provider_pickup_available_any === false) blockers.push("PROVIDER_PICKUP_UNAVAILABLE");
   return {
     key: "RATES",
     status: blockers.length ? "FAIL" : "PASS",
     blockers,
-    warnings: rateMeta.found ? [] : ["No latest Shipmastr Smart rate was available for certification."],
+    warnings: latestNoEligible
+      ? ["Latest live rate refresh returned no eligible Shipmastr shipping option for this pickup."]
+      : rateMeta.found ? [] : ["No latest Shipmastr Smart rate was available for certification."],
     safe_summary: {
       latest_rate_found: rateMeta.found,
+      latest_refresh_status: rateMeta.latestRefresh?.status ?? null,
+      eligible_rate_count: rateMeta.latestRefresh?.eligible_rate_count ?? null,
+      live_rate_candidates_count: rateMeta.latestRefresh?.live_rate_candidates_count ?? null,
+      pickup_available_any: rateMeta.latestRefresh?.provider_pickup_available_any ?? null,
+      stale_selected_rate_ignored: rateMeta.latestRefresh?.stale_selected_rate_ignored ?? false,
       live_mode: rateMeta.liveMode,
       live_ready: rateMeta.liveReady,
       pickup_available: rateMeta.pickupAvailable,
@@ -314,6 +362,12 @@ function nextActionsFor(blockers: string[], providerKey: CourierLiveProviderKey)
     actions.push("Align the Shipmastr pickup location with the certified provider pickup.");
   }
   if (blockers.includes("PROVIDER_PICKUP_UNAVAILABLE")) actions.push("Use another pickup or fix pickup availability before Ship Now.");
+  if (blockers.includes("PROVIDER_LATEST_RATE_REFRESH_NO_ELIGIBLE_RATES")) {
+    actions.push("Fix pickup/serviceability or try another pickup, then refresh live rates again.");
+  }
+  if (blockers.includes("PROVIDER_SERVICEABILITY_NO_CANDIDATES")) {
+    actions.push("Confirm provider serviceability for the selected pickup and delivery pincodes, then refresh rates.");
+  }
   if (blockers.includes("PROVIDER_RATES_NOT_LIVE")) actions.push("Run a pilot live rate fetch after pickup alignment.");
   if (blockers.includes("PROVIDER_COURIER_ID_MISSING")) actions.push("Confirm live rates return a numeric internal courier mapping.");
   if (blockers.includes("PROVIDER_AWB_NOT_CERTIFIED")) actions.push("Complete an explicit one-shot live AWB certification before live Ship Now.");
@@ -334,6 +388,8 @@ function statusFor(input: {
   if (blockers.includes("PROVIDER_PICKUP_UNAVAILABLE")
     || blockers.includes("PROVIDER_PICKUP_NOT_FOUND")
     || blockers.includes("PROVIDER_PICKUP_PINCODE_MISMATCH")
+    || blockers.includes("PROVIDER_LATEST_RATE_REFRESH_NO_ELIGIBLE_RATES")
+    || blockers.includes("PROVIDER_SERVICEABILITY_NO_CANDIDATES")
     || blockers.includes("PROVIDER_CREDENTIAL_TEST_FAILED")) {
     return "BLOCKED" as const;
   }
@@ -382,10 +438,13 @@ async function shiprocketSnapshot(
   options: Required<Pick<CertificationOptions, "client" | "checkedAt">> & CertificationOptions
 ) {
   const [rate, serviceabilityProbe] = await Promise.all([
-    latestSmartRate(merchantId, options.client),
+    latestSmartRate(merchantId, options.client, options.shipmentId),
     latestProbe(merchantId, "SHIPROCKET", ["RATE_SERVICEABILITY", "PINCODE_SERVICEABILITY"], options.client)
   ]);
-  const rateMeta = liveRateMetadata(rate);
+  const rateMeta = {
+    ...liveRateMetadata(rate),
+    latestRefresh: await latestRateRefreshDiagnostic(merchantId, options.shipmentId, options.client)
+  };
   const pickupDiagnostics = options.pickupDiagnostics ?? (options.includePickupProbe
     ? await getShiprocketPickupDiagnostics(merchantId, {
       client: options.client,

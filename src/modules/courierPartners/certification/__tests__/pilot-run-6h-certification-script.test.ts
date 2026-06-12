@@ -69,6 +69,32 @@ describe("Pilot Run 6H certification check script", () => {
     assert.equal(action, "Re-fetch live rates for this shipment after pickup alignment, then rerun this check.");
   });
 
+  it("prints no-eligible rate context action when latest refresh has no eligible rates", () => {
+    const action = scriptHelpers.rateContextAction({
+      provider: {
+        dimensions: [{ key: "PICKUPS", status: "PASS" }]
+      },
+      pickup: {
+        provider_pickup_pincode_match: true
+      },
+      liveShipReadiness: {
+        latest_rate_refresh: {
+          status: "NO_ELIGIBLE_SHIPPING_RATES",
+          eligible_rate_count: 0,
+          rejected_rate_reasons: [{ safe_reason: "PICKUP_UNAVAILABLE", count: 3 }]
+        },
+        selected_rate: {
+          latest_refresh_status: "NO_ELIGIBLE_SHIPPING_RATES",
+          stale_selected_rate_ignored: true
+        }
+      }
+    });
+    assert.equal(
+      action,
+      "No eligible Shipmastr shipping option is available for this pickup right now. Fix provider pickup/serviceability or try another pickup, then refresh rates again."
+    );
+  });
+
   it("renders provider-scoped output without secrets, auth headers, global blockers, or provider dashboard calls", () => {
     const report = scriptHelpers.renderReport({
       runtime: {
@@ -105,14 +131,32 @@ describe("Pilot Run 6H certification check script", () => {
         ready: false,
         runtime: { enabled: true, mode: "LIVE" },
         live_awb_one_shot: { allowed_shipment_matched: true, approval_present: false },
-        selected_rate: { live_ready: true, pickup_available: false },
-        blockers: ["LIVE_SHIPROCKET_ONE_SHOT_APPROVAL_REQUIRED"]
+        selected_rate: {
+          live_ready: false,
+          pickup_available: false,
+          stale_selected_rate_ignored: true,
+          latest_refresh_status: "NO_ELIGIBLE_SHIPPING_RATES"
+        },
+        latest_rate_refresh: {
+          status: "NO_ELIGIBLE_SHIPPING_RATES",
+          eligible_rate_count: 0,
+          rejected_rate_reasons: [{ safe_reason: "PICKUP_UNAVAILABLE", count: 3 }],
+          provider_pickup_available_any: false,
+          stale_selected_rate_ignored: true
+        },
+        blockers: ["PROVIDER_LATEST_RATE_REFRESH_NO_ELIGIBLE_RATES", "LIVE_SHIPROCKET_ONE_SHOT_APPROVAL_REQUIRED"]
       }
     });
     assert.match(report, /Provider-scoped blockers:/);
+    assert.match(report, /Rates:/);
+    assert.match(report, /latest refresh: NO_ELIGIBLE_SHIPPING_RATES/);
+    assert.match(report, /eligible rate count: 0/);
+    assert.match(report, /stale selected rate ignored: true/);
     assert.match(report, /PROVIDER_RATES_NOT_LIVE/);
+    assert.match(report, /PROVIDER_LATEST_RATE_REFRESH_NO_ELIGIBLE_RATES/);
     assert.match(report, /LIVE_SHIPROCKET_ONE_SHOT_APPROVAL_REQUIRED/);
     assert.match(report, /Rate context action:/);
+    assert.match(report, /No eligible Shipmastr shipping option is available for this pickup right now/);
     assert.doesNotMatch(report, /PROVIDER_CREDENTIALS_MISSING|UNRELATED_GLOBAL_BLOCKER/);
     assert.doesNotMatch(report, /test-token|password|secret|Authorization|Bearer|app\.shiprocket\.in|ship-now/i);
   });

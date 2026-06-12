@@ -31,6 +31,29 @@ import {
 
 type Db = Prisma.TransactionClient | typeof prisma;
 type LiveRatesAdapterFactory = (input: Parameters<typeof createShiprocketLiveAdapter>[0]) => InternalCourierProviderAdapter;
+type SafeRateRejectionReason =
+  | "PICKUP_UNAVAILABLE"
+  | "DELIVERY_UNAVAILABLE"
+  | "BLOCKED"
+  | "MISSING_COURIER_ID"
+  | "MISSING_RATE"
+  | "UNSUPPORTED_SERVICE"
+  | "UNKNOWN";
+
+export type LiveRateRefreshDiagnostic = {
+  status: "RATES_AVAILABLE" | "NO_ELIGIBLE_SHIPPING_RATES" | "PROVIDER_SERVICEABILITY_NO_CANDIDATES";
+  selected_pickup_pincode: string | null;
+  delivery_pincode: string | null;
+  live_provider_checked: boolean;
+  live_serviceability_returned_count: number;
+  live_rate_candidates_count: number;
+  eligible_rate_count: number;
+  rejected_rate_reasons: Array<{ safe_reason: SafeRateRejectionReason; count: number }>;
+  provider_pickup_available_any: boolean | null;
+  provider_delivery_available_any: boolean | null;
+  stale_selected_rate_ignored: boolean;
+  checked_at: string;
+};
 
 type RateOptions = {
   client?: Db;
@@ -80,6 +103,128 @@ function firstStringMetadata(...values: unknown[]) {
 
 function rateBreakupObject(value: unknown) {
   return metadataObject(value);
+}
+
+function safeRefreshStatus(value: unknown): LiveRateRefreshDiagnostic["status"] | null {
+  if (value === "RATES_AVAILABLE" || value === "NO_ELIGIBLE_SHIPPING_RATES" || value === "PROVIDER_SERVICEABILITY_NO_CANDIDATES") {
+    return value;
+  }
+  return null;
+}
+
+function numberField(value: unknown, fallback = 0) {
+  if (typeof value === "number" && Number.isFinite(value)) return value;
+  if (typeof value === "string" && Number.isFinite(Number(value))) return Number(value);
+  return fallback;
+}
+
+function boolField(value: unknown): boolean | null {
+  return typeof value === "boolean" ? value : null;
+}
+
+function rejectionReason(value: unknown): SafeRateRejectionReason {
+  const normalized = typeof value === "string" ? value : "";
+  if ([
+    "PICKUP_UNAVAILABLE",
+    "DELIVERY_UNAVAILABLE",
+    "BLOCKED",
+    "MISSING_COURIER_ID",
+    "MISSING_RATE",
+    "UNSUPPORTED_SERVICE",
+    "UNKNOWN"
+  ].includes(normalized)) return normalized as SafeRateRejectionReason;
+  return "UNKNOWN";
+}
+
+function compactRejectedReasons(reasons: SafeRateRejectionReason[]) {
+  const counts = new Map<SafeRateRejectionReason, number>();
+  for (const reason of reasons) counts.set(reason, (counts.get(reason) ?? 0) + 1);
+  return [...counts.entries()].map(([safe_reason, count]) => ({ safe_reason, count }));
+}
+
+function providerRateSafeReason(input: {
+  liveShiprocketReady: boolean;
+  providerCourierId: string | null;
+  totalCharge: number;
+  pickupAvailable?: boolean | null | undefined;
+  deliveryAvailable?: boolean | null | undefined;
+  codSupported?: boolean | null | undefined;
+  paymentMode: string;
+  publicServiceCode: string;
+}): SafeRateRejectionReason | null {
+  if (input.liveShiprocketReady && !input.providerCourierId) return "MISSING_COURIER_ID";
+  if (!Number.isFinite(input.totalCharge) || input.totalCharge <= 0) return "MISSING_RATE";
+  if (!input.publicServiceCode) return "UNSUPPORTED_SERVICE";
+  if (input.pickupAvailable === false) return "PICKUP_UNAVAILABLE";
+  if (input.deliveryAvailable === false) return "DELIVERY_UNAVAILABLE";
+  if (input.paymentMode === "cod" && input.codSupported === false) return "BLOCKED";
+  return null;
+}
+
+export function sanitizeLiveRateRefreshDiagnostic(value: unknown): LiveRateRefreshDiagnostic | null {
+  const metadata = metadataObject(value);
+  const status = safeRefreshStatus(metadata.status);
+  if (!status) return null;
+  const rejected = Array.isArray(metadata.rejected_rate_reasons)
+    ? metadata.rejected_rate_reasons
+      .map((item) => metadataObject(item))
+      .map((item) => ({
+        safe_reason: rejectionReason(item.safe_reason),
+        count: numberField(item.count)
+      }))
+      .filter((item) => item.count > 0)
+    : [];
+  return {
+    status,
+    selected_pickup_pincode: stringMetadata(metadata.selected_pickup_pincode),
+    delivery_pincode: stringMetadata(metadata.delivery_pincode),
+    live_provider_checked: metadata.live_provider_checked === true,
+    live_serviceability_returned_count: numberField(metadata.live_serviceability_returned_count),
+    live_rate_candidates_count: numberField(metadata.live_rate_candidates_count),
+    eligible_rate_count: numberField(metadata.eligible_rate_count),
+    rejected_rate_reasons: rejected,
+    provider_pickup_available_any: boolField(metadata.provider_pickup_available_any),
+    provider_delivery_available_any: boolField(metadata.provider_delivery_available_any),
+    stale_selected_rate_ignored: metadata.stale_selected_rate_ignored === true,
+    checked_at: stringMetadata(metadata.checked_at) ?? new Date(0).toISOString()
+  };
+}
+
+export function latestRateRefreshDiagnosticFromShipment(shipment: { metadata?: unknown }) {
+  const metadata = metadataObject(shipment.metadata);
+  const phase6 = metadataObject(metadata.phase6);
+  return sanitizeLiveRateRefreshDiagnostic(phase6.latestRateRefresh);
+}
+
+function buildRateRefreshDiagnostic(input: {
+  shipment: Awaited<ReturnType<typeof getSellerShipment>>;
+  liveProviderChecked: boolean;
+  providerRatesCount: number;
+  candidates: ShippingTierCandidate[];
+  rejectedReasons: SafeRateRejectionReason[];
+  status?: LiveRateRefreshDiagnostic["status"];
+}): LiveRateRefreshDiagnostic {
+  const pickupValues = input.candidates.map((candidate) => candidate.pickupAvailable);
+  const deliveryValues = input.candidates.map((candidate) => candidate.deliveryAvailable);
+  const eligibleCount = input.candidates.filter((candidate) => (
+    candidate.pickupAvailable !== false
+    && candidate.deliveryAvailable !== false
+    && !(input.shipment.paymentMode === "cod" && candidate.codSupported === false)
+  )).length;
+  return {
+    status: input.status ?? (eligibleCount > 0 ? "RATES_AVAILABLE" : "NO_ELIGIBLE_SHIPPING_RATES"),
+    selected_pickup_pincode: input.shipment.fromPincode ?? null,
+    delivery_pincode: input.shipment.toPincode ?? null,
+    live_provider_checked: input.liveProviderChecked,
+    live_serviceability_returned_count: input.providerRatesCount,
+    live_rate_candidates_count: input.candidates.length,
+    eligible_rate_count: eligibleCount,
+    rejected_rate_reasons: compactRejectedReasons(input.rejectedReasons),
+    provider_pickup_available_any: pickupValues.length ? pickupValues.some((value) => value !== false) : null,
+    provider_delivery_available_any: deliveryValues.length ? deliveryValues.some((value) => value !== false) : null,
+    stale_selected_rate_ignored: eligibleCount === 0,
+    checked_at: new Date().toISOString()
+  };
 }
 
 function phase6RateMetadata(rateBreakup: unknown) {
@@ -194,6 +339,36 @@ async function findExistingRates(client: Db, shipmentId: string, sellerId: strin
       sellerId
     },
     orderBy: { createdAt: "desc" }
+  });
+}
+
+async function recordShipmentRateRefreshDiagnostic(input: {
+  client: Db;
+  shipment: Awaited<ReturnType<typeof getSellerShipment>>;
+  sellerCourierPartnerId?: string | null;
+  courierPartnerId?: string | null;
+  diagnostic: LiveRateRefreshDiagnostic;
+}) {
+  const existingMetadata = metadataObject(input.shipment.metadata);
+  const existingPhase6 = metadataObject(existingMetadata.phase6);
+  await input.client.shipment.update({
+    where: { id: input.shipment.id },
+    data: {
+      ...(input.sellerCourierPartnerId ? { sellerCourierPartnerId: input.sellerCourierPartnerId } : {}),
+      ...(input.courierPartnerId ? { courierPartnerId: input.courierPartnerId } : {}),
+      metadata: toPrismaJson({
+        ...existingMetadata,
+        phase6: {
+          ...existingPhase6,
+          providerStatus: input.diagnostic.status === "RATES_AVAILABLE" ? "rates_available" : "no_eligible_rates",
+          ratedAt: input.diagnostic.checked_at,
+          latestRateRefresh: input.diagnostic,
+          providerResponseJson: {
+            rateCount: input.diagnostic.live_serviceability_returned_count
+          }
+        }
+      })
+    }
   });
 }
 
@@ -438,11 +613,26 @@ export async function fetchShipmentRates(
   }
 
   const rates = [];
+  const tierCandidates: ShippingTierCandidate[] = [];
+  const rejectedReasons: SafeRateRejectionReason[] = [];
   for (const providerRate of providerRates) {
     const providerMetadata = providerRateSafeMetadata(providerRate.providerMetadata);
     const providerCourierId = numericProviderCourierId(providerRate.providerCourierId ?? providerMetadata.providerCourierId);
-    if (liveShiprocketReady && !providerCourierId) continue;
     const publicServiceCode = serviceCodeForName(providerRate.serviceLevel);
+    const rejection = providerRateSafeReason({
+      liveShiprocketReady,
+      providerCourierId,
+      totalCharge: providerRate.totalCharge,
+      pickupAvailable: providerRate.pickupAvailable,
+      deliveryAvailable: providerRate.deliveryAvailable,
+      codSupported: providerRate.codSupported,
+      paymentMode: shipment.paymentMode,
+      publicServiceCode
+    });
+    if (rejection) {
+      rejectedReasons.push(rejection);
+      if (rejection === "MISSING_COURIER_ID") continue;
+    }
     const selectedTier = shippingTierFromServiceCode(publicServiceCode);
     const reliabilityScore = await getReliabilityScoreForRate({
       provider: activeAdapter.code,
@@ -451,7 +641,7 @@ export async function fetchShipmentRates(
       selectedTier
     }, client);
 
-    rates.push(await client.shipmentRate.create({
+    const rate = await client.shipmentRate.create({
       data: {
         shipmentId: shipment.id,
         sellerId,
@@ -486,11 +676,49 @@ export async function fetchShipmentRates(
           }
         })
       }
-    }));
+    });
+    rates.push(rate);
+    tierCandidates.push(tierCandidateFromRate(rate));
   }
 
+  const diagnosticInput = {
+    shipment,
+    liveProviderChecked: liveShiprocketReady,
+    providerRatesCount: providerRates.length,
+    candidates: tierCandidates,
+    rejectedReasons,
+    ...(providerRates.length === 0 ? { status: "PROVIDER_SERVICEABILITY_NO_CANDIDATES" as const } : {})
+  };
+  let diagnostic = buildRateRefreshDiagnostic(diagnosticInput);
+
   if (!rates.length) {
-    throw new HttpError(409, liveShiprocketReady ? "SHIPROCKET_LIVE_RATE_PROVIDER_ID_MISSING" : "NO_ELIGIBLE_SHIPPING_RATES");
+    await recordShipmentRateRefreshDiagnostic({
+      client,
+      shipment,
+      sellerCourierPartnerId: mapping.id,
+      courierPartnerId: partner.id,
+      diagnostic
+    });
+    throw new HttpError(409, "NO_ELIGIBLE_SHIPPING_RATES");
+  }
+
+  try {
+    selectShippingTiers(tierCandidates, shipment.paymentMode);
+  } catch {
+    diagnostic = {
+      ...diagnostic,
+      status: "NO_ELIGIBLE_SHIPPING_RATES",
+      eligible_rate_count: 0,
+      stale_selected_rate_ignored: true
+    };
+    await recordShipmentRateRefreshDiagnostic({
+      client,
+      shipment,
+      sellerCourierPartnerId: mapping.id,
+      courierPartnerId: partner.id,
+      diagnostic
+    });
+    throw new HttpError(409, "NO_ELIGIBLE_SHIPPING_RATES");
   }
 
   const existingMetadata = metadataObject(shipment.metadata);
@@ -512,6 +740,7 @@ export async function fetchShipmentRates(
             providerResponseJson: {
               rateCount: providerRates.length
             },
+            latestRateRefresh: diagnostic,
             livePilotRatesMode: liveRatesReadiness.runtime.mode,
             livePilotRatesReady: liveRatesReadiness.ready
           }
@@ -533,6 +762,7 @@ export async function fetchShipmentRates(
             providerResponseJson: {
               rateCount: providerRates.length
             },
+            latestRateRefresh: diagnostic,
             livePilotRatesMode: liveRatesReadiness.runtime.mode,
             livePilotRatesReady: liveRatesReadiness.ready
           }
