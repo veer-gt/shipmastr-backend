@@ -112,6 +112,7 @@ import { getMerchantOperationsSummary } from "./shipping-merchant-operations.ser
 import { emailDeliveryRouter } from "../emailDelivery/email-delivery.routes.js";
 import { courierCertificationRouter } from "../courierPartners/certification/courier-certification.routes.js";
 import { courierLiveReadinessRouter } from "../courierPartners/liveReadiness/courier-live-readiness.routes.js";
+import { courierOnboardingRouter } from "../courierPartners/onboarding/courier-onboarding.routes.js";
 import { merchantStoreOnboardingRouter } from "../merchantOnboarding/merchant-onboarding.routes.js";
 import { merchantNotificationsRouter } from "../merchantNotifications/merchant-notification.routes.js";
 import { livePilotRouter } from "../livePilot/live-pilot.routes.js";
@@ -162,6 +163,7 @@ function routeParam(value: string | string[] | undefined) {
 shippingNetworkRouter.use("/", platformIntegrationsRouter);
 shippingNetworkRouter.use("/", courierLiveReadinessRouter);
 shippingNetworkRouter.use("/", courierCertificationRouter);
+shippingNetworkRouter.use("/", courierOnboardingRouter);
 shippingNetworkRouter.use("/", merchantNotificationsRouter);
 shippingNetworkRouter.use("/", emailDeliveryRouter);
 shippingNetworkRouter.use("/", merchantStoreOnboardingRouter);
