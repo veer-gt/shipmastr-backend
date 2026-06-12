@@ -129,6 +129,7 @@ const pickupAligned = {
     statusFlags: []
   },
   providerPickupPincodeMatch: true,
+  selectedContext: "shipment_pickup",
   status: "SHIPROCKET_PICKUP_ALIGNED_READY",
   anyUsableProviderPickup: true,
   blockers: [],
@@ -247,10 +248,17 @@ describe("courier partner certification layer", () => {
     const indexRoutes = readFileSync("src/routes/index.ts", "utf8");
     const shippingRoutes = readFileSync("src/modules/shippingNetwork/shipping-network.routes.ts", "utf8");
     const certificationRoutes = readFileSync("src/modules/courierPartners/certification/courier-certification.routes.ts", "utf8");
+    const certificationValidation = readFileSync("src/modules/courierPartners/certification/courier-certification.validation.ts", "utf8");
+    const readinessValidation = readFileSync("src/modules/courierPartners/liveReadiness/courier-live-readiness.validation.ts", "utf8");
     assert.match(indexRoutes, /apiRouter\.use\("\/shipping", requireJwtAuth, shippingNetworkRouter\);/);
     assert.match(shippingRoutes, /courierCertificationRouter/);
     assert.match(certificationRoutes, /\/courier-certification\/providers/);
     assert.match(certificationRoutes, /\/courier-certification\/summary/);
+    assert.match(certificationRoutes, /shipmentId: query\.shipment_id/);
+    assert.match(certificationRoutes, /pickupLocationId: query\.pickup_location_id/);
+    assert.match(certificationValidation, /shipment_id/);
+    assert.match(certificationValidation, /pickup_location_id/);
+    assert.match(readinessValidation, /pickup_location_id/);
     assert.doesNotMatch(indexRoutes, /shipping\/seller-api.*courier-certification/);
   });
 });

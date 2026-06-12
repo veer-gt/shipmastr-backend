@@ -1417,6 +1417,91 @@ describe("Shipmastr Shipping Network services", () => {
     assert.equal(pickupClient.calls.listPickupLocations, 1);
   });
 
+  it("selects explicit, shipment, default, and fallback pickup context safely", async () => {
+    const { client, state } = createFakeClient();
+    seedActiveLiveCourierProvider(state);
+    const pickupClient = createFakeShiprocketPickupClient({
+      pincode: "201301",
+      city: "Noida",
+      state: "Uttar Pradesh"
+    });
+    const oldPickup = await createShippingPickupLocation("seller_1", {
+      ...pickupBody(),
+      name: "Old Gurgaon pickup",
+      address: {
+        ...pickupBody().address,
+        city: "Gurugram",
+        state: "HR",
+        pincode: "122001"
+      }
+    }, { client, adapter: createFakeAdapter() });
+    const intendedPickup = await createShippingPickupLocation("seller_1", {
+      ...pickupBody(),
+      name: "Noida pickup",
+      is_default: true,
+      address: {
+        ...pickupBody().address,
+        city: "Noida",
+        state: "UP",
+        pincode: "201301"
+      }
+    }, { client, adapter: createFakeAdapter() });
+    const shipment = await createShipmentDraft("seller_1", shipmentBody(intendedPickup.pickup_location_id), client);
+    seedShipmentRate(state, { shipmentId: shipment.shipment_id, internalCourierId: "12345" });
+
+    const explicitOld = await getShiprocketPickupDiagnostics("seller_1", {
+      client,
+      pickupLocationId: oldPickup.pickup_location_id,
+      source: liveShiprocketSource(shipment.shipment_id),
+      shiprocketClient: pickupClient.client
+    });
+    assert.equal(explicitOld.selectedContext, "explicit_pickup");
+    assert.equal(explicitOld.selectedPickup?.pincode, "122001");
+    assert.equal(explicitOld.status, "SHIPROCKET_PICKUP_PINCODE_MISMATCH");
+
+    const explicitIntended = await getShiprocketPickupDiagnostics("seller_1", {
+      client,
+      pickupLocationId: intendedPickup.pickup_location_id,
+      source: liveShiprocketSource(shipment.shipment_id),
+      shiprocketClient: pickupClient.client
+    });
+    assert.equal(explicitIntended.selectedContext, "explicit_pickup");
+    assert.equal(explicitIntended.selectedPickup?.pincode, "201301");
+    assert.equal(explicitIntended.status, "SHIPROCKET_PICKUP_ALIGNED_READY");
+
+    const shipmentContext = await getShiprocketPickupDiagnostics("seller_1", {
+      client,
+      shipmentId: shipment.shipment_id,
+      source: liveShiprocketSource(shipment.shipment_id),
+      shiprocketClient: pickupClient.client
+    });
+    assert.equal(shipmentContext.selectedContext, "shipment_pickup");
+    assert.equal(shipmentContext.selectedPickup?.pickupLocationId, intendedPickup.pickup_location_id);
+    assert.equal(shipmentContext.status, "SHIPROCKET_PICKUP_ALIGNED_READY");
+
+    const defaultContext = await getShiprocketPickupDiagnostics("seller_1", {
+      client,
+      source: liveShiprocketSource(shipment.shipment_id),
+      shiprocketClient: pickupClient.client
+    });
+    assert.equal(defaultContext.selectedContext, "merchant_default_pickup");
+    assert.equal(defaultContext.selectedPickup?.pickupLocationId, intendedPickup.pickup_location_id);
+
+    state.pickupLocations.forEach((pickup) => {
+      pickup.metadata = { ...(pickup.metadata ?? {}), isDefault: false };
+    });
+    const fallbackContext = await getShiprocketPickupDiagnostics("seller_1", {
+      client,
+      source: liveShiprocketSource(shipment.shipment_id),
+      shiprocketClient: pickupClient.client
+    });
+    const serialized = serializeShiprocketPickupDiagnostics(shipmentContext);
+    assert.equal(fallbackContext.selectedContext, "fallback_active_pickup");
+    assert.equal(fallbackContext.selectedPickup?.pickupLocationId, oldPickup.pickup_location_id);
+    assert.equal(serialized.selected_context, "shipment_pickup");
+    assert.equal(serialized.selected_shipmastr_pickup?.pincode, "201301");
+  });
+
   it("adds pickup pincode mismatch to live Ship Now readiness without exposing provider details", async () => {
     const { client, state } = createFakeClient();
     state.livePilotMerchants.push({ merchantId: "seller_1", status: "ENABLED" });

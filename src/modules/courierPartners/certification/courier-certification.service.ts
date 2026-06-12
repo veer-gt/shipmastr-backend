@@ -42,6 +42,8 @@ type CertificationOptions = {
   source?: Source;
   checkedAt?: string;
   includePickupProbe?: boolean;
+  shipmentId?: string;
+  pickupLocationId?: string;
   pickupDiagnostics?: Awaited<ReturnType<typeof getShiprocketPickupDiagnostics>>;
 };
 
@@ -206,6 +208,7 @@ function pickupDimension(diagnostics: Awaited<ReturnType<typeof getShiprocketPic
     blockers: unique(blockers),
     warnings: diagnostics.warnings,
     safe_summary: {
+      selected_context: diagnostics.selectedContext,
       shipmastr_pickup_count: diagnostics.shipmastrPickupCount,
       provider_pickup_count: diagnostics.providerPickupCount,
       pincode_match: diagnostics.providerPickupPincodeMatch,
@@ -383,6 +386,8 @@ async function shiprocketSnapshot(
     ? await getShiprocketPickupDiagnostics(merchantId, {
       client: options.client,
       includeProviderPickups: true,
+      ...(options.shipmentId ? { shipmentId: options.shipmentId } : {}),
+      ...(options.pickupLocationId ? { pickupLocationId: options.pickupLocationId } : {}),
       ...(options.source ? { source: options.source } : {})
     })
     : null);

@@ -28,7 +28,9 @@ courierCertificationRouter.get("/courier-certification/providers", async (req, r
   const query = courierCertificationQuerySchema.parse(req.query ?? {});
   const merchantId = scopedMerchantId(req.auth!.merchantId, query.merchant_id);
   const data = await listCourierCertificationProviders(merchantId, {
-    includePickupProbe: query.include_pickup_probe
+    includePickupProbe: query.include_pickup_probe,
+    ...(query.shipment_id ? { shipmentId: query.shipment_id } : {}),
+    ...(query.pickup_location_id ? { pickupLocationId: query.pickup_location_id } : {})
   });
   return res.json(successEnvelope("Courier partner certification providers fetched safely.", data));
 });
@@ -37,7 +39,9 @@ courierCertificationRouter.get("/courier-certification/providers/:providerKey", 
   const query = courierCertificationQuerySchema.parse(req.query ?? {});
   const merchantId = scopedMerchantId(req.auth!.merchantId, query.merchant_id);
   const data = await getCourierCertificationProvider(merchantId, routeProvider(req.params.providerKey), {
-    includePickupProbe: query.include_pickup_probe
+    includePickupProbe: query.include_pickup_probe,
+    ...(query.shipment_id ? { shipmentId: query.shipment_id } : {}),
+    ...(query.pickup_location_id ? { pickupLocationId: query.pickup_location_id } : {})
   });
   return res.json(successEnvelope("Courier partner certification provider fetched safely.", data));
 });
@@ -46,7 +50,9 @@ courierCertificationRouter.get("/courier-certification/summary", async (req, res
   const query = courierCertificationQuerySchema.parse(req.query ?? {});
   const merchantId = scopedMerchantId(req.auth!.merchantId, query.merchant_id);
   const data = await getCourierCertificationSummary(merchantId, {
-    includePickupProbe: query.include_pickup_probe
+    includePickupProbe: query.include_pickup_probe,
+    ...(query.shipment_id ? { shipmentId: query.shipment_id } : {}),
+    ...(query.pickup_location_id ? { pickupLocationId: query.pickup_location_id } : {})
   });
   return res.json(successEnvelope("Courier partner certification summary fetched safely.", data));
 });

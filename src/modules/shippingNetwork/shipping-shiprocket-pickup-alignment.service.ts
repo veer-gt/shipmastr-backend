@@ -44,6 +44,12 @@ type ShipmastrPickupSummary = {
   active: boolean;
 };
 
+export type ShiprocketPickupSelectedContext =
+  | "explicit_pickup"
+  | "shipment_pickup"
+  | "merchant_default_pickup"
+  | "fallback_active_pickup";
+
 type LiveRatePickupSummary = {
   found: boolean;
   pickupAvailable: boolean | null;
@@ -61,6 +67,10 @@ function metadataObject(value: unknown) {
   return value as Record<string, unknown>;
 }
 
+function isDefaultPickup(value: unknown) {
+  return metadataObject(value).isDefault === true;
+}
+
 function strictBoolMetadata(value: unknown) {
   return typeof value === "boolean" ? value : null;
 }
@@ -76,6 +86,7 @@ function pickupSummary(row: {
   state?: string | null;
   pincode?: string | null;
   status?: string | null;
+  metadata?: unknown;
 }): ShipmastrPickupSummary {
   return {
     pickupLocationId: row.id,
@@ -111,6 +122,24 @@ function selectedRatePickupSummary(rate: { rateBreakup?: unknown } | null): Live
     found: true,
     pickupAvailable: strictBoolMetadata(phase6.pickupAvailable)
   };
+}
+
+function fallbackPickup(activePickups: Array<{
+  id: string;
+  label?: string | null;
+  city?: string | null;
+  state?: string | null;
+  pincode?: string | null;
+  status?: string | null;
+  metadata?: unknown;
+}>) {
+  const defaultPickup = activePickups.find((pickup) => isDefaultPickup(pickup.metadata));
+  return defaultPickup
+    ? { selectedPickup: pickupSummary(defaultPickup), selectedContext: "merchant_default_pickup" as const }
+    : {
+      selectedPickup: activePickups[0] ? pickupSummary(activePickups[0]) : null,
+      selectedContext: "fallback_active_pickup" as const
+    };
 }
 
 async function getActiveShiprocketCredential(merchantId: string, client: Db) {
@@ -262,6 +291,7 @@ export async function getShiprocketPickupDiagnostics(
     client?: Db;
     source?: Source;
     shipmentId?: string;
+    pickupLocationId?: string;
     shiprocketClient?: ShiprocketPickupClient;
     includeProviderPickups?: boolean;
   } = {}
@@ -276,9 +306,19 @@ export async function getShiprocketPickupDiagnostics(
     orderBy: { createdAt: "asc" }
   });
   let selectedPickup: ShipmastrPickupSummary | null = null;
+  let selectedContext: ShiprocketPickupSelectedContext = "fallback_active_pickup";
   let liveRate: LiveRatePickupSummary = { found: false, pickupAvailable: null };
 
-  if (options.shipmentId) {
+  if (options.pickupLocationId) {
+    const pickup = await client.pickupLocation.findFirst({
+      where: {
+        id: options.pickupLocationId,
+        sellerId: merchantId
+      }
+    });
+    selectedPickup = pickup ? pickupSummary(pickup) : null;
+    selectedContext = "explicit_pickup";
+  } else if (options.shipmentId) {
     const shipment = await getSellerShipment(merchantId, options.shipmentId, client);
     if (shipment.pickupLocationId) {
       const pickup = await client.pickupLocation.findFirst({
@@ -288,6 +328,7 @@ export async function getShiprocketPickupDiagnostics(
         }
       });
       selectedPickup = pickup ? pickupSummary(pickup) : null;
+      selectedContext = "shipment_pickup";
     }
     const rates = await client.shipmentRate.findMany({
       where: {
@@ -297,8 +338,15 @@ export async function getShiprocketPickupDiagnostics(
       orderBy: { createdAt: "desc" }
     });
     liveRate = selectedRatePickupSummary(rates.find(isSmartRate) ?? null);
+    if (!selectedPickup) {
+      const fallback = fallbackPickup(activePickups);
+      selectedPickup = fallback.selectedPickup;
+      selectedContext = fallback.selectedContext;
+    }
   } else {
-    selectedPickup = activePickups[0] ? pickupSummary(activePickups[0]) : null;
+    const fallback = fallbackPickup(activePickups);
+    selectedPickup = fallback.selectedPickup;
+    selectedContext = fallback.selectedContext;
   }
 
   const provider = options.includeProviderPickups === false
@@ -326,6 +374,7 @@ export async function getShiprocketPickupDiagnostics(
     credentialReady: provider.credentialReady,
     shipmastrPickupCount: activePickups.length,
     providerPickupCount: provider.pickups.length,
+    selectedContext,
     selectedPickup,
     liveRate,
     matchedProviderPickup: alignment.matchedProviderPickup,
@@ -349,6 +398,7 @@ export function serializeShiprocketPickupDiagnostics(
     shipmastr_pickup_count: diagnostics.shipmastrPickupCount,
     any_usable_pickup: diagnostics.anyUsableProviderPickup,
     status: diagnostics.status,
+    selected_context: diagnostics.selectedContext,
     selected_shipmastr_pickup: diagnostics.selectedPickup ? {
       pickup_location_id: diagnostics.selectedPickup.pickupLocationId,
       name: diagnostics.selectedPickup.name,

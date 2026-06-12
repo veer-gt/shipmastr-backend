@@ -60,7 +60,8 @@ export const courierReadinessQuerySchema = z.object({
 
 export const courierPickupDiagnosticsQuerySchema = z.object({
   merchant_id: z.string().trim().min(1).optional(),
-  shipment_id: z.string().trim().min(1).max(120).optional()
+  shipment_id: z.string().trim().min(1).max(120).optional(),
+  pickup_location_id: z.string().trim().min(1).max(120).optional()
 }).strict();
 
 export function isAllowedProbeType(value: string): value is CourierLiveProbeType {

@@ -9,5 +9,7 @@ export function parseCourierCertificationProvider(value: string | string[] | und
 
 export const courierCertificationQuerySchema = z.object({
   merchant_id: z.string().trim().min(1).max(120).optional(),
+  shipment_id: z.string().trim().min(1).max(120).optional(),
+  pickup_location_id: z.string().trim().min(1).max(120).optional(),
   include_pickup_probe: z.coerce.boolean().optional().default(false)
 });

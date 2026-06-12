@@ -58,7 +58,8 @@ courierLiveReadinessRouter.get("/courier-live-readiness/providers/:providerKey/p
   const query = courierPickupDiagnosticsQuerySchema.parse(req.query ?? {});
   const merchantId = scopedMerchantId(req.auth!.merchantId, query.merchant_id);
   const diagnostics = await getShiprocketPickupDiagnostics(merchantId, {
-    ...(query.shipment_id ? { shipmentId: query.shipment_id } : {})
+    ...(query.shipment_id ? { shipmentId: query.shipment_id } : {}),
+    ...(query.pickup_location_id ? { pickupLocationId: query.pickup_location_id } : {})
   });
   return res.json(successEnvelope(
     "Courier provider pickup diagnostics fetched safely.",
