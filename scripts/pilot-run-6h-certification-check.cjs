@@ -20,7 +20,8 @@ function runtimeFromEnv(env = process.env) {
     token: assertToken(env.SHIPMASTR_TOKEN),
     apiBase: (env.SHIPMASTR_API_BASE_URL || DEFAULT_API_BASE_URL).replace(/\/+$/, ""),
     shipmentId: env.PILOT_6H_SHIPMENT_ID || "",
-    pickupLocationId: env.PILOT_6H_PICKUP_LOCATION_ID || ""
+    pickupLocationId: env.PILOT_6H_PICKUP_LOCATION_ID || "",
+    trialPickupLocationId: env.PILOT_6H_TRIAL_PICKUP_LOCATION_ID || ""
   };
 }
 
@@ -34,13 +35,15 @@ function params(runtime, extra = {}) {
   return query.toString();
 }
 
-async function request(runtime, path) {
+async function request(runtime, path, options = {}) {
   const response = await fetch(`${runtime.apiBase}${path}`, {
-    method: "GET",
+    method: options.method ?? "GET",
     headers: {
       Authorization: `Bearer ${runtime.token}`,
-      Accept: "application/json"
-    }
+      Accept: "application/json",
+      ...(options.body ? { "Content-Type": "application/json" } : {})
+    },
+    ...(options.body ? { body: JSON.stringify(options.body) } : {})
   }).catch((error) => {
     throw new Error(`${LOCAL_API_HINT}. ${error.message}`);
   });
@@ -140,6 +143,7 @@ function renderReport(input) {
   const provider = input.provider;
   const pickup = input.pickup;
   const pickupServiceability = input.pickupServiceability;
+  const pickupTrial = input.pickupTrial;
   const liveShipReadiness = input.liveShipReadiness;
   const latestRefresh = liveShipReadiness?.latest_rate_refresh;
   const ratesDimension = dimension(provider, "RATES");
@@ -189,6 +193,15 @@ function renderReport(input) {
     `  numeric courier id candidates: ${pickupServiceability?.latest_rate_context?.numeric_courier_id_count ?? "unknown"}`,
     `  recommended action: ${pickupServiceability?.recommended_action ?? "unknown"}`,
     "",
+    "Alternate pickup trial:",
+    `  trial pickup id: ${input.runtime.trialPickupLocationId || "not provided"}`,
+    `  status: ${pickupTrial?.status ?? "not run"}`,
+    `  eligible rate count: ${pickupTrial?.rate_context?.eligible_count ?? "unknown"}`,
+    `  pickup available candidates: ${pickupTrial?.rate_context?.pickup_available_count ?? "unknown"}`,
+    `  command: ${input.runtime.trialPickupLocationId
+      ? `POST ${input.runtime.apiBase}/courier-pickup-trials/providers/SHIPROCKET/shipments/${input.runtime.shipmentId}`
+      : "Set PILOT_6H_TRIAL_PICKUP_LOCATION_ID and run the controlled pickup trial."}`,
+    "",
     "Pickup context:",
     `  selected context: ${pickup?.selected_context ?? "unknown"}`,
     `  selected pickup pincode: ${pickup?.selected_shipmastr_pickup?.pincode ?? "unknown"}`,
@@ -226,13 +239,25 @@ async function run(env = process.env) {
   const pickupServiceabilityPath = runtime.shipmentId
     ? `/courier-pickup-serviceability/providers/SHIPROCKET/shipments/${encodeURIComponent(runtime.shipmentId)}${params(runtime) ? `?${params(runtime)}` : ""}`
     : null;
+  const pickupTrialPath = runtime.shipmentId && runtime.trialPickupLocationId
+    ? `/courier-pickup-trials/providers/SHIPROCKET/shipments/${encodeURIComponent(runtime.shipmentId)}`
+    : null;
 
-  const [summary, shiprocket, pickup, liveShipReadiness, pickupServiceability] = await Promise.all([
+  const [summary, shiprocket, pickup, liveShipReadiness, pickupServiceability, pickupTrial] = await Promise.all([
     request(runtime, `/courier-certification/summary${summaryQuery ? `?${summaryQuery}` : ""}`),
     request(runtime, `/courier-certification/providers/SHIPROCKET?${contextQuery}`),
     request(runtime, `/courier-live-readiness/providers/SHIPROCKET/pickups?${params(runtime)}`),
     readinessPath ? request(runtime, readinessPath) : Promise.resolve(null),
-    pickupServiceabilityPath ? request(runtime, pickupServiceabilityPath) : Promise.resolve(null)
+    pickupServiceabilityPath ? request(runtime, pickupServiceabilityPath) : Promise.resolve(null),
+    pickupTrialPath
+      ? request(runtime, pickupTrialPath, {
+        method: "POST",
+        body: {
+          pickup_location_id: runtime.trialPickupLocationId,
+          mode: "DRY_RUN"
+        }
+      })
+      : Promise.resolve(null)
   ]);
 
   const report = renderReport({
@@ -241,6 +266,7 @@ async function run(env = process.env) {
     provider: shiprocket.provider ?? shiprocket,
     pickup,
     pickupServiceability,
+    pickupTrial,
     liveShipReadiness
   });
   console.log(report);
