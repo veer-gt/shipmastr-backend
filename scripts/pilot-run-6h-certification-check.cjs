@@ -1,38 +1,48 @@
 #!/usr/bin/env node
 
-const token = process.env.SHIPMASTR_TOKEN;
-const apiBase = (process.env.SHIPMASTR_API_BASE_URL || "http://localhost:4000/api/shipping").replace(/\/+$/, "");
-const shipmentId = process.env.PILOT_6H_SHIPMENT_ID || "";
-const pickupLocationId = process.env.PILOT_6H_PICKUP_LOCATION_ID || "";
+const DEFAULT_API_BASE_URL = "http://localhost:8080/api/shipping";
+const LOCAL_API_HINT = "local API unavailable. Start backend with npm run dev and set SHIPMASTR_API_BASE_URL=http://localhost:8080/api/shipping";
 
 function fail(message) {
   console.error(`Pilot Run 6H certification check failed: ${message}`);
   process.exit(1);
 }
 
-if (!token) {
-  fail("SHIPMASTR_TOKEN is required. The script does not print or store this token.");
+function assertToken(token) {
+  if (!token) {
+    throw new Error("SHIPMASTR_TOKEN is required. The script does not print or store this token.");
+  }
+  return token;
 }
 
-function params(extra = {}) {
+function runtimeFromEnv(env = process.env) {
+  return {
+    token: assertToken(env.SHIPMASTR_TOKEN),
+    apiBase: (env.SHIPMASTR_API_BASE_URL || DEFAULT_API_BASE_URL).replace(/\/+$/, ""),
+    shipmentId: env.PILOT_6H_SHIPMENT_ID || "",
+    pickupLocationId: env.PILOT_6H_PICKUP_LOCATION_ID || ""
+  };
+}
+
+function params(runtime, extra = {}) {
   const query = new URLSearchParams();
   for (const [key, value] of Object.entries(extra)) {
     if (value !== undefined && value !== null && String(value).trim()) query.set(key, String(value));
   }
-  if (shipmentId) query.set("shipment_id", shipmentId);
-  if (pickupLocationId) query.set("pickup_location_id", pickupLocationId);
+  if (runtime.shipmentId) query.set("shipment_id", runtime.shipmentId);
+  if (runtime.pickupLocationId) query.set("pickup_location_id", runtime.pickupLocationId);
   return query.toString();
 }
 
-async function request(path) {
-  const response = await fetch(`${apiBase}${path}`, {
+async function request(runtime, path) {
+  const response = await fetch(`${runtime.apiBase}${path}`, {
     method: "GET",
     headers: {
-      Authorization: `Bearer ${token}`,
+      Authorization: `Bearer ${runtime.token}`,
       Accept: "application/json"
     }
   }).catch((error) => {
-    throw new Error(`local API unavailable: ${error.message}`);
+    throw new Error(`${LOCAL_API_HINT}. ${error.message}`);
   });
 
   if (!response.ok) {
@@ -50,74 +60,161 @@ function status(provider, key) {
   return dimension(provider, key)?.status ?? "NOT_RUN";
 }
 
-function collectBlockers(...values) {
-  return [...new Set(values.flatMap((value) => Array.isArray(value) ? value : []))];
+function unique(values) {
+  return [...new Set(values.filter((value) => typeof value === "string" && value.trim()).map((value) => value.trim()))];
 }
 
-function printProvider(provider) {
-  console.log("Shiprocket:");
-  console.log(`  credentials: ${status(provider, "CREDENTIALS")}`);
-  console.log(`  pickup: ${status(provider, "PICKUPS")}`);
-  console.log(`  rates: ${status(provider, "RATES")}`);
-  console.log(`  awb: ${status(provider, "AWB")}`);
-  console.log(`  label: ${status(provider, "LABEL")}`);
-  console.log(`  tracking: ${status(provider, "TRACKING")}`);
+function providerScopedBlockers(input) {
+  return unique([
+    ...(input.provider?.blockers ?? []),
+    ...(input.pickup?.blockers ?? []),
+    ...(input.liveShipReadiness?.blockers ?? [])
+  ]);
 }
 
-function printSafeList(title, values) {
-  console.log(`${title}:`);
-  if (!values.length) {
-    console.log("  none");
-    return;
+function providerScopedNextActions(input) {
+  return unique([
+    ...(input.provider?.next_actions ?? []),
+    ...(input.provider?.nextActions ?? []),
+    ...(input.liveShipReadiness?.certification_decision?.seller_safe_message
+      ? [input.liveShipReadiness.certification_decision.seller_safe_message]
+      : []),
+    ...(rateContextAction(input) ? [rateContextAction(input)] : [])
+  ]);
+}
+
+function rateContextAction(input) {
+  const pickupAligned = input.pickup?.provider_pickup_pincode_match === true
+    || dimension(input.provider, "PICKUPS")?.status === "PASS";
+  const ratePickupUnavailable = input.liveShipReadiness?.selected_rate?.pickup_available === false;
+  if (pickupAligned && ratePickupUnavailable) {
+    return "Re-fetch live rates for this shipment after pickup alignment, then rerun this check.";
   }
-  for (const value of values) console.log(`  - ${String(value).slice(0, 160)}`);
+  return null;
 }
 
-(async () => {
-  const contextQuery = params({ include_pickup_probe: true });
-  const summaryQuery = params();
-  const readinessPath = shipmentId ? `/shipments/${encodeURIComponent(shipmentId)}/live-ship-readiness` : null;
+function boolText(value) {
+  if (value === true) return "true";
+  if (value === false) return "false";
+  return "unknown";
+}
 
-  const [summary, shiprocket, pickupDiagnostics, liveShipReadiness] = await Promise.all([
-    request(`/courier-certification/summary${summaryQuery ? `?${summaryQuery}` : ""}`),
-    request(`/courier-certification/providers/SHIPROCKET?${contextQuery}`),
-    request(`/courier-live-readiness/providers/SHIPROCKET/pickups?${params()}`),
-    readinessPath ? request(readinessPath) : Promise.resolve(null)
+function safeLine(value) {
+  return String(value ?? "unknown").replace(/[\r\n]+/g, " ").slice(0, 180);
+}
+
+function renderSafeList(title, values) {
+  const lines = [`${title}:`];
+  if (!values.length) {
+    lines.push("  none");
+    return lines;
+  }
+  for (const value of values) lines.push(`  - ${safeLine(value)}`);
+  return lines;
+}
+
+function renderReport(input) {
+  const provider = input.provider;
+  const pickup = input.pickup;
+  const liveShipReadiness = input.liveShipReadiness;
+  const readyForLiveShipNow = Boolean(liveShipReadiness?.ready);
+  const blockers = providerScopedBlockers(input);
+  const nextActions = providerScopedNextActions(input);
+  const rateAction = rateContextAction(input);
+
+  const lines = [
+    "Certification summary:",
+    `  total providers: ${input.summary?.counts?.total ?? "unknown"}`,
+    `  live ready: ${input.summary?.counts?.live_ready ?? "unknown"}`,
+    `  pilot ready: ${input.summary?.counts?.pilot_ready ?? "unknown"}`,
+    `  dry-run ready: ${input.summary?.counts?.dry_run_ready ?? "unknown"}`,
+    `  blocked: ${input.summary?.counts?.blocked ?? "unknown"}`,
+    "",
+    "Selected provider:",
+    "  provider: SHIPROCKET",
+    `  public network: ${provider?.public_network_name ?? "Shipmastr Courier Network"}`,
+    "",
+    "Selected shipment:",
+    `  shipment id: ${input.runtime.shipmentId || "not provided"}`,
+    `  pickup location id: ${input.runtime.pickupLocationId || pickup?.selected_shipmastr_pickup?.pickup_location_id || "not provided"}`,
+    "",
+    "Shiprocket:",
+    `  credentials: ${status(provider, "CREDENTIALS")}`,
+    `  pickup: ${status(provider, "PICKUPS")}`,
+    `  serviceability: ${status(provider, "SERVICEABILITY")}`,
+    `  rates: ${status(provider, "RATES")}`,
+    `  courier id mapping: ${status(provider, "COURIER_ID_MAPPING")}`,
+    `  awb: ${status(provider, "AWB")}`,
+    `  label: ${status(provider, "LABEL")}`,
+    `  tracking: ${status(provider, "TRACKING")}`,
+    "",
+    "Pickup context:",
+    `  selected context: ${pickup?.selected_context ?? "unknown"}`,
+    `  selected pickup pincode: ${pickup?.selected_shipmastr_pickup?.pincode ?? "unknown"}`,
+    `  provider pickup pincode match: ${boolText(pickup?.provider_pickup_pincode_match)}`,
+    `  provider pickup active: ${boolText((pickup?.pickups ?? []).find((item) => item.pincode === pickup?.selected_shipmastr_pickup?.pincode)?.active)}`,
+    "",
+    "Live Ship Now gate:",
+    `  enabled: ${boolText(liveShipReadiness?.runtime?.enabled)}`,
+    `  mode: ${liveShipReadiness?.runtime?.mode ?? "unknown"}`,
+    `  allowed shipment matched: ${boolText(liveShipReadiness?.live_awb_one_shot?.allowed_shipment_matched)}`,
+    `  approval present: ${boolText(liveShipReadiness?.live_awb_one_shot?.approval_present)}`,
+    `  selected rate live ready: ${boolText(liveShipReadiness?.selected_rate?.live_ready)}`,
+    `  selected rate pickup available: ${boolText(liveShipReadiness?.selected_rate?.pickup_available)}`,
+    "",
+    "Final decision:",
+    `  READY_FOR_LIVE_SHIP_NOW: ${readyForLiveShipNow ? "yes" : "no"}`,
+    "",
+    ...renderSafeList("Provider-scoped blockers", blockers),
+    "",
+    ...renderSafeList("Provider-scoped next actions", nextActions)
+  ];
+
+  if (rateAction) {
+    lines.push("", "Rate context action:", `  ${rateAction}`);
+  }
+
+  return lines.join("\n");
+}
+
+async function run(env = process.env) {
+  const runtime = runtimeFromEnv(env);
+  const contextQuery = params(runtime, { include_pickup_probe: true });
+  const summaryQuery = params(runtime);
+  const readinessPath = runtime.shipmentId ? `/shipments/${encodeURIComponent(runtime.shipmentId)}/live-ship-readiness` : null;
+
+  const [summary, shiprocket, pickup, liveShipReadiness] = await Promise.all([
+    request(runtime, `/courier-certification/summary${summaryQuery ? `?${summaryQuery}` : ""}`),
+    request(runtime, `/courier-certification/providers/SHIPROCKET?${contextQuery}`),
+    request(runtime, `/courier-live-readiness/providers/SHIPROCKET/pickups?${params(runtime)}`),
+    readinessPath ? request(runtime, readinessPath) : Promise.resolve(null)
   ]);
 
-  const provider = shiprocket.provider ?? shiprocket;
-  const pickup = pickupDiagnostics.pickup_diagnostics ?? pickupDiagnostics;
-  const blockers = collectBlockers(
-    summary.blockers,
-    provider.blockers,
-    pickup.blockers,
-    liveShipReadiness?.blockers
-  );
-  const nextActions = collectBlockers(
-    summary.next_actions,
-    provider.next_actions,
-    liveShipReadiness?.certification_decision?.seller_safe_message
-      ? [liveShipReadiness.certification_decision.seller_safe_message]
-      : []
-  );
-  const readyForLiveShipNow = Boolean(liveShipReadiness?.ready);
+  const report = renderReport({
+    runtime,
+    summary,
+    provider: shiprocket.provider ?? shiprocket,
+    pickup,
+    liveShipReadiness
+  });
+  console.log(report);
+  if (!liveShipReadiness?.ready) process.exitCode = 2;
+}
 
-  console.log("Certification summary:");
-  console.log(`  total providers: ${summary.counts?.total ?? "unknown"}`);
-  console.log(`  live ready: ${summary.counts?.live_ready ?? "unknown"}`);
-  console.log(`  pilot ready: ${summary.counts?.pilot_ready ?? "unknown"}`);
-  console.log(`  dry-run ready: ${summary.counts?.dry_run_ready ?? "unknown"}`);
-  console.log(`  blocked: ${summary.counts?.blocked ?? "unknown"}`);
-  printProvider(provider);
-  console.log("Pickup context:");
-  console.log(`  selected context: ${pickup.selected_context ?? "unknown"}`);
-  console.log(`  pincode match: ${pickup.provider_pickup_pincode_match ?? "unknown"}`);
-  console.log("Final decision:");
-  console.log(`  READY_FOR_LIVE_SHIP_NOW: ${readyForLiveShipNow ? "yes" : "no"}`);
-  printSafeList("Blockers", blockers);
-  printSafeList("Next actions", nextActions);
+if (require.main === module) {
+  run().catch((error) => {
+    fail(error.message);
+  });
+}
 
-  if (!readyForLiveShipNow) process.exitCode = 2;
-})().catch((error) => {
-  fail(error.message);
-});
+module.exports = {
+  DEFAULT_API_BASE_URL,
+  LOCAL_API_HINT,
+  assertToken,
+  runtimeFromEnv,
+  providerScopedBlockers,
+  providerScopedNextActions,
+  rateContextAction,
+  renderReport,
+  run
+};
