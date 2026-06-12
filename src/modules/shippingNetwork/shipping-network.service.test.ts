@@ -10,6 +10,7 @@ import {
   ShipmentStatus,
   ShippingPaymentMode
 } from "@prisma/client";
+import { env } from "../../config/env.js";
 import type { InternalCourierProviderAdapter } from "../courierPartners/providers/provider-adapter.types.js";
 import { HttpError } from "../../lib/httpError.js";
 import { cancelShipment } from "./shipping-cancel.service.js";
@@ -788,6 +789,23 @@ function liveRatesSource() {
   };
 }
 
+async function withEnvPatch<T>(patch: Record<string, unknown>, callback: () => Promise<T>) {
+  const target = env as unknown as Record<string, unknown>;
+  const previous = Object.fromEntries(Object.keys(patch).map((key) => [key, target[key]]));
+  Object.assign(target, patch);
+  try {
+    return await callback();
+  } finally {
+    for (const key of Object.keys(patch)) {
+      if (previous[key] === undefined) {
+        delete target[key];
+      } else {
+        target[key] = previous[key];
+      }
+    }
+  }
+}
+
 function seedShipmentRate(
   state: ReturnType<typeof createFakeClient>["state"],
   input: {
@@ -1033,6 +1051,68 @@ describe("Shipmastr Shipping Network services", () => {
     assert.equal(storedRateBreakup.every((metadata) => metadata.phase6.livePilotRatesReady === true), true);
     assert.equal(storedRateBreakup.every((metadata) => /^[0-9]+$/.test(metadata.providerCourierId)), true);
     assert.doesNotMatch(json, /internal_courier|providerCourierId|providerServiceId|providerRateId|providerMetadata|providerResponseJson|bigship|shiprocket|12345|svc_rate|rate_smart/i);
+  });
+
+  it("passes runtime env source into the live Shiprocket rates adapter when no explicit source is provided", async () => {
+    const { client, state } = createFakeClient();
+    state.livePilotMerchants.push({ merchantId: "seller_1", status: "ENABLED" });
+    state.livePilotCapabilities.push({
+      merchantId: "seller_1",
+      capability: "LIVE_COURIER_RATES",
+      status: "ENABLED"
+    });
+    seedActiveLiveCourierProvider(state);
+    const pickup = await createShippingPickupLocation("seller_1", pickupBody(), { client, adapter: createFakeAdapter() });
+    const shipment = await createShipmentDraft("seller_1", shipmentBody(pickup.pickup_location_id), client);
+    const adapter = createFakeShiprocketAdapter();
+    let adapterSource: Record<string, unknown> | undefined;
+
+    await withEnvPatch(liveRatesSource(), async () => {
+      const result = await fetchShipmentRates("seller_1", shipment.shipment_id, {
+        client,
+        liveRatesAdapterFactory: (input) => {
+          adapterSource = input.source;
+          return adapter;
+        }
+      });
+
+      assert.equal(result.tiers.smart.label, "Shipmastr Smart");
+    });
+
+    assert.equal(adapter.calls.getRates, 1);
+    assert.equal(adapterSource?.SHIPROCKET_LIVE_CREDENTIALS, liveRatesSource().SHIPROCKET_LIVE_CREDENTIALS);
+    assert.equal(adapterSource?.SHIPMASTR_LIVE_COURIER_RATES_MODE, "LIVE");
+    assert.equal(state.rates.every((rate) => rate.rateBreakup.phase6.livePilotRatesMode === "LIVE"), true);
+    assert.equal(state.rates.every((rate) => /^[0-9]+$/.test(rate.rateBreakup.providerCourierId)), true);
+  });
+
+  it("returns a safe unresolved credential error before serviceability when live credentials are missing", async () => {
+    const { client, state } = createFakeClient();
+    state.livePilotMerchants.push({ merchantId: "seller_1", status: "ENABLED" });
+    state.livePilotCapabilities.push({
+      merchantId: "seller_1",
+      capability: "LIVE_COURIER_RATES",
+      status: "ENABLED"
+    });
+    seedActiveLiveCourierProvider(state);
+    const adapter = createFakeShiprocketAdapter();
+    const pickup = await createShippingPickupLocation("seller_1", pickupBody(), { client, adapter });
+    const shipment = await createShipmentDraft("seller_1", shipmentBody(pickup.pickup_location_id), client);
+
+    await assert.rejects(
+      () => fetchShipmentRates("seller_1", shipment.shipment_id, {
+        client,
+        adapter,
+        liveRatesSource: {
+          SHIPMASTR_LIVE_COURIER_RATES_ENABLED: "true",
+          SHIPMASTR_LIVE_COURIER_RATES_MODE: "LIVE",
+          SHIPMASTR_LIVE_COURIER_RATES_PILOT_ONLY: "true"
+        }
+      }),
+      (error) => error instanceof HttpError && error.message === "LIVE_SHIPROCKET_CREDENTIAL_REF_UNRESOLVED"
+    );
+    assert.equal(adapter.calls.getRates, 0);
+    assert.equal(state.rates.length, 0);
   });
 
   it("keeps dry-run rates on the mock path without a Shiprocket serviceability call", async () => {

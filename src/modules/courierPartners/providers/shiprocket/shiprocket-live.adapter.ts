@@ -18,6 +18,7 @@ import type {
 } from "../provider-adapter.types.js";
 import {
   resolveShiprocketLiveCredentials,
+  ShiprocketCredentialResolutionError,
   type ShiprocketLiveCredentials
 } from "./shiprocket-live-credentials.js";
 import {
@@ -66,6 +67,12 @@ function expiresAtFrom(response: { expires_in?: number; expiresIn?: number }, no
 
 function safeProviderError(error: unknown): never {
   if (error instanceof ShiprocketLiveConfigError || error instanceof ShiprocketLiveProviderError) throw error;
+  if (error instanceof ShiprocketCredentialResolutionError) {
+    throw new ShiprocketLiveProviderError({
+      code: error.code,
+      retryable: false
+    });
+  }
   throw new ShiprocketLiveProviderError({
     code: "SHIPROCKET_LIVE_PROVIDER_ERROR",
     retryable: true

@@ -1,4 +1,5 @@
 import { ShipmentStatus, type Prisma } from "@prisma/client";
+import { env } from "../../config/env.js";
 import { HttpError } from "../../lib/httpError.js";
 import { prisma } from "../../lib/prisma.js";
 import type { InternalCourierProviderAdapter } from "../courierPartners/providers/provider-adapter.types.js";
@@ -29,12 +30,14 @@ import {
 } from "./shipping-shipments.service.js";
 
 type Db = Prisma.TransactionClient | typeof prisma;
+type LiveRatesAdapterFactory = (input: Parameters<typeof createShiprocketLiveAdapter>[0]) => InternalCourierProviderAdapter;
 
 type RateOptions = {
   client?: Db;
   adapter?: InternalCourierProviderAdapter;
   refresh?: boolean;
   liveRatesSource?: Record<string, unknown>;
+  liveRatesAdapterFactory?: LiveRatesAdapterFactory;
 };
 
 function metadataObject(value: unknown) {
@@ -113,17 +116,22 @@ function tierCandidateFromRate(rate: {
 }
 
 function liveRatesSource(source?: Record<string, unknown>) {
-  return source ?? {};
+  return {
+    ...env,
+    ...(source ?? {})
+  };
 }
 
 function liveShiprocketRatesAdapter(input: {
   source?: Record<string, unknown>;
   credentialRef?: string | null;
   override?: InternalCourierProviderAdapter;
+  factory?: LiveRatesAdapterFactory;
 }) {
   if (input.override) return input.override;
   if (!input.credentialRef) throw new HttpError(409, "LIVE_SHIPROCKET_CREDENTIAL_REF_UNRESOLVED");
-  return createShiprocketLiveAdapter({
+  const factory = input.factory ?? createShiprocketLiveAdapter;
+  return factory({
     credentialRef: input.credentialRef,
     source: liveRatesSource(input.source)
   });
@@ -368,7 +376,8 @@ export async function fetchShipmentRates(
     ? liveShiprocketRatesAdapter({
       ...(options.liveRatesSource ? { source: options.liveRatesSource } : {}),
       ...(liveRatesReadiness.shiprocket.credentialRef ? { credentialRef: liveRatesReadiness.shiprocket.credentialRef } : {}),
-      ...(options.adapter ? { override: options.adapter } : {})
+      ...(options.adapter ? { override: options.adapter } : {}),
+      ...(options.liveRatesAdapterFactory ? { factory: options.liveRatesAdapterFactory } : {})
     })
     : adapter;
 
@@ -422,7 +431,10 @@ export async function fetchShipmentRates(
     });
   } catch (error) {
     const code = providerErrorCode(error);
-    throw new HttpError(code === "SHIPROCKET_LIVE_RATE_PROVIDER_ID_MISSING" ? 409 : 502, code);
+    throw new HttpError(
+      ["SHIPROCKET_LIVE_RATE_PROVIDER_ID_MISSING", "LIVE_SHIPROCKET_CREDENTIAL_REF_UNRESOLVED"].includes(code) ? 409 : 502,
+      code
+    );
   }
 
   const rates = [];

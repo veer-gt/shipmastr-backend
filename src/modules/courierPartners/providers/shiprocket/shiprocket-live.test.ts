@@ -295,6 +295,44 @@ describe("Shiprocket live client and mapper", () => {
     assert.doesNotMatch(json, /ephemeral-token|not-a-real-provider-password|rawPayload|rawHeaders|Authorization|Bearer/i);
   });
 
+  it("adapter preserves safe credential resolution errors without provider detail", async () => {
+    const adapter = new ShiprocketLiveAdapter({
+      credentialRef: "env:SHIPROCKET_LIVE_CREDENTIALS",
+      source: {},
+      client: {
+        login: async () => { throw new Error("should not be called"); },
+        createAdhocOrder: async () => ({}),
+        getServiceability: async () => ({}),
+        assignAwb: async () => ({}),
+        generateLabel: async () => ({})
+      }
+    });
+
+    await assert.rejects(
+      () => adapter.getRates({
+        sellerId: "merchant_1",
+        shipmentId: "shipment_1",
+        providerOrderId: null,
+        pickupPincode: "560001",
+        deliveryPincode: "400001",
+        paymentMode: "cod",
+        collectableAmount: 1499,
+        deadWeightKg: 0.5,
+        dimensions: {
+          lengthCm: 20,
+          breadthCm: 15,
+          heightCm: 10
+        }
+      }),
+      (error: any) => {
+        assert.equal(error.code, "LIVE_SHIPROCKET_CREDENTIAL_REF_UNRESOLVED");
+        assert.equal(error.retryable, false);
+        assert.doesNotMatch(JSON.stringify(error), /password|token|Authorization|Bearer|pilot@example/i);
+        return true;
+      }
+    );
+  });
+
   it("fails closed for incomplete provider ids before mutation calls", async () => {
     const adapter = new ShiprocketLiveAdapter({
       credentialRef: "env:SHIPROCKET_LIVE_CREDENTIALS",
