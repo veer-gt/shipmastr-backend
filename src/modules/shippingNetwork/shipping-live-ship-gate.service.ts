@@ -49,6 +49,14 @@ export type LiveAwbLabelReadiness = {
     hasAwb: boolean;
     readyForShipNow: boolean;
   };
+  selectedRate?: {
+    tier: "smart";
+    found: boolean;
+    liveMode: boolean;
+    liveReady: boolean;
+    pickupAvailable: boolean | null;
+    providerCourierIdPresent: boolean;
+  };
   blockers: string[];
   warnings: string[];
   message: string;
@@ -88,6 +96,61 @@ function oneShotHeader(source: Source) {
 
 function shipmentAllowedForLive(status: string) {
   return status === ShipmentStatus.draft || status === ShipmentStatus.rates_fetched;
+}
+
+function metadataObject(value: unknown) {
+  if (!value || typeof value !== "object" || Array.isArray(value)) return {};
+  return value as Record<string, unknown>;
+}
+
+function strictBoolMetadata(value: unknown) {
+  return typeof value === "boolean" ? value : null;
+}
+
+function firstStringMetadata(...values: unknown[]) {
+  for (const value of values) {
+    if (typeof value === "string" && value.trim()) return value.trim();
+    if (typeof value === "number" && Number.isFinite(value)) return String(value);
+  }
+  return null;
+}
+
+function liveShiprocketCourierId(rateBreakup: unknown) {
+  const metadata = metadataObject(rateBreakup);
+  const phase6 = metadataObject(metadata.phase6);
+  const result = metadataObject(metadata.result);
+  const value = firstStringMetadata(
+    metadata.shiprocketCourierId,
+    metadata.providerCourierId,
+    metadata.courier_id,
+    metadata.courierId,
+    metadata.internalCourierId,
+    phase6.shiprocketCourierId,
+    phase6.providerCourierId,
+    phase6.courier_id,
+    phase6.courierId,
+    result.courier_id,
+    result.courierId,
+    result.providerCourierId
+  );
+  return value && /^[0-9]+$/.test(value) ? value : null;
+}
+
+function liveRateMetadata(rateBreakup: unknown) {
+  const metadata = metadataObject(rateBreakup);
+  const phase6 = metadataObject(metadata.phase6);
+  const liveMode = firstStringMetadata(phase6.livePilotRatesMode, metadata.livePilotRatesMode);
+  const liveReady = phase6.livePilotRatesReady === true || metadata.livePilotRatesReady === true;
+  return {
+    liveMode: liveMode === "LIVE",
+    liveReady,
+    pickupAvailable: strictBoolMetadata(phase6.pickupAvailable),
+    providerCourierIdPresent: Boolean(liveShiprocketCourierId(rateBreakup))
+  };
+}
+
+function isSmartRate(rate: { publicServiceCode?: string | null; publicServiceName?: string | null }) {
+  return rate.publicServiceCode === "shipmastr_smart" || rate.publicServiceName === "Shipmastr Smart";
 }
 
 export function getLiveAwbLabelRuntime(source: Source = env): LiveAwbLabelRuntime {
@@ -132,6 +195,7 @@ export async function getLiveAwbLabelReadiness(
   const blockers: string[] = [];
   const warnings: string[] = [];
   let shipment: LiveAwbLabelReadiness["shipment"];
+  let selectedRate: LiveAwbLabelReadiness["selectedRate"];
 
   if (options.shipmentId) {
     const record = await getSellerShipment(merchantId, options.shipmentId, client);
@@ -151,6 +215,44 @@ export async function getLiveAwbLabelReadiness(
     if (!shipment.readyForShipNow) blockers.push("SHIPMENT_STATUS_TERMINAL");
     if (shipment.hasAwb) blockers.push("SHIPMENT_ALREADY_HAS_AWB");
     if (!shipmentAllowedForLive(shipment.status)) blockers.push("SHIPMENT_NOT_READY_TO_SHIP");
+
+    const rates = await client.shipmentRate.findMany({
+      where: {
+        shipmentId: record.id,
+        sellerId: merchantId
+      },
+      orderBy: { createdAt: "desc" }
+    });
+    const smartRate = rates.find(isSmartRate) ?? null;
+    if (smartRate) {
+      const rateMetadata = liveRateMetadata(smartRate.rateBreakup);
+      selectedRate = {
+        tier: "smart",
+        found: true,
+        liveMode: rateMetadata.liveMode,
+        liveReady: rateMetadata.liveReady,
+        pickupAvailable: rateMetadata.pickupAvailable,
+        providerCourierIdPresent: rateMetadata.providerCourierIdPresent
+      };
+      if (
+        runtime.enabled
+        && runtime.mode === "LIVE"
+        && rateMetadata.liveMode
+        && rateMetadata.liveReady
+        && rateMetadata.pickupAvailable !== true
+      ) {
+        blockers.push("SHIPROCKET_LIVE_PICKUP_UNAVAILABLE");
+      }
+    } else {
+      selectedRate = {
+        tier: "smart",
+        found: false,
+        liveMode: false,
+        liveReady: false,
+        pickupAvailable: null,
+        providerCourierIdPresent: false
+      };
+    }
   }
 
   const oneShotToken = stringValue(source, "SHIPMASTR_LIVE_SHIPROCKET_ONE_SHOT_TOKEN");
@@ -202,7 +304,8 @@ export async function getLiveAwbLabelReadiness(
     && shiprocket.oneShotApprovalPresent
     && shiprocket.allowedMerchantMatched
     && shiprocket.allowedShipmentMatched
-    && (!shipment || (shipment.readyForShipNow && !shipment.hasAwb && shipmentAllowedForLive(shipment.status)));
+    && (!shipment || (shipment.readyForShipNow && !shipment.hasAwb && shipmentAllowedForLive(shipment.status)))
+    && !blockers.includes("SHIPROCKET_LIVE_PICKUP_UNAVAILABLE");
   const status = !runtime.enabled
     ? "DISABLED"
     : blockers.length
@@ -227,6 +330,7 @@ export async function getLiveAwbLabelReadiness(
     },
     shiprocket,
     ...(shipment ? { shipment } : {}),
+    ...(selectedRate ? { selectedRate } : {}),
     blockers: [...new Set(blockers)],
     warnings,
     message: ready
@@ -261,6 +365,9 @@ export async function assertLiveAwbLabelAllowed(
   }
   if (!readiness.shiprocket.allowedMerchantMatched) throw new HttpError(409, "LIVE_SHIPROCKET_ALLOWED_MERCHANT_MISMATCH");
   if (!readiness.shiprocket.allowedShipmentMatched) throw new HttpError(409, "LIVE_SHIPROCKET_ALLOWED_SHIPMENT_MISMATCH");
+  if (readiness.blockers.includes("SHIPROCKET_LIVE_PICKUP_UNAVAILABLE")) {
+    throw new HttpError(409, "SHIPROCKET_LIVE_PICKUP_UNAVAILABLE");
+  }
   if (readiness.shipment?.hasAwb) throw new HttpError(409, "SHIPMENT_ALREADY_HAS_AWB");
   if (readiness.shipment && !shipmentAllowedForLive(readiness.shipment.status)) throw new HttpError(409, "SHIPMENT_NOT_READY_TO_SHIP");
   if (readiness.shipment && !readiness.shipment.readyForShipNow) throw new HttpError(409, "SHIPMENT_STATUS_TERMINAL");
@@ -300,6 +407,15 @@ export function serializeLiveAwbLabelReadiness(readiness: LiveAwbLabelReadiness)
         status: readiness.shipment.status,
         has_awb: readiness.shipment.hasAwb,
         ready_for_ship_now: readiness.shipment.readyForShipNow
+      }
+    } : {}),
+    ...(readiness.selectedRate ? {
+      selected_rate: {
+        tier: readiness.selectedRate.tier,
+        found: readiness.selectedRate.found,
+        live_mode: readiness.selectedRate.liveMode,
+        live_ready: readiness.selectedRate.liveReady,
+        pickup_available: readiness.selectedRate.pickupAvailable
       }
     } : {}),
     blockers: readiness.blockers,

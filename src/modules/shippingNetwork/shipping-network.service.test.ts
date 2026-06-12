@@ -813,6 +813,7 @@ function seedShipmentRate(
     sellerId?: string;
     internalCourierId: string | null;
     serviceName?: "Shipmastr Smart" | "Shipmastr Economy" | "Shipmastr Express";
+    pickupAvailable?: boolean;
   }
 ) {
   const serviceName = input.serviceName ?? "Shipmastr Smart";
@@ -840,7 +841,7 @@ function seedShipmentRate(
       phase6: {
         tier: "smart",
         codSupported: true,
-        pickupAvailable: true,
+        pickupAvailable: input.pickupAvailable ?? true,
         deliveryAvailable: true,
         reliabilityScore: 0.9,
         livePilotRatesMode: "LIVE",
@@ -1319,6 +1320,69 @@ describe("Shipmastr Shipping Network services", () => {
     assert.equal(adapter.calls.createDraftOrder, 0);
     assert.equal(adapter.calls.manifestOrder, 0);
     assert.equal(adapter.calls.getLabel, 0);
+  });
+
+  it("blocks live Ship Now readiness when selected live rate pickup is unavailable", async () => {
+    const { client, state } = createFakeClient();
+    state.livePilotMerchants.push({ merchantId: "seller_1", status: "ENABLED" });
+    state.livePilotCapabilities.push(
+      { merchantId: "seller_1", capability: "LIVE_COURIER_RATES", status: "ENABLED" },
+      { merchantId: "seller_1", capability: "LIVE_AWB_LABEL", status: "ENABLED" }
+    );
+    seedActiveLiveCourierProvider(state);
+    const pickup = await createShippingPickupLocation("seller_1", pickupBody(), { client, adapter: createFakeAdapter() });
+    const shipment = await createShipmentDraft("seller_1", shipmentBody(pickup.pickup_location_id), client);
+    seedShipmentRate(state, {
+      shipmentId: shipment.shipment_id,
+      internalCourierId: "12345",
+      pickupAvailable: false
+    });
+
+    const readiness = await getLiveAwbLabelReadiness("seller_1", {
+      client,
+      shipmentId: shipment.shipment_id,
+      source: liveShiprocketSource(shipment.shipment_id)
+    });
+    const serialized = serializeLiveAwbLabelReadiness(readiness);
+    const json = JSON.stringify(serialized);
+
+    assert.equal(readiness.ready, false);
+    assert.equal(readiness.status, "BLOCKED");
+    assert.ok(readiness.blockers.includes("SHIPROCKET_LIVE_PICKUP_UNAVAILABLE"));
+    assert.equal(serialized.selected_rate?.pickup_available, false);
+    assert.doesNotMatch(json, /providerCourierId|providerServiceId|providerRateId|rawPayload|rawHeaders|rawResponse|Authorization|Bearer/i);
+  });
+
+  it("blocks live Ship Now when selected live rate pickup is unavailable before provider calls", async () => {
+    const { client, state } = createFakeClient();
+    state.livePilotMerchants.push({ merchantId: "seller_1", status: "ENABLED" });
+    state.livePilotCapabilities.push(
+      { merchantId: "seller_1", capability: "LIVE_COURIER_RATES", status: "ENABLED" },
+      { merchantId: "seller_1", capability: "LIVE_AWB_LABEL", status: "ENABLED" }
+    );
+    seedActiveLiveCourierProvider(state);
+    const adapter = createFakeShiprocketAdapter();
+    const pickup = await createShippingPickupLocation("seller_1", pickupBody(), { client, adapter });
+    const shipment = await createShipmentDraft("seller_1", shipmentBody(pickup.pickup_location_id), client);
+    seedShipmentRate(state, {
+      shipmentId: shipment.shipment_id,
+      internalCourierId: "12345",
+      pickupAvailable: false
+    });
+
+    await assert.rejects(
+      () => shipNowShipment("seller_1", shipment.shipment_id, "smart", {
+        client,
+        adapter,
+        liveAwbLabelSource: liveShiprocketSource(shipment.shipment_id)
+      }),
+      (error) => error instanceof HttpError && error.message === "SHIPROCKET_LIVE_PICKUP_UNAVAILABLE"
+    );
+    assert.equal(adapter.calls.createDraftOrder, 0);
+    assert.equal(adapter.calls.manifestOrder, 0);
+    assert.equal(adapter.calls.getLabel, 0);
+    assert.equal(state.providerRefs.length, 0);
+    assert.equal(state.shipments.find((record) => record.id === shipment.shipment_id)?.awbNumber, null);
   });
 
   it("blocks live Ship Now without one-shot approval before provider calls", async () => {

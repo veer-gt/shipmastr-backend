@@ -144,6 +144,34 @@ function liveShiprocketCourierId(rateBreakup: unknown) {
   return value && /^[0-9]+$/.test(value) ? value : null;
 }
 
+function strictBoolMetadata(value: unknown) {
+  return typeof value === "boolean" ? value : null;
+}
+
+function liveShiprocketRateEligibility(rateBreakup: unknown) {
+  const metadata = metadataObject(rateBreakup);
+  const phase6 = metadataObject(metadata.phase6);
+  const liveMode = firstStringMetadata(phase6.livePilotRatesMode, metadata.livePilotRatesMode);
+  const liveReady = phase6.livePilotRatesReady === true || metadata.livePilotRatesReady === true;
+  return {
+    liveMode: liveMode === "LIVE",
+    liveReady,
+    pickupAvailable: strictBoolMetadata(phase6.pickupAvailable),
+    providerCourierId: liveShiprocketCourierId(rateBreakup)
+  };
+}
+
+function assertLiveShiprocketRateEligible(rateBreakup: unknown) {
+  const eligibility = liveShiprocketRateEligibility(rateBreakup);
+  if (!eligibility.liveMode || !eligibility.liveReady || !eligibility.providerCourierId) {
+    throw new HttpError(409, "SHIPROCKET_LIVE_RATE_PROVIDER_ID_MISSING");
+  }
+  if (eligibility.pickupAvailable !== true) {
+    throw new HttpError(409, "SHIPROCKET_LIVE_PICKUP_UNAVAILABLE");
+  }
+  return eligibility;
+}
+
 function shipmentProducts(metadata: ReturnType<typeof shipmentMetadata>) {
   return metadata.boxes.flatMap((box) => box.products ?? []).map((product) => ({
     name: product.name,
@@ -203,6 +231,19 @@ function rateCandidate(rate: {
     deliveryAvailable: boolMetadata(metadata.deliveryAvailable, true),
     reliabilityScore: numberMetadata(metadata.reliabilityScore, 0.75)
   };
+}
+
+function serviceCodeForTier(tier: ShippingTier) {
+  return tier === "economy"
+    ? "shipmastr_economy"
+    : tier === "express"
+      ? "shipmastr_express"
+      : "shipmastr_smart";
+}
+
+function isRateForTier(rate: { publicServiceCode?: string | null; publicServiceName?: string | null }, tier: ShippingTier) {
+  return rate.publicServiceCode === serviceCodeForTier(tier)
+    || serviceCodeForName(rate.publicServiceName ?? "") === serviceCodeForTier(tier);
 }
 
 async function recordShipmentSlaEvent(input: {
@@ -492,6 +533,14 @@ export async function shipNowShipment(
     rates = await findRates(client, shipment.id, sellerId);
   }
 
+  if (liveShiprocketReady) {
+    const liveRateForRequestedTier = rates.find((rate) => isRateForTier(rate, tier));
+    if (!liveRateForRequestedTier) {
+      throw new HttpError(409, "SHIPMENT_RATE_NOT_FOUND");
+    }
+    assertLiveShiprocketRateEligible(liveRateForRequestedTier.rateBreakup);
+  }
+
   const tiers = selectShippingTiers(rates.map(rateCandidate), shipment.paymentMode);
   const selectedTier = tiers[tier];
   const selectedRate = rates.find((rate) => rate.id === selectedTier.rateId);
@@ -514,10 +563,6 @@ export async function shipNowShipment(
     },
     orderBy: { createdAt: "desc" }
   });
-
-  if (liveShiprocketReady && !liveShiprocketCourierId(selectedRate.rateBreakup)) {
-    throw new HttpError(409, "SHIPROCKET_LIVE_RATE_PROVIDER_ID_MISSING");
-  }
 
   const providerRef = liveShiprocketReady
     ? await ensureLiveShiprocketProviderRef({
