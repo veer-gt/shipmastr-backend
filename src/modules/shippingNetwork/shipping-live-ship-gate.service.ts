@@ -6,6 +6,12 @@ import {
   canResolveShiprocketLiveCredentials,
   type ShiprocketLiveCredentials
 } from "../courierPartners/providers/shiprocket/shiprocket-live-credentials.js";
+import {
+  getCourierCertificationDecision,
+  sellerSafeCourierCertificationDecision,
+  type CourierCertificationDecision
+} from "../courierPartners/certification/courier-certification-decision.service.js";
+import type { CourierCertificationSnapshot } from "../courierPartners/certification/courier-certification.types.js";
 import { getCourierLiveReadinessSnapshot } from "../courierPartners/liveReadiness/courier-live-readiness.service.js";
 import { getLivePilotReadinessSnapshot } from "../livePilot/live-pilot.service.js";
 import { getSellerShipment } from "./shipping-shipments.service.js";
@@ -63,6 +69,7 @@ export type LiveAwbLabelReadiness = {
     providerCourierIdPresent: boolean;
   };
   pickupAlignment?: Awaited<ReturnType<typeof getShiprocketPickupDiagnostics>>;
+  certificationDecision?: CourierCertificationDecision;
   blockers: string[];
   warnings: string[];
   message: string;
@@ -161,6 +168,102 @@ function liveRateMetadata(rateBreakup: unknown) {
 
 function isSmartRate(rate: { publicServiceCode?: string | null; publicServiceName?: string | null }) {
   return rate.publicServiceCode === "shipmastr_smart" || rate.publicServiceName === "Shipmastr Smart";
+}
+
+function liveAwbDecisionSnapshot(input: {
+  status: "READY_FOR_PILOT" | "BLOCKED";
+  shiprocket: LiveAwbLabelReadiness["shiprocket"];
+  selectedRate?: LiveAwbLabelReadiness["selectedRate"];
+  pickupAlignment?: LiveAwbLabelReadiness["pickupAlignment"];
+  blockers: string[];
+  warnings: string[];
+  checkedAt: string;
+}): CourierCertificationSnapshot {
+  const pickupPass = input.pickupAlignment
+    ? !input.pickupAlignment.blockers.length
+    : input.selectedRate?.pickupAvailable !== false;
+  const ratesPass = Boolean(input.selectedRate?.found && input.selectedRate.liveMode && input.selectedRate.liveReady);
+  const courierIdPass = Boolean(input.selectedRate?.providerCourierIdPresent);
+  const credentialsPass = Boolean(
+    input.shiprocket.credentialRefConfigured
+      && input.shiprocket.credentialResolved
+      && input.shiprocket.credentialId
+  );
+  const awbOneShotPass = input.shiprocket.oneShotEnabled
+    && input.shiprocket.oneShotApprovalPresent
+    && input.shiprocket.allowedMerchantMatched
+    && input.shiprocket.allowedShipmentMatched;
+
+  return {
+    provider_key: "SHIPROCKET",
+    provider_label_internal: "Shiprocket",
+    public_network_name: "Shipmastr Courier Network",
+    status: input.status,
+    live_ready: false,
+    can_use_for_rates: ratesPass && courierIdPass && pickupPass,
+    can_use_for_awb: false,
+    can_use_for_label: false,
+    can_use_for_tracking: false,
+    dimensions: [{
+      key: "CREDENTIALS",
+      status: credentialsPass ? "PASS" : "FAIL",
+      blockers: credentialsPass ? [] : ["PROVIDER_CREDENTIALS_MISSING"],
+      warnings: [],
+      safe_summary: { configured: credentialsPass }
+    }, {
+      key: "PICKUPS",
+      status: pickupPass ? "PASS" : "FAIL",
+      blockers: pickupPass ? [] : ["PROVIDER_PICKUP_UNAVAILABLE"],
+      warnings: [],
+      safe_summary: { selected_context: input.pickupAlignment?.selectedContext ?? null }
+    }, {
+      key: "RATES",
+      status: ratesPass ? "PASS" : "FAIL",
+      blockers: ratesPass ? [] : ["PROVIDER_RATES_NOT_LIVE"],
+      warnings: [],
+      safe_summary: { live_rate_seen: ratesPass }
+    }, {
+      key: "COURIER_ID_MAPPING",
+      status: courierIdPass ? "PASS" : "FAIL",
+      blockers: courierIdPass ? [] : ["PROVIDER_COURIER_ID_MISSING"],
+      warnings: [],
+      safe_summary: { mapping_present: courierIdPass }
+    }, {
+      key: "AWB",
+      status: awbOneShotPass ? "PASS" : "WARN",
+      blockers: awbOneShotPass ? [] : ["PROVIDER_LIVE_ONE_SHOT_REQUIRED"],
+      warnings: awbOneShotPass ? [] : ["Explicit one-shot AWB approval is required."],
+      safe_summary: { one_shot_approved: awbOneShotPass }
+    }, {
+      key: "LABEL",
+      status: "NOT_RUN",
+      blockers: ["PROVIDER_LABEL_NOT_CERTIFIED"],
+      warnings: [],
+      safe_summary: {}
+    }, {
+      key: "TRACKING",
+      status: "NOT_RUN",
+      blockers: ["PROVIDER_TRACKING_NOT_CERTIFIED"],
+      warnings: [],
+      safe_summary: {}
+    }, {
+      key: "WEBHOOKS",
+      status: "NOT_SUPPORTED",
+      blockers: [],
+      warnings: [],
+      safe_summary: {}
+    }, {
+      key: "PUBLIC_SAFETY",
+      status: "PASS",
+      blockers: [],
+      warnings: [],
+      safe_summary: { provider_details_public: false }
+    }],
+    blockers: input.blockers,
+    warnings: input.warnings,
+    next_actions: ["Review live Ship Now readiness blockers before attempting a pilot shipment."],
+    checked_at: input.checkedAt
+  };
 }
 
 export function getLiveAwbLabelRuntime(source: Source = env): LiveAwbLabelRuntime {
@@ -339,6 +442,28 @@ export async function getLiveAwbLabelReadiness(
       : runtime.mode === "DRY_RUN"
         ? "DRY_RUN"
         : "READY";
+  const certificationDecision = await getCourierCertificationDecision({
+    merchantId,
+    providerKey: "SHIPROCKET",
+    requestedCapability: "AWB",
+    ...(options.shipmentId ? { shipmentId: options.shipmentId } : {})
+  }, {
+    client,
+    certification: liveAwbDecisionSnapshot({
+      status: ready ? "READY_FOR_PILOT" : "BLOCKED",
+      shiprocket,
+      ...(selectedRate ? { selectedRate } : {}),
+      ...(pickupAlignment ? { pickupAlignment } : {}),
+      blockers: [...new Set(blockers)],
+      warnings: [...new Set(warnings)],
+      checkedAt: new Date().toISOString()
+    }),
+    existingAwb: shipment?.hasAwb ?? false,
+    oneShotPilotGatePassed: shiprocket.oneShotEnabled
+      && shiprocket.oneShotApprovalPresent
+      && shiprocket.allowedMerchantMatched
+      && shiprocket.allowedShipmentMatched
+  });
 
   return {
     status,
@@ -358,6 +483,7 @@ export async function getLiveAwbLabelReadiness(
     ...(shipment ? { shipment } : {}),
     ...(selectedRate ? { selectedRate } : {}),
     ...(pickupAlignment ? { pickupAlignment } : {}),
+    certificationDecision,
     blockers: [...new Set(blockers)],
     warnings: [...new Set(warnings)],
     message: ready
@@ -452,6 +578,9 @@ export function serializeLiveAwbLabelReadiness(readiness: LiveAwbLabelReadiness)
     } : {}),
     ...(readiness.pickupAlignment ? {
       pickup_alignment: serializeShiprocketPickupDiagnostics(readiness.pickupAlignment)
+    } : {}),
+    ...(readiness.certificationDecision ? {
+      certification_decision: sellerSafeCourierCertificationDecision(readiness.certificationDecision)
     } : {}),
     blockers: readiness.blockers,
     warnings: readiness.warnings,
