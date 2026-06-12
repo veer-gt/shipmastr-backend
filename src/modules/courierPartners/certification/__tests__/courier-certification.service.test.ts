@@ -39,13 +39,16 @@ function smartLiveRate(overrides: Record<string, unknown> = {}) {
   return {
     id: "rate_1",
     sellerId: "merchant_1",
+    shipmentId: "shipment_1",
     publicServiceCode: "shipmastr_smart",
     publicServiceName: "Shipmastr Smart",
+    amountPaise: 7200,
     rateBreakup: {
       phase6: {
         livePilotRatesMode: "LIVE",
         livePilotRatesReady: true,
         pickupAvailable: true,
+        deliveryAvailable: true,
         providerCourierId: "123",
         ...overrides
       }
@@ -59,12 +62,23 @@ function makeClient(input: {
   rates?: any[];
   probes?: any[];
   shipments?: any[];
+  pickups?: any[];
 } = {}) {
   const state = {
     credentials: input.credentials ?? [],
     rates: input.rates ?? [],
     probes: input.probes ?? [],
-    shipments: input.shipments ?? []
+    shipments: input.shipments ?? [],
+    pickups: input.pickups ?? [{
+      id: "pickup_1",
+      sellerId: "merchant_1",
+      label: "Noida Warehouse",
+      city: "Noida",
+      state: "UP",
+      pincode: "201301",
+      status: "active",
+      createdAt: now()
+    }]
   };
   return {
     courierProviderCredential: {
@@ -107,6 +121,19 @@ function makeClient(input: {
         (!where?.id || row.id === where.id)
         && (!where?.sellerId || row.sellerId === where.sellerId)
       )) ?? null
+    },
+    pickupLocation: {
+      findFirst: async ({ where }: any = {}) => state.pickups.find((row) => (
+        (!where?.id || row.id === where.id)
+        && (!where?.sellerId || row.sellerId === where.sellerId)
+      )) ?? null,
+      findMany: async ({ where, orderBy }: any = {}) => {
+        let rows = [...state.pickups];
+        if (where?.sellerId) rows = rows.filter((row) => row.sellerId === where.sellerId);
+        if (where?.status) rows = rows.filter((row) => row.status === where.status);
+        if (orderBy?.createdAt === "asc") rows.sort((a, b) => a.createdAt.getTime() - b.createdAt.getTime());
+        return rows;
+      }
     }
   } as any;
 }
@@ -203,12 +230,16 @@ describe("courier partner certification layer", () => {
       client: makeClient({
         credentials: [activeCredential()],
         rates: [{
-          ...smartLiveRate(),
+          ...smartLiveRate({ pickupAvailable: false }),
           shipmentId: "shipment_1"
         }],
         shipments: [{
           id: "shipment_1",
           sellerId: "merchant_1",
+          pickupLocationId: "pickup_1",
+          fromPincode: "201301",
+          toPincode: "400001",
+          paymentMode: "prepaid",
           metadata: {
             phase6: {
               latestRateRefresh: {
@@ -246,6 +277,11 @@ describe("courier partner certification layer", () => {
     assert.equal(rates.safe_summary.latest_refresh_status, "NO_ELIGIBLE_SHIPPING_RATES");
     assert.equal(rates.safe_summary.eligible_rate_count, 0);
     assert.equal(rates.safe_summary.stale_selected_rate_ignored, true);
+    assert.equal(rates.safe_summary.pickup_serviceability_status, "PICKUP_UNAVAILABLE");
+    assert.equal(rates.safe_summary.pickup_available_count, 0);
+    assert.equal(rates.safe_summary.delivery_available_count, 1);
+    assert.equal(rates.safe_summary.numeric_courier_id_count, 1);
+    assert.equal(rates.safe_summary.recommended_action, "SAFE_REVIEW");
     assert.doesNotMatch(json, /Bigship|Shipmozo|providerCourierId|providerServiceId|rawPayload|rawHeaders|rawResponse|Authorization|Bearer/i);
   });
 

@@ -14,6 +14,7 @@ describe("Pilot Run 6H certification check script", () => {
     assert.match(script, /courier-certification\/summary/);
     assert.match(script, /courier-certification\/providers\/SHIPROCKET/);
     assert.match(script, /courier-live-readiness\/providers\/SHIPROCKET\/pickups/);
+    assert.match(script, /courier-pickup-serviceability\/providers\/SHIPROCKET\/shipments/);
     assert.match(script, /live-ship-readiness/);
     assert.doesNotMatch(script, /ship-now|manifestOrder|createLabel|getLabel|createDraftOrder|app\.shiprocket\.in|shiprocket\.in\/v1\/external/i);
     assert.doesNotMatch(script, /console\.log\([^)]*token/i);
@@ -43,6 +44,9 @@ describe("Pilot Run 6H certification check script", () => {
       pickup: {
         blockers: ["SHIPROCKET_LIVE_PICKUP_UNAVAILABLE"]
       },
+      pickupServiceability: {
+        blockers: ["PROVIDER_PICKUP_UNAVAILABLE"]
+      },
       liveShipReadiness: {
         blockers: ["LIVE_SHIPROCKET_ONE_SHOT_APPROVAL_REQUIRED"]
       }
@@ -50,6 +54,7 @@ describe("Pilot Run 6H certification check script", () => {
     assert.deepEqual(blockers, [
       "PROVIDER_RATES_NOT_LIVE",
       "SHIPROCKET_LIVE_PICKUP_UNAVAILABLE",
+      "PROVIDER_PICKUP_UNAVAILABLE",
       "LIVE_SHIPROCKET_ONE_SHOT_APPROVAL_REQUIRED"
     ]);
   });
@@ -91,7 +96,7 @@ describe("Pilot Run 6H certification check script", () => {
     });
     assert.equal(
       action,
-      "No eligible Shipmastr shipping option is available for this pickup right now. Fix provider pickup/serviceability or try another pickup, then refresh rates again."
+      "No eligible Shipmastr shipping option is available for this pickup right now. Fix pickup/serviceability or try another pickup, then refresh rates again."
     );
   });
 
@@ -127,6 +132,17 @@ describe("Pilot Run 6H certification check script", () => {
         pickups: [{ pincode: "201301", active: true }],
         blockers: []
       },
+      pickupServiceability: {
+        status: "PICKUP_UNAVAILABLE",
+        latest_rate_context: {
+          pickup_available_count: 0,
+          delivery_available_count: 3,
+          numeric_courier_id_count: 3
+        },
+        recommended_action: "TRY_ALTERNATE_PICKUP",
+        blockers: ["PROVIDER_PICKUP_UNAVAILABLE"],
+        next_actions: ["Run a controlled rate refresh with another active pickup location."]
+      },
       liveShipReadiness: {
         ready: false,
         runtime: { enabled: true, mode: "LIVE" },
@@ -149,14 +165,20 @@ describe("Pilot Run 6H certification check script", () => {
     });
     assert.match(report, /Provider-scoped blockers:/);
     assert.match(report, /Rates:/);
+    assert.match(report, /Pickup serviceability:/);
     assert.match(report, /latest refresh: NO_ELIGIBLE_SHIPPING_RATES/);
     assert.match(report, /eligible rate count: 0/);
     assert.match(report, /stale selected rate ignored: true/);
+    assert.match(report, /status: PICKUP_UNAVAILABLE/);
+    assert.match(report, /pickup available candidates: 0/);
+    assert.match(report, /recommended action: TRY_ALTERNATE_PICKUP/);
     assert.match(report, /PROVIDER_RATES_NOT_LIVE/);
     assert.match(report, /PROVIDER_LATEST_RATE_REFRESH_NO_ELIGIBLE_RATES/);
+    assert.match(report, /PROVIDER_PICKUP_UNAVAILABLE/);
     assert.match(report, /LIVE_SHIPROCKET_ONE_SHOT_APPROVAL_REQUIRED/);
     assert.match(report, /Rate context action:/);
     assert.match(report, /No eligible Shipmastr shipping option is available for this pickup right now/);
+    assert.doesNotMatch(report, /provider pickup\/serviceability/i);
     assert.doesNotMatch(report, /PROVIDER_CREDENTIALS_MISSING|UNRELATED_GLOBAL_BLOCKER/);
     assert.doesNotMatch(report, /test-token|password|secret|Authorization|Bearer|app\.shiprocket\.in|ship-now/i);
   });

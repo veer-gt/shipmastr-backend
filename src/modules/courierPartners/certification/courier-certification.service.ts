@@ -11,6 +11,10 @@ import {
   latestRateRefreshDiagnosticFromShipment,
   type LiveRateRefreshDiagnostic
 } from "../../shippingNetwork/shipping-rates.service.js";
+import {
+  diagnoseCourierPickupServiceability
+} from "../pickupServiceability/courier-pickup-serviceability.service.js";
+import type { CourierPickupServiceabilityResult } from "../pickupServiceability/courier-pickup-serviceability.types.js";
 import type {
   CourierCertificationBlocker,
   CourierCertificationDimension,
@@ -296,14 +300,21 @@ function serviceabilityDimension(input: {
   };
 }
 
-function ratesDimension(rateMeta: ReturnType<typeof liveRateMetadata>): CourierCertificationDimension {
+function ratesDimension(
+  rateMeta: ReturnType<typeof liveRateMetadata>,
+  pickupServiceability: CourierPickupServiceabilityResult | null
+): CourierCertificationDimension {
   const blockers: CourierCertificationBlocker[] = [];
   const latestNoEligible = rateMeta.latestRefresh
     && ["NO_ELIGIBLE_SHIPPING_RATES", "PROVIDER_SERVICEABILITY_NO_CANDIDATES"].includes(rateMeta.latestRefresh.status);
   if (latestNoEligible) blockers.push("PROVIDER_LATEST_RATE_REFRESH_NO_ELIGIBLE_RATES");
   if (!latestNoEligible && (!rateMeta.liveMode || !rateMeta.liveReady)) blockers.push("PROVIDER_RATES_NOT_LIVE");
   if (!latestNoEligible && !rateMeta.providerCourierIdPresent) blockers.push("PROVIDER_COURIER_ID_MISSING");
-  if (rateMeta.pickupAvailable === false || rateMeta.latestRefresh?.provider_pickup_available_any === false) blockers.push("PROVIDER_PICKUP_UNAVAILABLE");
+  if (
+    rateMeta.pickupAvailable === false
+    || rateMeta.latestRefresh?.provider_pickup_available_any === false
+    || pickupServiceability?.status === "PICKUP_UNAVAILABLE"
+  ) blockers.push("PROVIDER_PICKUP_UNAVAILABLE");
   return {
     key: "RATES",
     status: blockers.length ? "FAIL" : "PASS",
@@ -318,6 +329,11 @@ function ratesDimension(rateMeta: ReturnType<typeof liveRateMetadata>): CourierC
       live_rate_candidates_count: rateMeta.latestRefresh?.live_rate_candidates_count ?? null,
       pickup_available_any: rateMeta.latestRefresh?.provider_pickup_available_any ?? null,
       stale_selected_rate_ignored: rateMeta.latestRefresh?.stale_selected_rate_ignored ?? false,
+      pickup_serviceability_status: pickupServiceability?.status ?? null,
+      pickup_available_count: pickupServiceability?.latest_rate_context.pickup_available_count ?? null,
+      delivery_available_count: pickupServiceability?.latest_rate_context.delivery_available_count ?? null,
+      numeric_courier_id_count: pickupServiceability?.latest_rate_context.numeric_courier_id_count ?? null,
+      recommended_action: pickupServiceability?.recommended_action ?? null,
       live_mode: rateMeta.liveMode,
       live_ready: rateMeta.liveReady,
       pickup_available: rateMeta.pickupAvailable,
@@ -454,11 +470,18 @@ async function shiprocketSnapshot(
       ...(options.source ? { source: options.source } : {})
     })
     : null);
+  const pickupServiceability = options.shipmentId
+    ? await diagnoseCourierPickupServiceability(merchantId, {
+      providerKey: "SHIPROCKET",
+      shipmentId: options.shipmentId,
+      ...(options.pickupLocationId ? { pickupLocationId: options.pickupLocationId } : {})
+    }, { client: options.client })
+    : null;
   const dimensions = [
     credentialDimension(credential),
     pickupDimension(pickupDiagnostics),
     serviceabilityDimension({ credential, serviceabilityProbe, rateMeta }),
-    ratesDimension(rateMeta),
+    ratesDimension(rateMeta, pickupServiceability),
     providerCourierIdDimension(rateMeta),
     fixedDimension({
       key: "AWB",

@@ -6,6 +6,7 @@ import type {
 
 const unsafeKeyPattern = /secret|token|password|credential|authorization|cookie|headers|raw|api[_-]?key|private|hash|provider_payload|providerPayload|provider_response|providerResponse|provider_ref|providerRef|providerPickupId|providerCourierId|courier_id|courierId/i;
 const unsafeStringPattern = /bearer\s+|basic\s+|token|secret|password|private[_-]?key|access[_-]?key|vault:|shiprocket|shipmozo|bigship|blue dart|provider courier id|provider pickup id/i;
+const safeAggregateKeys = new Set(["numeric_courier_id_count"]);
 
 function safeValue(value: unknown): unknown {
   if (value == null) return value;
@@ -13,7 +14,7 @@ function safeValue(value: unknown): unknown {
   if (typeof value === "object") {
     const output: Record<string, unknown> = {};
     for (const [key, child] of Object.entries(value as Record<string, unknown>)) {
-      if (unsafeKeyPattern.test(key)) continue;
+      if (!safeAggregateKeys.has(key) && unsafeKeyPattern.test(key)) continue;
       const next = safeValue(child);
       if (next !== undefined) output[key] = next;
     }

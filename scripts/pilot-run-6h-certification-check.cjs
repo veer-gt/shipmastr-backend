@@ -68,6 +68,7 @@ function providerScopedBlockers(input) {
   return unique([
     ...(input.provider?.blockers ?? []),
     ...(input.pickup?.blockers ?? []),
+    ...(input.pickupServiceability?.blockers ?? []),
     ...(input.liveShipReadiness?.blockers ?? [])
   ]);
 }
@@ -76,6 +77,7 @@ function providerScopedNextActions(input) {
   return unique([
     ...(input.provider?.next_actions ?? []),
     ...(input.provider?.nextActions ?? []),
+    ...(input.pickupServiceability?.next_actions ?? []),
     ...(input.liveShipReadiness?.certification_decision?.seller_safe_message
       ? [input.liveShipReadiness.certification_decision.seller_safe_message]
       : []),
@@ -90,7 +92,7 @@ function rateContextAction(input) {
     || input.liveShipReadiness?.selected_rate?.latest_refresh_status === "NO_ELIGIBLE_SHIPPING_RATES"
     || input.liveShipReadiness?.selected_rate?.latest_refresh_status === "PROVIDER_SERVICEABILITY_NO_CANDIDATES";
   if (noEligible) {
-    return "No eligible Shipmastr shipping option is available for this pickup right now. Fix provider pickup/serviceability or try another pickup, then refresh rates again.";
+    return "No eligible Shipmastr shipping option is available for this pickup right now. Fix pickup/serviceability or try another pickup, then refresh rates again.";
   }
   const pickupAligned = input.pickup?.provider_pickup_pincode_match === true
     || dimension(input.provider, "PICKUPS")?.status === "PASS";
@@ -137,6 +139,7 @@ function renderSafeList(title, values) {
 function renderReport(input) {
   const provider = input.provider;
   const pickup = input.pickup;
+  const pickupServiceability = input.pickupServiceability;
   const liveShipReadiness = input.liveShipReadiness;
   const latestRefresh = liveShipReadiness?.latest_rate_refresh;
   const ratesDimension = dimension(provider, "RATES");
@@ -179,6 +182,13 @@ function renderReport(input) {
     `  pickup unavailable candidates: ${pickupUnavailableCount || yesNoText(latestRefresh?.provider_pickup_available_any === false ? true : null)}`,
     `  stale selected rate ignored: ${boolText(liveShipReadiness?.selected_rate?.stale_selected_rate_ignored ?? latestRefresh?.stale_selected_rate_ignored)}`,
     "",
+    "Pickup serviceability:",
+    `  status: ${pickupServiceability?.status ?? "unknown"}`,
+    `  pickup available candidates: ${pickupServiceability?.latest_rate_context?.pickup_available_count ?? "unknown"}`,
+    `  delivery available candidates: ${pickupServiceability?.latest_rate_context?.delivery_available_count ?? "unknown"}`,
+    `  numeric courier id candidates: ${pickupServiceability?.latest_rate_context?.numeric_courier_id_count ?? "unknown"}`,
+    `  recommended action: ${pickupServiceability?.recommended_action ?? "unknown"}`,
+    "",
     "Pickup context:",
     `  selected context: ${pickup?.selected_context ?? "unknown"}`,
     `  selected pickup pincode: ${pickup?.selected_shipmastr_pickup?.pincode ?? "unknown"}`,
@@ -213,12 +223,16 @@ async function run(env = process.env) {
   const contextQuery = params(runtime, { include_pickup_probe: true });
   const summaryQuery = params(runtime);
   const readinessPath = runtime.shipmentId ? `/shipments/${encodeURIComponent(runtime.shipmentId)}/live-ship-readiness` : null;
+  const pickupServiceabilityPath = runtime.shipmentId
+    ? `/courier-pickup-serviceability/providers/SHIPROCKET/shipments/${encodeURIComponent(runtime.shipmentId)}${params(runtime) ? `?${params(runtime)}` : ""}`
+    : null;
 
-  const [summary, shiprocket, pickup, liveShipReadiness] = await Promise.all([
+  const [summary, shiprocket, pickup, liveShipReadiness, pickupServiceability] = await Promise.all([
     request(runtime, `/courier-certification/summary${summaryQuery ? `?${summaryQuery}` : ""}`),
     request(runtime, `/courier-certification/providers/SHIPROCKET?${contextQuery}`),
     request(runtime, `/courier-live-readiness/providers/SHIPROCKET/pickups?${params(runtime)}`),
-    readinessPath ? request(runtime, readinessPath) : Promise.resolve(null)
+    readinessPath ? request(runtime, readinessPath) : Promise.resolve(null),
+    pickupServiceabilityPath ? request(runtime, pickupServiceabilityPath) : Promise.resolve(null)
   ]);
 
   const report = renderReport({
@@ -226,6 +240,7 @@ async function run(env = process.env) {
     summary,
     provider: shiprocket.provider ?? shiprocket,
     pickup,
+    pickupServiceability,
     liveShipReadiness
   });
   console.log(report);
