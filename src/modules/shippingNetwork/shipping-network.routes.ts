@@ -113,6 +113,7 @@ import { emailDeliveryRouter } from "../emailDelivery/email-delivery.routes.js";
 import { courierCertificationRouter } from "../courierPartners/certification/courier-certification.routes.js";
 import { courierLiveReadinessRouter } from "../courierPartners/liveReadiness/courier-live-readiness.routes.js";
 import { courierOnboardingRouter } from "../courierPartners/onboarding/courier-onboarding.routes.js";
+import { courierPickupLearningRouter } from "../courierPartners/pickupLearning/courier-pickup-learning.routes.js";
 import { courierPickupServiceabilityRouter } from "../courierPartners/pickupServiceability/courier-pickup-serviceability.routes.js";
 import { courierPickupTrialRouter } from "../courierPartners/pickupTrial/courier-pickup-trial.routes.js";
 import { merchantStoreOnboardingRouter } from "../merchantOnboarding/merchant-onboarding.routes.js";
@@ -165,6 +166,7 @@ function routeParam(value: string | string[] | undefined) {
 shippingNetworkRouter.use("/", platformIntegrationsRouter);
 shippingNetworkRouter.use("/", courierLiveReadinessRouter);
 shippingNetworkRouter.use("/", courierCertificationRouter);
+shippingNetworkRouter.use("/", courierPickupLearningRouter);
 shippingNetworkRouter.use("/", courierPickupServiceabilityRouter);
 shippingNetworkRouter.use("/", courierPickupTrialRouter);
 shippingNetworkRouter.use("/", courierOnboardingRouter);

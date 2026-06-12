@@ -282,6 +282,9 @@ describe("courier partner certification layer", () => {
     assert.equal(rates.safe_summary.delivery_available_count, 1);
     assert.equal(rates.safe_summary.numeric_courier_id_count, 1);
     assert.equal(rates.safe_summary.recommended_action, "SAFE_REVIEW");
+    assert.equal(rates.safe_summary.pickup_learning_status, "UNAVAILABLE");
+    assert.equal(rates.safe_summary.pickup_learning_availability_score, 0);
+    assert.equal(rates.safe_summary.pickup_learning_recommendation, "TRY_ALTERNATE_PICKUP");
     assert.doesNotMatch(json, /Bigship|Shipmozo|providerCourierId|providerServiceId|rawPayload|rawHeaders|rawResponse|Authorization|Bearer/i);
   });
 

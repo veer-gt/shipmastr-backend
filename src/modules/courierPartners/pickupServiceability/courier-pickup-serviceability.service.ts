@@ -6,6 +6,7 @@ import {
   type LiveRateRefreshDiagnostic
 } from "../../shippingNetwork/shipping-rates.service.js";
 import { getSellerShipment } from "../../shippingNetwork/shipping-shipments.service.js";
+import { getCourierPickupLearningForShipment } from "../pickupLearning/courier-pickup-learning.service.js";
 import type {
   CourierPickupServiceabilityContext,
   CourierPickupServiceabilityRecommendationAction,
@@ -236,6 +237,7 @@ export async function diagnoseCourierPickupServiceability(
   });
   const action = recommendationAction(status, activeAlternatePickupCount);
   const blockers = blockersFor(status, activeAlternatePickupCount);
+  const learning = await getCourierPickupLearningForShipment(merchantId, input.providerKey, shipment.id, { client });
   return {
     provider_key: input.providerKey,
     public_network_name: "Shipmastr Courier Network",
@@ -249,7 +251,8 @@ export async function diagnoseCourierPickupServiceability(
     warnings: latestRefresh?.status ? [`Latest rate refresh status: ${latestRefresh.status}`] : [],
     next_actions: nextActionsFor(status, action),
     seller_safe_message: sellerMessage(status),
-    recommended_action: action
+    recommended_action: action,
+    learning_summary: learning
   };
 }
 

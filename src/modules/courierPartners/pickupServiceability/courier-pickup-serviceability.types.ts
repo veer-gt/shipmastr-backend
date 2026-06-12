@@ -1,3 +1,5 @@
+import type { CourierPickupLearningClassification } from "../pickupLearning/courier-pickup-learning.types.js";
+
 export type CourierPickupServiceabilityStatus =
   | "PICKUP_AVAILABLE"
   | "PICKUP_UNAVAILABLE"
@@ -44,6 +46,7 @@ export type CourierPickupServiceabilityResult = {
   next_actions: string[];
   seller_safe_message: string;
   recommended_action: CourierPickupServiceabilityRecommendationAction;
+  learning_summary?: CourierPickupLearningClassification | null;
 };
 
 export type CourierPickupTrialResult = {
