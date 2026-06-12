@@ -3,6 +3,7 @@ import { HttpError } from "../../lib/httpError.js";
 import { prisma } from "../../lib/prisma.js";
 import type { InternalCourierProviderAdapter } from "../courierPartners/providers/provider-adapter.types.js";
 import { createShiprocketLiveAdapter } from "../courierPartners/providers/shiprocket/shiprocket-live.adapter.js";
+import type { ShiprocketLiveCredentials } from "../courierPartners/providers/shiprocket/shiprocket-live-credentials.js";
 import { createMockSafeShippingAdapter } from "./shipping-pickup-location.service.js";
 import {
   PUBLIC_COURIER_NETWORK,
@@ -34,6 +35,10 @@ type ShipNowOptions = {
   client?: Db;
   adapter?: InternalCourierProviderAdapter;
   liveAwbLabelSource?: Record<string, unknown>;
+  shiprocketPickupClient?: {
+    login(credentials: ShiprocketLiveCredentials): Promise<{ token?: string; expires_in?: number; expiresIn?: number }>;
+    listPickupLocations(token: string): Promise<Record<string, unknown>>;
+  };
 };
 
 type ProviderRefForLabel = {
@@ -520,7 +525,9 @@ export async function shipNowShipment(
   const liveAwbLabelReadiness = await assertLiveAwbLabelAllowed(sellerId, {
     client,
     shipmentId: shipment.id,
-    ...(options.liveAwbLabelSource ? { source: options.liveAwbLabelSource } : {})
+    includePickupAlignment: true,
+    ...(options.liveAwbLabelSource ? { source: options.liveAwbLabelSource } : {}),
+    ...(options.shiprocketPickupClient ? { shiprocketPickupClient: options.shiprocketPickupClient } : {})
   });
 
   let rates = await findRates(client, shipment.id, sellerId);

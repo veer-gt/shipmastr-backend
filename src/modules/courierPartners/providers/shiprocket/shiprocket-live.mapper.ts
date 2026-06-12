@@ -11,6 +11,7 @@ import type {
   ShiprocketCreateOrderRequest,
   ShiprocketCreateOrderResponse,
   ShiprocketGenerateLabelResponse,
+  ShiprocketPickupListResponse,
   ShiprocketServiceabilityRequest,
   ShiprocketServiceabilityResponse
 } from "./shiprocket-live.client.js";
@@ -171,6 +172,93 @@ function truthyAvailability(value: unknown) {
   if (typeof value === "number") return value > 0;
   if (typeof value === "string") return !["0", "false", "no", "n", "not available"].includes(value.trim().toLowerCase());
   return true;
+}
+
+function strictBool(value: unknown) {
+  if (typeof value === "boolean") return value;
+  if (typeof value === "number") return value > 0;
+  if (typeof value === "string") {
+    const normalized = value.trim().toLowerCase();
+    if (["1", "true", "yes", "y", "active", "enabled", "verified", "approved"].includes(normalized)) return true;
+    if (["0", "false", "no", "n", "inactive", "disabled", "unverified", "pending", "rejected"].includes(normalized)) return false;
+  }
+  return null;
+}
+
+function safeStatusFlag(value: unknown) {
+  const raw = firstString(value);
+  if (!raw) return null;
+  const safe = raw.replace(/[^a-zA-Z0-9 _.-]/g, "").trim().slice(0, 60);
+  return safe || null;
+}
+
+function pickupRows(response: ShiprocketPickupListResponse) {
+  const data = dataObject(response);
+  return [
+    ...arrayValue(response.data),
+    ...arrayValue(data.pickup_addresses),
+    ...arrayValue(data.pickupAddresses),
+    ...arrayValue(data.pickup_locations),
+    ...arrayValue(data.pickupLocations),
+    ...arrayValue(data.shipping_address),
+    ...arrayValue(data.shippingAddress),
+    ...arrayValue(response.pickup_addresses),
+    ...arrayValue(response.pickupAddresses),
+    ...arrayValue(response.pickup_locations),
+    ...arrayValue(response.pickupLocations),
+    ...arrayValue(response.shipping_address),
+    ...arrayValue(response.shippingAddress)
+  ];
+}
+
+function idSuffix(value: string | null) {
+  if (!value) return null;
+  return value.length <= 4 ? value : value.slice(-4);
+}
+
+export type SafeShiprocketPickup = {
+  providerPickupIdPresent: boolean;
+  providerPickupIdSuffix: string | null;
+  pickupName: string | null;
+  city: string | null;
+  state: string | null;
+  pincode: string | null;
+  active: boolean | null;
+  verified: boolean | null;
+  statusFlags: string[];
+};
+
+export function mapShiprocketPickupListToSafePickups(response: ShiprocketPickupListResponse): SafeShiprocketPickup[] {
+  return pickupRows(response).map((row) => {
+    const providerPickupId = firstString(
+      row.id,
+      row.pickup_id,
+      row.pickupId,
+      row.pickup_location_id,
+      row.pickupLocationId,
+      row.pickup_code,
+      row.pickupCode
+    );
+    const pincode = firstString(row.pin_code, row.pincode, row.pickup_pincode, row.pickupPincode, row.postcode);
+    const statusFlags = [
+      safeStatusFlag(row.status),
+      safeStatusFlag(row.pickup_status),
+      safeStatusFlag(row.pickupStatus),
+      safeStatusFlag(row.kyc_status),
+      safeStatusFlag(row.kycStatus)
+    ].filter((item): item is string => Boolean(item));
+    return {
+      providerPickupIdPresent: Boolean(providerPickupId),
+      providerPickupIdSuffix: idSuffix(providerPickupId),
+      pickupName: firstString(row.pickup_location, row.pickupLocation, row.name, row.company_name, row.companyName, row.warehouse_name, row.warehouseName),
+      city: firstString(row.city, row.pickup_city, row.pickupCity),
+      state: firstString(row.state, row.pickup_state, row.pickupState),
+      pincode: pincode && /^[1-9][0-9]{5}$/.test(pincode) ? pincode : null,
+      active: strictBool(row.is_active ?? row.isActive ?? row.active ?? row.status),
+      verified: strictBool(row.is_verified ?? row.isVerified ?? row.verified ?? row.pickup_verified ?? row.pickupVerified ?? row.kyc_status ?? row.kycStatus),
+      statusFlags: [...new Set(statusFlags)]
+    };
+  }).filter((pickup) => pickup.providerPickupIdPresent || pickup.pincode || pickup.pickupName);
 }
 
 type ShiprocketRateCandidate = {

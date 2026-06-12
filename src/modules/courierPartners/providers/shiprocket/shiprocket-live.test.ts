@@ -12,6 +12,7 @@ import {
   mapProviderRateInputToShiprocketServiceability,
   mapProviderDraftToShiprocketOrder,
   mapShiprocketAwbToProviderManifest,
+  mapShiprocketPickupListToSafePickups,
   mapShiprocketServiceabilityToProviderRates,
   mapShiprocketLabelToProviderLabel,
   mapShiprocketOrderToProviderDraft
@@ -141,6 +142,7 @@ describe("Shiprocket live client and mapper", () => {
       }
       if (url.endsWith("/courier/assign/awb")) return { ok: true, status: 200, json: async () => ({ awb_code: "190123456789", shipment_id: 987654321 }) };
       if (url.endsWith("/courier/generate/label")) return { ok: true, status: 200, json: async () => ({ label_url: "https://label.example.test/safe.pdf" }) };
+      if (url.endsWith("/settings/company/pickup")) return { ok: true, status: 200, json: async () => ({}) };
       return { ok: false, status: 404, json: async () => ({}) };
     };
     const client = new ShiprocketLiveClient({ baseUrl: "https://apiv2.shiprocket.in" }, fetchImpl);
@@ -155,16 +157,63 @@ describe("Shiprocket live client and mapper", () => {
     }, login.token!);
     const awb = await client.assignAwb({ shipment_id: 987654321, courier_id: 12345 }, login.token!);
     const label = await client.generateLabel({ shipment_id: [987654321] }, login.token!);
+    const pickups = await client.listPickupLocations(login.token!);
 
     assert.equal(login.token, "ephemeral-token");
     assert.equal(mapShiprocketOrderToProviderDraft(order).providerOrderId, "987654321");
     assert.equal(mapShiprocketServiceabilityToProviderRates(serviceability)[0]?.providerCourierId, "12345");
     assert.equal(mapShiprocketAwbToProviderManifest(awb).providerAwb, "190123456789");
     assert.equal(mapShiprocketLabelToProviderLabel(label).labelUrl, "https://label.example.test/safe.pdf");
-    assert.equal(calls.length, 5);
+    assert.deepEqual(pickups, {});
+    assert.equal(calls.length, 6);
     assert.equal(calls[0]?.authorization, false);
     assert.equal(calls.slice(1).every((call) => call.authorization), true);
     assert.doesNotMatch(JSON.stringify({ order, serviceability: mapShiprocketServiceabilityToProviderRates(serviceability), awb, label }), /ephemeral-token|not-a-real-provider-password|Authorization|Bearer/i);
+  });
+
+  it("lists and maps Shiprocket pickups with mocked HTTP without exposing raw provider payloads", async () => {
+    const calls: Array<{ url: string; authorization: boolean }> = [];
+    const fetchImpl: ShiprocketLiveFetch = async (url, init) => {
+      calls.push({ url, authorization: Boolean(init.headers?.authorization) });
+      if (url.endsWith("/auth/login")) return { ok: true, status: 200, json: async () => ({ token: "ephemeral-token" }) };
+      if (url.endsWith("/settings/company/pickup")) {
+        return {
+          ok: true,
+          status: 200,
+          json: async () => ({
+            rawHeaders: { authorization: "Bearer secret" },
+            data: {
+              pickup_locations: [{
+                id: "pickup-provider-123456",
+                pickup_location: "skymax",
+                city: "Gautam Buddha Nagar",
+                state: "Uttar Pradesh",
+                pincode: "201301",
+                is_active: 1,
+                is_verified: "1",
+                internal_payload: "should-not-leak"
+              }]
+            }
+          })
+        };
+      }
+      return { ok: false, status: 404, json: async () => ({}) };
+    };
+    const client = new ShiprocketLiveClient({ baseUrl: "https://apiv2.shiprocket.in" }, fetchImpl);
+    const login = await client.login({ email: "pilot@example.test", password: "not-a-real-provider-password" });
+    const response = await client.listPickupLocations(login.token!);
+    const pickups = mapShiprocketPickupListToSafePickups(response);
+    const json = JSON.stringify(pickups);
+
+    assert.equal(calls.length, 2);
+    assert.equal(calls[1]?.authorization, true);
+    assert.equal(pickups[0]?.providerPickupIdPresent, true);
+    assert.equal(pickups[0]?.providerPickupIdSuffix, "3456");
+    assert.equal(pickups[0]?.pickupName, "skymax");
+    assert.equal(pickups[0]?.pincode, "201301");
+    assert.equal(pickups[0]?.active, true);
+    assert.equal(pickups[0]?.verified, true);
+    assert.doesNotMatch(json, /pickup-provider-123456|internal_payload|rawHeaders|Authorization|Bearer|ephemeral-token|not-a-real-provider-password/i);
   });
 
   it("maps Shiprocket serviceability into Shipmastr-branded rates with internal numeric ids", () => {

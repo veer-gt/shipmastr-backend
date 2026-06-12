@@ -3,11 +3,16 @@ import { env } from "../../config/env.js";
 import { HttpError } from "../../lib/httpError.js";
 import { prisma } from "../../lib/prisma.js";
 import {
-  canResolveShiprocketLiveCredentials
+  canResolveShiprocketLiveCredentials,
+  type ShiprocketLiveCredentials
 } from "../courierPartners/providers/shiprocket/shiprocket-live-credentials.js";
 import { getCourierLiveReadinessSnapshot } from "../courierPartners/liveReadiness/courier-live-readiness.service.js";
 import { getLivePilotReadinessSnapshot } from "../livePilot/live-pilot.service.js";
 import { getSellerShipment } from "./shipping-shipments.service.js";
+import {
+  getShiprocketPickupDiagnostics,
+  serializeShiprocketPickupDiagnostics
+} from "./shipping-shiprocket-pickup-alignment.service.js";
 
 type Db = Prisma.TransactionClient | typeof prisma;
 
@@ -57,12 +62,17 @@ export type LiveAwbLabelReadiness = {
     pickupAvailable: boolean | null;
     providerCourierIdPresent: boolean;
   };
+  pickupAlignment?: Awaited<ReturnType<typeof getShiprocketPickupDiagnostics>>;
   blockers: string[];
   warnings: string[];
   message: string;
 };
 
 type Source = Record<string, unknown>;
+type ShiprocketPickupClient = {
+  login(credentials: ShiprocketLiveCredentials): Promise<{ token?: string; expires_in?: number; expiresIn?: number }>;
+  listPickupLocations(token: string): Promise<Record<string, unknown>>;
+};
 
 function boolValue(source: Source, key: string, fallback = false) {
   const value = source[key];
@@ -170,6 +180,8 @@ export async function getLiveAwbLabelReadiness(
     client?: Db;
     source?: Source;
     shipmentId?: string;
+    includePickupAlignment?: boolean;
+    shiprocketPickupClient?: ShiprocketPickupClient;
   } = {}
 ): Promise<LiveAwbLabelReadiness> {
   const client = options.client ?? prisma;
@@ -196,6 +208,7 @@ export async function getLiveAwbLabelReadiness(
   const warnings: string[] = [];
   let shipment: LiveAwbLabelReadiness["shipment"];
   let selectedRate: LiveAwbLabelReadiness["selectedRate"];
+  let pickupAlignment: LiveAwbLabelReadiness["pickupAlignment"];
 
   if (options.shipmentId) {
     const record = await getSellerShipment(merchantId, options.shipmentId, client);
@@ -290,6 +303,18 @@ export async function getLiveAwbLabelReadiness(
     if (runtime.mode === "DRY_RUN") warnings.push("Pilot live AWB and label creation is in dry-run mode; no live document call is allowed.");
   }
 
+  const pickupAlignmentAllowed = !blockers.length || !blockers.some((blocker) => blocker !== "SHIPROCKET_LIVE_PICKUP_UNAVAILABLE");
+  if (runtime.enabled && runtime.mode === "LIVE" && options.shipmentId && options.includePickupAlignment && pickupAlignmentAllowed) {
+    pickupAlignment = await getShiprocketPickupDiagnostics(merchantId, {
+      client,
+      source,
+      shipmentId: options.shipmentId,
+      ...(options.shiprocketPickupClient ? { shiprocketClient: options.shiprocketPickupClient } : {})
+    });
+    blockers.push(...(pickupAlignment.blockers as string[]));
+    warnings.push(...pickupAlignment.warnings);
+  }
+
   const ready = runtime.enabled
     && runtime.pilotOnly
     && runtime.mode === "LIVE"
@@ -305,7 +330,8 @@ export async function getLiveAwbLabelReadiness(
     && shiprocket.allowedMerchantMatched
     && shiprocket.allowedShipmentMatched
     && (!shipment || (shipment.readyForShipNow && !shipment.hasAwb && shipmentAllowedForLive(shipment.status)))
-    && !blockers.includes("SHIPROCKET_LIVE_PICKUP_UNAVAILABLE");
+    && !blockers.includes("SHIPROCKET_LIVE_PICKUP_UNAVAILABLE")
+    && !pickupAlignment?.blockers.length;
   const status = !runtime.enabled
     ? "DISABLED"
     : blockers.length
@@ -331,8 +357,9 @@ export async function getLiveAwbLabelReadiness(
     shiprocket,
     ...(shipment ? { shipment } : {}),
     ...(selectedRate ? { selectedRate } : {}),
+    ...(pickupAlignment ? { pickupAlignment } : {}),
     blockers: [...new Set(blockers)],
-    warnings,
+    warnings: [...new Set(warnings)],
     message: ready
       ? "Pilot live Ship Now is available for this merchant and shipment. Public responses remain Shipmastr-branded."
       : "Pilot live Ship Now is not available. Existing safe mock or dry-run behavior remains active."
@@ -345,6 +372,8 @@ export async function assertLiveAwbLabelAllowed(
     client?: Db;
     source?: Source;
     shipmentId?: string;
+    includePickupAlignment?: boolean;
+    shiprocketPickupClient?: ShiprocketPickupClient;
   } = {}
 ) {
   const readiness = await getLiveAwbLabelReadiness(merchantId, options);
@@ -365,6 +394,9 @@ export async function assertLiveAwbLabelAllowed(
   }
   if (!readiness.shiprocket.allowedMerchantMatched) throw new HttpError(409, "LIVE_SHIPROCKET_ALLOWED_MERCHANT_MISMATCH");
   if (!readiness.shiprocket.allowedShipmentMatched) throw new HttpError(409, "LIVE_SHIPROCKET_ALLOWED_SHIPMENT_MISMATCH");
+  if (readiness.blockers.includes("SHIPROCKET_PICKUP_NOT_FOUND")) throw new HttpError(409, "SHIPROCKET_PICKUP_NOT_FOUND");
+  if (readiness.blockers.includes("SHIPROCKET_PICKUP_PINCODE_MISMATCH")) throw new HttpError(409, "SHIPROCKET_PICKUP_PINCODE_MISMATCH");
+  if (readiness.blockers.includes("SHIPROCKET_PICKUP_NOT_ACTIVE")) throw new HttpError(409, "SHIPROCKET_PICKUP_NOT_ACTIVE");
   if (readiness.blockers.includes("SHIPROCKET_LIVE_PICKUP_UNAVAILABLE")) {
     throw new HttpError(409, "SHIPROCKET_LIVE_PICKUP_UNAVAILABLE");
   }
@@ -417,6 +449,9 @@ export function serializeLiveAwbLabelReadiness(readiness: LiveAwbLabelReadiness)
         live_ready: readiness.selectedRate.liveReady,
         pickup_available: readiness.selectedRate.pickupAvailable
       }
+    } : {}),
+    ...(readiness.pickupAlignment ? {
+      pickup_alignment: serializeShiprocketPickupDiagnostics(readiness.pickupAlignment)
     } : {}),
     blockers: readiness.blockers,
     warnings: readiness.warnings,

@@ -553,6 +553,7 @@ shippingNetworkRouter.post("/shipments/:shipmentId/rates", async (req, res) => {
 shippingNetworkRouter.get("/shipments/:shipmentId/live-ship-readiness", async (req, res) => {
   const readiness = await getLiveAwbLabelReadiness(req.auth!.merchantId, {
     shipmentId: req.params.shipmentId,
+    includePickupAlignment: true,
     source: {
       SHIPMASTR_LIVE_SHIPROCKET_ONE_SHOT_HEADER: req.get("x-shipmastr-live-awb-approval") ?? ""
     }

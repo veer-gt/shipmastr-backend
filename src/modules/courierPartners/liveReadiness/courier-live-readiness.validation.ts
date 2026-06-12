@@ -58,6 +58,11 @@ export const courierReadinessQuerySchema = z.object({
   merchant_id: z.string().trim().min(1).optional()
 }).strict();
 
+export const courierPickupDiagnosticsQuerySchema = z.object({
+  merchant_id: z.string().trim().min(1).optional(),
+  shipment_id: z.string().trim().min(1).max(120).optional()
+}).strict();
+
 export function isAllowedProbeType(value: string): value is CourierLiveProbeType {
   return (courierLiveProbeTypes as readonly string[]).includes(value);
 }
@@ -66,4 +71,4 @@ export type CourierCredentialInput = z.infer<typeof courierCredentialInputSchema
 export type CourierCredentialQuery = z.infer<typeof courierCredentialQuerySchema>;
 export type CourierProbeInput = z.infer<typeof courierProbeInputSchema>;
 export type CourierReadinessQuery = z.infer<typeof courierReadinessQuerySchema>;
-
+export type CourierPickupDiagnosticsQuery = z.infer<typeof courierPickupDiagnosticsQuerySchema>;

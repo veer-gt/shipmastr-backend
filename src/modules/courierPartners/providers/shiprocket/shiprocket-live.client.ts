@@ -51,6 +51,7 @@ export type ShiprocketServiceabilityRequest = {
   declared_value?: number;
 };
 export type ShiprocketServiceabilityResponse = Record<string, unknown>;
+export type ShiprocketPickupListResponse = Record<string, unknown>;
 
 export class ShiprocketLiveConfigError extends Error {
   constructor(message = "Courier provider live configuration is incomplete.") {
@@ -197,5 +198,15 @@ export class ShiprocketLiveClient {
         authorization: `Bearer ${token}`
       }
     }, "SHIPROCKET_RATE_SERVICEABILITY_FAILED");
+  }
+
+  listPickupLocations(token: string): Promise<ShiprocketPickupListResponse> {
+    return this.requestJson<ShiprocketPickupListResponse>("/v1/external/settings/company/pickup", {
+      method: "GET",
+      headers: {
+        "content-type": "application/json",
+        authorization: `Bearer ${token}`
+      }
+    }, "SHIPROCKET_PICKUP_LIST_FAILED");
   }
 }

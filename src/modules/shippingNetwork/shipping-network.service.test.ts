@@ -25,6 +25,10 @@ import {
   getLiveAwbLabelReadiness,
   serializeLiveAwbLabelReadiness
 } from "./shipping-live-ship-gate.service.js";
+import {
+  getShiprocketPickupDiagnostics,
+  serializeShiprocketPickupDiagnostics
+} from "./shipping-shiprocket-pickup-alignment.service.js";
 import { shipNowShipment } from "./shipping-ship-now.service.js";
 import { createShipmentDraft } from "./shipping-shipments.service.js";
 import { selectShippingTiers } from "./shipping-tier-decision.service.js";
@@ -789,6 +793,43 @@ function liveRatesSource() {
   };
 }
 
+function createFakeShiprocketPickupClient(input: {
+  pincode?: string;
+  city?: string;
+  state?: string;
+  active?: boolean | number | string;
+  verified?: boolean | number | string;
+} = {}) {
+  const calls = { login: 0, listPickupLocations: 0 };
+  return {
+    calls,
+    client: {
+      login: async () => {
+        calls.login += 1;
+        return { token: "ephemeral-token" };
+      },
+      listPickupLocations: async (token: string) => {
+        calls.listPickupLocations += 1;
+        assert.equal(token, "ephemeral-token");
+        return {
+          data: {
+            pickup_locations: [{
+              id: "pickup-provider-123456",
+              pickup_location: "skymax",
+              city: input.city ?? "Bengaluru",
+              state: input.state ?? "Karnataka",
+              pincode: input.pincode ?? "560001",
+              is_active: input.active ?? 1,
+              is_verified: input.verified ?? 1,
+              rawHeaders: { authorization: "Bearer should-not-leak" }
+            }]
+          }
+        };
+      }
+    }
+  };
+}
+
 async function withEnvPatch<T>(patch: Record<string, unknown>, callback: () => Promise<T>) {
   const target = env as unknown as Record<string, unknown>;
   const previous = Object.fromEntries(Object.keys(patch).map((key) => [key, target[key]]));
@@ -1268,6 +1309,7 @@ describe("Shipmastr Shipping Network services", () => {
     );
     seedActiveLiveCourierProvider(state);
     const adapter = createFakeShiprocketAdapter();
+    const pickupClient = createFakeShiprocketPickupClient();
     const pickup = await createShippingPickupLocation("seller_1", pickupBody(), { client, adapter });
     const shipment = await createShipmentDraft("seller_1", shipmentBody(pickup.pickup_location_id), client);
     seedShipmentRate(state, { shipmentId: shipment.shipment_id, internalCourierId: "12345" });
@@ -1275,18 +1317,21 @@ describe("Shipmastr Shipping Network services", () => {
     const first = await shipNowShipment("seller_1", shipment.shipment_id, "smart", {
       client,
       adapter,
-      liveAwbLabelSource: liveShiprocketSource(shipment.shipment_id)
+      liveAwbLabelSource: liveShiprocketSource(shipment.shipment_id),
+      shiprocketPickupClient: pickupClient.client
     });
     const second = await shipNowShipment("seller_1", shipment.shipment_id, "smart", {
       client,
       adapter,
-      liveAwbLabelSource: liveShiprocketSource(shipment.shipment_id)
+      liveAwbLabelSource: liveShiprocketSource(shipment.shipment_id),
+      shiprocketPickupClient: pickupClient.client
     });
     const json = JSON.stringify(first);
 
     assert.equal(adapter.calls.createDraftOrder, 1);
     assert.equal(adapter.calls.manifestOrder, 1);
     assert.equal(adapter.calls.getLabel, 1);
+    assert.equal(pickupClient.calls.listPickupLocations, 1);
     assert.equal(first.awbNumber, second.awbNumber);
     assert.match(first.awbNumber ?? "", /^SM/);
     assert.notEqual(first.awbNumber, "190123456789");
@@ -1305,6 +1350,7 @@ describe("Shipmastr Shipping Network services", () => {
     );
     seedActiveLiveCourierProvider(state);
     const adapter = createFakeShiprocketAdapter();
+    const pickupClient = createFakeShiprocketPickupClient();
     const pickup = await createShippingPickupLocation("seller_1", pickupBody(), { client, adapter });
     const shipment = await createShipmentDraft("seller_1", shipmentBody(pickup.pickup_location_id), client);
     seedShipmentRate(state, { shipmentId: shipment.shipment_id, internalCourierId: "shipmastr_smart" });
@@ -1313,13 +1359,92 @@ describe("Shipmastr Shipping Network services", () => {
       () => shipNowShipment("seller_1", shipment.shipment_id, "smart", {
         client,
         adapter,
-        liveAwbLabelSource: liveShiprocketSource(shipment.shipment_id)
+        liveAwbLabelSource: liveShiprocketSource(shipment.shipment_id),
+        shiprocketPickupClient: pickupClient.client
       }),
       (error) => error instanceof HttpError && error.message === "SHIPROCKET_LIVE_RATE_PROVIDER_ID_MISSING"
     );
     assert.equal(adapter.calls.createDraftOrder, 0);
     assert.equal(adapter.calls.manifestOrder, 0);
     assert.equal(adapter.calls.getLabel, 0);
+  });
+
+  it("reports Shiprocket pickup alignment when Shipmastr and provider pincodes match", async () => {
+    const { client, state } = createFakeClient();
+    seedActiveLiveCourierProvider(state);
+    const pickupClient = createFakeShiprocketPickupClient();
+    const pickup = await createShippingPickupLocation("seller_1", pickupBody(), { client, adapter: createFakeAdapter() });
+    const shipment = await createShipmentDraft("seller_1", shipmentBody(pickup.pickup_location_id), client);
+    seedShipmentRate(state, { shipmentId: shipment.shipment_id, internalCourierId: "12345" });
+
+    const diagnostics = await getShiprocketPickupDiagnostics("seller_1", {
+      client,
+      shipmentId: shipment.shipment_id,
+      source: liveShiprocketSource(shipment.shipment_id),
+      shiprocketClient: pickupClient.client
+    });
+    const serialized = serializeShiprocketPickupDiagnostics(diagnostics, { includePickups: true });
+    const json = JSON.stringify(serialized);
+
+    assert.equal(diagnostics.status, "SHIPROCKET_PICKUP_ALIGNED_READY");
+    assert.equal(diagnostics.providerPickupPincodeMatch, true);
+    assert.equal(diagnostics.liveRate.pickupAvailable, true);
+    assert.equal(serialized.selected_shipmastr_pickup?.pincode, "560001");
+    assert.equal(serialized.pickups?.[0]?.pincode, "560001");
+    assert.equal(pickupClient.calls.listPickupLocations, 1);
+    assert.doesNotMatch(json, /pickup-provider-123456|rawHeaders|Authorization|Bearer|ephemeral-token|not-a-real-provider-password|providerCourierId|providerRateId/i);
+  });
+
+  it("reports Shiprocket pickup pincode mismatch without provider mutation", async () => {
+    const { client, state } = createFakeClient();
+    seedActiveLiveCourierProvider(state);
+    const pickupClient = createFakeShiprocketPickupClient({ pincode: "201301", city: "Gautam Buddha Nagar", state: "Uttar Pradesh" });
+    const pickup = await createShippingPickupLocation("seller_1", pickupBody(), { client, adapter: createFakeAdapter() });
+    const shipment = await createShipmentDraft("seller_1", shipmentBody(pickup.pickup_location_id), client);
+    seedShipmentRate(state, { shipmentId: shipment.shipment_id, internalCourierId: "12345" });
+
+    const diagnostics = await getShiprocketPickupDiagnostics("seller_1", {
+      client,
+      shipmentId: shipment.shipment_id,
+      source: liveShiprocketSource(shipment.shipment_id),
+      shiprocketClient: pickupClient.client
+    });
+
+    assert.equal(diagnostics.status, "SHIPROCKET_PICKUP_PINCODE_MISMATCH");
+    assert.ok(diagnostics.blockers.includes("SHIPROCKET_PICKUP_PINCODE_MISMATCH"));
+    assert.equal(diagnostics.providerPickupPincodeMatch, false);
+    assert.equal(state.providerRefs.length, 0);
+    assert.equal(pickupClient.calls.listPickupLocations, 1);
+  });
+
+  it("adds pickup pincode mismatch to live Ship Now readiness without exposing provider details", async () => {
+    const { client, state } = createFakeClient();
+    state.livePilotMerchants.push({ merchantId: "seller_1", status: "ENABLED" });
+    state.livePilotCapabilities.push(
+      { merchantId: "seller_1", capability: "LIVE_COURIER_RATES", status: "ENABLED" },
+      { merchantId: "seller_1", capability: "LIVE_AWB_LABEL", status: "ENABLED" }
+    );
+    seedActiveLiveCourierProvider(state);
+    const pickupClient = createFakeShiprocketPickupClient({ pincode: "201301" });
+    const pickup = await createShippingPickupLocation("seller_1", pickupBody(), { client, adapter: createFakeAdapter() });
+    const shipment = await createShipmentDraft("seller_1", shipmentBody(pickup.pickup_location_id), client);
+    seedShipmentRate(state, { shipmentId: shipment.shipment_id, internalCourierId: "12345" });
+
+    const readiness = await getLiveAwbLabelReadiness("seller_1", {
+      client,
+      shipmentId: shipment.shipment_id,
+      source: liveShiprocketSource(shipment.shipment_id),
+      includePickupAlignment: true,
+      shiprocketPickupClient: pickupClient.client
+    });
+    const serialized = serializeLiveAwbLabelReadiness(readiness);
+    const json = JSON.stringify(serialized);
+
+    assert.equal(readiness.ready, false);
+    assert.ok(readiness.blockers.includes("SHIPROCKET_PICKUP_PINCODE_MISMATCH"));
+    assert.equal(serialized.pickup_alignment?.provider_pickup_pincode_match, false);
+    assert.equal(serialized.pickup_alignment?.selected_shipmastr_pickup?.pincode, "560001");
+    assert.doesNotMatch(json, /pickup-provider-123456|providerCourierId|providerServiceId|providerRateId|rawPayload|rawHeaders|rawResponse|Authorization|Bearer|ephemeral-token/i);
   });
 
   it("blocks live Ship Now readiness when selected live rate pickup is unavailable", async () => {
@@ -1330,6 +1455,7 @@ describe("Shipmastr Shipping Network services", () => {
       { merchantId: "seller_1", capability: "LIVE_AWB_LABEL", status: "ENABLED" }
     );
     seedActiveLiveCourierProvider(state);
+    const pickupClient = createFakeShiprocketPickupClient();
     const pickup = await createShippingPickupLocation("seller_1", pickupBody(), { client, adapter: createFakeAdapter() });
     const shipment = await createShipmentDraft("seller_1", shipmentBody(pickup.pickup_location_id), client);
     seedShipmentRate(state, {
@@ -1341,7 +1467,9 @@ describe("Shipmastr Shipping Network services", () => {
     const readiness = await getLiveAwbLabelReadiness("seller_1", {
       client,
       shipmentId: shipment.shipment_id,
-      source: liveShiprocketSource(shipment.shipment_id)
+      source: liveShiprocketSource(shipment.shipment_id),
+      includePickupAlignment: true,
+      shiprocketPickupClient: pickupClient.client
     });
     const serialized = serializeLiveAwbLabelReadiness(readiness);
     const json = JSON.stringify(serialized);
@@ -1362,6 +1490,7 @@ describe("Shipmastr Shipping Network services", () => {
     );
     seedActiveLiveCourierProvider(state);
     const adapter = createFakeShiprocketAdapter();
+    const pickupClient = createFakeShiprocketPickupClient();
     const pickup = await createShippingPickupLocation("seller_1", pickupBody(), { client, adapter });
     const shipment = await createShipmentDraft("seller_1", shipmentBody(pickup.pickup_location_id), client);
     seedShipmentRate(state, {
@@ -1374,7 +1503,8 @@ describe("Shipmastr Shipping Network services", () => {
       () => shipNowShipment("seller_1", shipment.shipment_id, "smart", {
         client,
         adapter,
-        liveAwbLabelSource: liveShiprocketSource(shipment.shipment_id)
+        liveAwbLabelSource: liveShiprocketSource(shipment.shipment_id),
+        shiprocketPickupClient: pickupClient.client
       }),
       (error) => error instanceof HttpError && error.message === "SHIPROCKET_LIVE_PICKUP_UNAVAILABLE"
     );

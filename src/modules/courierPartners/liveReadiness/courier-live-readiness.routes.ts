@@ -2,6 +2,10 @@ import { Router } from "express";
 import { HttpError } from "../../../lib/httpError.js";
 import { successEnvelope } from "../../shippingNetwork/shipping-public-serializers.js";
 import {
+  getShiprocketPickupDiagnostics,
+  serializeShiprocketPickupDiagnostics
+} from "../../shippingNetwork/shipping-shiprocket-pickup-alignment.service.js";
+import {
   createCourierProviderCredential,
   getCourierLiveProvider,
   getCourierLiveReadinessSnapshot,
@@ -14,6 +18,7 @@ import {
 import {
   courierCredentialInputSchema,
   courierCredentialQuerySchema,
+  courierPickupDiagnosticsQuerySchema,
   courierProbeInputSchema,
   courierReadinessQuerySchema,
   parseCourierLiveProviderKey
@@ -45,6 +50,20 @@ courierLiveReadinessRouter.get("/courier-live-readiness/providers/:providerKey",
   const providerKey = routeProvider(req.params.providerKey);
   const data = await getCourierLiveProvider(providerKey);
   return res.json(successEnvelope("Courier live readiness provider fetched safely.", data));
+});
+
+courierLiveReadinessRouter.get("/courier-live-readiness/providers/:providerKey/pickups", async (req, res) => {
+  const providerKey = routeProvider(req.params.providerKey);
+  if (providerKey !== "SHIPROCKET") throw new HttpError(400, "COURIER_PROVIDER_PICKUP_DIAGNOSTICS_UNSUPPORTED");
+  const query = courierPickupDiagnosticsQuerySchema.parse(req.query ?? {});
+  const merchantId = scopedMerchantId(req.auth!.merchantId, query.merchant_id);
+  const diagnostics = await getShiprocketPickupDiagnostics(merchantId, {
+    ...(query.shipment_id ? { shipmentId: query.shipment_id } : {})
+  });
+  return res.json(successEnvelope(
+    "Courier provider pickup diagnostics fetched safely.",
+    serializeShiprocketPickupDiagnostics(diagnostics, { includePickups: true })
+  ));
 });
 
 courierLiveReadinessRouter.get("/courier-live-readiness/providers/:providerKey/credentials", async (req, res) => {
