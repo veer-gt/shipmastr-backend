@@ -4,7 +4,7 @@ import type {
   SellerSafeCourierAvailability
 } from "./courier-certification.types.js";
 
-const unsafeKeyPattern = /secret|token|password|credential|authorization|cookie|headers|raw|api[_-]?key|private|hash|provider_payload|provider_response|provider_ref|providerPickupId|providerCourierId|courier_id|courierId/i;
+const unsafeKeyPattern = /secret|token|password|credential|authorization|cookie|headers|raw|api[_-]?key|private|hash|provider_payload|providerPayload|provider_response|providerResponse|provider_ref|providerRef|providerPickupId|providerCourierId|courier_id|courierId/i;
 const unsafeStringPattern = /bearer\s+|basic\s+|token|secret|password|private[_-]?key|access[_-]?key|vault:|shiprocket|shipmozo|bigship|blue dart|provider courier id|provider pickup id/i;
 
 function safeValue(value: unknown): unknown {

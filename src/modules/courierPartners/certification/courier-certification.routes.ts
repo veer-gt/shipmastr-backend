@@ -28,6 +28,9 @@ courierCertificationRouter.get("/courier-certification/providers", async (req, r
   const query = courierCertificationQuerySchema.parse(req.query ?? {});
   const merchantId = scopedMerchantId(req.auth!.merchantId, query.merchant_id);
   const data = await listCourierCertificationProviders(merchantId, {
+    ...(query.provider_key ? { providerKey: routeProvider(query.provider_key) } : {}),
+    ...(query.status ? { status: query.status } : {}),
+    ...(query.capability ? { capability: query.capability } : {}),
     includePickupProbe: query.include_pickup_probe,
     ...(query.shipment_id ? { shipmentId: query.shipment_id } : {}),
     ...(query.pickup_location_id ? { pickupLocationId: query.pickup_location_id } : {})
@@ -50,6 +53,9 @@ courierCertificationRouter.get("/courier-certification/summary", async (req, res
   const query = courierCertificationQuerySchema.parse(req.query ?? {});
   const merchantId = scopedMerchantId(req.auth!.merchantId, query.merchant_id);
   const data = await getCourierCertificationSummary(merchantId, {
+    ...(query.provider_key ? { providerKey: routeProvider(query.provider_key) } : {}),
+    ...(query.status ? { status: query.status } : {}),
+    ...(query.capability ? { capability: query.capability } : {}),
     includePickupProbe: query.include_pickup_probe,
     ...(query.shipment_id ? { shipmentId: query.shipment_id } : {}),
     ...(query.pickup_location_id ? { pickupLocationId: query.pickup_location_id } : {})

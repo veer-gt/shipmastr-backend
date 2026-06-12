@@ -10,6 +10,7 @@ import { getShiprocketPickupDiagnostics } from "../../shippingNetwork/shipping-s
 import type {
   CourierCertificationBlocker,
   CourierCertificationDimension,
+  CourierCertificationDimensionKey,
   CourierCertificationSnapshot,
   CourierCertificationStatus,
   CourierCertificationSummary
@@ -44,6 +45,9 @@ type CertificationOptions = {
   includePickupProbe?: boolean;
   shipmentId?: string;
   pickupLocationId?: string;
+  providerKey?: CourierLiveProviderKey;
+  status?: CourierCertificationStatus;
+  capability?: CourierCertificationDimensionKey;
   pickupDiagnostics?: Awaited<ReturnType<typeof getShiprocketPickupDiagnostics>>;
 };
 
@@ -466,11 +470,17 @@ export async function listCourierCertificationProviders(
 ) {
   const client = options.client ?? prisma;
   const checkedAt = options.checkedAt ?? new Date().toISOString();
-  const providers = await Promise.all(PROVIDERS.map((providerKey) => providerSnapshot(merchantId, providerKey, {
+  const providerKeys = options.providerKey ? PROVIDERS.filter((providerKey) => providerKey === options.providerKey) : PROVIDERS;
+  const snapshots = await Promise.all(providerKeys.map((providerKey) => providerSnapshot(merchantId, providerKey, {
     ...options,
     client,
     checkedAt
   })));
+  const providers = snapshots.filter((provider) => {
+    if (options.status && provider.status !== options.status) return false;
+    if (options.capability && !provider.dimensions.some((dimension) => dimension.key === options.capability)) return false;
+    return true;
+  });
   return { providers };
 }
 

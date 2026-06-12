@@ -236,6 +236,42 @@ describe("courier partner certification layer", () => {
     assert.doesNotMatch(json, /password|token|secret|credential value|raw provider response|Authorization|Bearer|rawPayload|rawResponse|credentialHash|provider pickup id|provider courier id/i);
   });
 
+  it("filters provider certification summaries by provider, status, and capability", async () => {
+    const summary = await getCourierCertificationSummary("merchant_1", {
+      client: makeClient(),
+      checkedAt: now().toISOString(),
+      providerKey: "BIGSHIP",
+      status: "READY_FOR_DRY_RUN",
+      capability: "PUBLIC_SAFETY"
+    });
+    assert.equal(summary.providers.length, 1);
+    assert.equal(summary.providers[0]?.provider_key, "BIGSHIP");
+    assert.equal(summary.counts.total, 1);
+    assert.equal(summary.counts.dry_run_ready, 1);
+    assert.equal(summary.counts.blocked, 0);
+  });
+
+  it("redacts unsafe camelCase admin summary fields", async () => {
+    const result = await getCourierCertificationProvider("merchant_1", "SHIPROCKET", {
+      client: makeClient({
+        credentials: [activeCredential()],
+        rates: [smartLiveRate()]
+      }),
+      pickupDiagnostics: {
+        ...pickupAligned,
+        warnings: ["safe warning"],
+        pickups: [],
+        matchedProviderPickup: {
+          providerPayload: { Authorization: "Bearer unsafe" },
+          providerResponse: { token: "unsafe" },
+          providerRef: "unsafe"
+        }
+      } as any
+    });
+    const json = JSON.stringify(result);
+    assert.doesNotMatch(json, /providerPayload|providerResponse|providerRef|Authorization|Bearer|token|secret|api_key|password/i);
+  });
+
   it("seller-safe helper hides provider names and provider ids", () => {
     const blocked = sellerSafeCourierAvailability({ pickupIssue: true });
     const checking = sellerSafeCourierAvailability({ checking: true });
@@ -256,8 +292,14 @@ describe("courier partner certification layer", () => {
     assert.match(certificationRoutes, /\/courier-certification\/summary/);
     assert.match(certificationRoutes, /shipmentId: query\.shipment_id/);
     assert.match(certificationRoutes, /pickupLocationId: query\.pickup_location_id/);
+    assert.match(certificationRoutes, /providerKey: routeProvider\(query\.provider_key\)/);
+    assert.match(certificationRoutes, /status: query\.status/);
+    assert.match(certificationRoutes, /capability: query\.capability/);
     assert.match(certificationValidation, /shipment_id/);
     assert.match(certificationValidation, /pickup_location_id/);
+    assert.match(certificationValidation, /provider_key/);
+    assert.match(certificationValidation, /status/);
+    assert.match(certificationValidation, /capability/);
     assert.match(readinessValidation, /pickup_location_id/);
     assert.doesNotMatch(indexRoutes, /shipping\/seller-api.*courier-certification/);
   });
