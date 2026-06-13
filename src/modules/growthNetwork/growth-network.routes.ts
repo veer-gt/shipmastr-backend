@@ -1,6 +1,8 @@
 import { Router } from "express";
 
 import { successEnvelope } from "../shippingNetwork/shipping-public-serializers.js";
+import { createCodPrepaidIncentiveRouter } from "./cod-prepaid-incentive.routes.js";
+import type { CodPrepaidIncentiveDb } from "./cod-prepaid-incentive.service.js";
 import {
   addGrowthOfferPlacement,
   createGrowthOffer,
@@ -43,6 +45,11 @@ function queryWithAliases(query: Record<string, unknown>) {
 export function createGrowthNetworkRouter(deps: GrowthNetworkRouterDeps = {}) {
   const router = Router();
   const client = deps.client;
+
+  router.use(
+    "/prepaid-incentives",
+    createCodPrepaidIncentiveRouter(client ? { client: client as CodPrepaidIncentiveDb } : {})
+  );
 
   router.post("/offers", async (req, res) => {
     const body = createGrowthOfferSchema.parse(req.body);

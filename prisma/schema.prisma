@@ -227,6 +227,31 @@ enum GrowthEventType {
   CONVERSION
 }
 
+enum PrepaidIncentiveStatus {
+  DRAFT
+  ACTIVE
+  PAUSED
+  ARCHIVED
+}
+
+enum PrepaidIncentiveType {
+  FLAT_DISCOUNT
+  PERCENT_DISCOUNT
+  FREE_SHIPPING
+  COD_FEE_WAIVER
+  PRIORITY_DISPATCH
+}
+
+enum PrepaidConversionIntentStatus {
+  OFFERED
+  CLICKED
+  INTENT_CREATED
+  PAYMENT_PENDING
+  CONVERTED_SIMULATED
+  EXPIRED
+  CANCELLED
+}
+
 enum ReconciliationStatus {
   AUTO_APPROVED
   PARTIAL_MATCH
@@ -4467,6 +4492,64 @@ model GrowthOfferEvent {
   @@index([surface])
   @@index([createdAt])
   @@map("growth_offer_events")
+}
+
+model PrepaidIncentivePolicy {
+  id                     String                 @id @default(cuid())
+  merchantId             String                 @map("merchant_id")
+  title                  String
+  description            String?
+  status                 PrepaidIncentiveStatus @default(DRAFT)
+  incentiveType          PrepaidIncentiveType   @map("incentive_type")
+  discountAmountPaise    Int?                   @map("discount_amount_paise")
+  discountPercent        Decimal?               @map("discount_percent") @db.Decimal(5, 2)
+  maxDiscountAmountPaise Int?                   @map("max_discount_amount_paise")
+  minOrderAmountPaise    Int?                   @map("min_order_amount_paise")
+  maxOrderAmountPaise    Int?                   @map("max_order_amount_paise")
+  startsAt               DateTime?              @map("starts_at")
+  endsAt                 DateTime?              @map("ends_at")
+  metadata               Json?
+  createdAt              DateTime               @default(now()) @map("created_at")
+  updatedAt              DateTime               @default(now()) @updatedAt @map("updated_at")
+
+  @@index([merchantId])
+  @@index([status])
+  @@index([incentiveType])
+  @@index([startsAt])
+  @@index([endsAt])
+  @@index([createdAt])
+  @@map("prepaid_incentive_policies")
+}
+
+model PrepaidConversionIntent {
+  id                String                        @id @default(cuid())
+  policyId          String?                       @map("policy_id")
+  merchantId        String?                       @map("merchant_id")
+  sellerId          String?                       @map("seller_id")
+  orderId           String?                       @map("order_id")
+  shipmentId        String?                       @map("shipment_id")
+  growthOfferId     String?                       @map("growth_offer_id")
+  status            PrepaidConversionIntentStatus @default(INTENT_CREATED)
+  originalPaymentMode String?                     @map("original_payment_mode")
+  targetPaymentMode String                        @default("PREPAID") @map("target_payment_mode")
+  incentiveSnapshot Json                          @map("incentive_snapshot")
+  idempotencyKey    String?                       @unique @map("idempotency_key")
+  expiresAt         DateTime?                     @map("expires_at")
+  convertedAt       DateTime?                     @map("converted_at")
+  metadata          Json?
+  createdAt         DateTime                      @default(now()) @map("created_at")
+  updatedAt         DateTime                      @default(now()) @updatedAt @map("updated_at")
+
+  @@index([policyId])
+  @@index([merchantId])
+  @@index([sellerId])
+  @@index([orderId])
+  @@index([shipmentId])
+  @@index([growthOfferId])
+  @@index([status])
+  @@index([expiresAt])
+  @@index([createdAt])
+  @@map("prepaid_conversion_intents")
 }
 
 model SlaBreach {
