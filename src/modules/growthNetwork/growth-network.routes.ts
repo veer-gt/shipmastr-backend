@@ -5,6 +5,8 @@ import { createCodPrepaidIncentiveRouter } from "./cod-prepaid-incentive.routes.
 import type { CodPrepaidIncentiveDb } from "./cod-prepaid-incentive.service.js";
 import { createRtoNdrRecoveryRouter } from "./rto-ndr-recovery.routes.js";
 import type { RtoNdrRecoveryDb } from "./rto-ndr-recovery.service.js";
+import { createSellerGrowthSuggestionsRouter } from "./seller-growth-suggestions.routes.js";
+import type { SellerGrowthSuggestionsDb } from "./seller-growth-suggestions.service.js";
 import {
   addGrowthOfferPlacement,
   createGrowthOffer,
@@ -55,6 +57,10 @@ export function createGrowthNetworkRouter(deps: GrowthNetworkRouterDeps = {}) {
   router.use(
     "/rto-ndr-recovery",
     createRtoNdrRecoveryRouter(client ? { client: client as RtoNdrRecoveryDb } : {})
+  );
+  router.use(
+    "/seller-dashboard",
+    createSellerGrowthSuggestionsRouter(client ? { client: client as SellerGrowthSuggestionsDb } : {})
   );
 
   router.post("/offers", async (req, res) => {
