@@ -33,6 +33,21 @@ describe("Pilot Run 6H certification check script", () => {
     assert.equal(runtime.trialPickupLocationId, "");
   });
 
+  it("omits redundant shipment_id query params on shipment-scoped routes", () => {
+    const runtime = {
+      shipmentId: "shipment_1",
+      pickupLocationId: "pickup_201301"
+    };
+    const query = scriptHelpers.shipmentScopedParams(runtime, {
+      provider_key: "SHIPROCKET",
+      requested_capability: "AWB"
+    });
+    assert.equal(query.includes("shipment_id="), false);
+    assert.match(query, /provider_key=SHIPROCKET/);
+    assert.match(query, /requested_capability=AWB/);
+    assert.match(query, /pickup_location_id=pickup_201301/);
+  });
+
   it("fails closed when SHIPMASTR_TOKEN is missing", () => {
     assert.throws(
       () => scriptHelpers.runtimeFromEnv({}),

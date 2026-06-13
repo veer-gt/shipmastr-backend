@@ -25,14 +25,18 @@ function runtimeFromEnv(env = process.env) {
   };
 }
 
-function params(runtime, extra = {}) {
+function params(runtime, extra = {}, options = {}) {
   const query = new URLSearchParams();
   for (const [key, value] of Object.entries(extra)) {
     if (value !== undefined && value !== null && String(value).trim()) query.set(key, String(value));
   }
-  if (runtime.shipmentId) query.set("shipment_id", runtime.shipmentId);
+  if (options.includeShipmentId !== false && runtime.shipmentId) query.set("shipment_id", runtime.shipmentId);
   if (runtime.pickupLocationId) query.set("pickup_location_id", runtime.pickupLocationId);
   return query.toString();
+}
+
+function shipmentScopedParams(runtime, extra = {}) {
+  return params(runtime, extra, { includeShipmentId: false });
 }
 
 async function request(runtime, path, options = {}) {
@@ -317,13 +321,13 @@ async function run(env = process.env) {
   const summaryQuery = params(runtime);
   const readinessPath = runtime.shipmentId ? `/shipments/${encodeURIComponent(runtime.shipmentId)}/live-ship-readiness` : null;
   const pickupServiceabilityPath = runtime.shipmentId
-    ? `/courier-pickup-serviceability/providers/SHIPROCKET/shipments/${encodeURIComponent(runtime.shipmentId)}${params(runtime) ? `?${params(runtime)}` : ""}`
+    ? `/courier-pickup-serviceability/providers/SHIPROCKET/shipments/${encodeURIComponent(runtime.shipmentId)}${shipmentScopedParams(runtime) ? `?${shipmentScopedParams(runtime)}` : ""}`
     : null;
   const pickupLearningPath = runtime.shipmentId
     ? `/pickup-learning/providers/SHIPROCKET/shipments/${encodeURIComponent(runtime.shipmentId)}`
     : null;
   const arbitrationPath = runtime.shipmentId
-    ? `/courier-arbitration/shipments/${encodeURIComponent(runtime.shipmentId)}?${params(runtime, { provider_key: "SHIPROCKET", requested_capability: "AWB" })}`
+    ? `/courier-arbitration/shipments/${encodeURIComponent(runtime.shipmentId)}?${shipmentScopedParams(runtime, { provider_key: "SHIPROCKET", requested_capability: "AWB" })}`
     : null;
   const awbSandboxPath = runtime.shipmentId
     ? `/awb-certification/providers/SHIPROCKET/shipments/${encodeURIComponent(runtime.shipmentId)}/dry-run`
@@ -335,13 +339,13 @@ async function run(env = process.env) {
     ? `/tracking-certification/providers/SHIPROCKET/shipments/${encodeURIComponent(runtime.shipmentId)}/dry-run`
     : null;
   const readinessAutopilotPath = runtime.shipmentId
-    ? `/provider-readiness-autopilot/shipments/${encodeURIComponent(runtime.shipmentId)}/providers/SHIPROCKET?${params(runtime, {
+    ? `/provider-readiness-autopilot/shipments/${encodeURIComponent(runtime.shipmentId)}/providers/SHIPROCKET?${shipmentScopedParams(runtime, {
       requested_capability: "AWB",
       include_arbitration: true
     })}`
     : null;
   const certifiedRoutingPath = runtime.shipmentId
-    ? `/certified-provider-routing/shipments/${encodeURIComponent(runtime.shipmentId)}?${params(runtime, {
+    ? `/certified-provider-routing/shipments/${encodeURIComponent(runtime.shipmentId)}?${shipmentScopedParams(runtime, {
       requested_capability: "AWB",
       requested_outcome: "DEFAULT_SMART"
     })}`
@@ -427,6 +431,8 @@ module.exports = {
   LOCAL_API_HINT,
   assertToken,
   runtimeFromEnv,
+  params,
+  shipmentScopedParams,
   providerScopedBlockers,
   providerScopedNextActions,
   rateContextAction,
