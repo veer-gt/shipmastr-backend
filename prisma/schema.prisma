@@ -228,6 +228,41 @@ enum GrowthEventType {
   CONVERSION
 }
 
+enum GrowthPartnerStatus {
+  DRAFT
+  ACTIVE
+  PAUSED
+  ARCHIVED
+}
+
+enum GrowthPartnerCategory {
+  PACKAGING
+  INSURANCE
+  FINANCING
+  STORE_GROWTH_TOOL
+  DOMAIN_HOSTING
+  DESIGN_THEME
+  RETURNS_MANAGEMENT
+  CUSTOMER_SUPPORT
+  ANALYTICS
+  OTHER
+}
+
+enum GrowthPartnerLeadStatus {
+  CAPTURED
+  QUALIFIED_SIMULATED
+  DISQUALIFIED
+  ARCHIVED
+}
+
+enum GrowthAttributionEventType {
+  IMPRESSION
+  CLICK
+  LEAD_CAPTURED
+  CONVERSION_SIMULATED
+  DISMISS
+}
+
 enum PrepaidIncentiveStatus {
   DRAFT
   ACTIVE
@@ -4519,6 +4554,102 @@ model GrowthOfferEvent {
   @@index([surface])
   @@index([createdAt])
   @@map("growth_offer_events")
+}
+
+model GrowthPartner {
+  id          String                @id @default(cuid())
+  name        String                @unique
+  displayName String                @map("display_name")
+  category    GrowthPartnerCategory
+  status      GrowthPartnerStatus   @default(DRAFT)
+  description String?
+  websiteUrl  String?               @map("website_url")
+  isSponsored Boolean               @default(false) @map("is_sponsored")
+  metadata    Json?
+  createdAt   DateTime              @default(now()) @map("created_at")
+  updatedAt   DateTime              @default(now()) @updatedAt @map("updated_at")
+
+  @@index([category])
+  @@index([status])
+  @@index([createdAt])
+  @@map("growth_partners")
+}
+
+model GrowthPartnerPlacement {
+  id        String                 @id @default(cuid())
+  partnerId String                 @map("partner_id")
+  offerId   String?                @map("offer_id")
+  surface   GrowthPlacementSurface
+  priority  Int                    @default(100)
+  rulesJson Json?                  @map("rules_json")
+  startsAt  DateTime?              @map("starts_at")
+  endsAt    DateTime?              @map("ends_at")
+  createdAt DateTime               @default(now()) @map("created_at")
+  updatedAt DateTime               @default(now()) @updatedAt @map("updated_at")
+
+  @@index([partnerId])
+  @@index([offerId])
+  @@index([surface, priority])
+  @@index([startsAt])
+  @@index([endsAt])
+  @@index([createdAt])
+  @@map("growth_partner_placements")
+}
+
+model GrowthPartnerLead {
+  id              String                  @id @default(cuid())
+  partnerId       String                  @map("partner_id")
+  merchantId      String?                 @map("merchant_id")
+  sellerId        String?                 @map("seller_id")
+  offerId         String?                 @map("offer_id")
+  shipmentId      String?                 @map("shipment_id")
+  orderId         String?                 @map("order_id")
+  status          GrowthPartnerLeadStatus @default(CAPTURED)
+  sourceSurface   GrowthPlacementSurface  @map("source_surface")
+  attributionRef  String?                 @map("attribution_ref")
+  idempotencyKey  String?                 @unique @map("idempotency_key")
+  metadata        Json?
+  createdAt       DateTime                @default(now()) @map("created_at")
+  updatedAt       DateTime                @default(now()) @updatedAt @map("updated_at")
+
+  @@index([partnerId])
+  @@index([merchantId])
+  @@index([sellerId])
+  @@index([offerId])
+  @@index([shipmentId])
+  @@index([orderId])
+  @@index([status])
+  @@index([sourceSurface])
+  @@index([attributionRef])
+  @@index([createdAt])
+  @@map("growth_partner_leads")
+}
+
+model GrowthPartnerAttributionEvent {
+  id              String                     @id @default(cuid())
+  partnerId       String?                    @map("partner_id")
+  offerId         String?                    @map("offer_id")
+  leadId          String?                    @map("lead_id")
+  merchantId      String?                    @map("merchant_id")
+  sellerId        String?                    @map("seller_id")
+  eventType       GrowthAttributionEventType @map("event_type")
+  surface         GrowthPlacementSurface
+  attributionRef  String?                    @map("attribution_ref")
+  sessionRef      String?                    @map("session_ref")
+  idempotencyKey  String?                    @unique @map("idempotency_key")
+  metadata        Json?
+  createdAt       DateTime                   @default(now()) @map("created_at")
+
+  @@index([partnerId])
+  @@index([offerId])
+  @@index([leadId])
+  @@index([merchantId])
+  @@index([sellerId])
+  @@index([eventType])
+  @@index([surface])
+  @@index([attributionRef])
+  @@index([createdAt])
+  @@map("growth_partner_attribution_events")
 }
 
 model PrepaidIncentivePolicy {

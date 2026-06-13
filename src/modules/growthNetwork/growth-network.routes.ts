@@ -3,6 +3,8 @@ import { Router } from "express";
 import { successEnvelope } from "../shippingNetwork/shipping-public-serializers.js";
 import { createCodPrepaidIncentiveRouter } from "./cod-prepaid-incentive.routes.js";
 import type { CodPrepaidIncentiveDb } from "./cod-prepaid-incentive.service.js";
+import { createPartnerMarketplaceRouter } from "./partner-marketplace.routes.js";
+import type { PartnerMarketplaceDb } from "./partner-marketplace.service.js";
 import { createRtoNdrRecoveryRouter } from "./rto-ndr-recovery.routes.js";
 import type { RtoNdrRecoveryDb } from "./rto-ndr-recovery.service.js";
 import { createSellerGrowthSuggestionsRouter } from "./seller-growth-suggestions.routes.js";
@@ -61,6 +63,10 @@ export function createGrowthNetworkRouter(deps: GrowthNetworkRouterDeps = {}) {
   router.use(
     "/seller-dashboard",
     createSellerGrowthSuggestionsRouter(client ? { client: client as SellerGrowthSuggestionsDb } : {})
+  );
+  router.use(
+    "/partners",
+    createPartnerMarketplaceRouter(client ? { client: client as unknown as PartnerMarketplaceDb } : {})
   );
 
   router.post("/offers", async (req, res) => {
