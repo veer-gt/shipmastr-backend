@@ -73,6 +73,7 @@ function providerScopedBlockers(input) {
     ...(input.pickup?.blockers ?? []),
     ...(input.pickupServiceability?.blockers ?? []),
     ...(input.readinessAutopilot?.blockers ?? []),
+    ...(input.certifiedRouting?.blockers ?? []),
     ...(input.liveShipReadiness?.blockers ?? [])
   ]);
 }
@@ -92,6 +93,7 @@ function providerScopedNextActions(input) {
     ...(input.trackingCertification?.admin_next_actions ?? []),
     ...(input.trackingCertification?.next_actions ?? []),
     ...(input.readinessAutopilot?.admin_next_actions ?? []),
+    ...(input.certifiedRouting?.admin_next_actions ?? []),
     ...(input.liveShipReadiness?.certification_decision?.seller_safe_message
       ? [input.liveShipReadiness.certification_decision.seller_safe_message]
       : []),
@@ -160,6 +162,7 @@ function renderReport(input) {
   const labelSandbox = input.labelSandbox;
   const trackingCertification = input.trackingCertification;
   const readinessAutopilot = input.readinessAutopilot;
+  const certifiedRouting = input.certifiedRouting;
   const pickupTrial = input.pickupTrial;
   const liveShipReadiness = input.liveShipReadiness;
   const latestRefresh = liveShipReadiness?.latest_rate_refresh;
@@ -258,6 +261,18 @@ function renderReport(input) {
     `  next safe action: ${readinessAutopilot?.next_safe_action ?? "unknown"}`,
     `  seller-safe message: ${readinessAutopilot?.seller_safe_message ?? "unknown"}`,
     "",
+    "Certified provider routing:",
+    `  decision: ${certifiedRouting?.decision ?? "unknown"}`,
+    `  selected public tier: ${certifiedRouting?.selected_public_tier ?? "none"}`,
+    `  selected pickup: ${certifiedRouting?.selected_pickup_location_id ?? "none"}`,
+    `  internal provider selected: ${certifiedRouting?.internal_selection?.provider_key_internal ?? "none"}`,
+    `  rates ready: ${boolText(certifiedRouting?.readiness?.rates_ready)}`,
+    `  awb ready: ${boolText(certifiedRouting?.readiness?.awb_ready)}`,
+    `  label ready: ${boolText(certifiedRouting?.readiness?.label_ready)}`,
+    `  tracking ready: ${boolText(certifiedRouting?.readiness?.tracking_ready)}`,
+    `  seller-safe message: ${certifiedRouting?.seller_safe_message ?? "unknown"}`,
+    `  next action: ${(certifiedRouting?.admin_next_actions ?? [])[0] ?? "unknown"}`,
+    "",
     "Alternate pickup trial:",
     `  trial pickup id: ${input.runtime.trialPickupLocationId || "not provided"}`,
     `  status: ${pickupTrial?.status ?? "not run"}`,
@@ -325,11 +340,17 @@ async function run(env = process.env) {
       include_arbitration: true
     })}`
     : null;
+  const certifiedRoutingPath = runtime.shipmentId
+    ? `/certified-provider-routing/shipments/${encodeURIComponent(runtime.shipmentId)}?${params(runtime, {
+      requested_capability: "AWB",
+      requested_outcome: "DEFAULT_SMART"
+    })}`
+    : null;
   const pickupTrialPath = runtime.shipmentId && runtime.trialPickupLocationId
     ? `/courier-pickup-trials/providers/SHIPROCKET/shipments/${encodeURIComponent(runtime.shipmentId)}`
     : null;
 
-  const [summary, shiprocket, pickup, liveShipReadiness, pickupServiceability, pickupLearning, arbitration, awbSandbox, labelSandbox, trackingCertification, readinessAutopilot, pickupTrial] = await Promise.all([
+  const [summary, shiprocket, pickup, liveShipReadiness, pickupServiceability, pickupLearning, arbitration, awbSandbox, labelSandbox, trackingCertification, readinessAutopilot, certifiedRouting, pickupTrial] = await Promise.all([
     request(runtime, `/courier-certification/summary${summaryQuery ? `?${summaryQuery}` : ""}`),
     request(runtime, `/courier-certification/providers/SHIPROCKET?${contextQuery}`),
     request(runtime, `/courier-live-readiness/providers/SHIPROCKET/pickups?${params(runtime)}`),
@@ -363,6 +384,7 @@ async function run(env = process.env) {
       })
       : Promise.resolve(null),
     readinessAutopilotPath ? request(runtime, readinessAutopilotPath) : Promise.resolve(null),
+    certifiedRoutingPath ? request(runtime, certifiedRoutingPath) : Promise.resolve(null),
     pickupTrialPath
       ? request(runtime, pickupTrialPath, {
         method: "POST",
@@ -386,6 +408,7 @@ async function run(env = process.env) {
     labelSandbox,
     trackingCertification,
     readinessAutopilot,
+    certifiedRouting,
     pickupTrial,
     liveShipReadiness
   });
