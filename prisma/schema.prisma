@@ -205,6 +205,7 @@ enum GrowthOfferType {
   MERCHANT_REORDER
   MERCHANT_CROSS_SELL
   PREPAID_INCENTIVE
+  RTO_NDR_RECOVERY
   COD_RISK_REDUCTION
   PACKAGING_RECOMMENDATION
   INSURANCE_RECOMMENDATION
@@ -248,6 +249,32 @@ enum PrepaidConversionIntentStatus {
   INTENT_CREATED
   PAYMENT_PENDING
   CONVERTED_SIMULATED
+  EXPIRED
+  CANCELLED
+}
+
+enum RtoNdrRecoveryPolicyStatus {
+  DRAFT
+  ACTIVE
+  PAUSED
+  ARCHIVED
+}
+
+enum RtoNdrRecoveryActionType {
+  CONFIRM_ADDRESS
+  UPDATE_ADDRESS
+  SELECT_RETRY_WINDOW
+  SWITCH_TO_PREPAID
+  ACCEPT_DELIVERY_INCENTIVE
+  CONTACT_SUPPORT
+}
+
+enum RtoNdrRecoveryIntentStatus {
+  OFFERED
+  CLICKED
+  INTENT_CREATED
+  ACTION_PENDING
+  RECOVERY_SIMULATED
   EXPIRED
   CANCELLED
 }
@@ -4550,6 +4577,64 @@ model PrepaidConversionIntent {
   @@index([expiresAt])
   @@index([createdAt])
   @@map("prepaid_conversion_intents")
+}
+
+model RtoNdrRecoveryPolicy {
+  id                       String                     @id @default(cuid())
+  merchantId               String                     @map("merchant_id")
+  title                    String
+  description              String?
+  status                   RtoNdrRecoveryPolicyStatus @default(DRAFT)
+  actionType               RtoNdrRecoveryActionType   @map("action_type")
+  incentiveAmountPaise     Int?                       @map("incentive_amount_paise")
+  maxIncentiveAmountPaise  Int?                       @map("max_incentive_amount_paise")
+  minOrderAmountPaise      Int?                       @map("min_order_amount_paise")
+  maxOrderAmountPaise      Int?                       @map("max_order_amount_paise")
+  allowedFailureReasons    Json?                      @map("allowed_failure_reasons")
+  startsAt                 DateTime?                  @map("starts_at")
+  endsAt                   DateTime?                  @map("ends_at")
+  metadata                 Json?
+  createdAt                DateTime                   @default(now()) @map("created_at")
+  updatedAt                DateTime                   @default(now()) @updatedAt @map("updated_at")
+
+  @@index([merchantId])
+  @@index([status])
+  @@index([actionType])
+  @@index([startsAt])
+  @@index([endsAt])
+  @@index([createdAt])
+  @@map("rto_ndr_recovery_policies")
+}
+
+model RtoNdrRecoveryIntent {
+  id              String                     @id @default(cuid())
+  policyId        String?                    @map("policy_id")
+  merchantId      String?                    @map("merchant_id")
+  sellerId        String?                    @map("seller_id")
+  orderId         String?                    @map("order_id")
+  shipmentId      String?                    @map("shipment_id")
+  growthOfferId   String?                    @map("growth_offer_id")
+  status          RtoNdrRecoveryIntentStatus @default(INTENT_CREATED)
+  actionType      RtoNdrRecoveryActionType   @map("action_type")
+  recoverySnapshot Json                      @map("recovery_snapshot")
+  idempotencyKey  String?                    @unique @map("idempotency_key")
+  expiresAt       DateTime?                  @map("expires_at")
+  recoveredAt     DateTime?                  @map("recovered_at")
+  metadata        Json?
+  createdAt       DateTime                   @default(now()) @map("created_at")
+  updatedAt       DateTime                   @default(now()) @updatedAt @map("updated_at")
+
+  @@index([policyId])
+  @@index([merchantId])
+  @@index([sellerId])
+  @@index([orderId])
+  @@index([shipmentId])
+  @@index([growthOfferId])
+  @@index([status])
+  @@index([actionType])
+  @@index([expiresAt])
+  @@index([createdAt])
+  @@map("rto_ndr_recovery_intents")
 }
 
 model SlaBreach {

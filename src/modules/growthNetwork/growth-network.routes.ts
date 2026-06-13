@@ -3,6 +3,8 @@ import { Router } from "express";
 import { successEnvelope } from "../shippingNetwork/shipping-public-serializers.js";
 import { createCodPrepaidIncentiveRouter } from "./cod-prepaid-incentive.routes.js";
 import type { CodPrepaidIncentiveDb } from "./cod-prepaid-incentive.service.js";
+import { createRtoNdrRecoveryRouter } from "./rto-ndr-recovery.routes.js";
+import type { RtoNdrRecoveryDb } from "./rto-ndr-recovery.service.js";
 import {
   addGrowthOfferPlacement,
   createGrowthOffer,
@@ -49,6 +51,10 @@ export function createGrowthNetworkRouter(deps: GrowthNetworkRouterDeps = {}) {
   router.use(
     "/prepaid-incentives",
     createCodPrepaidIncentiveRouter(client ? { client: client as CodPrepaidIncentiveDb } : {})
+  );
+  router.use(
+    "/rto-ndr-recovery",
+    createRtoNdrRecoveryRouter(client ? { client: client as RtoNdrRecoveryDb } : {})
   );
 
   router.post("/offers", async (req, res) => {
