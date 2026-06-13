@@ -1,5 +1,6 @@
 import type {
   CourierTrackingCertificationDryRunResult,
+  CourierTrackingCertificationLiveReadResult,
   CourierTrackingCertificationProviderStatus
 } from "./courier-tracking-certification.types.js";
 
@@ -62,5 +63,35 @@ export function serializeCourierTrackingCertificationProviderStatus(status: Cour
     blockers: safeList(status.blockers),
     warnings: safeList(status.warnings),
     next_actions: safeList(status.next_actions)
+  };
+}
+
+export function serializeCourierTrackingCertificationLiveRead(result: CourierTrackingCertificationLiveReadResult) {
+  return {
+    success: result.success,
+    provider_key: result.provider_key,
+    public_network_name: result.public_network_name,
+    shipment_id: result.shipment_id,
+    tracking_status: result.tracking_status,
+    public_tracking_status: result.public_tracking_status,
+    normalized_events_count: result.normalized_events_count,
+    latest_public_status: result.latest_public_status,
+    certification_status: result.certification_status,
+    blockers: safeList(result.blockers),
+    warnings: safeList(result.warnings),
+    seller_safe_message: safeString(result.seller_safe_message),
+    admin_next_actions: safeList(result.admin_next_actions),
+    seller_safe: {
+      public_network_name: "Shipmastr Courier Network",
+      shipment_id: result.shipment_id,
+      tracking_status: result.tracking_status,
+      public_tracking_status: result.public_tracking_status,
+      normalized_events_count: result.normalized_events_count,
+      latest_public_status: result.latest_public_status,
+      certification_status: result.certification_status,
+      blockers: safeList(result.blockers),
+      warnings: safeList(result.warnings),
+      seller_safe_message: safeString(result.seller_safe_message)
+    }
   };
 }

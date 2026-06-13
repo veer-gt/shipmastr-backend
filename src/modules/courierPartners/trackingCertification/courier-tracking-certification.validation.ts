@@ -13,3 +13,9 @@ export const courierTrackingCertificationDryRunSchema = z.object({
 }).strict();
 
 export type CourierTrackingCertificationDryRunInput = z.infer<typeof courierTrackingCertificationDryRunSchema>;
+
+export const courierTrackingCertificationLiveReadSchema = z.object({
+  operator_note: z.string().trim().min(1).max(240).optional()
+}).strict();
+
+export type CourierTrackingCertificationLiveReadInput = z.infer<typeof courierTrackingCertificationLiveReadSchema>;

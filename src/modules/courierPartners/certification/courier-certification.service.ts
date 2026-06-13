@@ -413,8 +413,10 @@ function statusFor(input: {
     return "BLOCKED" as const;
   }
   const ratesReady = !blockers.includes("PROVIDER_RATES_NOT_LIVE") && !blockers.includes("PROVIDER_COURIER_ID_MISSING");
-  const awbCertified = !blockers.includes("PROVIDER_AWB_NOT_CERTIFIED") && !blockers.includes("PROVIDER_LABEL_NOT_CERTIFIED");
-  if (input.credential?.live_ready && ratesReady && awbCertified) return "READY_FOR_LIVE" as const;
+  const fullyCertified = !blockers.includes("PROVIDER_AWB_NOT_CERTIFIED")
+    && !blockers.includes("PROVIDER_LABEL_NOT_CERTIFIED")
+    && !blockers.includes("PROVIDER_TRACKING_NOT_CERTIFIED");
+  if (input.credential?.live_ready && ratesReady && fullyCertified) return "READY_FOR_LIVE" as const;
   if (input.credential?.live_ready && ratesReady) return "READY_FOR_PILOT" as const;
   if (input.credential?.live_ready) return "PARTIAL" as const;
   return "BLOCKED" as const;
@@ -432,7 +434,12 @@ function buildSnapshot(input: {
   const canUseForRates = input.providerKey === "SHIPROCKET"
     ? status === "READY_FOR_PILOT" || status === "READY_FOR_LIVE"
     : status === "READY_FOR_DRY_RUN";
-  const canUseForAwb = status === "READY_FOR_LIVE";
+  const canUseForAwb = input.credential?.live_ready === true
+    && !blockers.includes("PROVIDER_RATES_NOT_LIVE")
+    && !blockers.includes("PROVIDER_COURIER_ID_MISSING")
+    && !blockers.includes("PROVIDER_AWB_NOT_CERTIFIED");
+  const canUseForLabel = canUseForAwb && !blockers.includes("PROVIDER_LABEL_NOT_CERTIFIED");
+  const canUseForTracking = canUseForLabel && !blockers.includes("PROVIDER_TRACKING_NOT_CERTIFIED");
   return serializeCourierCertificationSnapshot({
     provider_key: input.providerKey,
     provider_label_internal: getCourierLiveProviderDefinition(input.providerKey).label,
@@ -441,8 +448,8 @@ function buildSnapshot(input: {
     live_ready: status === "READY_FOR_LIVE",
     can_use_for_rates: canUseForRates,
     can_use_for_awb: canUseForAwb,
-    can_use_for_label: canUseForAwb,
-    can_use_for_tracking: false,
+    can_use_for_label: canUseForLabel,
+    can_use_for_tracking: canUseForTracking,
     dimensions: input.dimensions,
     blockers,
     warnings,
@@ -490,8 +497,10 @@ async function shiprocketSnapshot(
     : null;
   const phase42p = metadataObject(metadataObject(shipment?.metadata).phase42p);
   const phase42q = metadataObject(metadataObject(shipment?.metadata).phase42q);
+  const phase42r = metadataObject(metadataObject(shipment?.metadata).phase42r);
   const awbCertified = Boolean(shipment?.awbNumber && phase42p.awbCertified === true);
   const labelCertified = Boolean(awbCertified && phase42q.labelCertified === true && phase42q.publicLabelReady === true);
+  const trackingCertified = Boolean(awbCertified && phase42r.trackingCertified === true && phase42r.publicTrackingReady === true);
   const dimensions = [
     credentialDimension(credential),
     pickupDimension(pickupDiagnostics),
@@ -528,13 +537,17 @@ async function shiprocketSnapshot(
     }),
     fixedDimension({
       key: "TRACKING",
-      status: "NOT_RUN",
-      blocker: "PROVIDER_TRACKING_NOT_CERTIFIED",
+      status: trackingCertified ? "PASS" : "NOT_RUN",
+      ...(trackingCertified ? {} : {
+        blocker: "PROVIDER_TRACKING_NOT_CERTIFIED"
+      }),
       summary: {
-        live_tracking_certified: false,
-        live_tracking_read_allowed: false,
+        live_tracking_certified: trackingCertified,
+        live_tracking_read_allowed: trackingCertified,
+        latest_public_status: firstString(phase42r.latestPublicStatus),
+        normalized_events_count: Number(phase42r.normalizedEventsCount ?? 0),
         sandbox_status: "AVAILABLE",
-        sandbox_dry_run_required: true
+        sandbox_dry_run_required: !trackingCertified
       }
     }),
     fixedDimension({

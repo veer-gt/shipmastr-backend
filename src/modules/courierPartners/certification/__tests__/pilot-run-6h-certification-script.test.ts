@@ -222,7 +222,10 @@ describe("Pilot Run 6H certification check script", () => {
     assert.match(report, /Label certification:/);
     assert.match(report, /certified: false/);
     assert.match(report, /label ready: false/);
-    assert.match(report, /Tracking certification foundation:/);
+    assert.match(report, /Tracking certification:/);
+    assert.match(report, /certified: false/);
+    assert.match(report, /tracking ready: false/);
+    assert.match(report, /latest public status: unknown/);
     assert.match(report, /Alternate pickup trial:/);
     assert.match(report, /latest refresh: NO_ELIGIBLE_SHIPPING_RATES/);
     assert.match(report, /eligible rate count: 0/);

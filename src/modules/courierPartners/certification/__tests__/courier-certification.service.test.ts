@@ -318,6 +318,58 @@ describe("courier partner certification layer", () => {
     assert.ok(result.provider.blockers.includes("PROVIDER_TRACKING_NOT_CERTIFIED"));
   });
 
+  it("marks tracking certified only after tracking live-read marker and then reaches full live readiness", async () => {
+    const result = await getCourierCertificationProvider("merchant_1", "SHIPROCKET", {
+      shipmentId: "shipment_1",
+      client: makeClient({
+        credentials: [activeCredential()],
+        rates: [smartLiveRate()],
+        probes: [{
+          providerKey: "SHIPROCKET",
+          merchantId: "merchant_1",
+          probeType: "PINCODE_SERVICEABILITY",
+          status: "PASS",
+          testedAt: now()
+        }],
+        shipments: [{
+          id: "shipment_1",
+          sellerId: "merchant_1",
+          awbNumber: "SMCERTIFIED",
+          pickupLocationId: "pickup_1",
+          fromPincode: "201301",
+          toPincode: "400001",
+          paymentMode: "prepaid",
+          metadata: {
+            phase42p: {
+              awbCertified: true
+            },
+            phase42q: {
+              labelCertified: true,
+              publicLabelReady: true,
+              labelRef: "SMLABEL-SHIPMENT1"
+            },
+            phase42r: {
+              trackingCertified: true,
+              publicTrackingReady: true,
+              latestPublicStatus: "in_transit",
+              normalizedEventsCount: 2
+            }
+          }
+        }]
+      }),
+      pickupDiagnostics: pickupAligned
+    });
+
+    const tracking = result.provider.dimensions.find((dimension) => dimension.key === "TRACKING");
+    assert.equal(result.provider.status, "READY_FOR_LIVE");
+    assert.equal(result.provider.live_ready, true);
+    assert.equal(result.provider.can_use_for_tracking, true);
+    assert.equal(tracking?.status, "PASS");
+    assert.equal(tracking?.safe_summary.live_tracking_certified, true);
+    assert.equal(tracking?.safe_summary.latest_public_status, "in_transit");
+    assert.equal(result.provider.blockers.includes("PROVIDER_TRACKING_NOT_CERTIFIED"), false);
+  });
+
   it("keeps Shiprocket rates failed when latest refresh has no eligible rates", async () => {
     const result = await getCourierCertificationProvider("merchant_1", "SHIPROCKET", {
       shipmentId: "shipment_1",

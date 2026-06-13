@@ -162,6 +162,7 @@ function renderReport(input) {
   const latestRefresh = liveShipReadiness?.latest_rate_refresh;
   const ratesDimension = dimension(provider, "RATES");
   const labelDimension = dimension(provider, "LABEL");
+  const trackingDimension = dimension(provider, "TRACKING");
   const pickupUnavailableCount = countRejectedReason(latestRefresh, "PICKUP_UNAVAILABLE");
   const readyForLiveShipNow = Boolean(liveShipReadiness?.ready);
   const blockers = providerScopedBlockers(input);
@@ -236,10 +237,12 @@ function renderReport(input) {
     `  blockers: ${(labelSandbox?.blockers ?? []).length ? labelSandbox.blockers.map(safeLine).join(", ") : "none"}`,
     `  next action: ${(labelSandbox?.admin_next_actions ?? labelSandbox?.next_actions ?? [])[0] ?? "unknown"}`,
     "",
-    "Tracking certification foundation:",
+    "Tracking certification:",
     `  dry-run ready: ${boolText(trackingCertification?.dry_run_ready)}`,
     `  live read ready: ${boolText(trackingCertification?.live_read_ready)}`,
-    `  payload readiness: ${trackingCertification?.status ?? "unknown"}`,
+    `  certified: ${boolText(trackingDimension?.safe_summary?.live_tracking_certified === true)}`,
+    `  tracking ready: ${boolText(trackingDimension?.status === "PASS")}`,
+    `  latest public status: ${trackingDimension?.safe_summary?.latest_public_status ?? "unknown"}`,
     `  blockers: ${(trackingCertification?.blockers ?? []).length ? trackingCertification.blockers.map(safeLine).join(", ") : "none"}`,
     `  next action: ${(trackingCertification?.admin_next_actions ?? trackingCertification?.next_actions ?? [])[0] ?? "unknown"}`,
     "",

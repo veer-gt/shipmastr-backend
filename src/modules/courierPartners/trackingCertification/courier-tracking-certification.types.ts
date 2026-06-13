@@ -28,6 +28,7 @@ export type CourierTrackingCertificationStatus =
 export type CourierTrackingCertificationBlocker =
   | "TRACKING_CERTIFICATION_AWB_MISSING"
   | "TRACKING_CERTIFICATION_REF_MISSING"
+  | "TRACKING_CERTIFICATION_CREDENTIALS_NOT_READY"
   | "TRACKING_CERTIFICATION_ADAPTER_MISSING"
   | "TRACKING_CERTIFICATION_MAPPER_MISSING"
   | "TRACKING_CERTIFICATION_PUBLIC_MAPPING_NOT_READY"
@@ -35,7 +36,10 @@ export type CourierTrackingCertificationBlocker =
   | "TRACKING_CERTIFICATION_LIVE_MODE_DISABLED"
   | "TRACKING_CERTIFICATION_ALLOWED_SHIPMENT_MISMATCH"
   | "TRACKING_CERTIFICATION_ALLOWED_MERCHANT_MISMATCH"
-  | "TRACKING_CERTIFICATION_APPROVAL_REQUIRED";
+  | "TRACKING_CERTIFICATION_APPROVAL_REQUIRED"
+  | "TRACKING_CERTIFICATION_ONE_SHOT_APPROVAL_REQUIRED"
+  | "TRACKING_CERTIFICATION_PROVIDER_CALL_FAILED"
+  | "TRACKING_CERTIFICATION_PROVIDER_RESPONSE_INVALID";
 
 export type CourierTrackingPayloadReadiness = {
   awb_ready: boolean;
@@ -83,4 +87,25 @@ export type CourierTrackingCertificationProviderStatus = {
   blockers: string[];
   warnings: string[];
   next_actions: string[];
+};
+
+export type CourierTrackingCertificationLiveReadStatus =
+  | "TRACKING_CERTIFIED"
+  | "BLOCKED"
+  | "ALREADY_CERTIFIED";
+
+export type CourierTrackingCertificationLiveReadResult = {
+  success: boolean;
+  provider_key: CourierLiveProviderKey;
+  public_network_name: "Shipmastr Courier Network";
+  shipment_id: string;
+  tracking_status: "CERTIFIED" | "BLOCKED" | "ALREADY_CERTIFIED";
+  public_tracking_status: "READY" | "NOT_READY";
+  normalized_events_count: number;
+  latest_public_status: CourierTrackingPublicStatus | null;
+  certification_status: CourierTrackingCertificationLiveReadStatus;
+  blockers: CourierTrackingCertificationBlocker[];
+  warnings: string[];
+  seller_safe_message: string;
+  admin_next_actions: string[];
 };
