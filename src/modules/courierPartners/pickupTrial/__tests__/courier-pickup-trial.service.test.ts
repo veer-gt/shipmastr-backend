@@ -2,10 +2,14 @@ import assert from "node:assert/strict";
 import { readFileSync } from "node:fs";
 import { describe, it } from "node:test";
 import {
+  confirmControlledCourierPickupTrial,
   createControlledCourierPickupRateRefresh,
   createControlledCourierPickupTrial
 } from "../courier-pickup-trial.service.js";
-import { serializeCourierPickupTrial } from "../courier-pickup-trial.serializer.js";
+import {
+  serializeCourierPickupConfirmation,
+  serializeCourierPickupTrial
+} from "../courier-pickup-trial.serializer.js";
 
 const now = new Date("2026-06-12T10:00:00.000Z");
 
@@ -148,6 +152,63 @@ function adapter(rates: any[] = [providerRate()]) {
       throw new Error("cancel must not be called");
     }
   } as any;
+}
+
+function eligibleEvidence(overrides: Record<string, unknown> = {}) {
+  return {
+    trial_id: "pickup_trial_shipment_1_pickup_2",
+    provider_key: "SHIPROCKET",
+    trial_pickup_location_id: "pickup_2",
+    trial_pickup_pincode: "122001",
+    delivery_pincode: "400001",
+    status: "ELIGIBLE_RATES_FOUND",
+    rate_context: {
+      candidate_count: 1,
+      eligible_count: 1,
+      pickup_available_count: 1,
+      delivery_available_count: 1,
+      numeric_courier_id_count: 1
+    },
+    public_rate_options: [{
+      public_service_code: "shipmastr_smart",
+      public_service_name: "Shipmastr Smart",
+      amount_paise: 7200,
+      estimated_delivery_days: 2
+    }],
+    blockers: [],
+    warnings: ["Stored safe trial evidence."],
+    seller_safe_message: "Shipmastr shipping options are available for this pickup trial.",
+    admin_next_actions: ["Explicitly confirm pickup before refreshing rates."],
+    rawProviderResponseStored: false,
+    refreshed_at: now.toISOString(),
+    ...overrides
+  };
+}
+
+function shipmentWithEvidence(evidence: Record<string, unknown>, overrides: Record<string, unknown> = {}) {
+  return {
+    id: "shipment_1",
+    sellerId: "merchant_1",
+    pickupLocationId: "pickup_1",
+    fromPincode: "201301",
+    toPincode: "400001",
+    paymentMode: "prepaid",
+    codAmountPaise: 0,
+    deadWeightKg: 1,
+    lengthCm: 10,
+    breadthCm: 10,
+    heightCm: 10,
+    status: "draft",
+    awbNumber: null,
+    metadata: {
+      phase44d: {
+        alternatePickupRateRefreshTrials: {
+          pickup_2: evidence
+        }
+      }
+    },
+    ...overrides
+  };
 }
 
 describe("controlled alternate pickup rate trial", () => {
@@ -373,8 +434,141 @@ describe("controlled alternate pickup rate trial", () => {
 
     assert.match(routes, /courier-pickup-trials\/providers\/:providerKey\/shipments\/:shipmentId/);
     assert.match(routes, /courier-pickup-trials\/providers\/:providerKey\/shipments\/:shipmentId\/rate-refresh/);
+    assert.match(routes, /courier-pickup-trials\/providers\/:providerKey\/shipments\/:shipmentId\/confirm/);
     assert.match(routes, /COURIER_PICKUP_TRIAL_ADMIN_ONLY/);
     assert.match(shippingRoutes, /courierPickupTrialRouter/);
     assert.doesNotMatch(routes, /ship-now|manifestOrder|createLabel|getLabel|fetchShipmentRates|createDraftOrder|app\.shiprocket\.in|shiprocket\.in\/v1\/external/i);
+  });
+
+  it("confirmation fails when the stored trial is not found", async () => {
+    const result = await confirmControlledCourierPickupTrial("merchant_1", {
+      providerKey: "SHIPROCKET",
+      shipmentId: "shipment_1",
+      pickupLocationId: "pickup_2",
+      trialId: "missing_trial"
+    }, {
+      client: makeClient({ rates: [], shipment: shipmentWithEvidence(eligibleEvidence()) })
+    });
+
+    assert.equal(result.success, false);
+    assert.equal(result.status, "TRIAL_NOT_FOUND");
+    assert.ok(result.blockers.includes("PICKUP_CONFIRMATION_TRIAL_NOT_FOUND"));
+  });
+
+  it("confirmation fails when the trial is not eligible", async () => {
+    const result = await confirmControlledCourierPickupTrial("merchant_1", {
+      providerKey: "SHIPROCKET",
+      shipmentId: "shipment_1",
+      pickupLocationId: "pickup_2",
+      trialId: "pickup_trial_shipment_1_pickup_2"
+    }, {
+      client: makeClient({
+        shipment: shipmentWithEvidence(eligibleEvidence({
+          status: "NO_ELIGIBLE_RATES",
+          rate_context: {
+            candidate_count: 1,
+            eligible_count: 0,
+            pickup_available_count: 1,
+            delivery_available_count: 1,
+            numeric_courier_id_count: 1
+          }
+        }))
+      })
+    });
+
+    assert.equal(result.success, false);
+    assert.equal(result.status, "TRIAL_NOT_ELIGIBLE");
+    assert.ok(result.blockers.includes("PICKUP_CONFIRMATION_TRIAL_NOT_ELIGIBLE"));
+    assert.ok(result.blockers.includes("PICKUP_CONFIRMATION_NO_ELIGIBLE_RATES"));
+  });
+
+  it("confirmation fails when pickup availability or courier id evidence is missing", async () => {
+    const pickupUnavailable = await confirmControlledCourierPickupTrial("merchant_1", {
+      providerKey: "SHIPROCKET",
+      shipmentId: "shipment_1",
+      pickupLocationId: "pickup_2",
+      trialId: "pickup_trial_shipment_1_pickup_2"
+    }, {
+      client: makeClient({
+        shipment: shipmentWithEvidence(eligibleEvidence({
+          rate_context: {
+            candidate_count: 1,
+            eligible_count: 1,
+            pickup_available_count: 0,
+            delivery_available_count: 1,
+            numeric_courier_id_count: 1
+          }
+        }))
+      })
+    });
+    const courierMissing = await confirmControlledCourierPickupTrial("merchant_1", {
+      providerKey: "SHIPROCKET",
+      shipmentId: "shipment_1",
+      pickupLocationId: "pickup_2",
+      trialId: "pickup_trial_shipment_1_pickup_2"
+    }, {
+      client: makeClient({
+        shipment: shipmentWithEvidence(eligibleEvidence({
+          rate_context: {
+            candidate_count: 1,
+            eligible_count: 1,
+            pickup_available_count: 1,
+            delivery_available_count: 1,
+            numeric_courier_id_count: 0
+          }
+        }))
+      })
+    });
+
+    assert.ok(pickupUnavailable.blockers.includes("PICKUP_CONFIRMATION_PICKUP_UNAVAILABLE"));
+    assert.ok(courierMissing.blockers.includes("PICKUP_CONFIRMATION_COURIER_ID_MISSING"));
+  });
+
+  it("confirmation fails when the shipment already has an AWB", async () => {
+    const result = await confirmControlledCourierPickupTrial("merchant_1", {
+      providerKey: "SHIPROCKET",
+      shipmentId: "shipment_1",
+      pickupLocationId: "pickup_2",
+      trialId: "pickup_trial_shipment_1_pickup_2"
+    }, {
+      client: makeClient({
+        shipment: shipmentWithEvidence(eligibleEvidence(), { awbNumber: "SM0001" })
+      })
+    });
+
+    assert.equal(result.success, false);
+    assert.equal(result.status, "SHIPMENT_ALREADY_HAS_AWB");
+    assert.ok(result.blockers.includes("PICKUP_CONFIRMATION_SHIPMENT_ALREADY_HAS_AWB"));
+  });
+
+  it("confirmation succeeds after eligible trial evidence and updates only safe shipment pickup fields", async () => {
+    const updates: any[] = [];
+    const result = await confirmControlledCourierPickupTrial("merchant_1", {
+      providerKey: "SHIPROCKET",
+      shipmentId: "shipment_1",
+      pickupLocationId: "pickup_2",
+      trialId: "pickup_trial_shipment_1_pickup_2",
+      operatorNote: "Pilot Run 6H alternate pickup confirmation"
+    }, {
+      client: makeClient({ updates, shipment: shipmentWithEvidence(eligibleEvidence()) }),
+      now: () => now
+    });
+    const update = updates[0];
+    const audit = update?.data?.metadata?.phase44e?.latestAlternatePickupConfirmation;
+    const json = JSON.stringify(serializeCourierPickupConfirmation(result));
+
+    assert.equal(result.success, true);
+    assert.equal(result.status, "CONFIRMED");
+    assert.equal(result.requires_rate_refresh, true);
+    assert.equal(update.data.pickupLocationId, "pickup_2");
+    assert.equal(update.data.fromPincode, "122001");
+    assert.equal(update.data.awbNumber, undefined);
+    assert.equal(update.data.status, undefined);
+    assert.equal(audit.previous_pickup_location_id, "pickup_1");
+    assert.equal(audit.confirmed_pickup_location_id, "pickup_2");
+    assert.equal(audit.trial_id, "pickup_trial_shipment_1_pickup_2");
+    assert.equal(audit.requires_rate_refresh, true);
+    assert.equal(audit.rawProviderResponseStored, false);
+    assert.doesNotMatch(json, /rawPayload|rawHeaders|rawResponse|Authorization|Bearer|token|secret|provider courier|provider pickup/i);
   });
 });

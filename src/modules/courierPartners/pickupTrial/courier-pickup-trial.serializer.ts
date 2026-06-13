@@ -1,4 +1,7 @@
-import type { CourierPickupTrialResult } from "./courier-pickup-trial.types.js";
+import type {
+  CourierPickupConfirmationResult,
+  CourierPickupTrialResult
+} from "./courier-pickup-trial.types.js";
 
 const unsafeStringPattern = /shiprocket|shipmozo|bigship|authorization|bearer|token|secret|password|rawpayload|rawheaders|rawresponse|provider courier|provider pickup/i;
 
@@ -29,6 +32,24 @@ export function serializeCourierPickupTrial(result: CourierPickupTrialResult) {
       amount_paise: option.amount_paise,
       estimated_delivery_days: option.estimated_delivery_days
     })),
+    blockers: safeList(result.blockers),
+    warnings: safeList(result.warnings),
+    seller_safe_message: safeString(result.seller_safe_message),
+    admin_next_actions: safeList(result.admin_next_actions)
+  };
+}
+
+export function serializeCourierPickupConfirmation(result: CourierPickupConfirmationResult) {
+  return {
+    success: result.success,
+    provider_key: result.provider_key,
+    public_network_name: "Shipmastr Courier Network",
+    shipment_id: result.shipment_id,
+    previous_pickup_location_id: result.previous_pickup_location_id,
+    confirmed_pickup_location_id: result.confirmed_pickup_location_id,
+    confirmed_pickup_pincode: result.confirmed_pickup_pincode,
+    status: result.status,
+    requires_rate_refresh: result.requires_rate_refresh,
     blockers: safeList(result.blockers),
     warnings: safeList(result.warnings),
     seller_safe_message: safeString(result.seller_safe_message),

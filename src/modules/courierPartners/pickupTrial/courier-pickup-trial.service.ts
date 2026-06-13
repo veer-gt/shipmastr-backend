@@ -21,6 +21,8 @@ import {
   shipmentWeightForProvider
 } from "../../shippingNetwork/shipping-shipments.service.js";
 import type {
+  CourierPickupConfirmationResult,
+  CourierPickupConfirmationStatus,
   CourierPickupTrialRateContext,
   CourierPickupTrialRateOption,
   CourierPickupTrialRatePreview,
@@ -67,6 +69,10 @@ type RateRefreshOptions = TrialOptions & {
 };
 
 type StoredTrialEvidence = {
+  trial_id?: unknown;
+  provider_key?: unknown;
+  trial_pickup_location_id?: unknown;
+  trial_pickup_pincode?: unknown;
   status?: unknown;
   rate_context?: unknown;
   public_rate_options?: unknown;
@@ -74,7 +80,11 @@ type StoredTrialEvidence = {
   warnings?: unknown;
   seller_safe_message?: unknown;
   admin_next_actions?: unknown;
+  refreshed_at?: unknown;
 };
+
+const safeShipmentPickupConfirmationStatuses = new Set(["draft", "rates_fetched"]);
+const unsafeOperatorNotePattern = /authorization|bearer|token|secret|password|credential|api[_-]?key|rawpayload|rawheaders|rawresponse|provider/i;
 
 function metadataObject(value: unknown) {
   if (!value || typeof value !== "object" || Array.isArray(value)) return {};
@@ -419,6 +429,79 @@ function providerErrorCode(error: unknown) {
   return code.replace(/[^A-Z0-9_]/gi, "_").toUpperCase().slice(0, 80) || "CONTROLLED_RATE_REFRESH_FAILED";
 }
 
+function safeOperatorNote(value: string | null | undefined) {
+  const trimmed = String(value ?? "").replace(/[\r\n]+/g, " ").trim().slice(0, 240);
+  if (!trimmed) return null;
+  return unsafeOperatorNotePattern.test(trimmed) ? "Operator note redacted for safety." : trimmed;
+}
+
+function confirmationResult(input: {
+  providerKey: string;
+  shipmentId: string;
+  previousPickupLocationId: string | null;
+  confirmedPickupLocationId: string;
+  confirmedPickupPincode: string;
+  status: CourierPickupConfirmationStatus;
+  requiresRateRefresh: boolean;
+  blockers?: string[];
+  warnings?: string[];
+  adminNextActions?: string[];
+}): CourierPickupConfirmationResult {
+  const success = input.status === "CONFIRMED";
+  return {
+    success,
+    provider_key: input.providerKey,
+    public_network_name: "Shipmastr Courier Network",
+    shipment_id: input.shipmentId,
+    previous_pickup_location_id: input.previousPickupLocationId,
+    confirmed_pickup_location_id: input.confirmedPickupLocationId,
+    confirmed_pickup_pincode: input.confirmedPickupPincode,
+    status: input.status,
+    requires_rate_refresh: input.requiresRateRefresh,
+    blockers: input.blockers ?? [],
+    warnings: input.warnings ?? [],
+    seller_safe_message: success
+      ? "Shipmastr confirmed this pickup for the shipment. Refresh rates before any shipping action."
+      : "Shipmastr could not confirm this pickup yet. Keep the shipment in safe review.",
+    admin_next_actions: input.adminNextActions ?? (success
+      ? ["Run a confirmed-pickup rate refresh before any AWB, label, tracking, or Ship Now action."]
+      : ["Review blockers, rerun the controlled pickup trial if needed, and do not Ship Now."])
+  };
+}
+
+function evidenceTrialId(shipmentId: string, pickupLocationId: string) {
+  return `pickup_trial_${shipmentId}_${pickupLocationId}`;
+}
+
+function confirmationAuditMetadata(input: {
+  existingMetadata: Record<string, unknown>;
+  previousPickupLocationId: string | null;
+  confirmedPickupLocationId: string;
+  confirmedPickupPincode: string;
+  trialId: string;
+  operatorNote?: string | null;
+  confirmedAt: string;
+  requiresRateRefresh: boolean;
+}) {
+  const phase44e = metadataObject(input.existingMetadata.phase44e);
+  return toPrismaJson({
+    ...input.existingMetadata,
+    phase44e: {
+      ...phase44e,
+      latestAlternatePickupConfirmation: {
+        previous_pickup_location_id: input.previousPickupLocationId,
+        confirmed_pickup_location_id: input.confirmedPickupLocationId,
+        confirmed_pickup_pincode: input.confirmedPickupPincode,
+        trial_id: input.trialId,
+        operator_note: input.operatorNote ?? null,
+        confirmed_at: input.confirmedAt,
+        requires_rate_refresh: input.requiresRateRefresh,
+        rawProviderResponseStored: false
+      }
+    }
+  });
+}
+
 function liveRatesSource(source?: Record<string, unknown>) {
   return {
     ...env,
@@ -688,4 +771,115 @@ export async function createControlledCourierPickupRateRefresh(
   });
 
   return result;
+}
+
+export async function confirmControlledCourierPickupTrial(
+  merchantId: string,
+  input: {
+    providerKey: "SHIPROCKET" | string;
+    shipmentId: string;
+    pickupLocationId: string;
+    trialId: string;
+    operatorNote?: string | null;
+  },
+  options: TrialOptions & { now?: () => Date } = {}
+): Promise<CourierPickupConfirmationResult> {
+  const client = options.client ?? prisma;
+  if (input.providerKey !== "SHIPROCKET") throw new HttpError(400, "COURIER_PICKUP_TRIAL_UNSUPPORTED_PROVIDER");
+  const shipment = await getSellerShipment(merchantId, input.shipmentId, client);
+  const pickup = await client.pickupLocation.findFirst({
+    where: {
+      id: input.pickupLocationId,
+      sellerId: merchantId
+    }
+  }) as PickupRecord | null;
+
+  if (!pickup) throw new HttpError(404, "PICKUP_LOCATION_NOT_FOUND");
+  if (pickup.status !== "active") throw new HttpError(409, "PICKUP_LOCATION_NOT_ACTIVE");
+
+  const previousPickupLocationId = shipment.pickupLocationId ?? null;
+  const confirmedPickupPincode = pickup.pincode ?? "";
+  const requiresRateRefresh = previousPickupLocationId !== input.pickupLocationId;
+  const base = {
+    providerKey: input.providerKey,
+    shipmentId: shipment.id,
+    previousPickupLocationId,
+    confirmedPickupLocationId: input.pickupLocationId,
+    confirmedPickupPincode,
+    requiresRateRefresh
+  };
+  const evidence = alternatePickupTrialEvidence(shipment, input.pickupLocationId);
+  const expectedTrialId = evidenceTrialId(shipment.id, input.pickupLocationId);
+
+  if (!evidence || (stringValue(evidence.trial_id) ?? expectedTrialId) !== input.trialId) {
+    return confirmationResult({
+      ...base,
+      status: "TRIAL_NOT_FOUND",
+      blockers: ["PICKUP_CONFIRMATION_TRIAL_NOT_FOUND"]
+    });
+  }
+
+  const context = contextFromEvidence(evidence.rate_context);
+  const evidenceProviderKey = stringValue(evidence.provider_key);
+  const evidencePickupLocationId = stringValue(evidence.trial_pickup_location_id);
+  const blockers: string[] = [];
+
+  if (evidenceProviderKey && evidenceProviderKey !== input.providerKey) {
+    blockers.push("PICKUP_CONFIRMATION_PROVIDER_MISMATCH");
+  }
+  if (evidencePickupLocationId && evidencePickupLocationId !== input.pickupLocationId) {
+    blockers.push("PICKUP_CONFIRMATION_PICKUP_MISMATCH");
+  }
+  if (!context || safeStatus(evidence.status) !== "ELIGIBLE_RATES_FOUND") {
+    blockers.push("PICKUP_CONFIRMATION_TRIAL_NOT_ELIGIBLE");
+  }
+  if (!context || context.eligible_count <= 0) blockers.push("PICKUP_CONFIRMATION_NO_ELIGIBLE_RATES");
+  if (!context || context.pickup_available_count <= 0) blockers.push("PICKUP_CONFIRMATION_PICKUP_UNAVAILABLE");
+  if (!context || context.numeric_courier_id_count <= 0) blockers.push("PICKUP_CONFIRMATION_COURIER_ID_MISSING");
+  if (shipment.awbNumber) blockers.push("PICKUP_CONFIRMATION_SHIPMENT_ALREADY_HAS_AWB");
+  if (!safeShipmentPickupConfirmationStatuses.has(String(shipment.status))) {
+    blockers.push("PICKUP_CONFIRMATION_UNSAFE_SHIPMENT_STATE");
+  }
+
+  if (blockers.length) {
+    const status: CourierPickupConfirmationStatus = blockers.includes("PICKUP_CONFIRMATION_SHIPMENT_ALREADY_HAS_AWB")
+      ? "SHIPMENT_ALREADY_HAS_AWB"
+      : blockers.includes("PICKUP_CONFIRMATION_UNSAFE_SHIPMENT_STATE")
+        ? "UNSAFE_SHIPMENT_STATE"
+        : "TRIAL_NOT_ELIGIBLE";
+    return confirmationResult({
+      ...base,
+      status,
+      blockers: [...new Set(blockers)]
+    });
+  }
+
+  const confirmedAt = (options.now ?? (() => new Date()))().toISOString();
+  const existingMetadata = metadataObject(shipment.metadata);
+  await client.shipment.update({
+    where: { id: shipment.id },
+    data: {
+      pickupLocationId: input.pickupLocationId,
+      fromPincode: confirmedPickupPincode,
+      metadata: confirmationAuditMetadata({
+        existingMetadata,
+        previousPickupLocationId,
+        confirmedPickupLocationId: input.pickupLocationId,
+        confirmedPickupPincode,
+        trialId: input.trialId,
+        operatorNote: safeOperatorNote(input.operatorNote),
+        confirmedAt,
+        requiresRateRefresh
+      })
+    }
+  });
+
+  return confirmationResult({
+    ...base,
+    status: "CONFIRMED",
+    warnings: [
+      "Pickup confirmation changed shipment pickup only after stored eligible trial evidence.",
+      "No AWB, label, tracking, Ship Now, or provider call was performed."
+    ]
+  });
 }

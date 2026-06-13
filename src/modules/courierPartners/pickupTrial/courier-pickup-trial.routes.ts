@@ -3,11 +3,16 @@ import { isAdminRole } from "../../../lib/accountRoles.js";
 import { HttpError } from "../../../lib/httpError.js";
 import { successEnvelope } from "../../shippingNetwork/shipping-public-serializers.js";
 import {
+  confirmControlledCourierPickupTrial,
   createControlledCourierPickupRateRefresh,
   createControlledCourierPickupTrial
 } from "./courier-pickup-trial.service.js";
-import { serializeCourierPickupTrial } from "./courier-pickup-trial.serializer.js";
 import {
+  serializeCourierPickupConfirmation,
+  serializeCourierPickupTrial
+} from "./courier-pickup-trial.serializer.js";
+import {
+  confirmCourierPickupTrialSchema,
   createCourierPickupTrialSchema,
   parseCourierPickupTrialProvider,
   refreshCourierPickupTrialRatesSchema
@@ -57,5 +62,24 @@ courierPickupTrialRouter.post("/courier-pickup-trials/providers/:providerKey/shi
   return res.status(201).json(successEnvelope(
     "Controlled alternate pickup rate refresh completed safely. No shipment pickup, AWB, label, or tracking mutation was performed.",
     serializeCourierPickupTrial(data)
+  ));
+});
+
+courierPickupTrialRouter.post("/courier-pickup-trials/providers/:providerKey/shipments/:shipmentId/confirm", async (req, res) => {
+  requireInternalAdminRole(req);
+  const providerKey = routeProvider(req.params.providerKey);
+  const body = confirmCourierPickupTrialSchema.parse(req.body ?? {});
+  const data = await confirmControlledCourierPickupTrial(req.auth!.merchantId, {
+    providerKey,
+    shipmentId: routeParam(req.params.shipmentId),
+    pickupLocationId: body.pickup_location_id,
+    trialId: body.trial_id,
+    operatorNote: body.operator_note ?? null
+  });
+  return res.status(data.success ? 200 : 409).json(successEnvelope(
+    data.success
+      ? "Alternate pickup confirmed safely. Refresh rates before any shipping action."
+      : "Alternate pickup confirmation blocked safely.",
+    serializeCourierPickupConfirmation(data)
   ));
 });

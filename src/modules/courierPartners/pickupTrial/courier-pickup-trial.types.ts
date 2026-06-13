@@ -51,3 +51,27 @@ export type CourierPickupTrialRatePreview = {
   deliveryAvailable?: boolean | null;
   providerCourierId?: string | number | null;
 };
+
+export type CourierPickupConfirmationStatus =
+  | "CONFIRMED"
+  | "BLOCKED"
+  | "TRIAL_NOT_FOUND"
+  | "TRIAL_NOT_ELIGIBLE"
+  | "SHIPMENT_ALREADY_HAS_AWB"
+  | "UNSAFE_SHIPMENT_STATE";
+
+export type CourierPickupConfirmationResult = {
+  success: boolean;
+  provider_key: "SHIPROCKET" | string;
+  public_network_name: "Shipmastr Courier Network";
+  shipment_id: string;
+  previous_pickup_location_id: string | null;
+  confirmed_pickup_location_id: string;
+  confirmed_pickup_pincode: string;
+  status: CourierPickupConfirmationStatus;
+  requires_rate_refresh: boolean;
+  blockers: string[];
+  warnings: string[];
+  seller_safe_message: string;
+  admin_next_actions: string[];
+};
