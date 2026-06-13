@@ -491,7 +491,12 @@ async function shiprocketSnapshot(
       status: "WARN",
       blocker: "PROVIDER_AWB_NOT_CERTIFIED",
       warning: "Live AWB one-shot certification has not been completed.",
-      summary: { live_awb_certified: false, mutation_probe_allowed: false }
+      summary: {
+        live_awb_certified: false,
+        mutation_probe_allowed: false,
+        sandbox_status: "AVAILABLE",
+        sandbox_dry_run_required: true
+      }
     }),
     fixedDimension({
       key: "LABEL",

@@ -17,6 +17,7 @@ describe("Pilot Run 6H certification check script", () => {
     assert.match(script, /courier-pickup-serviceability\/providers\/SHIPROCKET\/shipments/);
     assert.match(script, /pickup-learning\/providers\/SHIPROCKET\/shipments/);
     assert.match(script, /courier-arbitration\/shipments/);
+    assert.match(script, /awb-certification\/providers\/SHIPROCKET\/shipments/);
     assert.match(script, /courier-pickup-trials\/providers\/SHIPROCKET\/shipments/);
     assert.match(script, /live-ship-readiness/);
     assert.doesNotMatch(script, /ship-now|manifestOrder|createLabel|getLabel|createDraftOrder|app\.shiprocket\.in|shiprocket\.in\/v1\/external/i);
@@ -162,6 +163,13 @@ describe("Pilot Run 6H certification check script", () => {
         evaluated_options: [{ status: "BLOCKED" }, { status: "TRIAL_REQUIRED" }],
         admin_next_actions: ["Run a controlled alternate pickup trial. Do not Ship Now until the trial and certification pass."]
       },
+      awbSandbox: {
+        dry_run_ready: false,
+        live_one_shot_ready: false,
+        status: "BLOCKED",
+        blockers: ["AWB_CERTIFICATION_PICKUP_UNAVAILABLE", "AWB_CERTIFICATION_ONE_SHOT_APPROVAL_REQUIRED"],
+        admin_next_actions: ["Try another pickup location before attempting AWB certification."]
+      },
       pickupTrial: {
         status: "DRY_RUN_ONLY",
         rate_context: {
@@ -194,6 +202,7 @@ describe("Pilot Run 6H certification check script", () => {
     assert.match(report, /Pickup serviceability:/);
     assert.match(report, /Pickup learning:/);
     assert.match(report, /Arbitration:/);
+    assert.match(report, /AWB certification sandbox:/);
     assert.match(report, /Alternate pickup trial:/);
     assert.match(report, /latest refresh: NO_ELIGIBLE_SHIPPING_RATES/);
     assert.match(report, /eligible rate count: 0/);
@@ -206,6 +215,9 @@ describe("Pilot Run 6H certification check script", () => {
     assert.match(report, /recommendation: TRY_ALTERNATE_PICKUP/);
     assert.match(report, /Pickup learning recommends: TRY_ALTERNATE_PICKUP/);
     assert.match(report, /decision: RUN_PICKUP_TRIAL/);
+    assert.match(report, /dry-run ready: false/);
+    assert.match(report, /live one-shot ready: false/);
+    assert.match(report, /AWB_CERTIFICATION_PICKUP_UNAVAILABLE/);
     assert.match(report, /next action: Run a controlled alternate pickup trial/);
     assert.match(report, /POST http:\/\/localhost:8080\/api\/shipping\/courier-pickup-trials\/providers\/SHIPROCKET\/shipments\/shipment_1/);
     assert.match(report, /PROVIDER_RATES_NOT_LIVE/);
