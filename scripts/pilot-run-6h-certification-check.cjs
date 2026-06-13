@@ -82,6 +82,8 @@ function providerScopedNextActions(input) {
     ...(input.provider?.nextActions ?? []),
     ...(input.pickupServiceability?.next_actions ?? []),
     ...(input.pickupLearning?.recommendation ? [`Pickup learning recommends: ${input.pickupLearning.recommendation}`] : []),
+    ...(input.arbitration?.admin_next_actions ?? []),
+    ...(input.arbitration?.next_actions ?? []),
     ...(input.liveShipReadiness?.certification_decision?.seller_safe_message
       ? [input.liveShipReadiness.certification_decision.seller_safe_message]
       : []),
@@ -145,6 +147,7 @@ function renderReport(input) {
   const pickup = input.pickup;
   const pickupServiceability = input.pickupServiceability;
   const pickupLearning = input.pickupLearning;
+  const arbitration = input.arbitration;
   const pickupTrial = input.pickupTrial;
   const liveShipReadiness = input.liveShipReadiness;
   const latestRefresh = liveShipReadiness?.latest_rate_refresh;
@@ -201,6 +204,13 @@ function renderReport(input) {
     `  observations: ${pickupLearning?.observation_count ?? pickupServiceability?.pickup_learning?.observation_count ?? "unknown"}`,
     `  recommendation: ${pickupLearning?.recommendation ?? pickupServiceability?.pickup_learning?.recommendation ?? "unknown"}`,
     "",
+    "Arbitration:",
+    `  requested capability: ${arbitration?.requested_capability ?? "AWB"}`,
+    `  decision: ${arbitration?.decision ?? "unknown"}`,
+    `  selected option: ${arbitration?.selected_option?.pickup_location_id ?? "none"}`,
+    `  evaluated options: ${(arbitration?.evaluated_options ?? []).length}`,
+    `  next action: ${(arbitration?.admin_next_actions ?? arbitration?.next_actions ?? [])[0] ?? "unknown"}`,
+    "",
     "Alternate pickup trial:",
     `  trial pickup id: ${input.runtime.trialPickupLocationId || "not provided"}`,
     `  status: ${pickupTrial?.status ?? "not run"}`,
@@ -250,17 +260,21 @@ async function run(env = process.env) {
   const pickupLearningPath = runtime.shipmentId
     ? `/pickup-learning/providers/SHIPROCKET/shipments/${encodeURIComponent(runtime.shipmentId)}`
     : null;
+  const arbitrationPath = runtime.shipmentId
+    ? `/courier-arbitration/shipments/${encodeURIComponent(runtime.shipmentId)}?${params(runtime, { provider_key: "SHIPROCKET", requested_capability: "AWB" })}`
+    : null;
   const pickupTrialPath = runtime.shipmentId && runtime.trialPickupLocationId
     ? `/courier-pickup-trials/providers/SHIPROCKET/shipments/${encodeURIComponent(runtime.shipmentId)}`
     : null;
 
-  const [summary, shiprocket, pickup, liveShipReadiness, pickupServiceability, pickupLearning, pickupTrial] = await Promise.all([
+  const [summary, shiprocket, pickup, liveShipReadiness, pickupServiceability, pickupLearning, arbitration, pickupTrial] = await Promise.all([
     request(runtime, `/courier-certification/summary${summaryQuery ? `?${summaryQuery}` : ""}`),
     request(runtime, `/courier-certification/providers/SHIPROCKET?${contextQuery}`),
     request(runtime, `/courier-live-readiness/providers/SHIPROCKET/pickups?${params(runtime)}`),
     readinessPath ? request(runtime, readinessPath) : Promise.resolve(null),
     pickupServiceabilityPath ? request(runtime, pickupServiceabilityPath) : Promise.resolve(null),
     pickupLearningPath ? request(runtime, pickupLearningPath) : Promise.resolve(null),
+    arbitrationPath ? request(runtime, arbitrationPath) : Promise.resolve(null),
     pickupTrialPath
       ? request(runtime, pickupTrialPath, {
         method: "POST",
@@ -279,6 +293,7 @@ async function run(env = process.env) {
     pickup,
     pickupServiceability,
     pickupLearning,
+    arbitration,
     pickupTrial,
     liveShipReadiness
   });

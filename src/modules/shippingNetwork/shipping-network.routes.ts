@@ -110,6 +110,7 @@ import {
 } from "./shipping-webhook-events.service.js";
 import { getMerchantOperationsSummary } from "./shipping-merchant-operations.service.js";
 import { emailDeliveryRouter } from "../emailDelivery/email-delivery.routes.js";
+import { courierArbitrationRouter } from "../courierPartners/arbitration/courier-arbitration.routes.js";
 import { courierCertificationRouter } from "../courierPartners/certification/courier-certification.routes.js";
 import { courierLiveReadinessRouter } from "../courierPartners/liveReadiness/courier-live-readiness.routes.js";
 import { courierOnboardingRouter } from "../courierPartners/onboarding/courier-onboarding.routes.js";
@@ -165,6 +166,7 @@ function routeParam(value: string | string[] | undefined) {
 
 shippingNetworkRouter.use("/", platformIntegrationsRouter);
 shippingNetworkRouter.use("/", courierLiveReadinessRouter);
+shippingNetworkRouter.use("/", courierArbitrationRouter);
 shippingNetworkRouter.use("/", courierCertificationRouter);
 shippingNetworkRouter.use("/", courierPickupLearningRouter);
 shippingNetworkRouter.use("/", courierPickupServiceabilityRouter);

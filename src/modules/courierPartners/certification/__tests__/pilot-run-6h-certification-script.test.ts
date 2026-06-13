@@ -16,6 +16,7 @@ describe("Pilot Run 6H certification check script", () => {
     assert.match(script, /courier-live-readiness\/providers\/SHIPROCKET\/pickups/);
     assert.match(script, /courier-pickup-serviceability\/providers\/SHIPROCKET\/shipments/);
     assert.match(script, /pickup-learning\/providers\/SHIPROCKET\/shipments/);
+    assert.match(script, /courier-arbitration\/shipments/);
     assert.match(script, /courier-pickup-trials\/providers\/SHIPROCKET\/shipments/);
     assert.match(script, /live-ship-readiness/);
     assert.doesNotMatch(script, /ship-now|manifestOrder|createLabel|getLabel|createDraftOrder|app\.shiprocket\.in|shiprocket\.in\/v1\/external/i);
@@ -154,6 +155,13 @@ describe("Pilot Run 6H certification check script", () => {
         observation_count: 3,
         recommendation: "TRY_ALTERNATE_PICKUP"
       },
+      arbitration: {
+        requested_capability: "AWB",
+        decision: "RUN_PICKUP_TRIAL",
+        selected_option: { pickup_location_id: "pickup_122001" },
+        evaluated_options: [{ status: "BLOCKED" }, { status: "TRIAL_REQUIRED" }],
+        admin_next_actions: ["Run a controlled alternate pickup trial. Do not Ship Now until the trial and certification pass."]
+      },
       pickupTrial: {
         status: "DRY_RUN_ONLY",
         rate_context: {
@@ -185,6 +193,7 @@ describe("Pilot Run 6H certification check script", () => {
     assert.match(report, /Rates:/);
     assert.match(report, /Pickup serviceability:/);
     assert.match(report, /Pickup learning:/);
+    assert.match(report, /Arbitration:/);
     assert.match(report, /Alternate pickup trial:/);
     assert.match(report, /latest refresh: NO_ELIGIBLE_SHIPPING_RATES/);
     assert.match(report, /eligible rate count: 0/);
@@ -196,6 +205,8 @@ describe("Pilot Run 6H certification check script", () => {
     assert.match(report, /availability score: 0/);
     assert.match(report, /recommendation: TRY_ALTERNATE_PICKUP/);
     assert.match(report, /Pickup learning recommends: TRY_ALTERNATE_PICKUP/);
+    assert.match(report, /decision: RUN_PICKUP_TRIAL/);
+    assert.match(report, /next action: Run a controlled alternate pickup trial/);
     assert.match(report, /POST http:\/\/localhost:8080\/api\/shipping\/courier-pickup-trials\/providers\/SHIPROCKET\/shipments\/shipment_1/);
     assert.match(report, /PROVIDER_RATES_NOT_LIVE/);
     assert.match(report, /PROVIDER_LATEST_RATE_REFRESH_NO_ELIGIBLE_RATES/);
