@@ -19,7 +19,8 @@ function runtimeFromEnv(env = process.env) {
     apiBase: (env.SHIPMASTR_API_BASE_URL || DEFAULT_API_BASE_URL).replace(/\/+$/, ""),
     providerKey: env.PILOT_6H_PROVIDER_KEY || DEFAULT_PROVIDER_KEY,
     shipmentId: env.PILOT_6H_SHIPMENT_ID || DEFAULT_SHIPMENT_ID,
-    alternatePickupLocationId: env.PILOT_6H_ALTERNATE_PICKUP_LOCATION_ID || DEFAULT_ALTERNATE_PICKUP_LOCATION_ID
+    alternatePickupLocationId: env.PILOT_6H_ALTERNATE_PICKUP_LOCATION_ID || DEFAULT_ALTERNATE_PICKUP_LOCATION_ID,
+    runControlledRateRefresh: String(env.PILOT_6H_RUN_CONTROLLED_RATE_REFRESH || "").trim() === "1"
   };
 }
 
@@ -43,13 +44,16 @@ function rateLabel(option) {
 
 function finalRecommendation(result) {
   if (result?.status === "ELIGIBLE_RATES_FOUND") {
-    return "Review safe public options, then explicitly refresh rates and rerun certification before any shipping action.";
+    return "Review safe public options, then explicitly confirm pickup alignment and rerun certification before any shipping action.";
   }
-  if (result?.status === "DRY_RUN_ONLY") {
+  if (result?.status === "DRY_RUN_ONLY" || result?.status === "CONTROLLED_REFRESH_REQUIRED") {
     return "Run a controlled alternate pickup rate refresh. Keep the shipment blocked until eligibility is proven.";
   }
   if (result?.status === "PICKUP_UNAVAILABLE") {
     return "Alternate pickup is not serviceable from available safe evidence. Try another pickup or fix pickup availability.";
+  }
+  if (result?.status === "NO_ELIGIBLE_RATES" || result?.status === "NO_PROVIDER_CANDIDATES") {
+    return "No eligible alternate pickup rate is available yet. Keep the shipment blocked and review pickup/serviceability.";
   }
   return "Keep shipment in safe review. Do not Ship Now, create AWB, generate labels, or run tracking.";
 }
@@ -63,9 +67,11 @@ function renderReport(runtime, result) {
       : [];
   const lines = [
     "Pilot Run 6H alternate pickup trial:",
+    `  mode: ${runtime.runControlledRateRefresh ? "CONTROLLED_REFRESH" : "DRY_RUN"}`,
     `  provider: ${safeLine(runtime.providerKey)}`,
     `  shipment id: ${safeLine(runtime.shipmentId)}`,
-    `  alternate pickup id: ${safeLine(runtime.alternatePickupLocationId)}`,
+    `  current pickup: ${safeLine(result?.current_pickup_location_id || result?.currentPickupLocationId || "unknown")}`,
+    `  alternate pickup: ${safeLine(result?.trial_pickup_location_id || result?.trialPickupLocationId || runtime.alternatePickupLocationId)}`,
     `  status: ${safeLine(result?.status)}`,
     `  candidate count: ${context.candidate_count ?? context.candidateCount ?? 0}`,
     `  eligible count: ${context.eligible_count ?? context.eligibleCount ?? 0}`,
@@ -86,20 +92,28 @@ function renderReport(runtime, result) {
   return lines.join("\n");
 }
 
+function endpointPath(runtime) {
+  const base = `/courier-pickup-trials/providers/${encodeURIComponent(runtime.providerKey)}/shipments/${encodeURIComponent(runtime.shipmentId)}`;
+  return runtime.runControlledRateRefresh ? `${base}/rate-refresh` : base;
+}
+
+function requestBody(runtime) {
+  return {
+    pickup_location_id: runtime.alternatePickupLocationId,
+    mode: runtime.runControlledRateRefresh ? "CONTROLLED_REFRESH" : "DRY_RUN"
+  };
+}
+
 async function run(env = process.env) {
   const runtime = runtimeFromEnv(env);
-  const path = `/courier-pickup-trials/providers/${encodeURIComponent(runtime.providerKey)}/shipments/${encodeURIComponent(runtime.shipmentId)}`;
-  const response = await fetch(`${runtime.apiBase}${path}`, {
+  const response = await fetch(`${runtime.apiBase}${endpointPath(runtime)}`, {
     method: "POST",
     headers: {
       Authorization: `Bearer ${runtime.token}`,
       Accept: "application/json",
       "Content-Type": "application/json"
     },
-    body: JSON.stringify({
-      pickup_location_id: runtime.alternatePickupLocationId,
-      mode: "DRY_RUN"
-    })
+    body: JSON.stringify(requestBody(runtime))
   }).catch((error) => {
     throw new Error(`${LOCAL_API_HINT}. ${error.message}`);
   });
@@ -127,6 +141,8 @@ module.exports = {
   DEFAULT_ALTERNATE_PICKUP_LOCATION_ID,
   assertToken,
   runtimeFromEnv,
+  endpointPath,
+  requestBody,
   finalRecommendation,
   renderReport,
   run

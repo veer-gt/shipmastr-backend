@@ -23,12 +23,23 @@ describe("Pilot Run 6H alternate pickup trial script", () => {
     assert.equal(runtime.providerKey, "SHIPROCKET");
     assert.equal(runtime.shipmentId, "cmqamlku6000am1qh7amfz3m5");
     assert.equal(runtime.alternatePickupLocationId, "cmq9380sf0002m1akjbwmbkm8");
+    assert.equal(runtime.runControlledRateRefresh, false);
   });
 
-  it("uses only the controlled alternate pickup dry-run endpoint", () => {
+  it("uses dry-run by default and controlled refresh only when explicitly requested", () => {
     const source = scriptSource();
+    const dryRunRuntime = trialScript.runtimeFromEnv({ SHIPMASTR_TOKEN: "test-token" });
+    const controlledRuntime = trialScript.runtimeFromEnv({
+      SHIPMASTR_TOKEN: "test-token",
+      PILOT_6H_RUN_CONTROLLED_RATE_REFRESH: "1"
+    });
+
     assert.match(source, /courier-pickup-trials\/providers/);
-    assert.match(source, /mode:\s*"DRY_RUN"/);
+    assert.match(source, /mode:\s*runtime\.runControlledRateRefresh\s*\?\s*"CONTROLLED_REFRESH"\s*:\s*"DRY_RUN"/);
+    assert.equal(trialScript.endpointPath(dryRunRuntime).endsWith("/rate-refresh"), false);
+    assert.equal(trialScript.requestBody(dryRunRuntime).mode, "DRY_RUN");
+    assert.equal(trialScript.endpointPath(controlledRuntime).endsWith("/rate-refresh"), true);
+    assert.equal(trialScript.requestBody(controlledRuntime).mode, "CONTROLLED_REFRESH");
     assert.doesNotMatch(source, /\/live-one-shot|\/ship-now|x-shipmastr-live-awb-approval|x-shipmastr-live-label-approval|x-shipmastr-live-tracking-approval/i);
     assert.doesNotMatch(source, /awb-certification|label-certification|tracking-certification|shipNowShipment|manifestOrder|createLabel|getLabel|liveTrackingRead|app\.shiprocket\.in|shiprocket\.in\/v1\/external/i);
   });
@@ -37,9 +48,12 @@ describe("Pilot Run 6H alternate pickup trial script", () => {
     const report = trialScript.renderReport({
       providerKey: "SHIPROCKET",
       shipmentId: "shipment_1",
-      alternatePickupLocationId: "pickup_122001"
+      alternatePickupLocationId: "pickup_122001",
+      runControlledRateRefresh: false
     }, {
       status: "DRY_RUN_ONLY",
+      current_pickup_location_id: "pickup_201301",
+      trial_pickup_location_id: "pickup_122001",
       rate_context: {
         candidate_count: 0,
         eligible_count: 0,
@@ -53,6 +67,9 @@ describe("Pilot Run 6H alternate pickup trial script", () => {
     });
 
     assert.match(report, /Pilot Run 6H alternate pickup trial:/);
+    assert.match(report, /mode: DRY_RUN/);
+    assert.match(report, /current pickup: pickup_201301/);
+    assert.match(report, /alternate pickup: pickup_122001/);
     assert.match(report, /status: DRY_RUN_ONLY/);
     assert.match(report, /public rate options:/);
     assert.match(report, /final recommendation:/);
@@ -63,9 +80,12 @@ describe("Pilot Run 6H alternate pickup trial script", () => {
     const report = trialScript.renderReport({
       providerKey: "SHIPROCKET",
       shipmentId: "shipment_1",
-      alternatePickupLocationId: "pickup_122001"
+      alternatePickupLocationId: "pickup_122001",
+      runControlledRateRefresh: true
     }, {
       status: "ELIGIBLE_RATES_FOUND",
+      current_pickup_location_id: "pickup_201301",
+      trial_pickup_location_id: "pickup_122001",
       rate_context: {
         candidate_count: 2,
         eligible_count: 1,
@@ -83,6 +103,7 @@ describe("Pilot Run 6H alternate pickup trial script", () => {
     });
 
     assert.match(report, /Shipmastr Smart \(INR 72\.00, 2 days\)/);
+    assert.match(report, /mode: CONTROLLED_REFRESH/);
     assert.match(report, /Review safe public options/);
     assert.doesNotMatch(report, /providerCourierId|provider pickup|rawPayload|rawHeaders|rawResponse|Authorization|Bearer|token|secret/i);
   });

@@ -5,6 +5,11 @@ export const createCourierPickupTrialSchema = z.object({
   mode: z.literal("DRY_RUN").default("DRY_RUN")
 }).strict();
 
+export const refreshCourierPickupTrialRatesSchema = z.object({
+  pickup_location_id: z.string().trim().min(1),
+  mode: z.literal("CONTROLLED_REFRESH").default("CONTROLLED_REFRESH")
+}).strict();
+
 export function parseCourierPickupTrialProvider(value: string | string[] | undefined) {
   const providerKey = (Array.isArray(value) ? value[0] ?? "" : value ?? "").trim().toUpperCase();
   if (!providerKey) return null;

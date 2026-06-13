@@ -1,4 +1,4 @@
-export type CourierPickupTrialMode = "DRY_RUN";
+export type CourierPickupTrialMode = "DRY_RUN" | "CONTROLLED_REFRESH";
 
 export type CourierPickupTrialStatus =
   | "ELIGIBLE_RATES_FOUND"
@@ -6,6 +6,7 @@ export type CourierPickupTrialStatus =
   | "PICKUP_UNAVAILABLE"
   | "NO_PROVIDER_CANDIDATES"
   | "BLOCKED"
+  | "CONTROLLED_REFRESH_REQUIRED"
   | "DRY_RUN_ONLY";
 
 export type CourierPickupTrialRateContext = {

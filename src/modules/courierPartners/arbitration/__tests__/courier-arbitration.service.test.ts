@@ -146,8 +146,9 @@ function makeClient(input: {
   rates?: any[];
   pickups?: any[];
   awbNumber?: string | null;
+  shipment?: any;
 } = {}) {
-  const shipment = {
+  const shipment = input.shipment ?? {
     id: "shipment_1",
     sellerId: "merchant_1",
     pickupLocationId: "pickup_1",
@@ -207,6 +208,71 @@ describe("courier pickup arbitration", () => {
     assert.equal(result.selected_option?.pickup_location_id, "pickup_2");
     assert.ok(result.blockers.includes("CONTROLLED_TRIAL_REQUIRES_RATE_REFRESH"));
     assert.ok(result.blockers.includes("PROVIDER_AWB_NOT_CERTIFIED"));
+  });
+
+  it("recommends TRY_ALTERNATE_PICKUP when controlled refresh evidence proves eligible rates", async () => {
+    const result = await arbitrate({
+      client: makeClient({
+        rates: [rate({ pickupLocationId: "pickup_1", pickupPincode: "201301", pickupAvailable: false })],
+        shipment: {
+          id: "shipment_1",
+          sellerId: "merchant_1",
+          pickupLocationId: "pickup_1",
+          fromPincode: "201301",
+          toPincode: "400001",
+          awbNumber: null,
+          metadata: {
+            phase44d: {
+              alternatePickupRateRefreshTrials: {
+                pickup_2: {
+                  status: "ELIGIBLE_RATES_FOUND",
+                  rate_context: {
+                    candidate_count: 1,
+                    eligible_count: 1,
+                    pickup_available_count: 1,
+                    delivery_available_count: 1,
+                    numeric_courier_id_count: 1
+                  },
+                  public_rate_options: [{
+                    public_service_code: "shipmastr_smart",
+                    public_service_name: "Shipmastr Smart",
+                    amount_paise: 7200,
+                    estimated_delivery_days: 2
+                  }],
+                  blockers: [],
+                  warnings: ["Stored safe trial evidence."],
+                  seller_safe_message: "Shipmastr shipping options are available for this pickup trial.",
+                  admin_next_actions: ["Review the trial options."]
+                }
+              }
+            }
+          }
+        }
+      }),
+      capability: "RATES",
+      providers: [shiprocketPilotReady(), snapshot("BIGSHIP"), snapshot("SHIPMOZO")]
+    });
+
+    assert.equal(result.decision, "TRY_ALTERNATE_PICKUP");
+    assert.equal(result.selected_option?.pickup_location_id, "pickup_2");
+    assert.equal(result.selected_option?.public_network_name, "Shipmastr Courier Network");
+    assert.doesNotMatch(JSON.stringify(serializeCourierArbitrationSellerSafe(result)), /providerCourierId|123456|rawPayload|rawHeaders|Authorization|Bearer/i);
+  });
+
+  it("keeps SAFE_REVIEW when alternate pickup refresh evidence is unavailable", async () => {
+    const result = await arbitrate({
+      client: makeClient({
+        rates: [
+          rate({ pickupLocationId: "pickup_1", pickupPincode: "201301", pickupAvailable: false }),
+          rate({ pickupLocationId: "pickup_2", pickupPincode: "122001", pickupAvailable: false, providerCourierId: "123456" })
+        ]
+      }),
+      providers: [shiprocketBlocked(), snapshot("BIGSHIP"), snapshot("SHIPMOZO")]
+    });
+
+    assert.equal(result.decision, "SAFE_REVIEW");
+    assert.equal(result.selected_option, null);
+    assert.ok(result.blockers.includes("PROVIDER_PICKUP_UNAVAILABLE"));
   });
 
   it("keeps shipment in safe review when selected pickup is unavailable and no alternate pickup exists", async () => {
