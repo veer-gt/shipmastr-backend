@@ -194,6 +194,7 @@ function renderReport(input) {
     "Selected shipment:",
     `  shipment id: ${input.runtime.shipmentId || "not provided"}`,
     `  pickup location id: ${input.runtime.pickupLocationId || pickup?.selected_shipmastr_pickup?.pickup_location_id || "not provided"}`,
+    `  pickup source: ${input.runtime.pickupLocationDetectedFromShipment ? "current shipment pickup" : "operator/environment"}`,
     "",
     "Shiprocket:",
     `  credentials: ${status(provider, "CREDENTIALS")}`,
@@ -316,7 +317,18 @@ function renderReport(input) {
 }
 
 async function run(env = process.env) {
-  const runtime = runtimeFromEnv(env);
+  let runtime = runtimeFromEnv(env);
+  const shipmentDetails = runtime.shipmentId
+    ? await request(runtime, `/shipments/${encodeURIComponent(runtime.shipmentId)}`)
+    : null;
+  const detectedPickupLocationId = shipmentDetails?.pickup_location_id ?? shipmentDetails?.pickupLocationId ?? "";
+  if (!runtime.pickupLocationId && detectedPickupLocationId) {
+    runtime = {
+      ...runtime,
+      pickupLocationId: detectedPickupLocationId,
+      pickupLocationDetectedFromShipment: true
+    };
+  }
   const contextQuery = params(runtime, { include_pickup_probe: true });
   const summaryQuery = params(runtime);
   const readinessPath = runtime.shipmentId ? `/shipments/${encodeURIComponent(runtime.shipmentId)}/live-ship-readiness` : null;
@@ -402,6 +414,7 @@ async function run(env = process.env) {
 
   const report = renderReport({
     runtime,
+    shipmentDetails,
     summary,
     provider: shiprocket.provider ?? shiprocket,
     pickup,

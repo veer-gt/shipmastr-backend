@@ -4,6 +4,7 @@ import { HttpError } from "../../../lib/httpError.js";
 import { successEnvelope } from "../../shippingNetwork/shipping-public-serializers.js";
 import {
   confirmControlledCourierPickupTrial,
+  createConfirmedCourierPickupRateRefresh,
   createControlledCourierPickupRateRefresh,
   createControlledCourierPickupTrial
 } from "./courier-pickup-trial.service.js";
@@ -13,6 +14,7 @@ import {
 } from "./courier-pickup-trial.serializer.js";
 import {
   confirmCourierPickupTrialSchema,
+  confirmedPickupRateRefreshSchema,
   createCourierPickupTrialSchema,
   parseCourierPickupTrialProvider,
   refreshCourierPickupTrialRatesSchema
@@ -81,5 +83,21 @@ courierPickupTrialRouter.post("/courier-pickup-trials/providers/:providerKey/shi
       ? "Alternate pickup confirmed safely. Refresh rates before any shipping action."
       : "Alternate pickup confirmation blocked safely.",
     serializeCourierPickupConfirmation(data)
+  ));
+});
+
+courierPickupTrialRouter.post("/courier-pickup-trials/providers/:providerKey/shipments/:shipmentId/confirmed-pickup-rate-refresh", async (req, res) => {
+  requireInternalAdminRole(req);
+  const providerKey = routeProvider(req.params.providerKey);
+  const body = confirmedPickupRateRefreshSchema.parse(req.body ?? {});
+  const data = await createConfirmedCourierPickupRateRefresh(req.auth!.merchantId, {
+    providerKey,
+    shipmentId: routeParam(req.params.shipmentId),
+    pickupLocationId: body.pickup_location_id,
+    mode: body.mode
+  });
+  return res.status(201).json(successEnvelope(
+    "Confirmed-pickup rate refresh completed safely. No AWB, label, tracking, or Ship Now action was performed.",
+    serializeCourierPickupTrial(data)
   ));
 });

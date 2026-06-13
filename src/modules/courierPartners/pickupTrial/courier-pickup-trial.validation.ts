@@ -16,6 +16,11 @@ export const confirmCourierPickupTrialSchema = z.object({
   operator_note: z.string().trim().max(240).optional()
 }).strict();
 
+export const confirmedPickupRateRefreshSchema = z.object({
+  pickup_location_id: z.string().trim().min(1),
+  mode: z.literal("CONFIRMED_PICKUP_REFRESH").default("CONFIRMED_PICKUP_REFRESH")
+}).strict();
+
 export function parseCourierPickupTrialProvider(value: string | string[] | undefined) {
   const providerKey = (Array.isArray(value) ? value[0] ?? "" : value ?? "").trim().toUpperCase();
   if (!providerKey) return null;

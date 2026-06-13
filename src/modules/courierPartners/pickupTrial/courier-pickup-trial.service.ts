@@ -17,6 +17,11 @@ import {
 } from "../../shippingNetwork/shipping-public-serializers.js";
 import { assertLiveCourierRatesAllowed } from "../../shippingNetwork/shipping-live-rates-gate.service.js";
 import {
+  fetchShipmentRates,
+  latestRateRefreshDiagnosticFromShipment,
+  type LiveRateRefreshDiagnostic
+} from "../../shippingNetwork/shipping-rates.service.js";
+import {
   getSellerShipment,
   shipmentWeightForProvider
 } from "../../shippingNetwork/shipping-shipments.service.js";
@@ -66,6 +71,10 @@ type RateRefreshOptions = TrialOptions & {
   liveRatesSource?: Record<string, unknown>;
   liveRatesAdapterFactory?: LiveRatesAdapterFactory;
   now?: () => Date;
+};
+
+type ConfirmedPickupRateRefreshOptions = RateRefreshOptions & {
+  rateFetcher?: typeof fetchShipmentRates;
 };
 
 type StoredTrialEvidence = {
@@ -471,6 +480,32 @@ function confirmationResult(input: {
 
 function evidenceTrialId(shipmentId: string, pickupLocationId: string) {
   return `pickup_trial_${shipmentId}_${pickupLocationId}`;
+}
+
+function statusFromDiagnostic(diagnostic: LiveRateRefreshDiagnostic | null, context: CourierPickupTrialRateContext): CourierPickupTrialStatus {
+  if (!diagnostic) return statusFrom(context);
+  if (diagnostic.status === "RATES_AVAILABLE") return "ELIGIBLE_RATES_FOUND";
+  if (diagnostic.status === "PROVIDER_SERVICEABILITY_NO_CANDIDATES") return "NO_PROVIDER_CANDIDATES";
+  if (diagnostic.provider_pickup_available_any === false) return "PICKUP_UNAVAILABLE";
+  return "NO_ELIGIBLE_RATES";
+}
+
+function contextFromDiagnostic(
+  diagnostic: LiveRateRefreshDiagnostic | null,
+  storedContext: CourierPickupTrialRateContext
+): CourierPickupTrialRateContext {
+  if (!diagnostic) return storedContext;
+  return {
+    candidate_count: diagnostic.live_rate_candidates_count || storedContext.candidate_count,
+    eligible_count: diagnostic.eligible_rate_count,
+    pickup_available_count: diagnostic.provider_pickup_available_any === false
+      ? 0
+      : Math.max(storedContext.pickup_available_count, diagnostic.eligible_rate_count ? 1 : 0),
+    delivery_available_count: diagnostic.provider_delivery_available_any === false
+      ? 0
+      : Math.max(storedContext.delivery_available_count, diagnostic.eligible_rate_count ? 1 : 0),
+    numeric_courier_id_count: Math.max(storedContext.numeric_courier_id_count, diagnostic.eligible_rate_count)
+  };
 }
 
 function confirmationAuditMetadata(input: {
@@ -882,4 +917,93 @@ export async function confirmControlledCourierPickupTrial(
       "No AWB, label, tracking, Ship Now, or provider call was performed."
     ]
   });
+}
+
+export async function createConfirmedCourierPickupRateRefresh(
+  merchantId: string,
+  input: {
+    providerKey: "SHIPROCKET" | string;
+    shipmentId: string;
+    pickupLocationId: string;
+    mode: "CONFIRMED_PICKUP_REFRESH";
+  },
+  options: ConfirmedPickupRateRefreshOptions = {}
+): Promise<CourierPickupTrialResult> {
+  const client = options.client ?? prisma;
+  if (input.providerKey !== "SHIPROCKET") throw new HttpError(400, "COURIER_PICKUP_TRIAL_UNSUPPORTED_PROVIDER");
+  const shipment = await getSellerShipment(merchantId, input.shipmentId, client);
+  const pickup = await client.pickupLocation.findFirst({
+    where: {
+      id: input.pickupLocationId,
+      sellerId: merchantId
+    }
+  }) as PickupRecord | null;
+
+  if (!pickup) throw new HttpError(404, "PICKUP_LOCATION_NOT_FOUND");
+  if (pickup.status !== "active") throw new HttpError(409, "PICKUP_LOCATION_NOT_ACTIVE");
+  if (shipment.pickupLocationId !== input.pickupLocationId) {
+    throw new HttpError(409, "CONFIRMED_PICKUP_REFRESH_PICKUP_MISMATCH");
+  }
+  if (shipment.awbNumber) throw new HttpError(409, "CONFIRMED_PICKUP_REFRESH_SHIPMENT_ALREADY_HAS_AWB");
+
+  const rateFetcher = options.rateFetcher ?? fetchShipmentRates;
+  try {
+    await rateFetcher(merchantId, shipment.id, {
+      client,
+      refresh: true,
+      ...(options.adapter ? { adapter: options.adapter } : {}),
+      ...(options.liveRatesSource ? { liveRatesSource: options.liveRatesSource } : {}),
+      ...(options.liveRatesAdapterFactory ? { liveRatesAdapterFactory: options.liveRatesAdapterFactory } : {})
+    });
+  } catch (error) {
+    const code = providerErrorCode(error);
+    if (!["NO_ELIGIBLE_SHIPPING_RATES", "PROVIDER_SERVICEABILITY_NO_CANDIDATES"].includes(code)) {
+      throw error;
+    }
+  }
+
+  const refreshedShipment = await getSellerShipment(merchantId, input.shipmentId, client);
+  const pickupPincode = pickup.pincode ?? "";
+  const deliveryPincode = refreshedShipment.toPincode ?? null;
+  const rates = (await shipmentRates(client, merchantId, refreshedShipment.id))
+    .filter((rate) => storedRateBelongsToPickup(rate, input.pickupLocationId, pickupPincode));
+  const storedContext = contextFromRates(rates);
+  const diagnostic = latestRateRefreshDiagnosticFromShipment(refreshedShipment);
+  const context = contextFromDiagnostic(diagnostic, storedContext);
+  const status = statusFromDiagnostic(diagnostic, context);
+  const publicOptions = publicOptionsFromRates(rates);
+  const result: CourierPickupTrialResult = {
+    trial_id: evidenceTrialId(refreshedShipment.id, input.pickupLocationId),
+    provider_key: input.providerKey,
+    public_network_name: "Shipmastr Courier Network",
+    shipment_id: refreshedShipment.id,
+    current_pickup_location_id: refreshedShipment.pickupLocationId ?? null,
+    trial_pickup_location_id: input.pickupLocationId,
+    trial_pickup_pincode: pickupPincode,
+    delivery_pincode: deliveryPincode,
+    status,
+    rate_context: context,
+    public_rate_options: publicOptions,
+    blockers: blockersFor(status),
+    warnings: [
+      "Confirmed-pickup refresh used the shipment's current pickup context.",
+      "No AWB, label, tracking, Ship Now, or provider response storage was performed."
+    ],
+    seller_safe_message: sellerMessage(status),
+    admin_next_actions: status === "ELIGIBLE_RATES_FOUND"
+      ? ["Rerun certification readiness and AWB dry-run before any explicit one-shot consideration."]
+      : adminNextActions(status)
+  };
+
+  await storeTrialEvidence({
+    client,
+    shipment: refreshedShipment,
+    pickupLocationId: input.pickupLocationId,
+    evidence: evidenceForResult({
+      result,
+      refreshedAt: (options.now ?? (() => new Date()))().toISOString()
+    })
+  });
+
+  return result;
 }

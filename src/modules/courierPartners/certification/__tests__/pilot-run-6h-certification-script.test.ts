@@ -22,6 +22,7 @@ describe("Pilot Run 6H certification check script", () => {
     assert.match(script, /tracking-certification\/providers\/SHIPROCKET\/shipments/);
     assert.match(script, /courier-pickup-trials\/providers\/SHIPROCKET\/shipments/);
     assert.match(script, /live-ship-readiness/);
+    assert.match(script, /pickupLocationDetectedFromShipment/);
     assert.doesNotMatch(script, /ship-now|manifestOrder|createLabel|getLabel|createDraftOrder|app\.shiprocket\.in|shiprocket\.in\/v1\/external/i);
     assert.doesNotMatch(script, /console\.log\([^)]*token/i);
   });
@@ -128,7 +129,8 @@ describe("Pilot Run 6H certification check script", () => {
         apiBase: "http://localhost:8080/api/shipping",
         shipmentId: "shipment_1",
         pickupLocationId: "pickup_201301",
-        trialPickupLocationId: "pickup_122001"
+        trialPickupLocationId: "pickup_122001",
+        pickupLocationDetectedFromShipment: true
       },
       summary: {
         counts: { total: 3, live_ready: 0, pilot_ready: 1, dry_run_ready: 2, blocked: 1 },
@@ -229,6 +231,7 @@ describe("Pilot Run 6H certification check script", () => {
       }
     });
     assert.match(report, /Provider-scoped blockers:/);
+    assert.match(report, /pickup source: current shipment pickup/);
     assert.match(report, /Rates:/);
     assert.match(report, /Pickup serviceability:/);
     assert.match(report, /Pickup learning:/);

@@ -3,6 +3,7 @@ import { readFileSync } from "node:fs";
 import { describe, it } from "node:test";
 import {
   confirmControlledCourierPickupTrial,
+  createConfirmedCourierPickupRateRefresh,
   createControlledCourierPickupRateRefresh,
   createControlledCourierPickupTrial
 } from "../courier-pickup-trial.service.js";
@@ -205,6 +206,30 @@ function shipmentWithEvidence(evidence: Record<string, unknown>, overrides: Reco
         alternatePickupRateRefreshTrials: {
           pickup_2: evidence
         }
+      }
+    },
+    ...overrides
+  };
+}
+
+function shipmentWithLatestRefresh(latestRateRefresh: Record<string, unknown>, overrides: Record<string, unknown> = {}) {
+  return {
+    id: "shipment_1",
+    sellerId: "merchant_1",
+    pickupLocationId: "pickup_2",
+    fromPincode: "122001",
+    toPincode: "400001",
+    paymentMode: "prepaid",
+    codAmountPaise: 0,
+    deadWeightKg: 1,
+    lengthCm: 10,
+    breadthCm: 10,
+    heightCm: 10,
+    status: "rates_fetched",
+    awbNumber: null,
+    metadata: {
+      phase6: {
+        latestRateRefresh
       }
     },
     ...overrides
@@ -435,6 +460,7 @@ describe("controlled alternate pickup rate trial", () => {
     assert.match(routes, /courier-pickup-trials\/providers\/:providerKey\/shipments\/:shipmentId/);
     assert.match(routes, /courier-pickup-trials\/providers\/:providerKey\/shipments\/:shipmentId\/rate-refresh/);
     assert.match(routes, /courier-pickup-trials\/providers\/:providerKey\/shipments\/:shipmentId\/confirm/);
+    assert.match(routes, /courier-pickup-trials\/providers\/:providerKey\/shipments\/:shipmentId\/confirmed-pickup-rate-refresh/);
     assert.match(routes, /COURIER_PICKUP_TRIAL_ADMIN_ONLY/);
     assert.match(shippingRoutes, /courierPickupTrialRouter/);
     assert.doesNotMatch(routes, /ship-now|manifestOrder|createLabel|getLabel|fetchShipmentRates|createDraftOrder|app\.shiprocket\.in|shiprocket\.in\/v1\/external/i);
@@ -570,5 +596,109 @@ describe("controlled alternate pickup rate trial", () => {
     assert.equal(audit.requires_rate_refresh, true);
     assert.equal(audit.rawProviderResponseStored, false);
     assert.doesNotMatch(json, /rawPayload|rawHeaders|rawResponse|Authorization|Bearer|token|secret|provider courier|provider pickup/i);
+  });
+
+  it("confirmed pickup refresh fails when the shipment pickup does not match the confirmed pickup", async () => {
+    let rateFetcherCalled = false;
+    await assert.rejects(() => createConfirmedCourierPickupRateRefresh("merchant_1", {
+      providerKey: "SHIPROCKET",
+      shipmentId: "shipment_1",
+      pickupLocationId: "pickup_2",
+      mode: "CONFIRMED_PICKUP_REFRESH"
+    }, {
+      client: makeClient(),
+      rateFetcher: async () => {
+        rateFetcherCalled = true;
+        return {} as any;
+      }
+    }), /CONFIRMED_PICKUP_REFRESH_PICKUP_MISMATCH/);
+    assert.equal(rateFetcherCalled, false);
+  });
+
+  it("confirmed pickup refresh uses the confirmed pickup context and stores safe eligible evidence", async () => {
+    const updates: any[] = [];
+    let rateFetcherCalled = false;
+    const result = await createConfirmedCourierPickupRateRefresh("merchant_1", {
+      providerKey: "SHIPROCKET",
+      shipmentId: "shipment_1",
+      pickupLocationId: "pickup_2",
+      mode: "CONFIRMED_PICKUP_REFRESH"
+    }, {
+      client: makeClient({
+        updates,
+        shipment: shipmentWithLatestRefresh({
+          status: "RATES_AVAILABLE",
+          selected_pickup_pincode: "122001",
+          delivery_pincode: "400001",
+          live_provider_checked: false,
+          live_serviceability_returned_count: 1,
+          live_rate_candidates_count: 1,
+          eligible_rate_count: 1,
+          rejected_rate_reasons: [],
+          provider_pickup_available_any: true,
+          provider_delivery_available_any: true,
+          stale_selected_rate_ignored: false,
+          checked_at: now.toISOString()
+        }),
+        rates: [rate({
+          pickupLocationId: "pickup_2",
+          pickupPincode: "122001",
+          providerCourierId: "54"
+        })]
+      }),
+      rateFetcher: async (_merchantId, _shipmentId, options) => {
+        rateFetcherCalled = true;
+        assert.equal(options?.refresh, true);
+        return {} as any;
+      },
+      now: () => now
+    });
+    const stored = updates[0]?.data?.metadata?.phase44d?.alternatePickupRateRefreshTrials?.pickup_2;
+
+    assert.equal(rateFetcherCalled, true);
+    assert.equal(result.status, "ELIGIBLE_RATES_FOUND");
+    assert.equal(result.current_pickup_location_id, "pickup_2");
+    assert.equal(result.rate_context.eligible_count, 1);
+    assert.equal(result.rate_context.pickup_available_count, 1);
+    assert.equal(result.rate_context.numeric_courier_id_count, 1);
+    assert.equal(stored.status, "ELIGIBLE_RATES_FOUND");
+    assert.equal(stored.rawProviderResponseStored, false);
+    assert.doesNotMatch(JSON.stringify(serializeCourierPickupTrial(result)), /rawPayload|rawHeaders|rawResponse|Authorization|Bearer|token|secret|providerCourierId/i);
+  });
+
+  it("confirmed pickup refresh keeps safe review when no eligible rates remain", async () => {
+    const result = await createConfirmedCourierPickupRateRefresh("merchant_1", {
+      providerKey: "SHIPROCKET",
+      shipmentId: "shipment_1",
+      pickupLocationId: "pickup_2",
+      mode: "CONFIRMED_PICKUP_REFRESH"
+    }, {
+      client: makeClient({
+        shipment: shipmentWithLatestRefresh({
+          status: "NO_ELIGIBLE_SHIPPING_RATES",
+          selected_pickup_pincode: "122001",
+          delivery_pincode: "400001",
+          live_provider_checked: false,
+          live_serviceability_returned_count: 1,
+          live_rate_candidates_count: 1,
+          eligible_rate_count: 0,
+          rejected_rate_reasons: [{ safe_reason: "PICKUP_UNAVAILABLE", count: 1 }],
+          provider_pickup_available_any: false,
+          provider_delivery_available_any: true,
+          stale_selected_rate_ignored: true,
+          checked_at: now.toISOString()
+        }),
+        rates: []
+      }),
+      rateFetcher: async () => {
+        const error = new Error("NO_ELIGIBLE_SHIPPING_RATES") as Error & { code?: string };
+        error.code = "NO_ELIGIBLE_SHIPPING_RATES";
+        throw error;
+      }
+    });
+
+    assert.equal(result.status, "PICKUP_UNAVAILABLE");
+    assert.equal(result.rate_context.eligible_count, 0);
+    assert.ok(result.blockers.includes("PROVIDER_PICKUP_UNAVAILABLE"));
   });
 });
