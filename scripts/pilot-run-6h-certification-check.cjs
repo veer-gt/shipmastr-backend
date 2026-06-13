@@ -72,6 +72,7 @@ function providerScopedBlockers(input) {
     ...(input.provider?.blockers ?? []),
     ...(input.pickup?.blockers ?? []),
     ...(input.pickupServiceability?.blockers ?? []),
+    ...(input.readinessAutopilot?.blockers ?? []),
     ...(input.liveShipReadiness?.blockers ?? [])
   ]);
 }
@@ -90,6 +91,7 @@ function providerScopedNextActions(input) {
     ...(input.labelSandbox?.next_actions ?? []),
     ...(input.trackingCertification?.admin_next_actions ?? []),
     ...(input.trackingCertification?.next_actions ?? []),
+    ...(input.readinessAutopilot?.admin_next_actions ?? []),
     ...(input.liveShipReadiness?.certification_decision?.seller_safe_message
       ? [input.liveShipReadiness.certification_decision.seller_safe_message]
       : []),
@@ -157,6 +159,7 @@ function renderReport(input) {
   const awbSandbox = input.awbSandbox;
   const labelSandbox = input.labelSandbox;
   const trackingCertification = input.trackingCertification;
+  const readinessAutopilot = input.readinessAutopilot;
   const pickupTrial = input.pickupTrial;
   const liveShipReadiness = input.liveShipReadiness;
   const latestRefresh = liveShipReadiness?.latest_rate_refresh;
@@ -246,6 +249,15 @@ function renderReport(input) {
     `  blockers: ${(trackingCertification?.blockers ?? []).length ? trackingCertification.blockers.map(safeLine).join(", ") : "none"}`,
     `  next action: ${(trackingCertification?.admin_next_actions ?? trackingCertification?.next_actions ?? [])[0] ?? "unknown"}`,
     "",
+    "Provider readiness autopilot:",
+    `  lifecycle state: ${readinessAutopilot?.lifecycle_state ?? "unknown"}`,
+    `  rates capability: ${readinessAutopilot?.capabilities?.rates ?? "unknown"}`,
+    `  awb capability: ${readinessAutopilot?.capabilities?.awb ?? "unknown"}`,
+    `  label capability: ${readinessAutopilot?.capabilities?.label ?? "unknown"}`,
+    `  tracking capability: ${readinessAutopilot?.capabilities?.tracking ?? "unknown"}`,
+    `  next safe action: ${readinessAutopilot?.next_safe_action ?? "unknown"}`,
+    `  seller-safe message: ${readinessAutopilot?.seller_safe_message ?? "unknown"}`,
+    "",
     "Alternate pickup trial:",
     `  trial pickup id: ${input.runtime.trialPickupLocationId || "not provided"}`,
     `  status: ${pickupTrial?.status ?? "not run"}`,
@@ -307,11 +319,17 @@ async function run(env = process.env) {
   const trackingCertificationPath = runtime.shipmentId
     ? `/tracking-certification/providers/SHIPROCKET/shipments/${encodeURIComponent(runtime.shipmentId)}/dry-run`
     : null;
+  const readinessAutopilotPath = runtime.shipmentId
+    ? `/provider-readiness-autopilot/shipments/${encodeURIComponent(runtime.shipmentId)}/providers/SHIPROCKET?${params(runtime, {
+      requested_capability: "AWB",
+      include_arbitration: true
+    })}`
+    : null;
   const pickupTrialPath = runtime.shipmentId && runtime.trialPickupLocationId
     ? `/courier-pickup-trials/providers/SHIPROCKET/shipments/${encodeURIComponent(runtime.shipmentId)}`
     : null;
 
-  const [summary, shiprocket, pickup, liveShipReadiness, pickupServiceability, pickupLearning, arbitration, awbSandbox, labelSandbox, trackingCertification, pickupTrial] = await Promise.all([
+  const [summary, shiprocket, pickup, liveShipReadiness, pickupServiceability, pickupLearning, arbitration, awbSandbox, labelSandbox, trackingCertification, readinessAutopilot, pickupTrial] = await Promise.all([
     request(runtime, `/courier-certification/summary${summaryQuery ? `?${summaryQuery}` : ""}`),
     request(runtime, `/courier-certification/providers/SHIPROCKET?${contextQuery}`),
     request(runtime, `/courier-live-readiness/providers/SHIPROCKET/pickups?${params(runtime)}`),
@@ -344,6 +362,7 @@ async function run(env = process.env) {
         }
       })
       : Promise.resolve(null),
+    readinessAutopilotPath ? request(runtime, readinessAutopilotPath) : Promise.resolve(null),
     pickupTrialPath
       ? request(runtime, pickupTrialPath, {
         method: "POST",
@@ -366,6 +385,7 @@ async function run(env = process.env) {
     awbSandbox,
     labelSandbox,
     trackingCertification,
+    readinessAutopilot,
     pickupTrial,
     liveShipReadiness
   });
