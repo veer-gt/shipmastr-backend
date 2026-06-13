@@ -263,6 +263,78 @@ enum GrowthAttributionEventType {
   DISMISS
 }
 
+enum MerchantCampaignStatus {
+  DRAFT
+  PENDING_REVIEW
+  ACTIVE
+  PAUSED
+  REJECTED
+  ARCHIVED
+}
+
+enum MerchantCampaignType {
+  TRACKING_REORDER
+  COD_TO_PREPAID
+  RTO_NDR_RECOVERY
+  CROSS_SELL
+  PACKAGING_QUALITY
+  CUSTOM_MESSAGE
+}
+
+enum MerchantCampaignReviewStatus {
+  NOT_REQUIRED
+  PENDING
+  APPROVED
+  REJECTED
+}
+
+enum MerchantCampaignEventType {
+  CREATED
+  UPDATED
+  SUBMITTED
+  APPROVED
+  REJECTED
+  ACTIVATED
+  PAUSED
+  ARCHIVED
+  IMPRESSION
+  CLICK
+  DISMISS
+  CONVERSION_SIMULATED
+}
+
+enum PartnerLeadConsentStatus {
+  DRAFT
+  GRANTED
+  REVOKED
+  EXPIRED
+}
+
+enum PartnerLeadRoutingStatus {
+  CREATED
+  CONSENT_REQUIRED
+  READY_SIMULATED
+  ROUTED_SIMULATED
+  BLOCKED
+  CANCELLED
+  ARCHIVED
+}
+
+enum GrowthBillingReadinessStatus {
+  NOT_READY
+  LEGAL_REVIEW_REQUIRED
+  FINANCE_REVIEW_REQUIRED
+  READY_SIMULATED
+  DISABLED
+}
+
+enum GrowthBillingEventType {
+  READINESS_CHECK
+  SIMULATED_CHARGE_CREATED
+  SIMULATED_INVOICE_DRAFTED
+  SIMULATED_INVOICE_VOIDED
+}
+
 enum PrepaidIncentiveStatus {
   DRAFT
   ACTIVE
@@ -4650,6 +4722,162 @@ model GrowthPartnerAttributionEvent {
   @@index([attributionRef])
   @@index([createdAt])
   @@map("growth_partner_attribution_events")
+}
+
+model MerchantCampaign {
+  id              String                       @id @default(cuid())
+  merchantId      String                       @map("merchant_id")
+  title           String
+  description     String?
+  campaignType    MerchantCampaignType        @map("campaign_type")
+  status          MerchantCampaignStatus      @default(DRAFT)
+  reviewStatus    MerchantCampaignReviewStatus @default(NOT_REQUIRED) @map("review_status")
+  rejectionReason String?                      @map("rejection_reason")
+  growthOfferId   String?                      @map("growth_offer_id")
+  surface         GrowthPlacementSurface       @default(SELLER_DASHBOARD)
+  startsAt        DateTime?                    @map("starts_at")
+  endsAt          DateTime?                    @map("ends_at")
+  ctaLabel        String                       @map("cta_label")
+  ctaUrl          String?                      @map("cta_url")
+  rulesJson       Json?                        @map("rules_json")
+  metadata        Json?
+  createdAt       DateTime                     @default(now()) @map("created_at")
+  updatedAt       DateTime                     @default(now()) @updatedAt @map("updated_at")
+
+  @@index([merchantId])
+  @@index([campaignType])
+  @@index([status])
+  @@index([reviewStatus])
+  @@index([growthOfferId])
+  @@index([surface])
+  @@index([startsAt])
+  @@index([endsAt])
+  @@index([createdAt])
+  @@map("merchant_campaigns")
+}
+
+model MerchantCampaignEvent {
+  id                 String                    @id @default(cuid())
+  campaignId         String                    @map("campaign_id")
+  merchantId         String?                   @map("merchant_id")
+  sellerId           String?                   @map("seller_id")
+  eventType          MerchantCampaignEventType @map("event_type")
+  surface            GrowthPlacementSurface?
+  growthOfferEventId String?                   @map("growth_offer_event_id")
+  metadata           Json?
+  createdAt          DateTime                  @default(now()) @map("created_at")
+
+  @@index([campaignId])
+  @@index([merchantId])
+  @@index([sellerId])
+  @@index([eventType])
+  @@index([surface])
+  @@index([growthOfferEventId])
+  @@index([createdAt])
+  @@map("merchant_campaign_events")
+}
+
+model MerchantCampaignReview {
+  id              String                       @id @default(cuid())
+  campaignId      String                       @map("campaign_id")
+  reviewerRef     String?                      @map("reviewer_ref")
+  reviewStatus    MerchantCampaignReviewStatus @map("review_status")
+  decisionReason  String?                      @map("decision_reason")
+  policyChecklist Json?                        @map("policy_checklist")
+  createdAt       DateTime                     @default(now()) @map("created_at")
+  updatedAt       DateTime                     @default(now()) @updatedAt @map("updated_at")
+
+  @@index([campaignId])
+  @@index([reviewStatus])
+  @@index([createdAt])
+  @@map("merchant_campaign_reviews")
+}
+
+model PartnerLeadConsent {
+  id            String                   @id @default(cuid())
+  partnerId     String?                  @map("partner_id")
+  merchantId    String                   @map("merchant_id")
+  sellerId      String?                  @map("seller_id")
+  consentStatus PartnerLeadConsentStatus @default(DRAFT) @map("consent_status")
+  consentScope  Json                     @map("consent_scope")
+  consentText   String                   @map("consent_text")
+  grantedAt     DateTime?                @map("granted_at")
+  revokedAt     DateTime?                @map("revoked_at")
+  expiresAt     DateTime?                @map("expires_at")
+  metadata      Json?
+  createdAt     DateTime                 @default(now()) @map("created_at")
+  updatedAt     DateTime                 @default(now()) @updatedAt @map("updated_at")
+
+  @@index([partnerId])
+  @@index([merchantId])
+  @@index([sellerId])
+  @@index([consentStatus])
+  @@index([expiresAt])
+  @@index([createdAt])
+  @@map("partner_lead_consents")
+}
+
+model PartnerLeadRoutingIntent {
+  id              String                   @id @default(cuid())
+  partnerId       String?                  @map("partner_id")
+  leadId          String?                  @map("lead_id")
+  consentId       String?                  @map("consent_id")
+  merchantId      String?                  @map("merchant_id")
+  sellerId        String?                  @map("seller_id")
+  routingStatus   PartnerLeadRoutingStatus @default(CREATED) @map("routing_status")
+  routingSnapshot Json                     @map("routing_snapshot")
+  idempotencyKey  String?                  @unique @map("idempotency_key")
+  createdAt       DateTime                 @default(now()) @map("created_at")
+  updatedAt       DateTime                 @default(now()) @updatedAt @map("updated_at")
+
+  @@index([partnerId])
+  @@index([leadId])
+  @@index([consentId])
+  @@index([merchantId])
+  @@index([sellerId])
+  @@index([routingStatus])
+  @@index([createdAt])
+  @@map("partner_lead_routing_intents")
+}
+
+model GrowthBillingReadinessProfile {
+  id               String                       @id @default(cuid())
+  merchantId       String?                      @map("merchant_id")
+  partnerId        String?                      @map("partner_id")
+  readinessStatus  GrowthBillingReadinessStatus @default(NOT_READY) @map("readiness_status")
+  legalReviewRef   String?                      @map("legal_review_ref")
+  financeReviewRef String?                      @map("finance_review_ref")
+  notes            String?
+  metadata         Json?
+  createdAt        DateTime                     @default(now()) @map("created_at")
+  updatedAt        DateTime                     @default(now()) @updatedAt @map("updated_at")
+
+  @@index([merchantId])
+  @@index([partnerId])
+  @@index([readinessStatus])
+  @@index([createdAt])
+  @@map("growth_billing_readiness_profiles")
+}
+
+model GrowthBillingSimulationEvent {
+  id                 String                 @id @default(cuid())
+  merchantId         String?                @map("merchant_id")
+  partnerId          String?                @map("partner_id")
+  campaignId         String?                @map("campaign_id")
+  leadId             String?                @map("lead_id")
+  eventType          GrowthBillingEventType @map("event_type")
+  amountPaise        Int?                   @map("amount_paise")
+  currency           String                 @default("INR")
+  simulationSnapshot Json                   @map("simulation_snapshot")
+  createdAt          DateTime               @default(now()) @map("created_at")
+
+  @@index([merchantId])
+  @@index([partnerId])
+  @@index([campaignId])
+  @@index([leadId])
+  @@index([eventType])
+  @@index([createdAt])
+  @@map("growth_billing_simulation_events")
 }
 
 model PrepaidIncentivePolicy {

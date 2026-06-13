@@ -1,10 +1,20 @@
 import { Router } from "express";
 
 import { successEnvelope } from "../shippingNetwork/shipping-public-serializers.js";
+import { createBillingReadinessRouter } from "./billing-readiness.routes.js";
+import type { BillingReadinessDb } from "./billing-readiness.service.js";
+import { createCampaignAnalyticsRouter } from "./campaign-analytics.routes.js";
+import type { CampaignAnalyticsDb } from "./campaign-analytics.service.js";
+import { createCampaignReviewRouter } from "./campaign-review.routes.js";
+import type { CampaignReviewDb } from "./campaign-review.service.js";
 import { createCodPrepaidIncentiveRouter } from "./cod-prepaid-incentive.routes.js";
 import type { CodPrepaidIncentiveDb } from "./cod-prepaid-incentive.service.js";
+import { createMerchantCampaignRouter } from "./merchant-campaign.routes.js";
+import type { MerchantCampaignDb } from "./merchant-campaign.service.js";
 import { createPartnerMarketplaceRouter } from "./partner-marketplace.routes.js";
 import type { PartnerMarketplaceDb } from "./partner-marketplace.service.js";
+import { createPartnerRoutingRouter } from "./partner-routing.routes.js";
+import type { PartnerRoutingDb } from "./partner-routing.service.js";
 import { createRtoNdrRecoveryRouter } from "./rto-ndr-recovery.routes.js";
 import type { RtoNdrRecoveryDb } from "./rto-ndr-recovery.service.js";
 import { createSellerGrowthSuggestionsRouter } from "./seller-growth-suggestions.routes.js";
@@ -67,6 +77,26 @@ export function createGrowthNetworkRouter(deps: GrowthNetworkRouterDeps = {}) {
   router.use(
     "/partners",
     createPartnerMarketplaceRouter(client ? { client: client as unknown as PartnerMarketplaceDb } : {})
+  );
+  router.use(
+    "/partners",
+    createPartnerRoutingRouter(client ? { client: client as unknown as PartnerRoutingDb } : {})
+  );
+  router.use(
+    "/admin/campaigns",
+    createCampaignReviewRouter(client ? { client: client as unknown as CampaignReviewDb } : {})
+  );
+  router.use(
+    "/merchant-campaigns/analytics",
+    createCampaignAnalyticsRouter(client ? { client: client as unknown as CampaignAnalyticsDb } : {})
+  );
+  router.use(
+    "/merchant-campaigns",
+    createMerchantCampaignRouter(client ? { client: client as unknown as MerchantCampaignDb } : {})
+  );
+  router.use(
+    "/billing-readiness",
+    createBillingReadinessRouter(client ? { client: client as unknown as BillingReadinessDb } : {})
   );
 
   router.post("/offers", async (req, res) => {
