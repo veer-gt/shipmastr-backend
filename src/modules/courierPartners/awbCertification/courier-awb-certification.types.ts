@@ -24,7 +24,9 @@ export type CourierAwbCertificationBlocker =
   | "AWB_CERTIFICATION_ONE_SHOT_APPROVAL_REQUIRED"
   | "AWB_CERTIFICATION_ALLOWED_SHIPMENT_MISMATCH"
   | "AWB_CERTIFICATION_ALLOWED_MERCHANT_MISMATCH"
-  | "AWB_CERTIFICATION_LIVE_MODE_DISABLED";
+  | "AWB_CERTIFICATION_LIVE_MODE_DISABLED"
+  | "AWB_CERTIFICATION_PROVIDER_CALL_FAILED"
+  | "AWB_CERTIFICATION_PROVIDER_RESPONSE_INVALID";
 
 export type CourierAwbPayloadReadiness = {
   merchant_ready: boolean;
@@ -76,4 +78,26 @@ export type CourierAwbCertificationProviderStatus = {
   blockers: string[];
   warnings: string[];
   next_actions: string[];
+};
+
+export type CourierAwbCertificationLiveOneShotStatus =
+  | "AWB_CERTIFIED"
+  | "BLOCKED"
+  | "ALREADY_CERTIFIED"
+  | "PENDING_LABEL_CERTIFICATION";
+
+export type CourierAwbCertificationLiveOneShotResult = {
+  success: boolean;
+  provider_key: CourierLiveProviderKey;
+  public_network_name: "Shipmastr Courier Network";
+  shipment_id: string;
+  public_awb_status: "CREATED" | "BLOCKED" | "ALREADY_EXISTS";
+  shipmastr_awb_number: string | null;
+  label_ready: boolean;
+  tracking_ready: boolean;
+  certification_status: CourierAwbCertificationLiveOneShotStatus;
+  blockers: CourierAwbCertificationBlocker[];
+  warnings: string[];
+  seller_safe_message: string;
+  admin_next_actions: string[];
 };

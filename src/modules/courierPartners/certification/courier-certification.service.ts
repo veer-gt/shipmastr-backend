@@ -480,6 +480,16 @@ async function shiprocketSnapshot(
       ...(options.pickupLocationId ? { pickupLocationId: options.pickupLocationId } : {})
     }, { client: options.client })
     : null;
+  const shipment = options.shipmentId
+    ? await options.client.shipment.findFirst({
+      where: {
+        id: options.shipmentId,
+        sellerId: merchantId
+      }
+    })
+    : null;
+  const phase42p = metadataObject(metadataObject(shipment?.metadata).phase42p);
+  const awbCertified = Boolean(shipment?.awbNumber && phase42p.awbCertified === true);
   const dimensions = [
     credentialDimension(credential),
     pickupDimension(pickupDiagnostics),
@@ -488,14 +498,16 @@ async function shiprocketSnapshot(
     providerCourierIdDimension(rateMeta),
     fixedDimension({
       key: "AWB",
-      status: "WARN",
-      blocker: "PROVIDER_AWB_NOT_CERTIFIED",
-      warning: "Live AWB one-shot certification has not been completed.",
+      status: awbCertified ? "PASS" : "WARN",
+      ...(awbCertified ? {} : {
+        blocker: "PROVIDER_AWB_NOT_CERTIFIED",
+        warning: "Live AWB one-shot certification has not been completed."
+      }),
       summary: {
-        live_awb_certified: false,
+        live_awb_certified: awbCertified,
         mutation_probe_allowed: false,
         sandbox_status: "AVAILABLE",
-        sandbox_dry_run_required: true
+        sandbox_dry_run_required: !awbCertified
       }
     }),
     fixedDimension({

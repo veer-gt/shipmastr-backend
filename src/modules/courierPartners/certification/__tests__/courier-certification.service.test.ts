@@ -224,6 +224,51 @@ describe("courier partner certification layer", () => {
     assert.ok(result.provider.blockers.includes("PROVIDER_LABEL_NOT_CERTIFIED"));
   });
 
+  it("marks only AWB dimension certified after one-shot marker while label and tracking remain separate", async () => {
+    const result = await getCourierCertificationProvider("merchant_1", "SHIPROCKET", {
+      shipmentId: "shipment_1",
+      client: makeClient({
+        credentials: [activeCredential()],
+        rates: [smartLiveRate()],
+        probes: [{
+          providerKey: "SHIPROCKET",
+          merchantId: "merchant_1",
+          probeType: "PINCODE_SERVICEABILITY",
+          status: "PASS",
+          testedAt: now()
+        }],
+        shipments: [{
+          id: "shipment_1",
+          sellerId: "merchant_1",
+          awbNumber: "SMCERTIFIED",
+          pickupLocationId: "pickup_1",
+          fromPincode: "201301",
+          toPincode: "400001",
+          paymentMode: "prepaid",
+          metadata: {
+            phase42p: {
+              awbCertified: true,
+              labelCertified: false,
+              trackingCertified: false
+            }
+          }
+        }]
+      }),
+      pickupDiagnostics: pickupAligned
+    });
+
+    const awb = result.provider.dimensions.find((dimension) => dimension.key === "AWB");
+    const label = result.provider.dimensions.find((dimension) => dimension.key === "LABEL");
+    const tracking = result.provider.dimensions.find((dimension) => dimension.key === "TRACKING");
+    assert.equal(awb?.status, "PASS");
+    assert.equal(awb?.safe_summary.live_awb_certified, true);
+    assert.equal(label?.status, "WARN");
+    assert.equal(tracking?.status, "NOT_RUN");
+    assert.ok(result.provider.blockers.includes("PROVIDER_LABEL_NOT_CERTIFIED"));
+    assert.ok(result.provider.blockers.includes("PROVIDER_TRACKING_NOT_CERTIFIED"));
+    assert.equal(result.provider.blockers.includes("PROVIDER_AWB_NOT_CERTIFIED"), false);
+  });
+
   it("keeps Shiprocket rates failed when latest refresh has no eligible rates", async () => {
     const result = await getCourierCertificationProvider("merchant_1", "SHIPROCKET", {
       shipmentId: "shipment_1",

@@ -1,7 +1,18 @@
-import { Prisma } from "@prisma/client";
+import { Prisma, ShipmentStatus } from "@prisma/client";
 import { HttpError } from "../../../lib/httpError.js";
 import { prisma } from "../../../lib/prisma.js";
-import { getSellerShipment } from "../../shippingNetwork/shipping-shipments.service.js";
+import type { InternalCourierProviderAdapter } from "../providers/provider-adapter.types.js";
+import { createShiprocketLiveAdapter } from "../providers/shiprocket/shiprocket-live.adapter.js";
+import {
+  getSellerShipment,
+  shipmentMetadata as parseShipmentMetadata,
+  shipmentWeightForProvider
+} from "../../shippingNetwork/shipping-shipments.service.js";
+import {
+  serviceCodeForName,
+  toPrismaJson,
+  trackingUrlForAwb
+} from "../../shippingNetwork/shipping-public-serializers.js";
 import {
   getLiveAwbLabelReadiness,
   type LiveAwbLabelReadiness
@@ -16,6 +27,7 @@ import type { CourierPickupServiceabilityResult } from "../pickupServiceability/
 import type {
   CourierAwbCertificationBlocker,
   CourierAwbCertificationDryRunResult,
+  CourierAwbCertificationLiveOneShotResult,
   CourierAwbCertificationProviderStatus,
   CourierAwbCertificationStatus,
   CourierAwbCertificationTier
@@ -33,11 +45,23 @@ type PickupRecord = {
 
 type RateRecord = {
   id: string;
+  courierPartnerId?: string | null;
+  sellerCourierPartnerId?: string | null;
   publicServiceCode?: string | null;
   publicServiceName?: string | null;
   rateBreakup?: unknown;
   amountPaise?: number | null;
   createdAt?: Date | string;
+};
+
+type ProviderRefRecord = {
+  id?: string | null;
+  courierPartnerId?: string | null;
+  providerAwb?: string | null;
+  providerOrderId?: string | null;
+  providerShipmentId?: string | null;
+  providerPickupId?: string | null;
+  metadata?: unknown;
 };
 
 const PUBLIC_NETWORK_NAME = "Shipmastr Courier Network" as const;
@@ -72,6 +96,14 @@ function shipmentMetadata(value: unknown) {
   return metadataObject(value);
 }
 
+function phase42pMetadata(value: unknown) {
+  return metadataObject(metadataObject(value).phase42p);
+}
+
+function phase6Metadata(value: unknown) {
+  return metadataObject(metadataObject(value).phase6);
+}
+
 function isTierRate(rate: RateRecord, tier: CourierAwbCertificationTier | null) {
   const code = tier ? `shipmastr_${tier}` : "shipmastr_smart";
   const name = tier ? `Shipmastr ${tier[0]!.toUpperCase()}${tier.slice(1)}` : "Shipmastr Smart";
@@ -97,6 +129,12 @@ function rateCourierId(rate: RateRecord | null) {
     result.providerCourierId
   );
   return value && /^[0-9]+$/.test(value) ? value : null;
+}
+
+function publicAwb(shipmentId: string, fallback: string | null | undefined) {
+  if (fallback?.startsWith("SM")) return fallback;
+  const suffix = shipmentId.replace(/[^a-z0-9]/gi, "").slice(-10).toUpperCase();
+  return `SM${suffix || "SHIPMENT"}`;
 }
 
 function rateLiveReady(rate: RateRecord | null) {
@@ -174,12 +212,16 @@ function sellerMessage(result: { dryRunReady: boolean; liveOneShotReady: boolean
 
 function adminNextActions(blockers: CourierAwbCertificationBlocker[]) {
   const actions: string[] = [];
+  if (blockers.includes("AWB_CERTIFICATION_CREDENTIALS_NOT_READY")) actions.push("Resolve live credential readiness before attempting one-shot AWB certification.");
   if (blockers.includes("AWB_CERTIFICATION_PICKUP_UNAVAILABLE")) actions.push("Try another pickup location before attempting AWB certification.");
   if (blockers.includes("AWB_CERTIFICATION_COURIER_ID_MISSING")) actions.push("Refresh pilot live rates and confirm a numeric internal courier mapping is present.");
   if (blockers.includes("AWB_CERTIFICATION_ONE_SHOT_APPROVAL_REQUIRED")) actions.push("Provide explicit one-shot AWB approval only after payload readiness passes.");
   if (blockers.includes("AWB_CERTIFICATION_ALLOWED_MERCHANT_MISMATCH")) actions.push("Align the one-shot merchant allowlist before live certification.");
   if (blockers.includes("AWB_CERTIFICATION_ALLOWED_SHIPMENT_MISMATCH")) actions.push("Align the one-shot shipment allowlist before live certification.");
   if (blockers.includes("AWB_CERTIFICATION_LIVE_MODE_DISABLED")) actions.push("Keep this shipment in dry-run review until live AWB mode is explicitly enabled.");
+  if (blockers.includes("AWB_CERTIFICATION_RATE_NOT_READY")) actions.push("Refresh pilot live rates before attempting one-shot AWB certification.");
+  if (blockers.includes("AWB_CERTIFICATION_PROVIDER_CALL_FAILED")) actions.push("Review the safe failure summary, fix the cause, then rerun the one-shot only with explicit approval.");
+  if (blockers.includes("AWB_CERTIFICATION_PROVIDER_RESPONSE_INVALID")) actions.push("Keep AWB certification blocked until the provider response mapper is fixed.");
   if (!actions.length) actions.push("Proceed only through the existing explicit one-shot Ship Now gate; this sandbox does not create AWB.");
   return unique(actions);
 }
@@ -202,6 +244,195 @@ function liveGateBlockers(readiness: LiveAwbLabelReadiness): CourierAwbCertifica
   if (!readiness.shiprocket.allowedMerchantMatched) blockers.push("AWB_CERTIFICATION_ALLOWED_MERCHANT_MISMATCH");
   if (!readiness.shiprocket.allowedShipmentMatched) blockers.push("AWB_CERTIFICATION_ALLOWED_SHIPMENT_MISMATCH");
   return blockers;
+}
+
+function liveOneShotBlockers(input: {
+  dryRun: CourierAwbCertificationDryRunResult;
+  readiness: LiveAwbLabelReadiness;
+}): CourierAwbCertificationBlocker[] {
+  const blockers = new Set<CourierAwbCertificationBlocker>(input.dryRun.blockers);
+  if (!input.readiness.ready || !input.dryRun.live_one_shot_ready) {
+    if (!input.readiness.runtime.enabled || input.readiness.runtime.mode !== "LIVE") blockers.add("AWB_CERTIFICATION_LIVE_MODE_DISABLED");
+    if (!input.readiness.shiprocket.oneShotApprovalPresent) blockers.add("AWB_CERTIFICATION_ONE_SHOT_APPROVAL_REQUIRED");
+    if (!input.readiness.shiprocket.allowedMerchantMatched) blockers.add("AWB_CERTIFICATION_ALLOWED_MERCHANT_MISMATCH");
+    if (!input.readiness.shiprocket.allowedShipmentMatched) blockers.add("AWB_CERTIFICATION_ALLOWED_SHIPMENT_MISMATCH");
+  }
+  if (!input.dryRun.payload_readiness.credential_ready) blockers.add("AWB_CERTIFICATION_CREDENTIALS_NOT_READY");
+  if (!input.dryRun.payload_readiness.pickup_ready) blockers.add("AWB_CERTIFICATION_PICKUP_NOT_READY");
+  if (!input.dryRun.payload_readiness.selected_rate_ready) blockers.add("AWB_CERTIFICATION_RATE_NOT_READY");
+  if (!input.dryRun.payload_readiness.courier_id_ready) blockers.add("AWB_CERTIFICATION_COURIER_ID_MISSING");
+  if (!input.dryRun.payload_readiness.no_existing_awb) blockers.add("AWB_CERTIFICATION_EXISTING_AWB");
+  return [...blockers];
+}
+
+function liveOneShotBlockedResult(input: {
+  providerKey: CourierLiveProviderKey;
+  shipmentId: string;
+  existingAwb?: string | null;
+  blockers: CourierAwbCertificationBlocker[];
+  warnings?: string[];
+}): CourierAwbCertificationLiveOneShotResult {
+  const existingAwb = input.existingAwb ?? null;
+  return {
+    success: false,
+    provider_key: input.providerKey,
+    public_network_name: PUBLIC_NETWORK_NAME,
+    shipment_id: input.shipmentId,
+    public_awb_status: existingAwb ? "ALREADY_EXISTS" : "BLOCKED",
+    shipmastr_awb_number: existingAwb,
+    label_ready: false,
+    tracking_ready: false,
+    certification_status: existingAwb ? "ALREADY_CERTIFIED" : "BLOCKED",
+    blockers: unique(input.blockers),
+    warnings: unique(input.warnings ?? []),
+    seller_safe_message: existingAwb ? "Shipping is being safely verified." : "Shipment creation is not ready yet.",
+    admin_next_actions: adminNextActions(input.blockers)
+  };
+}
+
+function liveOneShotAdapter(input: {
+  readiness: LiveAwbLabelReadiness;
+  source?: Record<string, unknown>;
+  adapter?: InternalCourierProviderAdapter;
+}) {
+  if (input.adapter) return input.adapter;
+  if (!input.readiness.shiprocket.credentialRef) throw new HttpError(409, "AWB_CERTIFICATION_CREDENTIALS_NOT_READY");
+  return createShiprocketLiveAdapter({
+    credentialRef: input.readiness.shiprocket.credentialRef,
+    source: input.source ?? {}
+  });
+}
+
+async function latestProviderRef(client: Db, shipmentId: string, courierPartnerId?: string | null): Promise<ProviderRefRecord | null> {
+  const model = (client as Db & { shipmentProviderRef?: { findFirst?: Function } }).shipmentProviderRef;
+  if (!model?.findFirst) return null;
+  return model.findFirst({
+    where: {
+      shipmentId,
+      ...(courierPartnerId ? { courierPartnerId } : {})
+    },
+    orderBy: { createdAt: "desc" }
+  }) as Promise<ProviderRefRecord | null>;
+}
+
+async function pickupProviderId(input: {
+  client: Db;
+  merchantId: string;
+  pickupLocationId: string | null;
+  courierPartnerId: string | null;
+}) {
+  if (!input.pickupLocationId) throw new HttpError(409, "AWB_CERTIFICATION_PICKUP_NOT_READY");
+  const pickup = await input.client.pickupLocation.findFirst({
+    where: {
+      id: input.pickupLocationId,
+      sellerId: input.merchantId
+    }
+  });
+  if (!pickup) throw new HttpError(409, "AWB_CERTIFICATION_PICKUP_NOT_READY");
+  if (input.courierPartnerId) {
+    const mapping = await input.client.pickupLocationProviderMapping.findUnique({
+      where: {
+        pickupLocationId_courierPartnerId: {
+          pickupLocationId: pickup.id,
+          courierPartnerId: input.courierPartnerId
+        }
+      }
+    });
+    const mapped = firstString(mapping?.providerPickupId);
+    if (mapped) return mapped;
+  }
+  return firstString(pickup.label, pickup.id) ?? pickup.id;
+}
+
+function draftProducts(metadata: ReturnType<typeof parseShipmentMetadata>) {
+  return metadata.boxes.flatMap((box) => box.products ?? []).map((product) => ({
+    name: product.name,
+    sku: product.sku ?? null,
+    quantity: product.quantity,
+    unitPrice: product.unit_price
+  }));
+}
+
+async function ensureLiveProviderRef(input: {
+  client: Db;
+  adapter: InternalCourierProviderAdapter;
+  merchantId: string;
+  shipment: ShipmentRecord;
+  pickupLocationId: string | null;
+  courierPartnerId: string | null;
+  existingProviderRef: ProviderRefRecord | null;
+  operatorNote?: string | null;
+}) {
+  const existingOrderId = firstString(input.existingProviderRef?.providerOrderId);
+  if (existingOrderId && /^[0-9]+$/.test(existingOrderId)) return input.existingProviderRef!;
+  const pickupLocationProviderId = await pickupProviderId({
+    client: input.client,
+    merchantId: input.merchantId,
+    pickupLocationId: input.pickupLocationId,
+    courierPartnerId: input.courierPartnerId
+  });
+  const metadata = parseShipmentMetadata(input.shipment.metadata);
+  const weight = shipmentWeightForProvider(input.shipment);
+  const draft = await input.adapter.createDraftOrder({
+    sellerId: input.merchantId,
+    shipmentId: input.shipment.id,
+    sellerOrderId: input.shipment.externalOrderId ?? input.shipment.id,
+    segment: input.shipment.segment,
+    paymentMode: input.shipment.paymentMode,
+    pickupLocationProviderId,
+    returnLocationProviderId: pickupLocationProviderId,
+    invoiceNumber: metadata.invoice.invoice_number ?? null,
+    invoiceAmount: metadata.invoice.invoice_amount,
+    collectableAmount: metadata.invoice.collectable_amount ?? null,
+    deadWeightKg: weight.deadWeightKg,
+    dimensions: weight.dimensions,
+    buyer: {
+      name: metadata.buyer.name,
+      phone: metadata.buyer.phone,
+      email: metadata.buyer.email ?? null,
+      addressLine1: metadata.buyer.address.line1,
+      addressLine2: metadata.buyer.address.line2 ?? null,
+      landmark: metadata.buyer.address.landmark ?? null,
+      city: metadata.buyer.address.city,
+      state: metadata.buyer.address.state,
+      country: metadata.buyer.address.country.toUpperCase(),
+      pincode: metadata.buyer.address.pincode
+    },
+    products: draftProducts(metadata)
+  });
+  const safeMetadata = toPrismaJson({
+    phase42p: {
+      status: draft.status,
+      reference: draft.providerReferenceNumber,
+      liveOneShot: true,
+      rawProviderResponseStored: false,
+      operatorNote: input.operatorNote ?? null
+    }
+  });
+
+  if (input.existingProviderRef?.id) {
+    return input.client.shipmentProviderRef.update({
+      where: { id: input.existingProviderRef.id },
+      data: {
+        courierPartnerId: input.courierPartnerId,
+        providerShipmentId: draft.providerOrderId,
+        providerOrderId: draft.providerOrderId,
+        providerPickupId: pickupLocationProviderId,
+        metadata: safeMetadata
+      }
+    });
+  }
+
+  return input.client.shipmentProviderRef.create({
+    data: {
+      shipmentId: input.shipment.id,
+      courierPartnerId: input.courierPartnerId,
+      providerShipmentId: draft.providerOrderId,
+      providerOrderId: draft.providerOrderId,
+      providerPickupId: pickupLocationProviderId,
+      metadata: safeMetadata
+    }
+  });
 }
 
 export async function getCourierAwbCertificationProviderStatus(
@@ -335,4 +566,210 @@ export async function runCourierAwbCertificationDryRun(
     seller_safe_message: sellerMessage({ dryRunReady, liveOneShotReady, pickupUnavailable }),
     admin_next_actions: adminNextActions(finalBlockers)
   };
+}
+
+export async function runCourierAwbCertificationLiveOneShot(
+  merchantId: string,
+  providerKey: CourierLiveProviderKey,
+  input: {
+    shipmentId: string;
+    pickupLocationId?: string;
+    requestedTier?: CourierAwbCertificationTier | null;
+    operatorNote?: string | null;
+  },
+  options: {
+    client?: Db;
+    source?: Record<string, unknown>;
+    adapter?: InternalCourierProviderAdapter;
+    liveReadinessProvider?: () => Promise<LiveAwbLabelReadiness>;
+    certificationProvider?: () => Promise<CourierCertificationSnapshot>;
+    pickupServiceabilityProvider?: () => Promise<CourierPickupServiceabilityResult>;
+  } = {}
+): Promise<CourierAwbCertificationLiveOneShotResult> {
+  if (providerKey !== "SHIPROCKET") throw new HttpError(400, "AWB_CERTIFICATION_PROVIDER_UNSUPPORTED");
+  const client = options.client ?? prisma;
+  const shipment = await getSellerShipment(merchantId, input.shipmentId, client);
+  if (shipment.awbNumber) {
+    return liveOneShotBlockedResult({
+      providerKey,
+      shipmentId: shipment.id,
+      existingAwb: shipment.awbNumber,
+      blockers: ["AWB_CERTIFICATION_EXISTING_AWB"],
+      warnings: ["Existing AWB was found; no provider call was made."]
+    });
+  }
+
+  const readinessProvider = options.liveReadinessProvider
+    ? options.liveReadinessProvider
+    : () => getLiveAwbLabelReadiness(merchantId, {
+      client,
+      shipmentId: shipment.id,
+      includePickupAlignment: true,
+      ...(options.source ? { source: options.source } : {})
+    });
+  const dryRun = await runCourierAwbCertificationDryRun(merchantId, providerKey, {
+    shipmentId: shipment.id,
+    ...(input.pickupLocationId ? { pickupLocationId: input.pickupLocationId } : {}),
+    requestedTier: input.requestedTier ?? "smart"
+  }, {
+    client,
+    liveReadinessProvider: readinessProvider,
+    ...(options.certificationProvider ? { certificationProvider: options.certificationProvider } : {}),
+    ...(options.pickupServiceabilityProvider ? { pickupServiceabilityProvider: options.pickupServiceabilityProvider } : {})
+  });
+  const readiness = await readinessProvider();
+  const blockers = liveOneShotBlockers({ dryRun, readiness });
+  if (blockers.length) {
+    return liveOneShotBlockedResult({
+      providerKey,
+      shipmentId: shipment.id,
+      blockers,
+      warnings: dryRun.warnings
+    });
+  }
+
+  const rate = await selectedRate(merchantId, shipment.id, input.requestedTier ?? "smart", client);
+  const courierId = rateCourierId(rate);
+  if (!rate || !rateLiveReady(rate)) {
+    return liveOneShotBlockedResult({
+      providerKey,
+      shipmentId: shipment.id,
+      blockers: ["AWB_CERTIFICATION_RATE_NOT_READY"],
+      warnings: ["Selected live rate was not ready; no provider call was made."]
+    });
+  }
+  if (!courierId) {
+    return liveOneShotBlockedResult({
+      providerKey,
+      shipmentId: shipment.id,
+      blockers: ["AWB_CERTIFICATION_COURIER_ID_MISSING"],
+      warnings: ["Selected live rate did not include a numeric internal mapping; no provider call was made."]
+    });
+  }
+
+  const adapter = liveOneShotAdapter({
+    readiness,
+    ...(options.source ? { source: options.source } : {}),
+    ...(options.adapter ? { adapter: options.adapter } : {})
+  });
+  const existingProviderRef = await latestProviderRef(client, shipment.id, rate.courierPartnerId ?? null);
+
+  try {
+    const providerRef = await ensureLiveProviderRef({
+      client,
+      adapter,
+      merchantId,
+      shipment,
+      pickupLocationId: input.pickupLocationId ?? shipment.pickupLocationId ?? null,
+      courierPartnerId: rate.courierPartnerId ?? null,
+      existingProviderRef,
+      operatorNote: input.operatorNote ?? null
+    });
+    if (!providerRef.id || !providerRef.providerOrderId) {
+      return liveOneShotBlockedResult({
+        providerKey,
+        shipmentId: shipment.id,
+        blockers: ["AWB_CERTIFICATION_PROVIDER_RESPONSE_INVALID"],
+        warnings: ["Provider reference was not ready after draft creation; no public AWB was stored."]
+      });
+    }
+
+    const manifested = await adapter.manifestOrder({
+      sellerId: merchantId,
+      shipmentId: shipment.id,
+      providerOrderId: providerRef.providerOrderId,
+      providerCourierId: courierId,
+      selectedRateId: rate.id
+    });
+    const awb = publicAwb(shipment.id, manifested.awb);
+    if (!awb || !awb.startsWith("SM")) {
+      return liveOneShotBlockedResult({
+        providerKey,
+        shipmentId: shipment.id,
+        blockers: ["AWB_CERTIFICATION_PROVIDER_RESPONSE_INVALID"],
+        warnings: ["Provider response did not map to a safe Shipmastr AWB."]
+      });
+    }
+
+    await client.shipmentProviderRef.update({
+      where: { id: providerRef.id },
+      data: {
+        providerAwb: manifested.providerAwb ?? manifested.awb,
+        metadata: toPrismaJson({
+          ...metadataObject(providerRef.metadata),
+          phase42p: {
+            ...metadataObject(metadataObject(providerRef.metadata).phase42p),
+            manifestReference: manifested.providerReferenceNumber,
+            manifestStatus: manifested.status,
+            liveOneShot: true,
+            rawProviderResponseStored: false
+          }
+        })
+      }
+    });
+
+    const metadata = shipmentMetadata(shipment.metadata);
+    const phase6 = phase6Metadata(shipment.metadata);
+    await client.shipment.update({
+      where: { id: shipment.id },
+      data: {
+        status: ShipmentStatus.manifested,
+        awbNumber: awb,
+        trackingUrl: trackingUrlForAwb(awb),
+        serviceLevel: rate.publicServiceName ?? null,
+        sellerCourierPartnerId: rate.sellerCourierPartnerId ?? null,
+        courierPartnerId: rate.courierPartnerId ?? null,
+        metadata: toPrismaJson({
+          ...metadata,
+          phase6: {
+            ...phase6,
+            selectedTier: input.requestedTier ?? "smart",
+            selectedRateId: rate.id,
+            selectedServiceCode: serviceCodeForName(rate.publicServiceName ?? "Shipmastr Smart"),
+            providerStatus: "awb_assigned",
+            awbAssignedAt: new Date().toISOString(),
+            livePilotAwbLabelMode: readiness.runtime.mode,
+            livePilotAwbLabelReady: readiness.ready,
+            rawProviderResponseStored: false
+          },
+          phase42p: {
+            ...phase42pMetadata(shipment.metadata),
+            awbCertified: true,
+            awbCertifiedAt: new Date().toISOString(),
+            labelCertified: false,
+            trackingCertified: false,
+            operatorNote: input.operatorNote ?? null,
+            rawProviderResponseStored: false
+          }
+        })
+      }
+    });
+
+    return {
+      success: true,
+      provider_key: providerKey,
+      public_network_name: PUBLIC_NETWORK_NAME,
+      shipment_id: shipment.id,
+      public_awb_status: "CREATED",
+      shipmastr_awb_number: awb,
+      label_ready: false,
+      tracking_ready: false,
+      certification_status: "AWB_CERTIFIED",
+      blockers: [],
+      warnings: ["AWB certification succeeded. Label and tracking certification remain separate."],
+      seller_safe_message: "Shipping is being safely verified.",
+      admin_next_actions: ["Run label certification next; tracking remains blocked until label/AWB prerequisites are complete."]
+    };
+  } catch (error) {
+    const maybe = error as { code?: unknown };
+    const code = typeof maybe?.code === "string" && maybe.code.startsWith("AWB_CERTIFICATION_")
+      ? maybe.code as CourierAwbCertificationBlocker
+      : "AWB_CERTIFICATION_PROVIDER_CALL_FAILED";
+    return liveOneShotBlockedResult({
+      providerKey,
+      shipmentId: shipment.id,
+      blockers: [code],
+      warnings: ["Provider call failed safely. No public AWB was stored."]
+    });
+  }
 }

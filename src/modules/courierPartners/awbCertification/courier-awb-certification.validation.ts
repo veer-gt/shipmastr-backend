@@ -15,3 +15,11 @@ export const courierAwbCertificationDryRunSchema = z.object({
 }).strict();
 
 export type CourierAwbCertificationDryRunInput = z.infer<typeof courierAwbCertificationDryRunSchema>;
+
+export const courierAwbCertificationLiveOneShotSchema = z.object({
+  pickup_location_id: z.string().trim().min(1).max(120).optional(),
+  requested_tier: z.enum(courierAwbCertificationTiers).default("smart"),
+  operator_note: z.string().trim().min(1).max(240).optional()
+}).strict();
+
+export type CourierAwbCertificationLiveOneShotInput = z.infer<typeof courierAwbCertificationLiveOneShotSchema>;

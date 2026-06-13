@@ -1,5 +1,6 @@
 import type {
   CourierAwbCertificationDryRunResult,
+  CourierAwbCertificationLiveOneShotResult,
   CourierAwbCertificationProviderStatus
 } from "./courier-awb-certification.types.js";
 
@@ -63,5 +64,35 @@ export function serializeCourierAwbCertificationProviderStatus(status: CourierAw
     blockers: safeList(status.blockers),
     warnings: safeList(status.warnings),
     next_actions: safeList(status.next_actions)
+  };
+}
+
+export function serializeCourierAwbCertificationLiveOneShot(result: CourierAwbCertificationLiveOneShotResult) {
+  return {
+    success: result.success,
+    provider_key: result.provider_key,
+    public_network_name: result.public_network_name,
+    shipment_id: result.shipment_id,
+    public_awb_status: result.public_awb_status,
+    shipmastr_awb_number: result.shipmastr_awb_number,
+    label_ready: result.label_ready,
+    tracking_ready: result.tracking_ready,
+    certification_status: result.certification_status,
+    blockers: safeList(result.blockers),
+    warnings: safeList(result.warnings),
+    seller_safe_message: safeString(result.seller_safe_message),
+    admin_next_actions: safeList(result.admin_next_actions),
+    seller_safe: {
+      public_network_name: "Shipmastr Courier Network",
+      shipment_id: result.shipment_id,
+      public_awb_status: result.public_awb_status,
+      shipmastr_awb_number: result.shipmastr_awb_number,
+      label_ready: result.label_ready,
+      tracking_ready: result.tracking_ready,
+      certification_status: result.certification_status,
+      blockers: safeList(result.blockers),
+      warnings: safeList(result.warnings),
+      seller_safe_message: safeString(result.seller_safe_message)
+    }
   };
 }
