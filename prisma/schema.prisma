@@ -192,6 +192,41 @@ enum CommunicationStatus {
   EXPIRED
 }
 
+enum GrowthPlacementSurface {
+  TRACKING_PAGE
+  SELLER_DASHBOARD
+  CHECKOUT
+  POST_DELIVERY
+  NDR_ACTION
+  BUILD_ON_SHIPMASTR
+}
+
+enum GrowthOfferType {
+  MERCHANT_REORDER
+  MERCHANT_CROSS_SELL
+  PREPAID_INCENTIVE
+  COD_RISK_REDUCTION
+  PACKAGING_RECOMMENDATION
+  INSURANCE_RECOMMENDATION
+  PARTNER_SPONSORED
+  STORE_GROWTH_TOOL
+}
+
+enum GrowthOfferStatus {
+  DRAFT
+  ACTIVE
+  PAUSED
+  ARCHIVED
+}
+
+enum GrowthEventType {
+  VIEW
+  IMPRESSION
+  CLICK
+  DISMISS
+  CONVERSION
+}
+
 enum ReconciliationStatus {
   AUTO_APPROVED
   PARTIAL_MATCH
@@ -4357,6 +4392,81 @@ model OperationalEvent {
   @@index([orderId])
   @@index([courierId])
   @@index([createdAt])
+}
+
+model GrowthOffer {
+  id          String            @id @default(cuid())
+  merchantId  String?           @map("merchant_id")
+  title       String
+  subtitle    String?
+  description String?
+  type        GrowthOfferType
+  status      GrowthOfferStatus @default(DRAFT)
+  isSponsored Boolean           @default(false) @map("is_sponsored")
+  sponsorName String?           @map("sponsor_name")
+  ctaLabel    String            @map("cta_label")
+  ctaUrl      String?           @map("cta_url")
+  metadata    Json?
+  startsAt    DateTime?         @map("starts_at")
+  endsAt      DateTime?         @map("ends_at")
+  createdAt   DateTime          @default(now()) @map("created_at")
+  updatedAt   DateTime          @default(now()) @updatedAt @map("updated_at")
+
+  placements GrowthOfferPlacement[]
+  events     GrowthOfferEvent[]
+
+  @@index([merchantId])
+  @@index([type])
+  @@index([status])
+  @@index([startsAt])
+  @@index([endsAt])
+  @@index([createdAt])
+  @@map("growth_offers")
+}
+
+model GrowthOfferPlacement {
+  id        String                 @id @default(cuid())
+  offerId   String                 @map("offer_id")
+  surface   GrowthPlacementSurface
+  priority  Int                    @default(100)
+  rulesJson Json?                  @map("rules_json")
+  createdAt DateTime               @default(now()) @map("created_at")
+  updatedAt DateTime               @default(now()) @updatedAt @map("updated_at")
+
+  offer GrowthOffer @relation(fields: [offerId], references: [id], onDelete: Cascade)
+
+  @@index([offerId])
+  @@index([surface, priority])
+  @@index([createdAt])
+  @@map("growth_offer_placements")
+}
+
+model GrowthOfferEvent {
+  id                String                 @id @default(cuid())
+  offerId           String?                @map("offer_id")
+  merchantId        String?                @map("merchant_id")
+  sellerId          String?                @map("seller_id")
+  shipmentId        String?                @map("shipment_id")
+  orderId           String?                @map("order_id")
+  eventType         GrowthEventType        @map("event_type")
+  surface           GrowthPlacementSurface
+  anonymousBuyerRef String?                @map("anonymous_buyer_ref")
+  sessionRef        String?                @map("session_ref")
+  idempotencyKey    String?                @unique @map("idempotency_key")
+  metadata          Json?
+  createdAt         DateTime               @default(now()) @map("created_at")
+
+  offer GrowthOffer? @relation(fields: [offerId], references: [id], onDelete: SetNull)
+
+  @@index([offerId])
+  @@index([merchantId])
+  @@index([sellerId])
+  @@index([shipmentId])
+  @@index([orderId])
+  @@index([eventType])
+  @@index([surface])
+  @@index([createdAt])
+  @@map("growth_offer_events")
 }
 
 model SlaBreach {
