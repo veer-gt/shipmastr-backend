@@ -1,6 +1,10 @@
 import { Prisma } from "@prisma/client";
+import { env } from "../../../config/env.js";
 import { HttpError } from "../../../lib/httpError.js";
 import { prisma } from "../../../lib/prisma.js";
+import type { InternalCourierProviderAdapter } from "../providers/provider-adapter.types.js";
+import { createShiprocketLiveAdapter } from "../providers/shiprocket/shiprocket-live.adapter.js";
+import { toPrismaJson } from "../../shippingNetwork/shipping-public-serializers.js";
 import {
   getLiveAwbLabelReadiness,
   type LiveAwbLabelReadiness
@@ -13,6 +17,7 @@ import type { CourierLiveProviderKey } from "../liveReadiness/courier-live-readi
 import type {
   CourierLabelCertificationBlocker,
   CourierLabelCertificationDryRunResult,
+  CourierLabelCertificationLiveOneShotResult,
   CourierLabelCertificationProviderStatus,
   CourierLabelCertificationStatus
 } from "./courier-label-certification.types.js";
@@ -26,7 +31,9 @@ type ProviderRefRecord = {
   providerOrderId?: string | null;
   providerShipmentId?: string | null;
   providerPickupId?: string | null;
+  metadata?: unknown;
 };
+type Source = Record<string, unknown>;
 
 const PUBLIC_NETWORK_NAME = "Shipmastr Courier Network" as const;
 
@@ -45,6 +52,14 @@ function stringValue(value: unknown) {
 
 function phase6Metadata(shipment: ShipmentRecord) {
   return metadataObject(metadataObject(shipment.metadata).phase6);
+}
+
+function phase42pMetadata(shipment: ShipmentRecord) {
+  return metadataObject(metadataObject(shipment.metadata).phase42p);
+}
+
+function phase42qMetadata(shipment: ShipmentRecord) {
+  return metadataObject(metadataObject(shipment.metadata).phase42q);
 }
 
 function rawProviderLabelSafe(shipment: ShipmentRecord) {
@@ -100,14 +115,62 @@ function liveGateBlockers(readiness: LiveAwbLabelReadiness): CourierLabelCertifi
   return blockers;
 }
 
+function boolValue(source: Source | undefined, key: string, fallback = false) {
+  const value = source?.[key];
+  if (typeof value === "boolean") return value;
+  if (typeof value === "number") return value === 1;
+  if (typeof value === "string") {
+    const normalized = value.trim().toLowerCase();
+    if (["true", "1", "yes", "on", "enabled", "live"].includes(normalized)) return true;
+    if (["false", "0", "no", "off", "disabled", ""].includes(normalized)) return false;
+  }
+  return fallback;
+}
+
+function sourceString(source: Source | undefined, key: string) {
+  const value = source?.[key];
+  return value === undefined || value === null ? "" : String(value).trim();
+}
+
+function sourceWithEnv(source?: Source) {
+  return {
+    ...env,
+    ...(source ?? {})
+  };
+}
+
+function labelApprovalPresent(source?: Source) {
+  const token = sourceString(source, "SHIPMASTR_LIVE_SHIPROCKET_LABEL_ONE_SHOT_TOKEN");
+  const header = sourceString(source, "SHIPMASTR_LIVE_SHIPROCKET_LABEL_ONE_SHOT_HEADER")
+    || sourceString(source, "x-shipmastr-live-label-approval");
+  return Boolean(token && header && token === header);
+}
+
+function labelLiveGateBlockers(readiness: LiveAwbLabelReadiness, source?: Source): CourierLabelCertificationBlocker[] {
+  const blockers: CourierLabelCertificationBlocker[] = [];
+  const labelEnabled = boolValue(source, "SHIPMASTR_ENABLE_LIVE_SHIPROCKET_LABEL", false);
+  if (!readiness.runtime.enabled || readiness.runtime.mode !== "LIVE" || !labelEnabled) blockers.push("LABEL_CERTIFICATION_LIVE_MODE_DISABLED");
+  if (!labelApprovalPresent(source)) blockers.push("LABEL_CERTIFICATION_ONE_SHOT_APPROVAL_REQUIRED");
+  if (!readiness.shiprocket.allowedMerchantMatched) blockers.push("LABEL_CERTIFICATION_ALLOWED_MERCHANT_MISMATCH");
+  if (!readiness.shiprocket.allowedShipmentMatched) blockers.push("LABEL_CERTIFICATION_ALLOWED_SHIPMENT_MISMATCH");
+  if (!readiness.shiprocket.credentialId || !readiness.shiprocket.credentialRefConfigured || !readiness.shiprocket.credentialResolved) {
+    blockers.push("LABEL_CERTIFICATION_CREDENTIALS_NOT_READY");
+  }
+  return blockers;
+}
+
 function adminNextActions(blockers: CourierLabelCertificationBlocker[]) {
   const actions: string[] = [];
   if (blockers.includes("LABEL_CERTIFICATION_AWB_MISSING")) actions.push("Complete AWB certification before attempting label certification.");
   if (blockers.includes("LABEL_CERTIFICATION_PROVIDER_REFS_MISSING")) actions.push("Confirm the shipment has safe internal provider references from AWB creation.");
+  if (blockers.includes("LABEL_CERTIFICATION_CREDENTIALS_NOT_READY")) actions.push("Resolve live credential readiness before attempting label certification.");
   if (blockers.includes("LABEL_CERTIFICATION_ADAPTER_MISSING")) actions.push("Keep label certification blocked until the provider label adapter is ready.");
   if (blockers.includes("LABEL_CERTIFICATION_ONE_SHOT_APPROVAL_REQUIRED")) actions.push("Provide explicit one-shot approval only after label dry-run readiness passes.");
   if (blockers.includes("LABEL_CERTIFICATION_ALLOWED_MERCHANT_MISMATCH")) actions.push("Align the pilot merchant allowlist before label certification.");
   if (blockers.includes("LABEL_CERTIFICATION_ALLOWED_SHIPMENT_MISMATCH")) actions.push("Align the pilot shipment allowlist before label certification.");
+  if (blockers.includes("LABEL_CERTIFICATION_LIVE_MODE_DISABLED")) actions.push("Keep label certification in dry-run review until live label mode is explicitly enabled.");
+  if (blockers.includes("LABEL_CERTIFICATION_PROVIDER_CALL_FAILED")) actions.push("Review the safe failure summary, fix the cause, then rerun the label one-shot only with explicit approval.");
+  if (blockers.includes("LABEL_CERTIFICATION_PROVIDER_RESPONSE_INVALID")) actions.push("Keep label certification blocked until the provider label response mapper is fixed.");
   if (!actions.length) actions.push("Proceed only through the existing explicit Ship Now one-shot gate; this sandbox does not generate labels.");
   return unique(actions);
 }
@@ -115,6 +178,53 @@ function adminNextActions(blockers: CourierLabelCertificationBlocker[]) {
 function providerLabelAdapterReady(providerKey: CourierLiveProviderKey, override?: boolean) {
   if (typeof override === "boolean") return override;
   return providerKey === "SHIPROCKET" && getCourierLiveProviderDefinition(providerKey).supportsAwbLabelReadiness;
+}
+
+function safeLabelRef(shipmentId: string) {
+  const suffix = shipmentId.replace(/[^a-z0-9]/gi, "").slice(-10).toUpperCase();
+  return `SMLABEL-${suffix || "SHIPMENT"}`;
+}
+
+function existingLabelCertified(shipment: ShipmentRecord) {
+  return Boolean(phase42qMetadata(shipment).labelCertified === true && stringValue(phase42qMetadata(shipment).labelRef));
+}
+
+function liveOneShotAdapter(input: {
+  readiness: LiveAwbLabelReadiness;
+  source?: Source;
+  adapter?: InternalCourierProviderAdapter;
+}) {
+  if (input.adapter) return input.adapter;
+  if (!input.readiness.shiprocket.credentialRef) throw new HttpError(409, "LABEL_CERTIFICATION_CREDENTIALS_NOT_READY");
+  return createShiprocketLiveAdapter({
+    credentialRef: input.readiness.shiprocket.credentialRef,
+    source: input.source ?? {}
+  });
+}
+
+function blockedResult(input: {
+  providerKey: CourierLiveProviderKey;
+  shipmentId: string;
+  blockers: CourierLabelCertificationBlocker[];
+  warnings?: string[];
+  alreadyCertified?: boolean;
+  labelRef?: string | null;
+}): CourierLabelCertificationLiveOneShotResult {
+  return {
+    success: false,
+    provider_key: input.providerKey,
+    public_network_name: PUBLIC_NETWORK_NAME,
+    shipment_id: input.shipmentId,
+    label_status: input.alreadyCertified ? "ALREADY_CERTIFIED" : "BLOCKED",
+    public_label_status: input.alreadyCertified ? "READY" : "NOT_READY",
+    shipmastr_label_ref: input.labelRef ?? null,
+    tracking_ready: false,
+    certification_status: input.alreadyCertified ? "ALREADY_CERTIFIED" : "BLOCKED",
+    blockers: unique(input.blockers),
+    warnings: unique(input.warnings ?? []),
+    seller_safe_message: input.alreadyCertified ? "Shipping label will be available after shipment creation is certified." : "Shipping label is not ready yet.",
+    admin_next_actions: adminNextActions(input.blockers)
+  };
 }
 
 export async function getCourierLabelCertificationProviderStatus(
@@ -234,4 +344,154 @@ export async function runCourierLabelCertificationDryRun(
     }),
     admin_next_actions: adminNextActions(finalBlockers)
   };
+}
+
+export async function runCourierLabelCertificationLiveOneShot(
+  merchantId: string,
+  providerKey: CourierLiveProviderKey,
+  input: {
+    shipmentId: string;
+    operatorNote?: string | null;
+  },
+  options: {
+    client?: Db;
+    source?: Source;
+    adapter?: InternalCourierProviderAdapter;
+    liveReadinessProvider?: () => Promise<LiveAwbLabelReadiness>;
+    certificationProvider?: () => Promise<CourierCertificationSnapshot>;
+    labelAdapterReady?: boolean;
+  } = {}
+): Promise<CourierLabelCertificationLiveOneShotResult> {
+  if (providerKey !== "SHIPROCKET") throw new HttpError(400, "LABEL_CERTIFICATION_PROVIDER_UNSUPPORTED");
+  const client = options.client ?? prisma;
+  const source = sourceWithEnv(options.source);
+  const shipment = await getSellerShipment(merchantId, input.shipmentId, client);
+  const existingLabelRef = stringValue(phase42qMetadata(shipment).labelRef);
+  if (existingLabelCertified(shipment)) {
+    return blockedResult({
+      providerKey,
+      shipmentId: shipment.id,
+      blockers: ["LABEL_CERTIFICATION_EXISTING_LABEL_READY"],
+      warnings: ["Existing label certification was found; no provider call was made."],
+      alreadyCertified: true,
+      labelRef: existingLabelRef
+    });
+  }
+
+  const readinessProvider = options.liveReadinessProvider
+    ? options.liveReadinessProvider
+    : () => getLiveAwbLabelReadiness(merchantId, {
+      client,
+      shipmentId: shipment.id,
+      includePickupAlignment: false,
+      source
+    });
+  const dryRun = await runCourierLabelCertificationDryRun(merchantId, providerKey, {
+    shipmentId: shipment.id
+  }, {
+    client,
+    liveReadinessProvider: readinessProvider,
+    ...(options.certificationProvider ? { certificationProvider: options.certificationProvider } : {}),
+    ...(options.labelAdapterReady === undefined ? {} : { labelAdapterReady: options.labelAdapterReady })
+  });
+  const readiness = await readinessProvider();
+  const payloadBlockers: CourierLabelCertificationBlocker[] = [];
+  if (!dryRun.payload_readiness.awb_ready) payloadBlockers.push("LABEL_CERTIFICATION_AWB_MISSING");
+  if (!dryRun.payload_readiness.provider_refs_ready) payloadBlockers.push("LABEL_CERTIFICATION_PROVIDER_REFS_MISSING");
+  if (!dryRun.payload_readiness.label_adapter_ready) payloadBlockers.push("LABEL_CERTIFICATION_ADAPTER_MISSING");
+  if (!dryRun.payload_readiness.label_public_safety_ready) payloadBlockers.push("LABEL_CERTIFICATION_PUBLIC_SAFETY_NOT_READY");
+  if (!dryRun.payload_readiness.no_raw_provider_label_leak) payloadBlockers.push("LABEL_CERTIFICATION_RAW_PROVIDER_URL_BLOCKED");
+  const blockers = unique([
+    ...payloadBlockers,
+    ...labelLiveGateBlockers(readiness, source)
+  ]);
+  if (blockers.length) {
+    return blockedResult({
+      providerKey,
+      shipmentId: shipment.id,
+      blockers,
+      warnings: dryRun.warnings
+    });
+  }
+
+  const providerRef = await latestProviderRef(client, shipment.id);
+  if (!providerRef?.providerOrderId && !providerRef?.providerShipmentId) {
+    return blockedResult({
+      providerKey,
+      shipmentId: shipment.id,
+      blockers: ["LABEL_CERTIFICATION_PROVIDER_REFS_MISSING"],
+      warnings: ["Internal provider references are missing; no provider label call was made."]
+    });
+  }
+
+  const adapter = liveOneShotAdapter({
+    readiness,
+    source,
+    ...(options.adapter ? { adapter: options.adapter } : {})
+  });
+
+  try {
+    const label = await adapter.getLabel({
+      sellerId: merchantId,
+      shipmentId: shipment.id,
+      awb: shipment.awbNumber,
+      trackingNumber: shipment.awbNumber,
+      providerOrderId: providerRef.providerOrderId ?? null,
+      providerShipmentId: providerRef.providerShipmentId ?? null
+    });
+    if (!label.labelUrl || /token|secret|authorization|bearer|raw/i.test(label.labelUrl)) {
+      return blockedResult({
+        providerKey,
+        shipmentId: shipment.id,
+        blockers: ["LABEL_CERTIFICATION_PROVIDER_RESPONSE_INVALID"],
+        warnings: ["Provider label response was not safe to certify."]
+      });
+    }
+
+    const labelRef = safeLabelRef(shipment.id);
+    const metadata = metadataObject(shipment.metadata);
+    await client.shipment.update({
+      where: { id: shipment.id },
+      data: {
+        metadata: toPrismaJson({
+          ...metadata,
+          phase42p: phase42pMetadata(shipment),
+          phase42q: {
+            ...phase42qMetadata(shipment),
+            labelCertified: true,
+            labelCertifiedAt: new Date().toISOString(),
+            labelRef,
+            publicLabelReady: true,
+            trackingCertified: false,
+            operatorNote: input.operatorNote ?? null,
+            rawProviderUrlStored: false,
+            rawProviderResponseStored: false
+          }
+        })
+      }
+    });
+
+    return {
+      success: true,
+      provider_key: providerKey,
+      public_network_name: PUBLIC_NETWORK_NAME,
+      shipment_id: shipment.id,
+      label_status: "CERTIFIED",
+      public_label_status: "READY",
+      shipmastr_label_ref: labelRef,
+      tracking_ready: false,
+      certification_status: "LABEL_CERTIFIED",
+      blockers: [],
+      warnings: ["Label certification succeeded. Tracking certification remains separate."],
+      seller_safe_message: "Shipping label will be available after shipment creation is certified.",
+      admin_next_actions: ["Run tracking certification next; tracking remains blocked until its own certification passes."]
+    };
+  } catch {
+    return blockedResult({
+      providerKey,
+      shipmentId: shipment.id,
+      blockers: ["LABEL_CERTIFICATION_PROVIDER_CALL_FAILED"],
+      warnings: ["Provider label call failed safely. No public label ready state was stored."]
+    });
+  }
 }

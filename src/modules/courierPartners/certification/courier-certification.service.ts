@@ -489,7 +489,9 @@ async function shiprocketSnapshot(
     })
     : null;
   const phase42p = metadataObject(metadataObject(shipment?.metadata).phase42p);
+  const phase42q = metadataObject(metadataObject(shipment?.metadata).phase42q);
   const awbCertified = Boolean(shipment?.awbNumber && phase42p.awbCertified === true);
+  const labelCertified = Boolean(awbCertified && phase42q.labelCertified === true && phase42q.publicLabelReady === true);
   const dimensions = [
     credentialDimension(credential),
     pickupDimension(pickupDiagnostics),
@@ -512,14 +514,16 @@ async function shiprocketSnapshot(
     }),
     fixedDimension({
       key: "LABEL",
-      status: "WARN",
-      blocker: "PROVIDER_LABEL_NOT_CERTIFIED",
-      warning: "Live label certification has not been completed.",
+      status: labelCertified ? "PASS" : "WARN",
+      ...(labelCertified ? {} : {
+        blocker: "PROVIDER_LABEL_NOT_CERTIFIED",
+        warning: "Live label certification has not been completed."
+      }),
       summary: {
-        live_label_certified: false,
+        live_label_certified: labelCertified,
         mutation_probe_allowed: false,
         sandbox_status: "AVAILABLE",
-        sandbox_dry_run_required: true
+        sandbox_dry_run_required: !labelCertified
       }
     }),
     fixedDimension({

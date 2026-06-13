@@ -13,3 +13,9 @@ export const courierLabelCertificationDryRunSchema = z.object({
 }).strict();
 
 export type CourierLabelCertificationDryRunInput = z.infer<typeof courierLabelCertificationDryRunSchema>;
+
+export const courierLabelCertificationLiveOneShotSchema = z.object({
+  operator_note: z.string().trim().min(1).max(240).optional()
+}).strict();
+
+export type CourierLabelCertificationLiveOneShotInput = z.infer<typeof courierLabelCertificationLiveOneShotSchema>;

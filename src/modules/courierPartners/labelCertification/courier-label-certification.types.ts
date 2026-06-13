@@ -11,13 +11,17 @@ export type CourierLabelCertificationStatus =
 export type CourierLabelCertificationBlocker =
   | "LABEL_CERTIFICATION_AWB_MISSING"
   | "LABEL_CERTIFICATION_PROVIDER_REFS_MISSING"
+  | "LABEL_CERTIFICATION_CREDENTIALS_NOT_READY"
   | "LABEL_CERTIFICATION_ADAPTER_MISSING"
   | "LABEL_CERTIFICATION_PUBLIC_SAFETY_NOT_READY"
   | "LABEL_CERTIFICATION_RAW_PROVIDER_URL_BLOCKED"
   | "LABEL_CERTIFICATION_ONE_SHOT_APPROVAL_REQUIRED"
   | "LABEL_CERTIFICATION_ALLOWED_SHIPMENT_MISMATCH"
   | "LABEL_CERTIFICATION_ALLOWED_MERCHANT_MISMATCH"
-  | "LABEL_CERTIFICATION_LIVE_MODE_DISABLED";
+  | "LABEL_CERTIFICATION_LIVE_MODE_DISABLED"
+  | "LABEL_CERTIFICATION_PROVIDER_CALL_FAILED"
+  | "LABEL_CERTIFICATION_PROVIDER_RESPONSE_INVALID"
+  | "LABEL_CERTIFICATION_EXISTING_LABEL_READY";
 
 export type CourierLabelPayloadReadiness = {
   awb_ready: boolean;
@@ -63,4 +67,26 @@ export type CourierLabelCertificationProviderStatus = {
   blockers: string[];
   warnings: string[];
   next_actions: string[];
+};
+
+export type CourierLabelCertificationLiveOneShotStatus =
+  | "LABEL_CERTIFIED"
+  | "BLOCKED"
+  | "ALREADY_CERTIFIED"
+  | "PENDING_TRACKING_CERTIFICATION";
+
+export type CourierLabelCertificationLiveOneShotResult = {
+  success: boolean;
+  provider_key: CourierLiveProviderKey;
+  public_network_name: "Shipmastr Courier Network";
+  shipment_id: string;
+  label_status: "CERTIFIED" | "BLOCKED" | "ALREADY_CERTIFIED";
+  public_label_status: "READY" | "NOT_READY";
+  shipmastr_label_ref: string | null;
+  tracking_ready: boolean;
+  certification_status: CourierLabelCertificationLiveOneShotStatus;
+  blockers: CourierLabelCertificationBlocker[];
+  warnings: string[];
+  seller_safe_message: string;
+  admin_next_actions: string[];
 };

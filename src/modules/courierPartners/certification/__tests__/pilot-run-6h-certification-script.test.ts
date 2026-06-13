@@ -219,7 +219,9 @@ describe("Pilot Run 6H certification check script", () => {
     assert.match(report, /Pickup learning:/);
     assert.match(report, /Arbitration:/);
     assert.match(report, /AWB certification sandbox:/);
-    assert.match(report, /Label certification sandbox:/);
+    assert.match(report, /Label certification:/);
+    assert.match(report, /certified: false/);
+    assert.match(report, /label ready: false/);
     assert.match(report, /Tracking certification foundation:/);
     assert.match(report, /Alternate pickup trial:/);
     assert.match(report, /latest refresh: NO_ELIGIBLE_SHIPPING_RATES/);

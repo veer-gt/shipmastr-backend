@@ -161,6 +161,7 @@ function renderReport(input) {
   const liveShipReadiness = input.liveShipReadiness;
   const latestRefresh = liveShipReadiness?.latest_rate_refresh;
   const ratesDimension = dimension(provider, "RATES");
+  const labelDimension = dimension(provider, "LABEL");
   const pickupUnavailableCount = countRejectedReason(latestRefresh, "PICKUP_UNAVAILABLE");
   const readyForLiveShipNow = Boolean(liveShipReadiness?.ready);
   const blockers = providerScopedBlockers(input);
@@ -227,10 +228,11 @@ function renderReport(input) {
     `  blockers: ${(awbSandbox?.blockers ?? []).length ? awbSandbox.blockers.map(safeLine).join(", ") : "none"}`,
     `  next action: ${(awbSandbox?.admin_next_actions ?? awbSandbox?.next_actions ?? [])[0] ?? "unknown"}`,
     "",
-    "Label certification sandbox:",
+    "Label certification:",
     `  dry-run ready: ${boolText(labelSandbox?.dry_run_ready)}`,
     `  live one-shot ready: ${boolText(labelSandbox?.live_one_shot_ready)}`,
-    `  payload readiness: ${labelSandbox?.status ?? "unknown"}`,
+    `  certified: ${boolText(labelDimension?.safe_summary?.live_label_certified === true)}`,
+    `  label ready: ${boolText(labelDimension?.status === "PASS")}`,
     `  blockers: ${(labelSandbox?.blockers ?? []).length ? labelSandbox.blockers.map(safeLine).join(", ") : "none"}`,
     `  next action: ${(labelSandbox?.admin_next_actions ?? labelSandbox?.next_actions ?? [])[0] ?? "unknown"}`,
     "",
