@@ -503,7 +503,12 @@ async function shiprocketSnapshot(
       status: "WARN",
       blocker: "PROVIDER_LABEL_NOT_CERTIFIED",
       warning: "Live label certification has not been completed.",
-      summary: { live_label_certified: false, mutation_probe_allowed: false }
+      summary: {
+        live_label_certified: false,
+        mutation_probe_allowed: false,
+        sandbox_status: "AVAILABLE",
+        sandbox_dry_run_required: true
+      }
     }),
     fixedDimension({
       key: "TRACKING",

@@ -86,6 +86,8 @@ function providerScopedNextActions(input) {
     ...(input.arbitration?.next_actions ?? []),
     ...(input.awbSandbox?.admin_next_actions ?? []),
     ...(input.awbSandbox?.next_actions ?? []),
+    ...(input.labelSandbox?.admin_next_actions ?? []),
+    ...(input.labelSandbox?.next_actions ?? []),
     ...(input.liveShipReadiness?.certification_decision?.seller_safe_message
       ? [input.liveShipReadiness.certification_decision.seller_safe_message]
       : []),
@@ -151,6 +153,7 @@ function renderReport(input) {
   const pickupLearning = input.pickupLearning;
   const arbitration = input.arbitration;
   const awbSandbox = input.awbSandbox;
+  const labelSandbox = input.labelSandbox;
   const pickupTrial = input.pickupTrial;
   const liveShipReadiness = input.liveShipReadiness;
   const latestRefresh = liveShipReadiness?.latest_rate_refresh;
@@ -221,6 +224,13 @@ function renderReport(input) {
     `  blockers: ${(awbSandbox?.blockers ?? []).length ? awbSandbox.blockers.map(safeLine).join(", ") : "none"}`,
     `  next action: ${(awbSandbox?.admin_next_actions ?? awbSandbox?.next_actions ?? [])[0] ?? "unknown"}`,
     "",
+    "Label certification sandbox:",
+    `  dry-run ready: ${boolText(labelSandbox?.dry_run_ready)}`,
+    `  live one-shot ready: ${boolText(labelSandbox?.live_one_shot_ready)}`,
+    `  payload readiness: ${labelSandbox?.status ?? "unknown"}`,
+    `  blockers: ${(labelSandbox?.blockers ?? []).length ? labelSandbox.blockers.map(safeLine).join(", ") : "none"}`,
+    `  next action: ${(labelSandbox?.admin_next_actions ?? labelSandbox?.next_actions ?? [])[0] ?? "unknown"}`,
+    "",
     "Alternate pickup trial:",
     `  trial pickup id: ${input.runtime.trialPickupLocationId || "not provided"}`,
     `  status: ${pickupTrial?.status ?? "not run"}`,
@@ -276,11 +286,14 @@ async function run(env = process.env) {
   const awbSandboxPath = runtime.shipmentId
     ? `/awb-certification/providers/SHIPROCKET/shipments/${encodeURIComponent(runtime.shipmentId)}/dry-run`
     : null;
+  const labelSandboxPath = runtime.shipmentId
+    ? `/label-certification/providers/SHIPROCKET/shipments/${encodeURIComponent(runtime.shipmentId)}/dry-run`
+    : null;
   const pickupTrialPath = runtime.shipmentId && runtime.trialPickupLocationId
     ? `/courier-pickup-trials/providers/SHIPROCKET/shipments/${encodeURIComponent(runtime.shipmentId)}`
     : null;
 
-  const [summary, shiprocket, pickup, liveShipReadiness, pickupServiceability, pickupLearning, arbitration, awbSandbox, pickupTrial] = await Promise.all([
+  const [summary, shiprocket, pickup, liveShipReadiness, pickupServiceability, pickupLearning, arbitration, awbSandbox, labelSandbox, pickupTrial] = await Promise.all([
     request(runtime, `/courier-certification/summary${summaryQuery ? `?${summaryQuery}` : ""}`),
     request(runtime, `/courier-certification/providers/SHIPROCKET?${contextQuery}`),
     request(runtime, `/courier-live-readiness/providers/SHIPROCKET/pickups?${params(runtime)}`),
@@ -294,6 +307,14 @@ async function run(env = process.env) {
         body: {
           ...(runtime.pickupLocationId ? { pickup_location_id: runtime.pickupLocationId } : {}),
           requested_tier: "smart"
+        }
+      })
+      : Promise.resolve(null),
+    labelSandboxPath
+      ? request(runtime, labelSandboxPath, {
+        method: "POST",
+        body: {
+          ...(runtime.pickupLocationId ? { pickup_location_id: runtime.pickupLocationId } : {})
         }
       })
       : Promise.resolve(null),
@@ -317,6 +338,7 @@ async function run(env = process.env) {
     pickupLearning,
     arbitration,
     awbSandbox,
+    labelSandbox,
     pickupTrial,
     liveShipReadiness
   });
