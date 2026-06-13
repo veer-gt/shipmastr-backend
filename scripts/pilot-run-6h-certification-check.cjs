@@ -88,6 +88,8 @@ function providerScopedNextActions(input) {
     ...(input.awbSandbox?.next_actions ?? []),
     ...(input.labelSandbox?.admin_next_actions ?? []),
     ...(input.labelSandbox?.next_actions ?? []),
+    ...(input.trackingCertification?.admin_next_actions ?? []),
+    ...(input.trackingCertification?.next_actions ?? []),
     ...(input.liveShipReadiness?.certification_decision?.seller_safe_message
       ? [input.liveShipReadiness.certification_decision.seller_safe_message]
       : []),
@@ -154,6 +156,7 @@ function renderReport(input) {
   const arbitration = input.arbitration;
   const awbSandbox = input.awbSandbox;
   const labelSandbox = input.labelSandbox;
+  const trackingCertification = input.trackingCertification;
   const pickupTrial = input.pickupTrial;
   const liveShipReadiness = input.liveShipReadiness;
   const latestRefresh = liveShipReadiness?.latest_rate_refresh;
@@ -231,6 +234,13 @@ function renderReport(input) {
     `  blockers: ${(labelSandbox?.blockers ?? []).length ? labelSandbox.blockers.map(safeLine).join(", ") : "none"}`,
     `  next action: ${(labelSandbox?.admin_next_actions ?? labelSandbox?.next_actions ?? [])[0] ?? "unknown"}`,
     "",
+    "Tracking certification foundation:",
+    `  dry-run ready: ${boolText(trackingCertification?.dry_run_ready)}`,
+    `  live read ready: ${boolText(trackingCertification?.live_read_ready)}`,
+    `  payload readiness: ${trackingCertification?.status ?? "unknown"}`,
+    `  blockers: ${(trackingCertification?.blockers ?? []).length ? trackingCertification.blockers.map(safeLine).join(", ") : "none"}`,
+    `  next action: ${(trackingCertification?.admin_next_actions ?? trackingCertification?.next_actions ?? [])[0] ?? "unknown"}`,
+    "",
     "Alternate pickup trial:",
     `  trial pickup id: ${input.runtime.trialPickupLocationId || "not provided"}`,
     `  status: ${pickupTrial?.status ?? "not run"}`,
@@ -289,11 +299,14 @@ async function run(env = process.env) {
   const labelSandboxPath = runtime.shipmentId
     ? `/label-certification/providers/SHIPROCKET/shipments/${encodeURIComponent(runtime.shipmentId)}/dry-run`
     : null;
+  const trackingCertificationPath = runtime.shipmentId
+    ? `/tracking-certification/providers/SHIPROCKET/shipments/${encodeURIComponent(runtime.shipmentId)}/dry-run`
+    : null;
   const pickupTrialPath = runtime.shipmentId && runtime.trialPickupLocationId
     ? `/courier-pickup-trials/providers/SHIPROCKET/shipments/${encodeURIComponent(runtime.shipmentId)}`
     : null;
 
-  const [summary, shiprocket, pickup, liveShipReadiness, pickupServiceability, pickupLearning, arbitration, awbSandbox, labelSandbox, pickupTrial] = await Promise.all([
+  const [summary, shiprocket, pickup, liveShipReadiness, pickupServiceability, pickupLearning, arbitration, awbSandbox, labelSandbox, trackingCertification, pickupTrial] = await Promise.all([
     request(runtime, `/courier-certification/summary${summaryQuery ? `?${summaryQuery}` : ""}`),
     request(runtime, `/courier-certification/providers/SHIPROCKET?${contextQuery}`),
     request(runtime, `/courier-live-readiness/providers/SHIPROCKET/pickups?${params(runtime)}`),
@@ -312,6 +325,14 @@ async function run(env = process.env) {
       : Promise.resolve(null),
     labelSandboxPath
       ? request(runtime, labelSandboxPath, {
+        method: "POST",
+        body: {
+          ...(runtime.pickupLocationId ? { pickup_location_id: runtime.pickupLocationId } : {})
+        }
+      })
+      : Promise.resolve(null),
+    trackingCertificationPath
+      ? request(runtime, trackingCertificationPath, {
         method: "POST",
         body: {
           ...(runtime.pickupLocationId ? { pickup_location_id: runtime.pickupLocationId } : {})
@@ -339,6 +360,7 @@ async function run(env = process.env) {
     arbitration,
     awbSandbox,
     labelSandbox,
+    trackingCertification,
     pickupTrial,
     liveShipReadiness
   });

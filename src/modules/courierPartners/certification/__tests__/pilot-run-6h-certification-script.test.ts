@@ -19,6 +19,7 @@ describe("Pilot Run 6H certification check script", () => {
     assert.match(script, /courier-arbitration\/shipments/);
     assert.match(script, /awb-certification\/providers\/SHIPROCKET\/shipments/);
     assert.match(script, /label-certification\/providers\/SHIPROCKET\/shipments/);
+    assert.match(script, /tracking-certification\/providers\/SHIPROCKET\/shipments/);
     assert.match(script, /courier-pickup-trials\/providers\/SHIPROCKET\/shipments/);
     assert.match(script, /live-ship-readiness/);
     assert.doesNotMatch(script, /ship-now|manifestOrder|createLabel|getLabel|createDraftOrder|app\.shiprocket\.in|shiprocket\.in\/v1\/external/i);
@@ -178,6 +179,13 @@ describe("Pilot Run 6H certification check script", () => {
         blockers: ["LABEL_CERTIFICATION_AWB_MISSING"],
         admin_next_actions: ["Complete AWB certification before attempting label certification."]
       },
+      trackingCertification: {
+        dry_run_ready: false,
+        live_read_ready: false,
+        status: "MISSING_AWB",
+        blockers: ["TRACKING_CERTIFICATION_AWB_MISSING"],
+        admin_next_actions: ["Complete AWB certification before attempting tracking certification."]
+      },
       pickupTrial: {
         status: "DRY_RUN_ONLY",
         rate_context: {
@@ -212,6 +220,7 @@ describe("Pilot Run 6H certification check script", () => {
     assert.match(report, /Arbitration:/);
     assert.match(report, /AWB certification sandbox:/);
     assert.match(report, /Label certification sandbox:/);
+    assert.match(report, /Tracking certification foundation:/);
     assert.match(report, /Alternate pickup trial:/);
     assert.match(report, /latest refresh: NO_ELIGIBLE_SHIPPING_RATES/);
     assert.match(report, /eligible rate count: 0/);
@@ -228,6 +237,7 @@ describe("Pilot Run 6H certification check script", () => {
     assert.match(report, /live one-shot ready: false/);
     assert.match(report, /AWB_CERTIFICATION_PICKUP_UNAVAILABLE/);
     assert.match(report, /LABEL_CERTIFICATION_AWB_MISSING/);
+    assert.match(report, /TRACKING_CERTIFICATION_AWB_MISSING/);
     assert.match(report, /next action: Run a controlled alternate pickup trial/);
     assert.match(report, /POST http:\/\/localhost:8080\/api\/shipping\/courier-pickup-trials\/providers\/SHIPROCKET\/shipments\/shipment_1/);
     assert.match(report, /PROVIDER_RATES_NOT_LIVE/);

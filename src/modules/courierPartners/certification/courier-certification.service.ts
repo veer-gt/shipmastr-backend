@@ -514,7 +514,12 @@ async function shiprocketSnapshot(
       key: "TRACKING",
       status: "NOT_RUN",
       blocker: "PROVIDER_TRACKING_NOT_CERTIFIED",
-      summary: { live_tracking_certified: false }
+      summary: {
+        live_tracking_certified: false,
+        live_tracking_read_allowed: false,
+        sandbox_status: "AVAILABLE",
+        sandbox_dry_run_required: true
+      }
     }),
     fixedDimension({
       key: "WEBHOOKS",

@@ -119,6 +119,7 @@ import { courierOnboardingRouter } from "../courierPartners/onboarding/courier-o
 import { courierPickupLearningRouter } from "../courierPartners/pickupLearning/courier-pickup-learning.routes.js";
 import { courierPickupServiceabilityRouter } from "../courierPartners/pickupServiceability/courier-pickup-serviceability.routes.js";
 import { courierPickupTrialRouter } from "../courierPartners/pickupTrial/courier-pickup-trial.routes.js";
+import { courierTrackingCertificationRouter } from "../courierPartners/trackingCertification/courier-tracking-certification.routes.js";
 import { merchantStoreOnboardingRouter } from "../merchantOnboarding/merchant-onboarding.routes.js";
 import { merchantNotificationsRouter } from "../merchantNotifications/merchant-notification.routes.js";
 import { livePilotRouter } from "../livePilot/live-pilot.routes.js";
@@ -172,6 +173,7 @@ shippingNetworkRouter.use("/", courierArbitrationRouter);
 shippingNetworkRouter.use("/", courierAwbCertificationRouter);
 shippingNetworkRouter.use("/", courierLabelCertificationRouter);
 shippingNetworkRouter.use("/", courierCertificationRouter);
+shippingNetworkRouter.use("/", courierTrackingCertificationRouter);
 shippingNetworkRouter.use("/", courierPickupLearningRouter);
 shippingNetworkRouter.use("/", courierPickupServiceabilityRouter);
 shippingNetworkRouter.use("/", courierPickupTrialRouter);
