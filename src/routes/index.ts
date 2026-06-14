@@ -72,7 +72,7 @@ apiRouter.use("/courier", courierRouter);
 apiRouter.use("/courier-invoices", requireJwtAuth, courierInvoicesRouter);
 apiRouter.use("/finance", requireJwtAuth, financeRouter);
 apiRouter.use("/first-shipment-request", requireJwtAuth, firstShipmentRequestRouter);
-apiRouter.use("/growth-network", growthNetworkRouter);
+apiRouter.use("/growth-network", requireJwtAuth, growthNetworkRouter);
 apiRouter.use("/imports", requireJwtAuth, importsRouter);
 apiRouter.use("/journal", journalRouter);
 apiRouter.use("/leads", leadsRouter);
