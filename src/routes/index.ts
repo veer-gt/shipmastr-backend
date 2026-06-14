@@ -19,6 +19,7 @@ import { adminDomainsRouter, domainStatusRouter, internalDomainProvisioningRoute
 import { ordersRouter } from "../modules/orders/orders.routes.js";
 import { financeRouter } from "../modules/sellerSettlements/finance.routes.js";
 import { firstShipmentRequestRouter } from "../modules/firstShipmentRequest/first-shipment-request.routes.js";
+import { growthNetworkRouter } from "../modules/growthNetwork/growth-network.routes.js";
 import { importsRouter } from "../modules/imports/imports.routes.js";
 import { shipmentsRouter } from "../modules/shipments/shipments.routes.js";
 import { riskRouter } from "../modules/risk/risk.routes.js";
@@ -71,6 +72,7 @@ apiRouter.use("/courier", courierRouter);
 apiRouter.use("/courier-invoices", requireJwtAuth, courierInvoicesRouter);
 apiRouter.use("/finance", requireJwtAuth, financeRouter);
 apiRouter.use("/first-shipment-request", requireJwtAuth, firstShipmentRequestRouter);
+apiRouter.use("/growth-network", growthNetworkRouter);
 apiRouter.use("/imports", requireJwtAuth, importsRouter);
 apiRouter.use("/journal", journalRouter);
 apiRouter.use("/leads", leadsRouter);
