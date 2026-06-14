@@ -1,0 +1,19 @@
+import { z } from "zod";
+import { normalizeCourierLiveProviderKey } from "../liveReadiness/courier-live-readiness.providers.js";
+import type { CourierLiveProviderKey } from "../liveReadiness/courier-live-readiness.types.js";
+import { courierCertificationStatuses, courierCertificationDimensions } from "./courier-certification.types.js";
+
+export function parseCourierCertificationProvider(value: string | string[] | undefined): CourierLiveProviderKey | null {
+  const raw = Array.isArray(value) ? value[0] ?? "" : value ?? "";
+  return normalizeCourierLiveProviderKey(raw);
+}
+
+export const courierCertificationQuerySchema = z.object({
+  merchant_id: z.string().trim().min(1).max(120).optional(),
+  provider_key: z.string().trim().min(1).max(40).optional(),
+  status: z.enum(courierCertificationStatuses).optional(),
+  capability: z.enum(courierCertificationDimensions).optional(),
+  shipment_id: z.string().trim().min(1).max(120).optional(),
+  pickup_location_id: z.string().trim().min(1).max(120).optional(),
+  include_pickup_probe: z.coerce.boolean().optional().default(false)
+});

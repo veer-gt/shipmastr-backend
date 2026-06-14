@@ -12,11 +12,63 @@ enum PaymentMode {
   COD
 }
 
+enum ShippingPaymentMode {
+  prepaid
+  cod
+}
+
+enum CourierPartnerStatus {
+  active
+  inactive
+  testing
+  suspended
+  failed
+}
+
+enum SellerCourierPartnerStatus {
+  active
+  inactive
+  suspended
+  failed
+}
+
+enum PartnerType {
+  system_managed
+  seller_owned
+  merchant_owned
+}
+
+enum ShipmentStatus {
+  draft
+  rates_fetched
+  manifested
+  pickup_scheduled
+  picked_up
+  in_transit
+  out_for_delivery
+  delivered
+  delivery_failed
+  rto_initiated
+  rto_in_transit
+  rto_delivered
+  cancelled
+  lost
+  damaged
+  exception
+}
+
+enum ShipmentSegment {
+  domestic_b2c
+  domestic_b2b
+  hyperlocal
+}
+
 enum OrderStatus {
   CREATED
   RISK_SCORED
   VERIFIED
   HELD
+  NEEDS_ATTENTION
   READY_TO_SHIP
   SHIPPED
   DELIVERED
@@ -435,6 +487,172 @@ enum WebhookStatus {
   DUPLICATE
 }
 
+enum SellerApiKeyStatus {
+  ACTIVE
+  REVOKED
+  EXPIRED
+}
+
+enum WebhookSubscriptionStatus {
+  ACTIVE
+  DISABLED
+  FAILING
+}
+
+enum WebhookEventOutboxStatus {
+  PENDING
+  DELIVERED
+  FAILED
+  SKIPPED
+}
+
+enum StorePlatform {
+  SHOPIFY
+  WOOCOMMERCE
+  MAGENTO
+  CUSTOM
+}
+
+enum PlatformConnectionStatus {
+  DRAFT
+  ACTIVE
+  DISABLED
+  ERROR
+}
+
+enum PlatformSyncDirection {
+  IMPORT_ONLY
+  EXPORT_ONLY
+  BIDIRECTIONAL
+}
+
+enum PlatformOrderImportStatus {
+  RECEIVED
+  MAPPED
+  SKIPPED
+  FAILED
+  IMPORTED
+}
+
+enum PlatformTrackingSyncStatus {
+  PENDING
+  SYNCED
+  FAILED
+  SKIPPED
+}
+
+enum PlatformCredentialProvider {
+  SHOPIFY
+  WOOCOMMERCE
+  MAGENTO
+  CUSTOM
+}
+
+enum PlatformCredentialType {
+  SHOPIFY_CUSTOM_APP_TOKEN
+  SHOPIFY_OAUTH_PLACEHOLDER
+  WOOCOMMERCE_REST_KEYS
+  MAGENTO_INTEGRATION_TOKEN
+  CUSTOM_API_KEY
+  WEBHOOK_SECRET
+}
+
+enum PlatformCredentialStatus {
+  ACTIVE
+  REVOKED
+  ROTATED
+  EXPIRED
+}
+
+enum PlatformHealthCheckStatus {
+  HEALTHY
+  DEGRADED
+  FAILED
+  NOT_CONFIGURED
+  SKIPPED
+}
+
+enum PlatformHealthCheckType {
+  AUTHENTICATION
+  READ_PERMISSIONS
+  WEBHOOK_CAPABILITY
+  TRACKING_SYNC_CAPABILITY
+  FULFILLMENT_CAPABILITY
+  OVERALL
+}
+
+enum PlatformImportJobStatus {
+  DRAFT
+  QUEUED
+  RUNNING
+  COMPLETED
+  COMPLETED_WITH_WARNINGS
+  FAILED
+  CANCELLED
+}
+
+enum PlatformImportJobMode {
+  DRY_RUN
+  IMPORT_FOUNDATION
+  READ_ONLY_FETCH_PLACEHOLDER
+}
+
+enum PlatformImportItemStatus {
+  PENDING
+  MAPPED
+  IMPORTED
+  SKIPPED
+  FAILED
+  DUPLICATE
+}
+
+enum PlatformImportSource {
+  MANUAL_PAYLOAD
+  WEBHOOK_PAYLOAD
+  POLLING_PLACEHOLDER
+  FILE_UPLOAD_PLACEHOLDER
+}
+
+enum ShopifyInstallMode {
+  CUSTOM_APP
+  PUBLIC_APP_PLACEHOLDER
+}
+
+enum ShopifyWebhookStatus {
+  NOT_CONFIGURED
+  SIMULATED
+  ACTIVE_PLACEHOLDER
+  DISABLED
+  ERROR
+}
+
+enum WooCommerceInstallMode {
+  REST_KEY_PLACEHOLDER
+  PLUGIN_PLACEHOLDER
+}
+
+enum WooCommerceWebhookStatus {
+  NOT_CONFIGURED
+  SIMULATED
+  ACTIVE_PLACEHOLDER
+  DISABLED
+  ERROR
+}
+
+enum MagentoInstallMode {
+  INTEGRATION_TOKEN_PLACEHOLDER
+  EXTENSION_PLACEHOLDER
+  ADOBE_COMMERCE_PLACEHOLDER
+}
+
+enum MagentoWebhookStatus {
+  NOT_CONFIGURED
+  SIMULATED
+  ACTIVE_PLACEHOLDER
+  DISABLED
+  ERROR
+}
+
 enum AutomationEventStatus {
   QUEUED
   PROCESSING
@@ -538,6 +756,7 @@ model Merchant {
   leads     Lead[]
   firstShipmentRequests FirstShipmentRequest[]
   orders    Order[]
+  orderImportBatches OrderImportBatch[]
   auditLogs AuditLog[]
   gstinRecords MerchantGstinRecord[]
   pickupPoints MerchantPickupPoint[]
@@ -687,6 +906,12 @@ model CourierPartner {
   id                  String   @id @default(cuid())
   name                String
   code                String   @unique
+  status              CourierPartnerStatus @default(active)
+  isSystemManaged     Boolean  @default(false)
+  defaultForNewSellers Boolean @default(false)
+  credentialsRequiredFromSeller Boolean @default(true)
+  country             String   @default("IN")
+  supportedSegments   ShipmentSegment[] @default([])
   gstin               String?
   serviceCodeType     String   @default("SAC")
   serviceCode         String   @default("996812")
@@ -719,12 +944,1097 @@ model CourierPartner {
   pilotChecklist CourierPilotChecklistItem[]
   developerCredentials CourierDeveloperCredential[]
   apiEvents CourierApiEvent[]
+  sellerCourierPartners SellerCourierPartner[]
+  pickupLocationProviderMappings PickupLocationProviderMapping[]
+  networkShipments Shipment[]
+  shipmentProviderRefs ShipmentProviderRef[]
+  shipmentRates ShipmentRate[]
+  shipmentTrackingEvents ShipmentTrackingEvent[]
 
+  @@index([status])
   @@index([active])
   @@index([priority])
   @@index([gstin])
   @@index([serviceCode])
   @@index([bookingMode])
+  @@index([isSystemManaged])
+  @@index([defaultForNewSellers])
+  @@index([country])
+}
+
+model SellerCourierPartner {
+  id                            String                     @id @default(cuid())
+  sellerId                      String                     @map("seller_id")
+  courierPartnerId              String                     @map("courier_partner_id")
+  status                        SellerCourierPartnerStatus @default(active)
+  partnerType                   PartnerType                @default(system_managed) @map("partner_type")
+  credentialsRequiredFromSeller Boolean                    @default(false) @map("credentials_required_from_seller")
+  enabledSegments               ShipmentSegment[]          @default([]) @map("enabled_segments")
+  country                       String                     @default("IN")
+  displayCode                   String                     @default("shipmastr_courier_network") @map("display_code")
+  displayName                   String                     @default("Shipmastr Courier Network") @map("display_name")
+  createdAt                     DateTime                   @default(now()) @map("created_at")
+  updatedAt                     DateTime                   @default(now()) @updatedAt @map("updated_at")
+
+  courierPartner CourierPartner @relation(fields: [courierPartnerId], references: [id], onDelete: Cascade)
+  pickupLocationProviderMappings PickupLocationProviderMapping[]
+  shipments Shipment[]
+  shipmentRates ShipmentRate[]
+
+  @@unique([sellerId, courierPartnerId])
+  @@index([sellerId])
+  @@index([courierPartnerId])
+  @@index([status])
+  @@index([partnerType])
+  @@index([country])
+  @@map("seller_courier_partners")
+}
+
+model PickupLocation {
+  id           String   @id @default(cuid())
+  sellerId     String   @map("seller_id")
+  label        String
+  contactName  String?  @map("contact_name")
+  phone        String?
+  addressLine1 String?  @map("address_line1")
+  addressLine2 String?  @map("address_line2")
+  city         String?
+  state        String?
+  pincode      String?
+  country      String   @default("IN")
+  status       String   @default("active")
+  metadata     Json?
+  createdAt    DateTime @default(now()) @map("created_at")
+  updatedAt    DateTime @default(now()) @updatedAt @map("updated_at")
+
+  providerMappings PickupLocationProviderMapping[]
+  shipments Shipment[]
+  orders Order[]
+
+  @@index([sellerId])
+  @@index([sellerId, status])
+  @@index([pincode])
+  @@index([country])
+  @@map("pickup_locations")
+}
+
+model PickupLocationProviderMapping {
+  id                     String   @id @default(cuid())
+  pickupLocationId       String   @map("pickup_location_id")
+  sellerCourierPartnerId String?  @map("seller_courier_partner_id")
+  courierPartnerId       String   @map("courier_partner_id")
+  providerPickupId       String?  @map("provider_pickup_id")
+  providerCode           String?  @map("provider_code")
+  status                 String   @default("active")
+  metadata               Json?
+  createdAt              DateTime @default(now()) @map("created_at")
+  updatedAt              DateTime @default(now()) @updatedAt @map("updated_at")
+
+  pickupLocation PickupLocation @relation(fields: [pickupLocationId], references: [id], onDelete: Cascade)
+  sellerCourierPartner SellerCourierPartner? @relation(fields: [sellerCourierPartnerId], references: [id], onDelete: SetNull)
+  courierPartner CourierPartner @relation(fields: [courierPartnerId], references: [id], onDelete: Cascade)
+
+  @@unique([pickupLocationId, courierPartnerId])
+  @@index([pickupLocationId])
+  @@index([sellerCourierPartnerId])
+  @@index([courierPartnerId])
+  @@index([providerPickupId])
+  @@index([status])
+  @@map("pickup_location_provider_mappings")
+}
+
+model Shipment {
+  id                     String              @id @default(cuid())
+  sellerId               String              @map("seller_id")
+  orderId                String?             @map("order_id")
+  externalOrderId        String?             @map("external_order_id")
+  pickupLocationId       String?             @map("pickup_location_id")
+  sellerCourierPartnerId String?             @map("seller_courier_partner_id")
+  courierPartnerId       String?             @map("courier_partner_id")
+  segment                ShipmentSegment     @default(domestic_b2c)
+  status                 ShipmentStatus      @default(draft)
+  paymentMode            ShippingPaymentMode @default(prepaid) @map("payment_mode")
+  codAmountPaise         Int                 @default(0) @map("cod_amount_paise")
+  declaredValuePaise     Int?                @map("declared_value_paise")
+  fromPincode            String?             @map("from_pincode")
+  toPincode              String?             @map("to_pincode")
+  deadWeightKg           Decimal?            @map("dead_weight_kg") @db.Decimal(10, 3)
+  lengthCm               Decimal?            @map("length_cm") @db.Decimal(10, 2)
+  breadthCm              Decimal?            @map("breadth_cm") @db.Decimal(10, 2)
+  heightCm               Decimal?            @map("height_cm") @db.Decimal(10, 2)
+  volumetricDivisor      Int                 @default(5000) @map("volumetric_divisor")
+  volumetricWeightKg     Decimal?            @map("volumetric_weight_kg") @db.Decimal(10, 3)
+  chargeableWeightKg     Decimal?            @map("chargeable_weight_kg") @db.Decimal(10, 3)
+  serviceLevel           String?             @map("service_level")
+  awbNumber              String?             @unique @map("awb_number")
+  trackingUrl            String?             @map("tracking_url")
+  trackingToken          String?             @unique @map("tracking_token")
+  trackingPublicUrl      String?             @map("tracking_public_url")
+  trackingStatus         String?             @map("tracking_status")
+  trackingLastSyncedAt   DateTime?           @map("tracking_last_synced_at")
+  metadata               Json?
+  createdAt              DateTime            @default(now()) @map("created_at")
+  updatedAt              DateTime            @default(now()) @updatedAt @map("updated_at")
+
+  pickupLocation PickupLocation? @relation(fields: [pickupLocationId], references: [id], onDelete: SetNull)
+  sellerCourierPartner SellerCourierPartner? @relation(fields: [sellerCourierPartnerId], references: [id], onDelete: SetNull)
+  courierPartner CourierPartner? @relation(fields: [courierPartnerId], references: [id], onDelete: SetNull)
+  providerRefs ShipmentProviderRef[]
+  rates ShipmentRate[]
+  trackingEvents ShipmentTrackingEvent[]
+
+  @@index([sellerId])
+  @@index([orderId])
+  @@index([externalOrderId])
+  @@index([pickupLocationId])
+  @@index([sellerCourierPartnerId])
+  @@index([courierPartnerId])
+  @@index([status])
+  @@index([segment])
+  @@index([paymentMode])
+  @@index([fromPincode, toPincode])
+  @@index([trackingToken])
+  @@index([createdAt])
+  @@map("shipments")
+}
+
+model ShipmentProviderRef {
+  id                 String   @id @default(cuid())
+  shipmentId         String   @map("shipment_id")
+  courierPartnerId   String?  @map("courier_partner_id")
+  providerShipmentId String?  @map("provider_shipment_id")
+  providerAwb        String?  @map("provider_awb")
+  providerOrderId    String?  @map("provider_order_id")
+  providerPickupId   String?  @map("provider_pickup_id")
+  metadata           Json?
+  createdAt          DateTime @default(now()) @map("created_at")
+  updatedAt          DateTime @default(now()) @updatedAt @map("updated_at")
+
+  shipment Shipment @relation(fields: [shipmentId], references: [id], onDelete: Cascade)
+  courierPartner CourierPartner? @relation(fields: [courierPartnerId], references: [id], onDelete: SetNull)
+
+  @@index([shipmentId])
+  @@index([courierPartnerId])
+  @@index([providerShipmentId])
+  @@index([providerAwb])
+  @@index([providerOrderId])
+  @@map("shipment_provider_refs")
+}
+
+model ShipmentRate {
+  id                     String          @id @default(cuid())
+  shipmentId             String?         @map("shipment_id")
+  sellerId               String          @map("seller_id")
+  sellerCourierPartnerId String?         @map("seller_courier_partner_id")
+  courierPartnerId       String?         @map("courier_partner_id")
+  publicServiceCode      String          @default("shipmastr_smart") @map("public_service_code")
+  publicServiceName      String          @default("Shipmastr Smart") @map("public_service_name")
+  segment                ShipmentSegment @default(domestic_b2c)
+  chargeableWeightKg     Decimal?        @map("chargeable_weight_kg") @db.Decimal(10, 3)
+  amountPaise            Int             @map("amount_paise")
+  currency               String          @default("INR")
+  estimatedDeliveryDays  Int?            @map("estimated_delivery_days")
+  rateBreakup            Json?           @map("rate_breakup")
+  expiresAt              DateTime?       @map("expires_at")
+  createdAt              DateTime        @default(now()) @map("created_at")
+  updatedAt              DateTime        @default(now()) @updatedAt @map("updated_at")
+
+  shipment Shipment? @relation(fields: [shipmentId], references: [id], onDelete: Cascade)
+  sellerCourierPartner SellerCourierPartner? @relation(fields: [sellerCourierPartnerId], references: [id], onDelete: SetNull)
+  courierPartner CourierPartner? @relation(fields: [courierPartnerId], references: [id], onDelete: SetNull)
+
+  @@index([shipmentId])
+  @@index([sellerId])
+  @@index([sellerCourierPartnerId])
+  @@index([courierPartnerId])
+  @@index([publicServiceCode])
+  @@index([segment])
+  @@index([createdAt])
+  @@map("shipment_rates")
+}
+
+model ShipmentTrackingEvent {
+  id               String         @id @default(cuid())
+  shipmentId       String         @map("shipment_id")
+  courierPartnerId String?        @map("courier_partner_id")
+  status           ShipmentStatus
+  eventCode        String?        @map("event_code")
+  eventLabel       String         @map("event_label")
+  publicMessage    String?        @map("public_message")
+  location         String?
+  occurredAt       DateTime       @default(now()) @map("occurred_at")
+  providerEventId  String?        @map("provider_event_id")
+  metadata         Json?
+  createdAt        DateTime       @default(now()) @map("created_at")
+
+  shipment Shipment @relation(fields: [shipmentId], references: [id], onDelete: Cascade)
+  courierPartner CourierPartner? @relation(fields: [courierPartnerId], references: [id], onDelete: SetNull)
+
+  @@index([shipmentId])
+  @@index([courierPartnerId])
+  @@index([status])
+  @@index([providerEventId])
+  @@index([occurredAt])
+  @@map("shipment_tracking_events")
+}
+
+model AutopilotPreference {
+  id                      String   @id @default(cuid())
+  merchantId              String   @unique @map("merchant_id")
+  isEnabled               Boolean  @default(false) @map("is_enabled")
+  defaultMode             String   @default("recommend_only") @map("default_mode")
+  preferredTier           String   @default("smart") @map("preferred_tier")
+  maxCodAmount            Int?     @map("max_cod_amount")
+  maxOrderAmount          Int?     @map("max_order_amount")
+  maxWeightGrams          Int?     @map("max_weight_grams")
+  allowCodHighRisk        Boolean  @default(false) @map("allow_cod_high_risk")
+  allowWeightHighRisk     Boolean  @default(false) @map("allow_weight_high_risk")
+  requireManualReviewHigh Boolean  @default(true) @map("require_manual_review_high")
+  rulesJson               Json?    @map("rules_json")
+  createdAt               DateTime @default(now()) @map("created_at")
+  updatedAt               DateTime @default(now()) @updatedAt @map("updated_at")
+
+  @@index([merchantId])
+  @@map("autopilot_preferences")
+}
+
+model AutopilotDecision {
+  id               String   @id @default(cuid())
+  merchantId       String   @map("merchant_id")
+  shipmentId       String   @map("shipment_id")
+  orderId          String?  @map("order_id")
+  mode             String
+  recommendedTier  String   @map("recommended_tier")
+  selectedTier     String?  @map("selected_tier")
+  decisionLevel    String   @map("decision_level")
+  reasonsJson      Json?    @map("reasons_json")
+  protectionJson   Json?    @map("protection_json")
+  rateSnapshotJson Json?    @map("rate_snapshot_json")
+  applied          Boolean  @default(false)
+  blockedReason    String?  @map("blocked_reason")
+  createdAt        DateTime @default(now()) @map("created_at")
+
+  @@index([merchantId, shipmentId])
+  @@index([merchantId, createdAt])
+  @@map("autopilot_decisions")
+}
+
+model CourierSlaEvent {
+  id               String   @id @default(cuid())
+  merchantId       String   @map("merchant_id")
+  shipmentId       String   @map("shipment_id")
+  orderId          String?  @map("order_id")
+  provider         String?
+  courierCode      String?  @map("courier_code")
+  courierName      String?  @map("courier_name")
+  serviceType      String?  @map("service_type")
+  selectedTier     String?  @map("selected_tier")
+  pickupPincode    String?  @map("pickup_pincode")
+  deliveryPincode  String?  @map("delivery_pincode")
+  eventType        String   @map("event_type")
+  eventAt          DateTime @default(now()) @map("event_at")
+  metadataJson     Json?    @map("metadata_json")
+  createdAt        DateTime @default(now()) @map("created_at")
+
+  @@index([merchantId, eventType])
+  @@index([provider, courierCode, deliveryPincode])
+  @@index([shipmentId])
+  @@map("courier_sla_events")
+}
+
+model CourierSlaStat {
+  id               String    @id @default(cuid())
+  provider         String?
+  courierCode      String?   @map("courier_code")
+  courierName      String?   @map("courier_name")
+  serviceType      String?   @map("service_type")
+  selectedTier     String?   @map("selected_tier")
+  pickupPincode    String?   @map("pickup_pincode")
+  deliveryPincode  String?   @map("delivery_pincode")
+  totalShipments   Int       @default(0) @map("total_shipments")
+  deliveredCount   Int       @default(0) @map("delivered_count")
+  rtoCount         Int       @default(0) @map("rto_count")
+  failedCount      Int       @default(0) @map("failed_count")
+  avgDeliveryDays  Float?    @map("avg_delivery_days")
+  reliabilityScore Float?    @map("reliability_score")
+  lastCalculatedAt DateTime? @map("last_calculated_at")
+  createdAt        DateTime  @default(now()) @map("created_at")
+  updatedAt        DateTime  @default(now()) @updatedAt @map("updated_at")
+
+  @@index([provider, courierCode, deliveryPincode])
+  @@index([selectedTier])
+  @@map("courier_sla_stats")
+}
+
+model BulkShippingBatch {
+  id            String   @id @default(cuid())
+  merchantId    String   @map("merchant_id")
+  action        String
+  status        String   @default("processing")
+  totalItems    Int      @default(0) @map("total_items")
+  successCount  Int      @default(0) @map("success_count")
+  failedCount   Int      @default(0) @map("failed_count")
+  skippedCount  Int      @default(0) @map("skipped_count")
+  requestedTier String?  @map("requested_tier")
+  errorsJson    Json?    @map("errors_json")
+  createdAt     DateTime @default(now()) @map("created_at")
+  updatedAt     DateTime @default(now()) @updatedAt @map("updated_at")
+
+  @@index([merchantId, status])
+  @@index([merchantId, createdAt])
+  @@map("bulk_shipping_batches")
+}
+
+model BulkShippingItem {
+  id           String   @id @default(cuid())
+  batchId      String   @map("batch_id")
+  merchantId   String   @map("merchant_id")
+  shipmentId   String   @map("shipment_id")
+  status       String
+  resultJson   Json?    @map("result_json")
+  errorCode    String?  @map("error_code")
+  errorMessage String?  @map("error_message")
+  createdAt    DateTime @default(now()) @map("created_at")
+
+  @@index([batchId])
+  @@index([merchantId, shipmentId])
+  @@map("bulk_shipping_items")
+}
+
+model NdrCase {
+  id                String    @id @default(cuid())
+  merchantId        String    @map("merchant_id")
+  shipmentId        String    @map("shipment_id")
+  orderId           String?   @map("order_id")
+  status            String    @default("open")
+  reasonCode        String?   @map("reason_code")
+  reasonLabel       String?   @map("reason_label")
+  buyerIssueType    String?   @map("buyer_issue_type")
+  latestAttemptAt   DateTime? @map("latest_attempt_at")
+  nextActionBy      DateTime? @map("next_action_by")
+  sellerAction      String?   @map("seller_action")
+  actionPayloadJson Json?     @map("action_payload_json")
+  providerActionRef String?   @map("provider_action_ref")
+  providerStatus    String?   @map("provider_status")
+  internalNotes     String?   @map("internal_notes")
+  createdAt         DateTime  @default(now()) @map("created_at")
+  updatedAt         DateTime  @default(now()) @updatedAt @map("updated_at")
+
+  @@index([merchantId, status])
+  @@index([shipmentId])
+  @@index([merchantId, createdAt])
+  @@map("ndr_cases")
+}
+
+model NdrActionAttempt {
+  id          String   @id @default(cuid())
+  merchantId  String   @map("merchant_id")
+  ndrCaseId   String   @map("ndr_case_id")
+  shipmentId  String   @map("shipment_id")
+  action      String
+  status      String   @default("recorded")
+  payloadJson Json?    @map("payload_json")
+  providerRef String?  @map("provider_ref")
+  errorJson   Json?    @map("error_json")
+  createdAt   DateTime @default(now()) @map("created_at")
+
+  @@index([merchantId, ndrCaseId])
+  @@index([shipmentId])
+  @@map("ndr_action_attempts")
+}
+
+model RtoCase {
+  id                 String    @id @default(cuid())
+  merchantId         String    @map("merchant_id")
+  shipmentId         String    @map("shipment_id")
+  orderId            String?   @map("order_id")
+  status             String    @default("initiated")
+  rtoReasonCode      String?   @map("rto_reason_code")
+  rtoReasonLabel     String?   @map("rto_reason_label")
+  initiatedAt        DateTime? @map("initiated_at")
+  receivedAt         DateTime? @map("received_at")
+  closedAt           DateTime? @map("closed_at")
+  forwardFreightPaise Int?     @map("forward_freight_paise")
+  rtoFreightPaise    Int?      @map("rto_freight_paise")
+  codLostPaise       Int?      @map("cod_lost_paise")
+  estimatedLossPaise Int?      @map("estimated_loss_paise")
+  providerStatus     String?   @map("provider_status")
+  metadataJson       Json?     @map("metadata_json")
+  createdAt          DateTime  @default(now()) @map("created_at")
+  updatedAt          DateTime  @default(now()) @updatedAt @map("updated_at")
+
+  @@index([merchantId, status])
+  @@index([shipmentId])
+  @@index([merchantId, createdAt])
+  @@map("rto_cases")
+}
+
+model CodLedgerEntry {
+  id                   String    @id @default(cuid())
+  merchantId           String    @map("merchant_id")
+  shipmentId           String?   @map("shipment_id")
+  orderId              String?   @map("order_id")
+  entryType            String    @map("entry_type")
+  status               String    @default("pending")
+  amountPaise          Int       @map("amount_paise")
+  currency             String    @default("INR")
+  expectedCollectionAt DateTime? @map("expected_collection_at")
+  collectedAt          DateTime? @map("collected_at")
+  remittanceDueAt      DateTime? @map("remittance_due_at")
+  remittedAt           DateTime? @map("remitted_at")
+  reference            String?
+  notes                String?
+  metadataJson         Json?     @map("metadata_json")
+  createdAt            DateTime  @default(now()) @map("created_at")
+  updatedAt            DateTime  @default(now()) @updatedAt @map("updated_at")
+
+  @@index([merchantId, status])
+  @@index([shipmentId])
+  @@index([orderId])
+  @@index([merchantId, createdAt])
+  @@map("cod_ledger_entries")
+}
+
+model WeightDiscrepancyCase {
+  id                    String    @id @default(cuid())
+  merchantId            String    @map("merchant_id")
+  shipmentId            String    @map("shipment_id")
+  orderId               String?   @map("order_id")
+  status                String    @default("detected")
+  declaredWeightGrams   Int?      @map("declared_weight_grams")
+  volumetricWeightGrams Int?      @map("volumetric_weight_grams")
+  billedWeightGrams     Int?      @map("billed_weight_grams")
+  differenceGrams       Int?      @map("difference_grams")
+  expectedChargePaise   Int?      @map("expected_charge_paise")
+  billedChargePaise     Int?      @map("billed_charge_paise")
+  differencePaise       Int?      @map("difference_paise")
+  reasonCode            String?   @map("reason_code")
+  reasonLabel           String?   @map("reason_label")
+  evidenceJson          Json?     @map("evidence_json")
+  providerRef           String?   @map("provider_ref")
+  providerStatus        String?   @map("provider_status")
+  internalNotes         String?   @map("internal_notes")
+  detectedAt            DateTime  @default(now()) @map("detected_at")
+  submittedAt           DateTime? @map("submitted_at")
+  closedAt              DateTime? @map("closed_at")
+  createdAt             DateTime  @default(now()) @map("created_at")
+  updatedAt             DateTime  @default(now()) @updatedAt @map("updated_at")
+
+  @@index([merchantId, status])
+  @@index([shipmentId])
+  @@index([merchantId, createdAt])
+  @@map("weight_discrepancy_cases")
+}
+
+model SellerApiKey {
+  id         String             @id @default(cuid())
+  merchantId String             @map("merchant_id")
+  name       String
+  keyPrefix  String             @map("key_prefix")
+  keyHash    String             @unique @map("key_hash")
+  scopes     String[]           @default([])
+  status     SellerApiKeyStatus @default(ACTIVE)
+  lastUsedAt DateTime?          @map("last_used_at")
+  expiresAt  DateTime?          @map("expires_at")
+  revokedAt  DateTime?          @map("revoked_at")
+  createdAt  DateTime           @default(now()) @map("created_at")
+  updatedAt  DateTime           @default(now()) @updatedAt @map("updated_at")
+
+  @@index([merchantId, status])
+  @@index([keyPrefix])
+  @@index([expiresAt])
+  @@map("seller_api_keys")
+}
+
+model WebhookSubscription {
+  id              String                    @id @default(cuid())
+  merchantId      String                    @map("merchant_id")
+  url             String
+  description     String?
+  events          String[]                  @default([])
+  status          WebhookSubscriptionStatus @default(ACTIVE)
+  secretHash      String?                   @map("secret_hash")
+  failureCount    Int                       @default(0) @map("failure_count")
+  lastDeliveredAt DateTime?                 @map("last_delivered_at")
+  lastFailedAt    DateTime?                 @map("last_failed_at")
+  disabledAt      DateTime?                 @map("disabled_at")
+  createdAt       DateTime                  @default(now()) @map("created_at")
+  updatedAt       DateTime                  @default(now()) @updatedAt @map("updated_at")
+
+  @@index([merchantId, status])
+  @@index([merchantId, createdAt])
+  @@map("webhook_subscriptions")
+}
+
+model WebhookEventOutbox {
+  id             String                   @id @default(cuid())
+  merchantId     String                   @map("merchant_id")
+  subscriptionId String?                  @map("subscription_id")
+  eventType      String                   @map("event_type")
+  payload        Json
+  status         WebhookEventOutboxStatus @default(PENDING)
+  attemptCount   Int                      @default(0) @map("attempt_count")
+  nextAttemptAt  DateTime?                @map("next_attempt_at")
+  lastAttemptAt  DateTime?                @map("last_attempt_at")
+  deliveredAt    DateTime?                @map("delivered_at")
+  failedAt       DateTime?                @map("failed_at")
+  createdAt      DateTime                 @default(now()) @map("created_at")
+  updatedAt      DateTime                 @default(now()) @updatedAt @map("updated_at")
+
+  @@index([merchantId, status])
+  @@index([merchantId, eventType])
+  @@index([subscriptionId])
+  @@index([createdAt])
+  @@map("webhook_event_outbox")
+}
+
+model PlatformConnection {
+  id                 String                   @id @default(cuid())
+  merchantId         String                   @map("merchant_id")
+  platform           StorePlatform
+  storeName          String?                  @map("store_name")
+  storeUrl           String                   @map("store_url")
+  status             PlatformConnectionStatus @default(DRAFT)
+  syncDirection      PlatformSyncDirection    @default(IMPORT_ONLY) @map("sync_direction")
+  credentialsRef     String?                  @map("credentials_ref")
+  credentialsMeta    Json?                    @map("credentials_meta")
+  lastOrderImportAt  DateTime?                @map("last_order_import_at")
+  lastTrackingSyncAt DateTime?                @map("last_tracking_sync_at")
+  lastErrorCode      String?                  @map("last_error_code")
+  lastErrorMessage   String?                  @map("last_error_message")
+  disabledAt         DateTime?                @map("disabled_at")
+  createdAt          DateTime                 @default(now()) @map("created_at")
+  updatedAt          DateTime                 @default(now()) @updatedAt @map("updated_at")
+
+  @@index([merchantId, status])
+  @@index([merchantId, platform])
+  @@index([merchantId, createdAt])
+  @@map("platform_connections")
+}
+
+model ShopifyConnectionState {
+  id                           String               @id @default(cuid())
+  connectionId                 String               @unique @map("connection_id")
+  shopDomain                   String               @map("shop_domain")
+  apiVersion                   String?              @map("api_version")
+  installMode                  ShopifyInstallMode   @default(CUSTOM_APP) @map("install_mode")
+  webhookStatus                ShopifyWebhookStatus @default(NOT_CONFIGURED) @map("webhook_status")
+  lastWebhookReceivedAt        DateTime?            @map("last_webhook_received_at")
+  lastOrderWebhookId           String?              @map("last_order_webhook_id")
+  lastFulfillmentSyncAttemptAt DateTime?            @map("last_fulfillment_sync_attempt_at")
+  createdAt                    DateTime             @default(now()) @map("created_at")
+  updatedAt                    DateTime             @default(now()) @updatedAt @map("updated_at")
+
+  @@index([shopDomain])
+  @@index([webhookStatus])
+  @@map("shopify_connection_states")
+}
+
+model WooCommerceConnectionState {
+  id                         String                   @id @default(cuid())
+  connectionId               String                   @unique @map("connection_id")
+  siteUrl                    String                   @map("site_url")
+  apiVersion                 String?                  @map("api_version")
+  installMode                WooCommerceInstallMode   @default(REST_KEY_PLACEHOLDER) @map("install_mode")
+  webhookStatus              WooCommerceWebhookStatus @default(NOT_CONFIGURED) @map("webhook_status")
+  lastWebhookReceivedAt      DateTime?                @map("last_webhook_received_at")
+  lastOrderWebhookId         String?                  @map("last_order_webhook_id")
+  lastTrackingSyncAttemptAt  DateTime?                @map("last_tracking_sync_attempt_at")
+  createdAt                  DateTime                 @default(now()) @map("created_at")
+  updatedAt                  DateTime                 @default(now()) @updatedAt @map("updated_at")
+
+  @@index([siteUrl])
+  @@index([webhookStatus])
+  @@map("woocommerce_connection_states")
+}
+
+model MagentoConnectionState {
+  id                        String               @id @default(cuid())
+  connectionId              String               @unique @map("connection_id")
+  baseUrl                   String               @map("base_url")
+  storeViewCode             String?              @map("store_view_code")
+  websiteCode               String?              @map("website_code")
+  apiVersion                String?              @map("api_version")
+  installMode               MagentoInstallMode   @default(INTEGRATION_TOKEN_PLACEHOLDER) @map("install_mode")
+  webhookStatus             MagentoWebhookStatus @default(NOT_CONFIGURED) @map("webhook_status")
+  lastWebhookReceivedAt     DateTime?            @map("last_webhook_received_at")
+  lastOrderWebhookId        String?              @map("last_order_webhook_id")
+  lastShippingSyncAttemptAt DateTime?            @map("last_shipping_sync_attempt_at")
+  createdAt                 DateTime             @default(now()) @map("created_at")
+  updatedAt                 DateTime             @default(now()) @updatedAt @map("updated_at")
+
+  @@index([baseUrl])
+  @@index([storeViewCode])
+  @@index([webhookStatus])
+  @@map("magento_connection_states")
+}
+
+model PlatformOrderImport {
+  id                String                    @id @default(cuid())
+  connectionId      String                    @map("connection_id")
+  merchantId        String                    @map("merchant_id")
+  platform          StorePlatform
+  externalOrderId   String                    @map("external_order_id")
+  externalOrderName String?                   @map("external_order_name")
+  status            PlatformOrderImportStatus @default(RECEIVED)
+  normalizedOrderId String?                   @map("normalized_order_id")
+  rawPayloadHash    String?                   @map("raw_payload_hash")
+  rawPayloadPreview Json?                     @map("raw_payload_preview")
+  mappingWarnings   Json?                     @map("mapping_warnings")
+  createdAt         DateTime                  @default(now()) @map("created_at")
+  updatedAt         DateTime                  @default(now()) @updatedAt @map("updated_at")
+
+  @@index([merchantId, status])
+  @@index([connectionId])
+  @@index([merchantId, platform])
+  @@index([merchantId, externalOrderId])
+  @@index([createdAt])
+  @@map("platform_order_imports")
+}
+
+model PlatformTrackingSync {
+  id             String                     @id @default(cuid())
+  connectionId   String                     @map("connection_id")
+  merchantId     String                     @map("merchant_id")
+  shipmentId     String                     @map("shipment_id")
+  platform       StorePlatform
+  externalOrderId String?                   @map("external_order_id")
+  trackingNumber String?                    @map("tracking_number")
+  trackingUrl    String?                    @map("tracking_url")
+  status         PlatformTrackingSyncStatus @default(PENDING)
+  mode           String                     @default("DRY_RUN")
+  safeMeta       Json?                      @map("safe_meta")
+  lastAttemptAt  DateTime?                  @map("last_attempt_at")
+  syncedAt       DateTime?                  @map("synced_at")
+  errorMessage   String?                    @map("error_message")
+  createdAt      DateTime                   @default(now()) @map("created_at")
+  updatedAt      DateTime                   @default(now()) @updatedAt @map("updated_at")
+
+  @@index([merchantId, status])
+  @@index([connectionId])
+  @@index([shipmentId])
+  @@index([merchantId, externalOrderId])
+  @@map("platform_tracking_syncs")
+}
+
+model PlatformCredential {
+  id                String                   @id @default(cuid())
+  merchantId        String                   @map("merchant_id")
+  platform          PlatformCredentialProvider
+  credentialType    PlatformCredentialType   @map("credential_type")
+  name              String
+  status            PlatformCredentialStatus @default(ACTIVE)
+  secretRef         String                   @unique @map("secret_ref")
+  secretFingerprint String                   @map("secret_fingerprint")
+  safeMetadata      Json?                    @map("safe_metadata")
+  lastUsedAt        DateTime?                @map("last_used_at")
+  expiresAt         DateTime?                @map("expires_at")
+  createdAt         DateTime                 @default(now()) @map("created_at")
+  updatedAt         DateTime                 @default(now()) @updatedAt @map("updated_at")
+  rotatedAt         DateTime?                @map("rotated_at")
+  revokedAt         DateTime?                @map("revoked_at")
+
+  @@index([merchantId, platform])
+  @@index([merchantId, status])
+  @@index([credentialType])
+  @@index([expiresAt])
+  @@map("platform_credentials")
+}
+
+model PlatformCredentialSecret {
+  id                String   @id @default(cuid())
+  credentialId      String   @unique @map("credential_id")
+  encryptedValue    String   @map("encrypted_value")
+  encryptionVersion String   @default("local-aes-256-gcm-v1") @map("encryption_version")
+  createdAt         DateTime @default(now()) @map("created_at")
+  updatedAt         DateTime @default(now()) @updatedAt @map("updated_at")
+
+  @@index([credentialId])
+  @@map("platform_credential_secrets")
+}
+
+model PlatformConnectionHealthCheck {
+  id          String                    @id @default(cuid())
+  connectionId String                   @map("connection_id")
+  merchantId  String                    @map("merchant_id")
+  platform    StorePlatform
+  checkType   PlatformHealthCheckType   @map("check_type")
+  status      PlatformHealthCheckStatus
+  message     String
+  safeDetails Json?                     @map("safe_details")
+  errorCode   String?                   @map("error_code")
+  checkedAt   DateTime                  @default(now()) @map("checked_at")
+  createdAt   DateTime                  @default(now()) @map("created_at")
+
+  @@index([merchantId, platform])
+  @@index([connectionId, checkedAt])
+  @@index([merchantId, status])
+  @@map("platform_connection_health_checks")
+}
+
+model PlatformImportJob {
+  id             String                  @id @default(cuid())
+  connectionId   String                  @map("connection_id")
+  merchantId     String                  @map("merchant_id")
+  platform       StorePlatform
+  mode           PlatformImportJobMode
+  source         PlatformImportSource
+  status         PlatformImportJobStatus @default(QUEUED)
+  requestedBy    String?                 @map("requested_by")
+  startedAt      DateTime?               @map("started_at")
+  completedAt    DateTime?               @map("completed_at")
+  cancelledAt    DateTime?               @map("cancelled_at")
+  totalItems     Int                     @default(0) @map("total_items")
+  mappedItems    Int                     @default(0) @map("mapped_items")
+  importedItems  Int                     @default(0) @map("imported_items")
+  skippedItems   Int                     @default(0) @map("skipped_items")
+  duplicateItems Int                     @default(0) @map("duplicate_items")
+  failedItems    Int                     @default(0) @map("failed_items")
+  warningCount   Int                     @default(0) @map("warning_count")
+  safeSummary    Json?                   @map("safe_summary")
+  createdAt      DateTime                @default(now()) @map("created_at")
+  updatedAt      DateTime                @default(now()) @updatedAt @map("updated_at")
+
+  @@index([merchantId, status])
+  @@index([connectionId, createdAt])
+  @@index([merchantId, platform])
+  @@index([merchantId, createdAt])
+  @@map("platform_import_jobs")
+}
+
+model PlatformImportCursor {
+  id           String        @id @default(cuid())
+  merchantId   String        @map("merchant_id")
+  connectionId String        @map("connection_id")
+  platform     StorePlatform
+  cursor       String?
+  page         Int?
+  since        DateTime?
+  status       String
+  lastJobId    String?       @map("last_job_id")
+  hasMore      Boolean       @default(false) @map("has_more")
+  warningCount Int           @default(0) @map("warning_count")
+  errorCount   Int           @default(0) @map("error_count")
+  createdAt    DateTime      @default(now()) @map("created_at")
+  updatedAt    DateTime      @default(now()) @updatedAt @map("updated_at")
+
+  @@index([merchantId, connectionId, platform])
+  @@index([merchantId, status])
+  @@index([connectionId, updatedAt])
+  @@map("platform_import_cursors")
+}
+
+model PlatformImportItem {
+  id                String                   @id @default(cuid())
+  jobId             String                   @map("job_id")
+  connectionId      String                   @map("connection_id")
+  merchantId        String                   @map("merchant_id")
+  platform          StorePlatform
+  externalOrderId   String?                  @map("external_order_id")
+  externalOrderName String?                  @map("external_order_name")
+  payloadHash       String                   @map("payload_hash")
+  status            PlatformImportItemStatus @default(PENDING)
+  orderImportId     String?                  @map("order_import_id")
+  normalizedOrderId String?                  @map("normalized_order_id")
+  attemptCount      Int                      @default(0) @map("attempt_count")
+  lastAttemptAt     DateTime?                @map("last_attempt_at")
+  nextAttemptAt     DateTime?                @map("next_attempt_at")
+  errorCode         String?                  @map("error_code")
+  errorMessage      String?                  @map("error_message")
+  mappingWarnings   Json?                    @map("mapping_warnings")
+  safePayloadPreview Json?                   @map("safe_payload_preview")
+  createdAt         DateTime                 @default(now()) @map("created_at")
+  updatedAt         DateTime                 @default(now()) @updatedAt @map("updated_at")
+
+  @@index([jobId])
+  @@index([merchantId, status])
+  @@index([connectionId, externalOrderId])
+  @@index([connectionId, payloadHash])
+  @@index([merchantId, createdAt])
+  @@map("platform_import_items")
+}
+
+model PlatformImportConversion {
+  id                    String   @id @default(cuid())
+  merchantId            String   @map("merchant_id")
+  importItemId          String   @map("import_item_id")
+  platformOrderImportId String?  @map("platform_order_import_id")
+  orderId               String?  @map("order_id")
+  shipmentId            String?  @map("shipment_id")
+  status                String
+  queue                 String?
+  warnings              Json?
+  reasonCodes           Json?    @map("reason_codes")
+  createdAt             DateTime @default(now()) @map("created_at")
+  updatedAt             DateTime @default(now()) @updatedAt @map("updated_at")
+
+  @@unique([merchantId, importItemId])
+  @@index([merchantId, status])
+  @@index([orderId])
+  @@index([shipmentId])
+  @@map("platform_import_conversions")
+}
+
+model PlatformWebhookEvent {
+  id              String    @id @default(cuid())
+  merchantId      String    @map("merchant_id")
+  connectionId    String?   @map("connection_id")
+  platform        StorePlatform
+  topic           String
+  externalEventId String?   @map("external_event_id")
+  eventHash       String    @map("event_hash")
+  status          String    @default("RECEIVED")
+  receivedAt      DateTime  @default(now()) @map("received_at")
+  processedAt     DateTime? @map("processed_at")
+  safeSummary     Json?     @map("safe_summary")
+  warnings        Json?
+  errors          Json?
+  importJobId     String?   @map("import_job_id")
+  importItemId    String?   @map("import_item_id")
+  dedupeKey       String?   @map("dedupe_key")
+  createdAt       DateTime  @default(now()) @map("created_at")
+  updatedAt       DateTime  @default(now()) @updatedAt @map("updated_at")
+
+  @@unique([merchantId, dedupeKey])
+  @@index([merchantId, platform])
+  @@index([merchantId, status])
+  @@index([connectionId])
+  @@index([receivedAt])
+  @@map("platform_webhook_events")
+}
+
+model PlatformWebhookRegistration {
+  id                String        @id @default(cuid())
+  merchantId        String        @map("merchant_id")
+  connectionId      String        @map("connection_id")
+  platform          StorePlatform
+  topic             String
+  callbackUrlSafe   String        @map("callback_url_safe")
+  status            String        @default("DRAFT")
+  externalWebhookId String?       @map("external_webhook_id")
+  registeredAt      DateTime?     @map("registered_at")
+  disabledAt        DateTime?     @map("disabled_at")
+  safeMeta          Json?         @map("safe_meta")
+  createdAt         DateTime      @default(now()) @map("created_at")
+  updatedAt         DateTime      @default(now()) @updatedAt @map("updated_at")
+
+  @@unique([connectionId, topic])
+  @@index([merchantId, connectionId])
+  @@index([merchantId, status])
+  @@index([platform, topic])
+  @@map("platform_webhook_registrations")
+}
+
+model MerchantNotification {
+  id          String    @id @default(cuid())
+  merchantId  String    @map("merchant_id")
+  type        String
+  severity    String
+  status      String    @default("UNREAD")
+  title       String
+  message     String
+  actionLabel String?   @map("action_label")
+  actionUrl   String?   @map("action_url")
+  sourceType  String?   @map("source_type")
+  sourceId    String?   @map("source_id")
+  sourceMeta  Json?     @map("source_meta")
+  dedupeKey   String?   @map("dedupe_key")
+  readAt      DateTime? @map("read_at")
+  createdAt   DateTime  @default(now()) @map("created_at")
+  updatedAt   DateTime  @default(now()) @updatedAt @map("updated_at")
+
+  @@unique([merchantId, dedupeKey])
+  @@index([merchantId, status])
+  @@index([merchantId, type])
+  @@index([merchantId, severity])
+  @@index([merchantId, createdAt])
+  @@map("merchant_notifications")
+}
+
+model MerchantNotificationPreference {
+  id                      String   @id @default(cuid())
+  merchantId              String   @unique @map("merchant_id")
+  inAppEnabled            Boolean  @default(true) @map("in_app_enabled")
+  importFailedEnabled     Boolean  @default(true) @map("import_failed_enabled")
+  needsReviewEnabled      Boolean  @default(true) @map("needs_review_enabled")
+  duplicateEnabled        Boolean  @default(true) @map("duplicate_enabled")
+  conversionBlockedEnabled Boolean @default(true) @map("conversion_blocked_enabled")
+  digestEnabled           Boolean  @default(true) @map("digest_enabled")
+  emailEnabled            Boolean  @default(false) @map("email_enabled")
+  createdAt               DateTime @default(now()) @map("created_at")
+  updatedAt               DateTime @default(now()) @updatedAt @map("updated_at")
+
+  @@map("merchant_notification_preferences")
+}
+
+model EmailDeliveryAttempt {
+  id             String    @id @default(cuid())
+  merchantId     String?   @map("merchant_id")
+  notificationId String?   @map("notification_id")
+  recipientSafe  String?   @map("recipient_safe")
+  provider       String
+  mode           String
+  status         String
+  subject        String?
+  safeMeta       Json?     @map("safe_meta")
+  sentAt         DateTime? @map("sent_at")
+  createdAt      DateTime  @default(now()) @map("created_at")
+  updatedAt      DateTime  @default(now()) @updatedAt @map("updated_at")
+
+  @@index([merchantId, status])
+  @@index([notificationId])
+  @@index([createdAt])
+  @@map("email_delivery_attempts")
+}
+
+model ShipmastrWorkerRun {
+  id             String    @id @default(cuid())
+  workerName     String    @map("worker_name")
+  merchantId     String?   @map("merchant_id")
+  status         String
+  mode           String
+  startedAt      DateTime  @default(now()) @map("started_at")
+  finishedAt     DateTime? @map("finished_at")
+  processedCount Int       @default(0) @map("processed_count")
+  failedCount    Int       @default(0) @map("failed_count")
+  warnings       Json?
+  errors         Json?
+  createdAt      DateTime  @default(now()) @map("created_at")
+  updatedAt      DateTime  @default(now()) @updatedAt @map("updated_at")
+
+  @@index([workerName, status])
+  @@index([startedAt])
+  @@index([merchantId, startedAt])
+  @@map("shipmastr_worker_runs")
+}
+
+model MerchantOnboardingState {
+  id                        String    @id @default(cuid())
+  merchantId                String    @unique @map("merchant_id")
+  currentStep               String    @default("WELCOME") @map("current_step")
+  storeConnected            Boolean   @default(false) @map("store_connected")
+  credentialsReady          Boolean   @default(false) @map("credentials_ready")
+  firstFetchCompleted       Boolean   @default(false) @map("first_fetch_completed")
+  reconciliationViewed      Boolean   @default(false) @map("reconciliation_viewed")
+  firstConversionCompleted  Boolean   @default(false) @map("first_conversion_completed")
+  shippingWorkspaceReady    Boolean   @default(false) @map("shipping_workspace_ready")
+  completedAt               DateTime? @map("completed_at")
+  createdAt                 DateTime  @default(now()) @map("created_at")
+  updatedAt                 DateTime  @default(now()) @updatedAt @map("updated_at")
+
+  @@index([merchantId, currentStep])
+  @@map("merchant_onboarding_states")
+}
+
+model LivePilotMerchant {
+  id         String    @id @default(cuid())
+  merchantId String    @unique @map("merchant_id")
+  status     String    @default("DISABLED")
+  notes      String?
+  enabledBy  String?   @map("enabled_by")
+  enabledAt  DateTime? @map("enabled_at")
+  disabledBy String?   @map("disabled_by")
+  disabledAt DateTime? @map("disabled_at")
+  createdAt  DateTime  @default(now()) @map("created_at")
+  updatedAt  DateTime  @default(now()) @updatedAt @map("updated_at")
+
+  @@index([status])
+  @@index([merchantId, status])
+  @@map("live_pilot_merchants")
+}
+
+model LivePilotCapability {
+  id         String    @id @default(cuid())
+  merchantId String    @map("merchant_id")
+  capability String
+  status     String    @default("DISABLED")
+  approvalId String?   @map("approval_id")
+  notes      String?
+  enabledAt  DateTime? @map("enabled_at")
+  disabledAt DateTime? @map("disabled_at")
+  createdAt  DateTime  @default(now()) @map("created_at")
+  updatedAt  DateTime  @default(now()) @updatedAt @map("updated_at")
+
+  @@unique([merchantId, capability])
+  @@index([merchantId, status])
+  @@index([capability, status])
+  @@map("live_pilot_capabilities")
+}
+
+model LivePilotApproval {
+  id           String    @id @default(cuid())
+  merchantId   String?   @map("merchant_id")
+  approvalType String    @map("approval_type")
+  status       String    @default("PENDING")
+  approvedBy   String?   @map("approved_by")
+  approvedAt   DateTime? @map("approved_at")
+  revokedBy    String?   @map("revoked_by")
+  revokedAt    DateTime? @map("revoked_at")
+  reason       String?
+  createdAt    DateTime  @default(now()) @map("created_at")
+  updatedAt    DateTime  @default(now()) @updatedAt @map("updated_at")
+
+  @@index([merchantId, approvalType])
+  @@index([status])
+  @@map("live_pilot_approvals")
+}
+
+model LivePilotAuditLog {
+  id         String   @id @default(cuid())
+  merchantId String?  @map("merchant_id")
+  action     String
+  actorId    String?  @map("actor_id")
+  targetType String?  @map("target_type")
+  targetId   String?  @map("target_id")
+  safeMeta   Json?    @map("safe_meta")
+  createdAt  DateTime @default(now()) @map("created_at")
+
+  @@index([merchantId, createdAt])
+  @@index([action])
+  @@map("live_pilot_audit_logs")
+}
+
+model CourierProviderCredential {
+  id              String   @id @default(cuid())
+  merchantId      String?  @map("merchant_id")
+  providerKey     String   @map("provider_key")
+  mode            String
+  status          String   @default("DRAFT")
+  credentialRef   String?  @map("credential_ref")
+  requiredFields  Json?    @map("required_fields")
+  safeMeta        Json?    @map("safe_meta")
+  lastTestedAt    DateTime? @map("last_tested_at")
+  lastTestStatus  String?  @map("last_test_status")
+  lastTestSummary Json?    @map("last_test_summary")
+  createdAt       DateTime @default(now()) @map("created_at")
+  updatedAt       DateTime @default(now()) @updatedAt @map("updated_at")
+  readinessProbes CourierProviderReadinessProbe[]
+
+  @@index([merchantId, providerKey, mode])
+  @@index([providerKey, status])
+  @@index([lastTestedAt])
+  @@map("courier_provider_credentials")
+}
+
+model CourierProviderReadinessProbe {
+  id            String   @id @default(cuid())
+  credentialId  String?  @map("credential_id")
+  credential    CourierProviderCredential? @relation(fields: [credentialId], references: [id], onDelete: SetNull)
+  merchantId    String?  @map("merchant_id")
+  providerKey   String   @map("provider_key")
+  probeType     String   @map("probe_type")
+  mode          String
+  status        String
+  safeSummary   Json?    @map("safe_summary")
+  warnings      Json?
+  errors        Json?
+  testedAt      DateTime @default(now()) @map("tested_at")
+  createdAt     DateTime @default(now()) @map("created_at")
+
+  @@index([merchantId, providerKey])
+  @@index([providerKey, status])
+  @@index([testedAt])
+  @@map("courier_provider_readiness_probes")
 }
 
 model CourierPartnerApplication {
@@ -1822,22 +3132,49 @@ model Order {
   id              String      @id @default(cuid())
   merchantId      String
   externalOrderId String
+  source          String      @default("manual")
+  importBatchId   String?
   buyerName       String
   buyerPhone      String
+  buyerEmail      String?
+  buyerAltPhone   String?
   addressLine1    String
   addressLine2    String?
+  landmark        String?
   city            String
   state           String
   pincode         String
+  country         String      @default("IN")
   orderValue      Int
   codAmount       Int         @default(0)
+  declaredValue   Int         @default(0)
   paymentMode     PaymentMode
   weightGrams     Int?
+  packageLengthMm Int?
+  packageWidthMm  Int?
+  packageHeightMm Int?
+  volumetricWeightGrams Int?
+  productDescription String?
+  hsnCode         String?
+  itemCount       Int         @default(1)
+  tags            Json?
+  codRiskScore    Int?
+  codRiskLevel    String?
+  rtoRiskScore    Int?
+  rtoRiskLevel    String?
+  courierOverride String?
+  addressQualityScore Int?
+  addressQualityFlags Json?
+  needsAttentionReasons Json?
+  sellerNotes     String?
+  pickupLocationId String?
   status          OrderStatus @default(CREATED)
   createdAt       DateTime    @default(now())
   updatedAt       DateTime    @updatedAt
 
   merchant          Merchant           @relation(fields: [merchantId], references: [id], onDelete: Cascade)
+  importBatch       OrderImportBatch?  @relation(fields: [importBatchId], references: [id], onDelete: SetNull)
+  pickupLocation    PickupLocation?    @relation(fields: [pickupLocationId], references: [id], onDelete: SetNull)
   riskScores        RiskScore[]
   webhookEvents     WebhookEvent[]
   shipmentDetails   ShipmentDetails?
@@ -1851,7 +3188,31 @@ model Order {
   @@unique([merchantId, externalOrderId])
   @@index([merchantId, buyerPhone])
   @@index([merchantId, pincode])
+  @@index([merchantId, source])
+  @@index([merchantId, importBatchId])
+  @@index([merchantId, pickupLocationId])
   @@index([status])
+}
+
+model OrderImportBatch {
+  id           String   @id @default(cuid())
+  merchantId   String
+  filename     String
+  totalRows    Int      @default(0)
+  importedRows Int      @default(0)
+  skippedRows  Int      @default(0)
+  failedRows   Int      @default(0)
+  errorsJson   Json?
+  status       String   @default("processing")
+  createdAt    DateTime @default(now())
+  updatedAt    DateTime @updatedAt
+
+  merchant Merchant @relation(fields: [merchantId], references: [id], onDelete: Cascade)
+  orders Order[]
+
+  @@index([merchantId])
+  @@index([merchantId, status])
+  @@index([merchantId, createdAt])
 }
 
 model ShipmentDetails {

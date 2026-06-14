@@ -26,6 +26,37 @@ import { actualOutcomeFromCarrier, evaluatePredictionFlags } from "./prediction-
 import { buildCommunicationQueueWhere, recordBuyerCommunication, updateBuyerCommunicationStatus } from "./buyer-communication.service.js";
 import { buildSellerSafeOrderDecision, buildSellerSafeOrderDecisionFromRecords } from "./seller-safe-decision.service.js";
 
+function orderFixture(overrides: Record<string, unknown>) {
+  return {
+    source: "manual",
+    importBatchId: null,
+    buyerEmail: null,
+    buyerAltPhone: null,
+    landmark: null,
+    country: "IN",
+    declaredValue: Number(overrides.orderValue ?? 0),
+    packageLengthMm: null,
+    packageWidthMm: null,
+    packageHeightMm: null,
+    volumetricWeightGrams: null,
+    productDescription: null,
+    hsnCode: null,
+    itemCount: 1,
+    tags: null,
+    codRiskScore: null,
+    codRiskLevel: null,
+    rtoRiskScore: null,
+    rtoRiskLevel: null,
+    courierOverride: null,
+    addressQualityScore: null,
+    addressQualityFlags: null,
+    needsAttentionReasons: null,
+    sellerNotes: null,
+    pickupLocationId: null,
+    ...overrides
+  } as any;
+}
+
 function makeCommunicationClient(overrides: Record<string, unknown> = {}) {
   const now = new Date("2026-05-05T00:00:00.000Z");
   const state = {
@@ -488,7 +519,7 @@ describe("logistics intelligence rules", () => {
   });
 
   it("builds enriched order data signals for SKU, campaign, profitability, and time", () => {
-    const order = {
+    const order = orderFixture({
       id: "order_1",
       merchantId: "merchant_1",
       externalOrderId: "SM-1",
@@ -506,7 +537,7 @@ describe("logistics intelligence rules", () => {
       status: "CREATED",
       createdAt: new Date("2026-05-03T23:30:00.000Z"),
       updatedAt: new Date("2026-05-03T23:30:00.000Z")
-    } as const;
+    });
 
     const signals = buildOrderDataSignalsInput(order, {
       skuId: "SKU-123",
@@ -534,7 +565,7 @@ describe("logistics intelligence rules", () => {
     const rawPhone = "9721193456";
     const pHash = hashPhone(rawPhone);
     const snapshot = buildEnrichedSnapshot({
-      order: {
+      order: orderFixture({
         id: "order_2",
         merchantId: "merchant_1",
         externalOrderId: "SM-2",
@@ -552,7 +583,7 @@ describe("logistics intelligence rules", () => {
         status: "CREATED",
         createdAt: new Date("2026-05-03T10:00:00.000Z"),
         updatedAt: new Date("2026-05-03T10:00:00.000Z")
-      },
+      }),
       buyerPhoneHash: pHash,
       addressHash: "address_hash",
       consigneeScore: 65,
@@ -585,7 +616,7 @@ describe("logistics intelligence rules", () => {
   });
 
   it("maps carrier webhook outcomes and shipment lifecycle patches", () => {
-    const order = {
+    const order = orderFixture({
       id: "order_3",
       merchantId: "merchant_1",
       externalOrderId: "SM-3",
@@ -603,7 +634,7 @@ describe("logistics intelligence rules", () => {
       status: "SHIPPED",
       createdAt: new Date("2026-05-03T10:00:00.000Z"),
       updatedAt: new Date("2026-05-03T10:00:00.000Z")
-    } as const;
+    });
     const patch = shipmentPatchFromWebhook({
       order,
       status: "NDR",
