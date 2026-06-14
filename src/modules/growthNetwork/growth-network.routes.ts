@@ -20,6 +20,13 @@ import type { RtoNdrRecoveryDb } from "./rto-ndr-recovery.service.js";
 import { createSellerGrowthSuggestionsRouter } from "./seller-growth-suggestions.routes.js";
 import type { SellerGrowthSuggestionsDb } from "./seller-growth-suggestions.service.js";
 import {
+  currentGrowthNetworkRuntime,
+  requireGrowthNetworkAudience,
+  requireGrowthNetworkEnabled,
+  serializeGrowthNetworkRuntimeStatus,
+  type GrowthNetworkRuntimeConfig
+} from "./growth-network-runtime.js";
+import {
   addGrowthOfferPlacement,
   createGrowthOffer,
   listGrowthOffers,
@@ -43,6 +50,8 @@ import {
 
 type GrowthNetworkRouterDeps = {
   client?: GrowthNetworkDb;
+  enforceRuntimeGuard?: boolean;
+  runtime?: GrowthNetworkRuntimeConfig;
 };
 
 function queryWithAliases(query: Record<string, unknown>) {
@@ -61,6 +70,24 @@ function queryWithAliases(query: Record<string, unknown>) {
 export function createGrowthNetworkRouter(deps: GrowthNetworkRouterDeps = {}) {
   const router = Router();
   const client = deps.client;
+  const runtime = deps.runtime ?? currentGrowthNetworkRuntime();
+
+  if (deps.enforceRuntimeGuard) {
+    router.use(requireGrowthNetworkAudience(runtime));
+  }
+
+  router.get("/status", (_req, res) => {
+    return res.json(successEnvelope(
+      runtime.enabled
+        ? "Growth Network is available for authenticated Shipmastr merchants and sellers."
+        : "This Growth Network capability is currently disabled.",
+      serializeGrowthNetworkRuntimeStatus(runtime)
+    ));
+  });
+
+  if (deps.enforceRuntimeGuard) {
+    router.use(requireGrowthNetworkEnabled(runtime));
+  }
 
   router.use(
     "/prepaid-incentives",
@@ -147,4 +174,4 @@ export function createGrowthNetworkRouter(deps: GrowthNetworkRouterDeps = {}) {
   return router;
 }
 
-export const growthNetworkRouter = createGrowthNetworkRouter();
+export const growthNetworkRouter = createGrowthNetworkRouter({ enforceRuntimeGuard: true });

@@ -150,7 +150,16 @@ const schema = z.object({
   SHIPMASTR_RETRY_WORKER_ENABLED: envBoolean(false),
   SHIPMASTR_WORKER_MAX_BATCH: z.coerce.number().int().min(1).max(100).default(25),
   SHIPMASTR_WORKER_LOCK_SECONDS: z.coerce.number().int().min(30).max(3600).default(300),
-  SHIPMASTR_WORKER_DRY_RUN: envBoolean(true)
+  SHIPMASTR_WORKER_DRY_RUN: envBoolean(true),
+  GROWTH_NETWORK_ENABLED: envBoolean(false),
+  GROWTH_NETWORK_AUDIENCE: z.enum(["MERCHANT_SELLER_ONLY"]).default("MERCHANT_SELLER_ONLY"),
+  GROWTH_NETWORK_EXTERNAL_ADS_ENABLED: envBoolean(false),
+  GROWTH_NETWORK_BILLING_ENABLED: envBoolean(false),
+  GROWTH_NETWORK_PARTNER_ROUTING_ENABLED: envBoolean(false),
+  GROWTH_NETWORK_MESSAGING_ENABLED: envBoolean(false),
+  GROWTH_NETWORK_PAYMENT_ENABLED: envBoolean(false),
+  GROWTH_NETWORK_BUYER_EXPORT_ENABLED: envBoolean(false),
+  GROWTH_NETWORK_PUBLIC_TRACKING_ENABLED: envBoolean(false)
 });
 
 export const env = schema.parse(process.env);
