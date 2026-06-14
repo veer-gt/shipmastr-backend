@@ -56,14 +56,14 @@ SERVICE_URL="$(gcloud run services describe "${SERVICE}" \
   --format='value(status.url)')"
 
 echo "Staging URL: ${SERVICE_URL}"
-echo "Running staging smoke tests"
+echo "Running no-email staging smoke tests"
 
 curl -fsS "${SERVICE_URL}/v1/health" >/dev/null
+curl -fsS "${SERVICE_URL}/api/health" >/dev/null
 
-SMOKE_EMAIL="staging-smoke+$(date -u +%Y%m%d%H%M%S)@shipmastr.com"
-curl -fsS -X POST "${SERVICE_URL}/v1/leads" \
-  -H "Content-Type: application/json" \
-  -d "{\"name\":\"Staging Smoke\",\"businessName\":\"Shipmastr Staging Smoke\",\"phone\":\"9999999999\",\"email\":\"${SMOKE_EMAIL}\",\"monthlyShipments\":\"test\",\"currentProvider\":\"staging\",\"biggestIssue\":\"smoke test\",\"notes\":\"Automated staging smoke test. Do not contact.\"}" >/dev/null
+# Do not POST /v1/leads from automated deploy smoke. That route can enqueue
+# or send transactional email in staging; lead-route smoke must remain a
+# separate manual operator-approved test.
 
-echo "Staging smoke passed: /v1/health and POST /v1/leads returned success"
+echo "No-email staging smoke passed: /v1/health and /api/health returned success"
 echo "Image digest ready for promotion: ${IMAGE_DIGEST}"
