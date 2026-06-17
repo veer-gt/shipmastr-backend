@@ -11,6 +11,7 @@ import { prisma } from "../../lib/prisma.js";
 import { audit } from "../audit/audit.service.js";
 import { rateCardToReconciliationInput } from "../rateCards/rate-card.service.js";
 import { calculateCourierPenalties } from "../sellerSettlements/finance-policy.service.js";
+import { credit as creditWallet } from "../wallet/wallet.service.js";
 import {
   buildCourierPayableSummary,
   buildReconciliationPlan,
@@ -461,17 +462,18 @@ export async function approveSellerSettlement(input: {
       }
     });
 
-    await tx.sellerWalletLedger.create({
-      data: {
-        merchantId: input.merchantId,
-        orderId: updated.orderId,
-        awb: updated.awb,
-        entryType: "SELLER_SETTLEMENT",
-        direction: "CREDIT",
-        amount: updated.sellerPayable,
-        metadata: json({ settlementId: updated.id })
-      }
-    });
+    await creditWallet({
+      merchantId: input.merchantId,
+      orderId: updated.orderId,
+      awb: updated.awb,
+      entryType: "SELLER_SETTLEMENT",
+      amount: updated.sellerPayable,
+      referenceType: "SellerSettlement",
+      referenceId: updated.id,
+      idempotencyKey: `seller-settlement:${updated.id}:direct-approval`,
+      description: "Seller settlement released after reconciliation approval.",
+      metadata: json({ settlementId: updated.id })
+    }, tx);
 
     if (updated.reconciliationResultId) {
       await tx.reconciliationResult.update({

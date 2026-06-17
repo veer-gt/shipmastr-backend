@@ -11,6 +11,7 @@ import type {
 import { HttpError } from "../../lib/httpError.js";
 import { prisma } from "../../lib/prisma.js";
 import { audit } from "../audit/audit.service.js";
+import { credit as creditWallet } from "../wallet/wallet.service.js";
 
 type Db = Prisma.TransactionClient | typeof prisma;
 
@@ -757,17 +758,19 @@ export async function approveFinanceApprovalRequest(input: {
         where: { id: settlement.id },
         data: { status: "SETTLED", settledAt: new Date() }
       });
-      await tx.sellerWalletLedger.create({
-        data: {
-          merchantId: input.merchantId,
-          orderId: updated.orderId,
-          awb: updated.awb,
-          entryType: "SELLER_SETTLEMENT",
-          direction: "CREDIT",
-          amount: updated.sellerPayable,
-          metadata: json({ settlementId: updated.id, approvalId: approval.id })
-        }
-      });
+      await creditWallet({
+        merchantId: input.merchantId,
+        orderId: updated.orderId,
+        awb: updated.awb,
+        entryType: "SELLER_SETTLEMENT",
+        amount: updated.sellerPayable,
+        referenceType: "SellerSettlement",
+        referenceId: updated.id,
+        idempotencyKey: `seller-settlement:${updated.id}:approval:${approval.id}`,
+        description: "Seller settlement released after finance approval.",
+        createdBy: input.checkedBy,
+        metadata: json({ settlementId: updated.id, approvalId: approval.id })
+      }, tx);
       if (updated.reconciliationResultId) {
         await tx.reconciliationResult.update({
           where: { id: updated.reconciliationResultId },
