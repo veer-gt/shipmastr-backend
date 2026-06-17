@@ -39,6 +39,7 @@ import { vasRouter } from "../modules/vas/vas.routes.js";
 import { webhooksRouter } from "../modules/webhooks/webhooks.routes.js";
 import { tasksRouter } from "../modules/tasks/tasks.routes.js";
 import { trackingRouter } from "../modules/tracking/tracking.routes.js";
+import { adminWalletRouter, walletRouter } from "../modules/wallet/wallet.routes.js";
 
 export const apiRouter = Router();
 
@@ -59,6 +60,7 @@ apiRouter.use("/admin/tax-compliance", requireAdminJwt, adminTaxComplianceRouter
 apiRouter.use("/admin/automation", requireAdminJwt, adminAutomationRouter);
 apiRouter.use("/admin/domains", requireAdminJwt, adminDomainsRouter);
 apiRouter.use("/admin/storefronts", requireAdminJwt, adminStorefrontsRouter);
+apiRouter.use("/admin/wallets", requireAdminJwt, adminWalletRouter);
 apiRouter.use("/admin", requireAdminJwt, adminRouter);
 apiRouter.use("/audit", requireJwtAuth, auditRouter);
 apiRouter.use("/automation/callbacks", automationCallbacksRouter);
@@ -97,6 +99,7 @@ apiRouter.use("/shipments", requireJwtAuth, shipmentsRouter);
 apiRouter.use("/storefronts", publicStorefrontsRouter);
 apiRouter.use("/vas", requireJwtAuth, vasRouter);
 apiRouter.use("/value-added-services", requireJwtAuth, vasRouter);
+apiRouter.use("/wallet", requireJwtAuth, walletRouter);
 apiRouter.use("/risk", requireFirebaseAuth, riskRouter);
 apiRouter.use("/webhooks", webhooksRouter);
 apiRouter.use("/tasks", tasksRouter);

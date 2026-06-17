@@ -2906,22 +2906,36 @@ model CodRemittanceImportRow {
 }
 
 model SellerWalletLedger {
-  id           String   @id @default(uuid())
-  merchantId   String
-  orderId      String?
-  awb          String?
-  entryType    String
-  direction    String
-  amount       Decimal  @db.Decimal(12, 2)
-  balanceAfter Decimal? @db.Decimal(12, 2)
-  metadata     Json?
-  createdAt    DateTime @default(now())
+  id                 String   @id @default(uuid())
+  merchantId         String
+  orderId            String?
+  awb                String?
+  entryType          String
+  direction          String
+  amount             Decimal  @db.Decimal(12, 2)
+  currency           String   @default("INR")
+  status             String   @default("POSTED")
+  balanceBefore      Decimal? @db.Decimal(12, 2)
+  balanceAfter       Decimal? @db.Decimal(12, 2)
+  referenceType      String?
+  referenceId        String?
+  idempotencyKey     String?
+  description        String?
+  metadata           Json?
+  createdBy          String?
+  postedAt           DateTime? @default(now())
+  reversedByLedgerId String?
+  createdAt          DateTime @default(now())
+  updatedAt          DateTime @default(now()) @updatedAt
 
   @@index([merchantId])
   @@index([orderId])
   @@index([awb])
   @@index([entryType])
+  @@index([status])
+  @@index([referenceType, referenceId])
   @@index([createdAt])
+  @@unique([merchantId, idempotencyKey])
 }
 
 model SellerSettlement {
