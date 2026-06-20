@@ -1,13 +1,15 @@
 import { Prisma, type SellerWalletLedger } from "@prisma/client";
 import { HttpError } from "../../lib/httpError.js";
 import { prisma } from "../../lib/prisma.js";
+import { audit } from "../audit/audit.service.js";
 import type {
+  AdminWalletListFilters,
   AppendWalletLedgerInput,
   WalletBalance,
-  WalletDirection,
   WalletLedgerFilters,
   WalletLedgerMutationResult,
-  WalletReconciliationOptions
+  WalletReconciliationOptions,
+  WalletReconciliationSummary
 } from "./wallet.types.js";
 
 type Db = Prisma.TransactionClient | typeof prisma;
@@ -15,12 +17,16 @@ type Db = Prisma.TransactionClient | typeof prisma;
 const DEFAULT_CURRENCY = "INR";
 const MAX_LEDGER_LIMIT = 100;
 
-function decimal(value: number | string | Prisma.Decimal) {
-  return new Prisma.Decimal(value);
+function decimal(value: unknown) {
+  return new Prisma.Decimal(String(value ?? 0));
+}
+
+function decimalMoney(value: unknown) {
+  return decimal(value).toDecimalPlaces(2);
 }
 
 function money(value: unknown) {
-  const parsed = Number(value ?? 0);
+  const parsed = Number(decimalMoney(value).toFixed(2));
   return Number.isFinite(parsed) ? Math.round(parsed * 100) / 100 : 0;
 }
 
@@ -36,36 +42,39 @@ function jsonObject(value: unknown): Record<string, unknown> {
 
 function numberFromMetadata(metadata: unknown, key: string) {
   const value = jsonObject(metadata)[key];
-  const parsed = Number(value ?? 0);
-  return Number.isFinite(parsed) ? parsed : 0;
+  try {
+    return decimalMoney(value);
+  } catch {
+    return decimalMoney(0);
+  }
 }
 
-function defaultImpact(direction: string, amount: number) {
+function defaultImpact(direction: string, amount: Prisma.Decimal) {
   switch (direction.toUpperCase()) {
     case "CREDIT":
-      return { currentImpact: amount, holdImpact: 0 };
+      return { currentImpact: amount, holdImpact: decimalMoney(0) };
     case "DEBIT":
-      return { currentImpact: -amount, holdImpact: 0 };
+      return { currentImpact: amount.negated(), holdImpact: decimalMoney(0) };
     case "HOLD":
-      return { currentImpact: 0, holdImpact: amount };
+      return { currentImpact: decimalMoney(0), holdImpact: amount };
     case "RELEASE":
-      return { currentImpact: 0, holdImpact: -amount };
+      return { currentImpact: decimalMoney(0), holdImpact: amount.negated() };
     case "REVERSAL":
-      return { currentImpact: -amount, holdImpact: 0 };
+      return { currentImpact: amount.negated(), holdImpact: decimalMoney(0) };
     default:
-      return { currentImpact: 0, holdImpact: 0 };
+      return { currentImpact: decimalMoney(0), holdImpact: decimalMoney(0) };
   }
 }
 
 function ledgerImpact(entry: Pick<SellerWalletLedger, "direction" | "amount" | "metadata">) {
-  const amount = money(entry.amount);
+  const amount = decimalMoney(entry.amount);
   const metadataCurrentImpact = numberFromMetadata(entry.metadata, "currentImpact");
   const metadataHoldImpact = numberFromMetadata(entry.metadata, "holdImpact");
 
-  if (metadataCurrentImpact || metadataHoldImpact) {
+  if (!metadataCurrentImpact.isZero() || !metadataHoldImpact.isZero()) {
     return {
-      currentImpact: money(metadataCurrentImpact),
-      holdImpact: money(metadataHoldImpact)
+      currentImpact: metadataCurrentImpact,
+      holdImpact: metadataHoldImpact
     };
   }
 
@@ -74,24 +83,24 @@ function ledgerImpact(entry: Pick<SellerWalletLedger, "direction" | "amount" | "
 
 function buildMetadata(
   input: AppendWalletLedgerInput,
-  impact: { currentImpact: number; holdImpact: number }
+  impact: { currentImpact: Prisma.Decimal; holdImpact: Prisma.Decimal }
 ): Prisma.InputJsonValue {
   return {
     ...jsonObject(input.metadata),
-    currentImpact: impact.currentImpact,
-    holdImpact: impact.holdImpact,
+    currentImpact: money(impact.currentImpact),
+    holdImpact: money(impact.holdImpact),
     walletSource: "SELLER_WALLET_LEDGER"
   };
 }
 
-function impactForInput(input: AppendWalletLedgerInput, amount: number) {
+function impactForInput(input: AppendWalletLedgerInput, amount: Prisma.Decimal) {
   const metadataCurrentImpact = numberFromMetadata(input.metadata, "currentImpact");
   const metadataHoldImpact = numberFromMetadata(input.metadata, "holdImpact");
 
-  if (metadataCurrentImpact || metadataHoldImpact) {
+  if (!metadataCurrentImpact.isZero() || !metadataHoldImpact.isZero()) {
     return {
-      currentImpact: money(metadataCurrentImpact),
-      holdImpact: money(metadataHoldImpact)
+      currentImpact: metadataCurrentImpact,
+      holdImpact: metadataHoldImpact
     };
   }
 
@@ -102,12 +111,20 @@ function isPrismaClient(client: Db): client is typeof prisma {
   return "$transaction" in client;
 }
 
+function maxDecimal(value: Prisma.Decimal, floor: Prisma.Decimal) {
+  return value.greaterThan(floor) ? value : floor;
+}
+
+function walletAuditAction(direction: string) {
+  return `WALLET_LEDGER_${direction.toUpperCase()}`;
+}
+
 export function deriveWalletBalanceFromLedger(
   merchantId: string,
   entries: Array<Pick<SellerWalletLedger, "id" | "direction" | "amount" | "currency" | "status" | "balanceAfter" | "metadata" | "createdAt" | "postedAt">>
 ): WalletBalance {
-  let currentBalance = 0;
-  let holdBalance = 0;
+  let currentBalance = decimalMoney(0);
+  let holdBalance = decimalMoney(0);
   let currency = DEFAULT_CURRENCY;
   let lastLedgerEntryId: string | null = null;
   let lastTransactionAt: Date | null = null;
@@ -116,8 +133,8 @@ export function deriveWalletBalanceFromLedger(
     if (entry.status === "FAILED") continue;
     currency = entry.currency || currency;
     const impact = ledgerImpact(entry);
-    currentBalance = money(currentBalance + impact.currentImpact);
-    holdBalance = money(Math.max(0, holdBalance + impact.holdImpact));
+    currentBalance = decimalMoney(currentBalance.plus(impact.currentImpact));
+    holdBalance = maxDecimal(decimalMoney(holdBalance.plus(impact.holdImpact)), decimalMoney(0));
     lastLedgerEntryId = entry.id;
     lastTransactionAt = entry.postedAt ?? entry.createdAt ?? lastTransactionAt;
   }
@@ -125,9 +142,9 @@ export function deriveWalletBalanceFromLedger(
   return {
     merchantId,
     currency,
-    currentBalance,
-    availableBalance: money(Math.max(0, currentBalance - holdBalance)),
-    holdBalance,
+    currentBalance: money(currentBalance),
+    availableBalance: money(maxDecimal(currentBalance.minus(holdBalance), decimalMoney(0))),
+    holdBalance: money(holdBalance),
     ledgerCount: entries.length,
     lastLedgerEntryId,
     lastTransactionAt,
@@ -244,17 +261,16 @@ async function appendLedgerEntryInTransaction(
   }
 
   const amount = positiveAmount(input.amount);
-  const numericAmount = money(amount);
-  const impact = impactForInput(input, numericAmount);
+  const impact = impactForInput(input, amount);
   const currentBalance = await getBalance(input.merchantId, tx);
-  const nextCurrentBalance = money(currentBalance.currentBalance + impact.currentImpact);
-  const nextHoldBalance = money(currentBalance.holdBalance + impact.holdImpact);
+  const nextCurrentBalance = decimalMoney(decimalMoney(currentBalance.currentBalance).plus(impact.currentImpact));
+  const nextHoldBalance = decimalMoney(decimalMoney(currentBalance.holdBalance).plus(impact.holdImpact));
 
-  if (!input.allowNegative && nextCurrentBalance < 0) {
+  if (!input.allowNegative && nextCurrentBalance.lessThan(0)) {
     throw new HttpError(409, "WALLET_INSUFFICIENT_BALANCE");
   }
 
-  if (nextHoldBalance < 0) {
+  if (nextHoldBalance.lessThan(0)) {
     throw new HttpError(409, "WALLET_HOLD_BALANCE_UNDERFLOW");
   }
 
@@ -268,8 +284,8 @@ async function appendLedgerEntryInTransaction(
       amount,
       currency: input.currency ?? DEFAULT_CURRENCY,
       status: input.status ?? "POSTED",
-      balanceBefore: decimal(currentBalance.currentBalance),
-      balanceAfter: decimal(nextCurrentBalance),
+      balanceBefore: decimalMoney(currentBalance.currentBalance),
+      balanceAfter: nextCurrentBalance,
       referenceType: input.referenceType ?? null,
       referenceId: input.referenceId ?? null,
       idempotencyKey: input.idempotencyKey ?? null,
@@ -279,6 +295,25 @@ async function appendLedgerEntryInTransaction(
       postedAt: new Date()
     }
   });
+
+  await audit({
+    merchantId: input.merchantId,
+    ...(input.createdBy ? { actorId: input.createdBy } : {}),
+    action: walletAuditAction(entry.direction),
+    entityType: "SellerWalletLedger",
+    entityId: entry.id,
+    metadata: {
+      entryType: entry.entryType,
+      direction: entry.direction,
+      amount: money(entry.amount),
+      currency: entry.currency,
+      status: entry.status,
+      referenceType: entry.referenceType,
+      hasReference: Boolean(entry.referenceId || entry.orderId || entry.awb),
+      idempotent: false,
+      sourceOfTruth: "SELLER_WALLET_LEDGER"
+    }
+  }, tx);
 
   return {
     entry,
@@ -347,8 +382,8 @@ export async function reverse(input: {
       metadata: {
         originalLedgerEntryId: original.id,
         originalDirection: original.direction,
-        currentImpact: money(-originalImpact.currentImpact),
-        holdImpact: money(-originalImpact.holdImpact)
+        currentImpact: money(originalImpact.currentImpact.negated()),
+        holdImpact: money(originalImpact.holdImpact.negated())
       },
       allowNegative: true
     }, tx);
@@ -401,10 +436,30 @@ export async function reconcileBalance(
   };
 }
 
-export async function listMerchantWallets(input: {
-  search?: string | undefined;
-  limit?: number | undefined;
-}, client: Db = prisma) {
+async function walletReconciliationSummary(
+  merchantId: string,
+  balance: WalletBalance,
+  client: Db
+): Promise<WalletReconciliationSummary> {
+  const latest = await client.sellerWalletLedger.findFirst({
+    where: { merchantId, balanceAfter: { not: null } },
+    orderBy: [{ createdAt: "desc" }, { id: "desc" }]
+  });
+  const latestCachedBalance = latest?.balanceAfter == null ? null : money(latest.balanceAfter);
+  const matchesLatestCachedBalance = latestCachedBalance == null ? null : money(latestCachedBalance) === money(balance.currentBalance);
+
+  return {
+    status: latestCachedBalance == null ? "UNCHECKED" : matchesLatestCachedBalance ? "MATCHED" : "MISMATCHED",
+    latestCachedBalance,
+    ledgerDerivedBalance: balance.currentBalance,
+    matchesLatestCachedBalance,
+    recommendation: latestCachedBalance == null
+      ? "No cached balance snapshot is available; ledger-derived balance is active."
+      : "Use ledger-derived balance as source of truth."
+  };
+}
+
+export async function listMerchantWallets(input: AdminWalletListFilters, client: Db = prisma) {
   const limit = Math.min(50, Math.max(1, Math.floor(Number(input.limit || 25))));
   const search = input.search?.trim();
   const query: Prisma.MerchantFindManyArgs = {
@@ -431,10 +486,26 @@ export async function listMerchantWallets(input: {
 
   const merchants = await client.merchant.findMany(query);
 
-  const rows = await Promise.all(merchants.map(async (merchant) => ({
-    merchant,
-    balance: await getBalance(merchant.id, client)
-  })));
+  const rows = await Promise.all(merchants.map(async (merchant) => {
+    const balance = await getBalance(merchant.id, client);
+    const reconciliation = await walletReconciliationSummary(merchant.id, balance, client);
+    return {
+      merchant,
+      balance,
+      wallet: {
+        status: "ACTIVE" as const,
+        sourceOfTruth: "SELLER_WALLET_LEDGER" as const
+      },
+      reconciliation
+    };
+  }));
 
-  return { wallets: rows, limit };
+  return {
+    wallets: rows.filter((row) => {
+      if (input.status && row.wallet.status !== input.status) return false;
+      if (input.reconcileStatus && row.reconciliation.status !== input.reconcileStatus) return false;
+      return true;
+    }),
+    limit
+  };
 }

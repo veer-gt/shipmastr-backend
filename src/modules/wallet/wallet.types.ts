@@ -21,6 +21,14 @@ export type WalletBalance = {
   compatibilityNote: string;
 };
 
+export type WalletReconciliationSummary = {
+  status: "MATCHED" | "MISMATCHED" | "UNCHECKED";
+  latestCachedBalance: number | null;
+  ledgerDerivedBalance: number;
+  matchesLatestCachedBalance: boolean | null;
+  recommendation: string;
+};
+
 export type WalletLedgerFilters = {
   direction?: WalletDirection | undefined;
   status?: WalletStatus | undefined;
@@ -58,4 +66,11 @@ export type WalletLedgerMutationResult = {
 export type WalletReconciliationOptions = {
   legacyCachedBalance?: number | null | undefined;
   legacyCachedBalanceSource?: string | null | undefined;
+};
+
+export type AdminWalletListFilters = {
+  search?: string | undefined;
+  status?: "ACTIVE" | undefined;
+  reconcileStatus?: WalletReconciliationSummary["status"] | undefined;
+  limit?: number | undefined;
 };
