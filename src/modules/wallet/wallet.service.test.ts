@@ -6,9 +6,11 @@ import {
   appendLedgerEntry,
   deriveWalletBalanceFromLedger,
   getBalance,
+  listMerchantWallets,
   listLedgerEntries,
   reconcileBalance
 } from "./wallet.service.js";
+import { serializeWalletLedgerEntry } from "./wallet.serializer.js";
 
 const now = new Date("2026-06-17T12:00:00.000Z");
 
@@ -44,7 +46,8 @@ function makeClient(seed: Array<Record<string, unknown>> = []) {
       { id: "merchant_1", name: "Merchant One", email: "merchant-one@example.test", onboardingStatus: "READY_TO_SHIP", createdAt: now },
       { id: "merchant_2", name: "Merchant Two", email: "merchant-two@example.test", onboardingStatus: "PENDING", createdAt: now }
     ],
-    entries: seed.map(makeLedgerEntry)
+    entries: seed.map(makeLedgerEntry),
+    auditLogs: [] as any[]
   };
 
   const client = {
@@ -64,6 +67,8 @@ function makeClient(seed: Array<Record<string, unknown>> = []) {
         if (where?.direction) rows = rows.filter((entry) => entry.direction === where.direction);
         if (where?.status) rows = rows.filter((entry) => entry.status === where.status);
         if (where?.entryType) rows = rows.filter((entry) => entry.entryType === where.entryType);
+        if (where?.createdAt?.gte) rows = rows.filter((entry) => new Date(entry.createdAt) >= new Date(where.createdAt.gte));
+        if (where?.createdAt?.lte) rows = rows.filter((entry) => new Date(entry.createdAt) <= new Date(where.createdAt.lte));
         if (cursor?.id) {
           const index = rows.findIndex((entry) => entry.id === cursor.id);
           rows = index >= 0 ? rows.slice(index + (skip ?? 0)) : rows;
@@ -105,6 +110,13 @@ function makeClient(seed: Array<Record<string, unknown>> = []) {
         state.entries[index] = { ...state.entries[index]!, ...data, updatedAt: now };
         return state.entries[index];
       }
+    },
+    auditLog: {
+      create: async ({ data }: any) => {
+        const row = { id: `audit_${state.auditLogs.length + 1}`, createdAt: now, ...data };
+        state.auditLogs.push(row);
+        return row;
+      }
     }
   };
 
@@ -123,6 +135,29 @@ describe("wallet ledger service", () => {
     assert.equal(balance.holdBalance, 100);
     assert.equal(balance.availableBalance, 650);
     assert.equal(balance.sourceOfTruth, "SELLER_WALLET_LEDGER");
+  });
+
+  it("uses decimal-safe ledger math for small money increments", async () => {
+    const { client } = makeClient();
+
+    await appendLedgerEntry({
+      merchantId: "merchant_1",
+      direction: "CREDIT",
+      amount: "0.10",
+      entryType: "TEST_CREDIT",
+      description: "Tiny credit one"
+    }, client);
+    await appendLedgerEntry({
+      merchantId: "merchant_1",
+      direction: "CREDIT",
+      amount: "0.20",
+      entryType: "TEST_CREDIT",
+      description: "Tiny credit two"
+    }, client);
+
+    const balance = await getBalance("merchant_1", client);
+    assert.equal(balance.currentBalance, 0.3);
+    assert.equal(balance.availableBalance, 0.3);
   });
 
   it("credits through an idempotency key without double-crediting", async () => {
@@ -152,6 +187,8 @@ describe("wallet ledger service", () => {
     assert.equal(first.idempotent, false);
     assert.equal(second.idempotent, true);
     assert.equal(state.entries.length, 1);
+    assert.equal(state.auditLogs.length, 1);
+    assert.equal(state.auditLogs[0]?.action, "WALLET_LEDGER_CREDIT");
     assert.equal(second.balance.currentBalance, 500);
   });
 
@@ -177,6 +214,28 @@ describe("wallet ledger service", () => {
     assert.equal(state.entries.length, 2);
     assert.equal(state.entries[1]?.balanceBefore?.toString(), "750");
     assert.equal(state.entries[1]?.balanceAfter?.toString(), "625");
+  });
+
+  it("filters and paginates ledger entries safely", async () => {
+    const { client } = makeClient([
+      { merchantId: "merchant_1", direction: "CREDIT", status: "POSTED", entryType: "SELLER_SETTLEMENT", amount: "100", id: "ledger_one", createdAt: new Date("2026-06-16T12:00:00.000Z") },
+      { merchantId: "merchant_1", direction: "DEBIT", status: "POSTED", entryType: "SHIPMENT_CHARGE", amount: "25", id: "ledger_two", createdAt: new Date("2026-06-17T12:00:00.000Z") },
+      { merchantId: "merchant_1", direction: "CREDIT", status: "PENDING", entryType: "ADJUSTMENT", amount: "10", id: "ledger_three", createdAt: new Date("2026-06-18T12:00:00.000Z") }
+    ]);
+
+    const firstPage = await listLedgerEntries("merchant_1", { limit: 1 }, client);
+    assert.equal(firstPage.entries.length, 1);
+    assert.equal(firstPage.hasMore, true);
+    assert.equal(firstPage.nextCursor, "ledger_two");
+
+    const filtered = await listLedgerEntries("merchant_1", {
+      direction: "CREDIT",
+      status: "POSTED",
+      dateFrom: new Date("2026-06-16T00:00:00.000Z"),
+      dateTo: new Date("2026-06-17T00:00:00.000Z")
+    }, client);
+    assert.equal(filtered.entries.length, 1);
+    assert.equal(filtered.entries[0]?.id, "ledger_one");
   });
 
   it("blocks debits that would make the ledger-derived balance negative", async () => {
@@ -226,6 +285,36 @@ describe("wallet ledger service", () => {
     assert.equal(result.matchesLegacyCachedBalance, false);
   });
 
+  it("redacts wallet ledger references in public serializers", () => {
+    const serialized = serializeWalletLedgerEntry(makeLedgerEntry({
+      referenceType: "SellerSettlement",
+      referenceId: "settlement_sensitive_reference_12345",
+      awb: "AWB1234567890",
+      orderId: "ORDER1234567890"
+    }) as any);
+
+    assert.equal(serialized.reference.redacted, true);
+    assert.equal(serialized.reference.id?.includes("sensitive_reference"), false);
+    assert.equal(serialized.reference.awb, "AWB1...7890");
+    assert.equal(serialized.reference.orderId, "ORDE...7890");
+  });
+
+  it("lists admin wallets with safe reconciliation status filters", async () => {
+    const { client } = makeClient([
+      { merchantId: "merchant_1", direction: "CREDIT", amount: "300", id: "ledger_one", balanceAfter: "125" },
+      { merchantId: "merchant_2", direction: "CREDIT", amount: "900", id: "ledger_two", balanceAfter: "900" }
+    ]);
+
+    const mismatched = await listMerchantWallets({ reconcileStatus: "MISMATCHED" }, client);
+    assert.equal(mismatched.wallets.length, 1);
+    assert.equal(mismatched.wallets[0]?.merchant.id, "merchant_1");
+    assert.equal(mismatched.wallets[0]?.reconciliation.status, "MISMATCHED");
+
+    const matched = await listMerchantWallets({ status: "ACTIVE", reconcileStatus: "MATCHED" }, client);
+    assert.equal(matched.wallets.length, 1);
+    assert.equal(matched.wallets[0]?.merchant.id, "merchant_2");
+  });
+
   it("keeps wallet routes scoped to authenticated merchant/admin guards", () => {
     const routes = readFileSync("src/routes/index.ts", "utf8");
     const walletRoutes = readFileSync("src/modules/wallet/wallet.routes.ts", "utf8");
@@ -237,5 +326,6 @@ describe("wallet ledger service", () => {
     assert.match(walletRoutes, /walletRouter\.get\("\/reconcile"/);
     assert.match(walletRoutes, /req\.auth!\.merchantId/);
     assert.match(walletRoutes, /adminWalletRouter\.get\("\/:merchantId"/);
+    assert.doesNotMatch(walletRoutes, /adminWalletRouter\.post/);
   });
 });

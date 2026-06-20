@@ -10,6 +10,13 @@ function iso(value: Date | string | null | undefined) {
   return value ? new Date(value).toISOString() : null;
 }
 
+function maskReference(value: string | null | undefined) {
+  if (!value) return null;
+  const text = String(value);
+  if (text.length <= 8) return `${text.slice(0, 2)}...${text.slice(-2)}`;
+  return `${text.slice(0, 4)}...${text.slice(-4)}`;
+}
+
 export function serializeWalletBalance(balance: WalletBalance) {
   return {
     merchantId: balance.merchantId,
@@ -38,9 +45,10 @@ export function serializeWalletLedgerEntry(entry: SellerWalletLedger) {
     balanceAfter: money(entry.balanceAfter),
     reference: {
       type: entry.referenceType ?? null,
-      id: entry.referenceId ?? null,
-      orderId: entry.orderId ?? null,
-      awb: entry.awb ?? null
+      id: maskReference(entry.referenceId),
+      orderId: maskReference(entry.orderId),
+      awb: maskReference(entry.awb),
+      redacted: Boolean(entry.referenceId || entry.orderId || entry.awb)
     },
     description: entry.description ?? null,
     postedAt: iso(entry.postedAt),
@@ -48,4 +56,3 @@ export function serializeWalletLedgerEntry(entry: SellerWalletLedger) {
     updatedAt: iso(entry.updatedAt)
   };
 }
-

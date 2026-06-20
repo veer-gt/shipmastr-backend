@@ -28,6 +28,8 @@ const ledgerQuerySchema = z.object({
 
 const adminListQuerySchema = z.object({
   search: z.string().trim().min(1).max(80).optional(),
+  status: z.enum(["ACTIVE"]).optional(),
+  reconcileStatus: z.enum(["MATCHED", "MISMATCHED", "UNCHECKED"]).optional(),
   limit: z.coerce.number().int().min(1).max(50).optional()
 });
 
@@ -42,6 +44,20 @@ function serializeLedgerPage(page: Awaited<ReturnType<typeof listLedgerEntries>>
     limit: page.limit,
     hasMore: page.hasMore,
     nextCursor: page.nextCursor
+  };
+}
+
+function serializeSafeMerchant(merchant: {
+  id: string;
+  name: string;
+  onboardingStatus: string;
+  createdAt?: Date | string | null;
+}) {
+  return {
+    id: merchant.id,
+    name: merchant.name,
+    onboardingStatus: merchant.onboardingStatus,
+    createdAt: merchant.createdAt ? new Date(merchant.createdAt).toISOString() : null
   };
 }
 
@@ -87,8 +103,14 @@ adminWalletRouter.get("/", async (req, res) => {
 
   res.json({
     wallets: result.wallets.map((row) => ({
-      merchant: row.merchant,
-      balance: serializeWalletBalance(row.balance)
+      merchant: serializeSafeMerchant(row.merchant),
+      wallet: row.wallet,
+      balance: serializeWalletBalance(row.balance),
+      reconciliation: row.reconciliation,
+      policy: {
+        adminMode: "READ_ONLY",
+        mutationActionsEnabled: false
+      }
     })),
     limit: result.limit
   });
@@ -96,9 +118,10 @@ adminWalletRouter.get("/", async (req, res) => {
 
 adminWalletRouter.get("/:merchantId", async (req, res) => {
   const merchantId = z.string().min(1).parse(req.params.merchantId);
-  const [{ wallet, merchant }, balance] = await Promise.all([
+  const [{ wallet, merchant }, balance, reconciliation] = await Promise.all([
     getOrCreateWalletForSellerOrMerchant(merchantId),
-    getBalance(merchantId)
+    getBalance(merchantId),
+    reconcileBalance(merchantId)
   ]);
 
   res.json({
@@ -106,8 +129,16 @@ adminWalletRouter.get("/:merchantId", async (req, res) => {
       ...wallet,
       ownerName: merchant.name
     },
-    merchant,
-    balance: serializeWalletBalance(balance)
+    merchant: serializeSafeMerchant(merchant),
+    balance: serializeWalletBalance(balance),
+    reconciliation: {
+      ...reconciliation,
+      balance: serializeWalletBalance(reconciliation.balance)
+    },
+    policy: {
+      adminMode: "READ_ONLY",
+      mutationActionsEnabled: false
+    }
   });
 });
 
