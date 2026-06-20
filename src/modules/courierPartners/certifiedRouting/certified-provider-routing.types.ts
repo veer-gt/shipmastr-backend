@@ -1,6 +1,12 @@
 import type { CourierArbitrationCapability } from "../arbitration/courier-arbitration.types.js";
 import type { CourierLiveProviderKey } from "../liveReadiness/courier-live-readiness.types.js";
 import type {
+  CourierProviderCapability,
+  CourierProviderLaneCode,
+  CourierProviderRuntimeMode,
+  CourierProviderWorkflowGuardStatus
+} from "../providerRegistry/courier-provider-registry.types.js";
+import type {
   CourierReadinessAutopilotProviderList,
   CourierReadinessAutopilotProviderResult
 } from "../readinessAutopilot/courier-readiness-autopilot.types.js";
@@ -76,6 +82,11 @@ export type CertifiedProviderRoutingResult = {
   warnings: string[];
   seller_safe_message: string;
   admin_next_actions: string[];
+  admin_diagnostics: {
+    fallback_used: boolean;
+    no_eligible_provider: boolean;
+    evaluated_providers: CertifiedProviderRoutingProviderDiagnostic[];
+  };
 };
 
 export type CertifiedProviderRoutingDependencies = {
@@ -108,10 +119,48 @@ export type CertifiedProviderRoutingDependencies = {
     admin_next_actions: string[];
   }>;
   ratesProvider?: (merchantId: string, shipmentId: string) => Promise<CertifiedProviderRoutingRateCandidate[]>;
+  providerWorkflowGuardProvider?: (
+    merchantId: string,
+    input: {
+      provider: CourierReadinessAutopilotProviderResult;
+      providerKey: CourierLiveProviderKey;
+      laneCode: CourierProviderLaneCode | null;
+      requestedCapability: CourierArbitrationCapability;
+      providerCapability: CourierProviderCapability;
+      mode: CourierProviderRuntimeMode;
+    }
+  ) => Promise<CertifiedProviderRoutingWorkflowGuard>;
 };
 
 export type CertifiedProviderRoutingSelection = {
   provider: CourierReadinessAutopilotProviderResult | null;
   rate: CertifiedProviderRoutingRateCandidate | null;
   pickupLocationId: string | null;
+};
+
+export type CertifiedProviderRoutingWorkflowGuard = {
+  lane_code: CourierProviderLaneCode | null;
+  capability: CourierProviderCapability;
+  requested_mode: CourierProviderRuntimeMode;
+  status: CourierProviderWorkflowGuardStatus | "NOT_MODELED";
+  allowed: boolean;
+  blockers: string[];
+  warnings: string[];
+  next_actions: string[];
+};
+
+export type CertifiedProviderRoutingProviderDiagnostic = {
+  provider_key_internal: CourierLiveProviderKey;
+  lane_code_internal: CourierProviderLaneCode | null;
+  eligible: boolean;
+  preferred: boolean;
+  selected: boolean;
+  fallback_reason: string | null;
+  lifecycle_state: string;
+  capability_status: string;
+  registry_status: CertifiedProviderRoutingWorkflowGuard["status"];
+  pickup_available: boolean;
+  blockers: string[];
+  warnings: string[];
+  next_actions: string[];
 };

@@ -5,6 +5,13 @@ import { arbitrateCourierPickup } from "../arbitration/courier-arbitration.servi
 import type { CourierArbitrationCapability } from "../arbitration/courier-arbitration.types.js";
 import type { CourierLiveProviderKey } from "../liveReadiness/courier-live-readiness.types.js";
 import {
+  checkCourierProviderLiveWorkflowAllowed
+} from "../providerRegistry/courier-provider-registry.service.js";
+import type {
+  CourierProviderCapability,
+  CourierProviderLaneCode
+} from "../providerRegistry/courier-provider-registry.types.js";
+import {
   evaluateCourierShipmentReadinessAutopilot
 } from "../readinessAutopilot/courier-readiness-autopilot.service.js";
 import type { CourierReadinessAutopilotProviderResult } from "../readinessAutopilot/courier-readiness-autopilot.types.js";
@@ -13,10 +20,12 @@ import type {
   CertifiedProviderRoutingDependencies,
   CertifiedProviderRoutingInput,
   CertifiedProviderRoutingOutcome,
+  CertifiedProviderRoutingProviderDiagnostic,
   CertifiedProviderRoutingPublicTier,
   CertifiedProviderRoutingRateCandidate,
   CertifiedProviderRoutingResult,
-  CertifiedProviderRoutingSelection
+  CertifiedProviderRoutingSelection,
+  CertifiedProviderRoutingWorkflowGuard
 } from "./certified-provider-routing.types.js";
 
 type Db = Prisma.TransactionClient | typeof prisma;
@@ -117,6 +126,105 @@ function providerCanRouteCapability(
   if (capability === "AWB") return providerLiveReady(provider) && provider.capabilities.awb === "READY";
   if (capability === "LABEL") return providerLiveReady(provider) && provider.capabilities.label === "READY";
   return providerLiveReady(provider) && provider.capabilities.tracking === "READY";
+}
+
+function providerCapabilityStatus(
+  provider: CourierReadinessAutopilotProviderResult,
+  capability: CourierArbitrationCapability
+) {
+  if (capability === "RATES") return provider.capabilities.rates;
+  if (capability === "AWB") return provider.capabilities.awb;
+  if (capability === "LABEL") return provider.capabilities.label;
+  return provider.capabilities.tracking;
+}
+
+function providerRegistryCapability(capability: CourierArbitrationCapability): CourierProviderCapability {
+  if (capability === "RATES") return "RATE";
+  return capability;
+}
+
+function providerLaneCode(providerKey: CourierLiveProviderKey): CourierProviderLaneCode | null {
+  if (providerKey === "BIGSHIP") return "BIGSHIP";
+  if (providerKey === "SHIPROCKET") return "SHIPROCKET";
+  return null;
+}
+
+function fallbackReason(blockers: readonly string[]) {
+  if (!blockers.length) return null;
+  if (blockers.some((blocker) => blocker.includes("SUSPENDED"))) return "LANE_SUSPENDED";
+  if (blockers.some((blocker) => blocker.includes("DISABLED"))) return "LANE_DISABLED";
+  if (blockers.some((blocker) => blocker.includes("CREDENTIAL"))) return "CREDENTIALS_NOT_READY";
+  if (blockers.some((blocker) => blocker.includes("UNSUPPORTED"))) return "CAPABILITY_UNSUPPORTED";
+  if (blockers.some((blocker) => blocker.includes("PICKUP"))) return "PICKUP_OR_SERVICEABILITY_NOT_READY";
+  if (blockers.some((blocker) => blocker.includes("CERTIFIED") || blocker.includes("ONE_SHOT"))) return "CERTIFICATION_NOT_READY";
+  if (blockers.some((blocker) => blocker.includes("DRY_RUN"))) return "DRY_RUN_ONLY";
+  return "READINESS_NOT_READY";
+}
+
+function readinessBlockers(
+  provider: CourierReadinessAutopilotProviderResult,
+  capability: CourierArbitrationCapability
+) {
+  const blockers = [...provider.blockers];
+  const lifecycle = provider.lifecycle_state;
+  if (lifecycle === "NOT_CONFIGURED") blockers.push("PROVIDER_NOT_CONFIGURED");
+  if (lifecycle === "REVOKED") blockers.push("PROVIDER_REVOKED");
+  if (lifecycle === "DRY_RUN_ONLY") blockers.push("PROVIDER_DRY_RUN_ONLY");
+  if (lifecycle === "BLOCKED") blockers.push("PROVIDER_BLOCKED");
+  if (!pickupAvailable(provider)) blockers.push("PROVIDER_PICKUP_OR_SERVICEABILITY_NOT_READY");
+  if (!providerCanRouteCapability(provider, capability)) blockers.push("PROVIDER_CAPABILITY_NOT_READY");
+  return unique(blockers);
+}
+
+function notModeledWorkflowGuard(input: {
+  laneCode: CourierProviderLaneCode | null;
+  capability: CourierProviderCapability;
+}): CertifiedProviderRoutingWorkflowGuard {
+  return {
+    lane_code: input.laneCode,
+    capability: input.capability,
+    requested_mode: "LIVE",
+    status: "NOT_MODELED",
+    allowed: true,
+    blockers: [],
+    warnings: input.laneCode ? [] : ["Provider registry lane is not modeled for this legacy provider."],
+    next_actions: []
+  };
+}
+
+async function defaultProviderWorkflowGuard(
+  merchantId: string,
+  input: {
+    provider: CourierReadinessAutopilotProviderResult;
+    providerKey: CourierLiveProviderKey;
+    laneCode: CourierProviderLaneCode | null;
+    requestedCapability: CourierArbitrationCapability;
+    providerCapability: CourierProviderCapability;
+  },
+  client: Db
+): Promise<CertifiedProviderRoutingWorkflowGuard> {
+  if (!input.laneCode) {
+    return notModeledWorkflowGuard({
+      laneCode: input.laneCode,
+      capability: input.providerCapability
+    });
+  }
+  const guard = await checkCourierProviderLiveWorkflowAllowed({
+    merchantId,
+    laneCode: input.laneCode,
+    capability: input.providerCapability,
+    mode: "LIVE"
+  }, {}, client);
+  return {
+    lane_code: guard.lane_code,
+    capability: guard.capability,
+    requested_mode: guard.requested_mode,
+    status: guard.status,
+    allowed: guard.allowed,
+    blockers: guard.blockers,
+    warnings: guard.warnings,
+    next_actions: []
+  };
 }
 
 function decisionMessage(decision: CertifiedProviderRoutingDecision) {
@@ -220,15 +328,106 @@ function chooseProvider(input: {
   };
 }
 
+async function providerDiagnostics(input: {
+  merchantId: string;
+  providers: CourierReadinessAutopilotProviderResult[];
+  primary: CourierReadinessAutopilotProviderResult | null;
+  capability: CourierArbitrationCapability;
+  dependencies: CertifiedProviderRoutingDependencies;
+  client: Db;
+  selectedByArbitration: CourierReadinessAutopilotProviderResult | null;
+}) {
+  const providerCapability = providerRegistryCapability(input.capability);
+  const preferredProviderKey = input.selectedByArbitration?.provider_key_internal
+    ?? input.primary?.provider_key_internal
+    ?? null;
+
+  const rows = await Promise.all(input.providers.map(async (provider) => {
+    const laneCode = providerLaneCode(provider.provider_key_internal);
+    const guard = input.dependencies.providerWorkflowGuardProvider
+      ? await input.dependencies.providerWorkflowGuardProvider(input.merchantId, {
+        provider,
+        providerKey: provider.provider_key_internal,
+        laneCode,
+        requestedCapability: input.capability,
+        providerCapability,
+        mode: "LIVE"
+      })
+      : await defaultProviderWorkflowGuard(input.merchantId, {
+        provider,
+        providerKey: provider.provider_key_internal,
+        laneCode,
+        requestedCapability: input.capability,
+        providerCapability
+      }, input.client);
+    const blockers = unique([
+      ...readinessBlockers(provider, input.capability),
+      ...(guard.allowed ? [] : guard.blockers)
+    ]);
+    const eligible = providerCanRouteCapability(provider, input.capability)
+      && pickupAvailable(provider)
+      && guard.allowed
+      && !["NOT_CONFIGURED", "BLOCKED", "DRY_RUN_ONLY", "REVOKED"].includes(provider.lifecycle_state);
+    const preferred = provider.provider_key_internal === preferredProviderKey;
+
+    return {
+      provider,
+      guard,
+      diagnostic: {
+        provider_key_internal: provider.provider_key_internal,
+        lane_code_internal: laneCode,
+        eligible,
+        preferred,
+        selected: false,
+        fallback_reason: eligible ? null : fallbackReason(blockers),
+        lifecycle_state: provider.lifecycle_state,
+        capability_status: providerCapabilityStatus(provider, input.capability),
+        registry_status: guard.status,
+        pickup_available: pickupAvailable(provider),
+        blockers,
+        warnings: unique([
+          ...provider.warnings,
+          ...guard.warnings
+        ]),
+        next_actions: unique([
+          ...provider.admin_next_actions,
+          ...guard.next_actions
+        ])
+      } satisfies CertifiedProviderRoutingProviderDiagnostic
+    };
+  }));
+
+  const preferred = rows.find((row) => row.diagnostic.preferred && row.diagnostic.eligible) ?? null;
+  const selected = preferred ?? rows.find((row) => row.diagnostic.eligible) ?? null;
+  const diagnostics = rows.map((row) => ({
+    ...row.diagnostic,
+    selected: row.provider.provider_key_internal === selected?.provider.provider_key_internal
+  }));
+
+  return {
+    selectedProvider: selected?.provider ?? null,
+    selectedDiagnostic: diagnostics.find((row) => row.selected) ?? null,
+    diagnostics,
+    fallbackUsed: Boolean(selected && !selected.diagnostic.preferred),
+    noEligibleProvider: !selected
+  };
+}
+
 function routingDecision(input: {
   primary: CourierReadinessAutopilotProviderResult | null;
   selected: CourierReadinessAutopilotProviderResult | null;
   liveReady: CourierReadinessAutopilotProviderResult[];
   capabilityReady: CourierReadinessAutopilotProviderResult[];
   capability: CourierArbitrationCapability;
+  fallbackUsed: boolean;
   arbitrationDecision?: string;
 }) {
   if (!input.primary && !input.selected) return "SAFE_REVIEW" as const;
+  if (input.selected && input.fallbackUsed) return input.capability === "RATES" ? "RATES_ONLY" as const : "TRY_ALTERNATE_PROVIDER" as const;
+  if (input.selected && providerCanRouteCapability(input.selected, input.capability)) {
+    if (input.capability === "RATES") return "RATES_ONLY" as const;
+    return input.capability === "AWB" ? "AWB_READY" as const : "ROUTE_READY" as const;
+  }
   if (input.primary && !pickupAvailable(input.primary)) {
     if (input.arbitrationDecision === "TRY_ALTERNATE_PICKUP") return "TRY_ALTERNATE_PICKUP" as const;
     if (input.arbitrationDecision === "RUN_PICKUP_TRIAL") return "RUN_PICKUP_TRIAL" as const;
@@ -236,9 +435,6 @@ function routingDecision(input: {
   }
   if (input.capability === "RATES") {
     return input.capabilityReady.length ? "RATES_ONLY" as const : "SAFE_REVIEW" as const;
-  }
-  if (input.primary && providerCanRouteCapability(input.primary, input.capability)) {
-    return input.capability === "AWB" ? "AWB_READY" as const : "ROUTE_READY" as const;
   }
   if (input.primary?.capabilities.rates === "READY") return "RATES_ONLY" as const;
   const alternateLive = input.liveReady.find((provider) => provider.provider_key_internal !== input.primary?.provider_key_internal);
@@ -303,6 +499,15 @@ export async function evaluateCertifiedProviderRouting(
     capability: requestedCapability,
     arbitration
   });
+  const readinessDiagnostics = await providerDiagnostics({
+    merchantId,
+    providers: readiness.providers,
+    primary,
+    capability: requestedCapability,
+    dependencies,
+    client,
+    selectedByArbitration: chosen.selectedByArbitration
+  });
   const tier = publicTier({
     ...(input.preferredPublicTier ? { preferred: input.preferredPublicTier } : {}),
     outcome: requestedOutcome
@@ -314,14 +519,13 @@ export async function evaluateCertifiedProviderRouting(
     liveReady: chosen.liveReady,
     capabilityReady: chosen.capabilityReady,
     capability: requestedCapability,
+    fallbackUsed: readinessDiagnostics.fallbackUsed,
     ...(arbitration?.decision ? { arbitrationDecision: arbitration.decision } : {})
   });
   const selectedTier = selectedPublicTier(decision, tier);
   const selection = selectionFor({
     decision,
-    selected: decision === "TRY_ALTERNATE_PROVIDER"
-      ? chosen.liveReady.find((provider) => provider.provider_key_internal !== primary?.provider_key_internal) ?? chosen.selected
-      : chosen.selected,
+    selected: readinessDiagnostics.selectedProvider,
     rate,
     pickupLocationId: arbitration?.selected_option?.pickup_location_id ?? pickupLocationId
   });
@@ -329,11 +533,15 @@ export async function evaluateCertifiedProviderRouting(
   const blockers = unique([
     ...(selectedProvider?.blockers ?? primary?.blockers ?? []),
     ...(arbitration?.blockers ?? []),
+    ...(readinessDiagnostics.selectedDiagnostic?.blockers ?? []),
+    ...(readinessDiagnostics.noEligibleProvider ? ["NO_ELIGIBLE_CERTIFIED_PROVIDER"] : []),
     ...(decision === "RATES_ONLY" && requestedCapability !== "RATES" ? ["PROVIDER_NOT_CERTIFIED_FOR_LIVE_AWB"] : [])
   ]);
   const warnings = unique([
     ...(selectedProvider?.warnings ?? primary?.warnings ?? []),
-    ...(arbitration?.warnings ?? [])
+    ...(arbitration?.warnings ?? []),
+    ...(readinessDiagnostics.fallbackUsed ? ["PREFERRED_PROVIDER_SKIPPED_FOR_SAFE_FALLBACK"] : []),
+    ...(readinessDiagnostics.selectedDiagnostic?.warnings ?? [])
   ]);
   return {
     shipment_id: shipment.id,
@@ -363,8 +571,14 @@ export async function evaluateCertifiedProviderRouting(
     admin_next_actions: unique([
       ...(selectedProvider?.admin_next_actions ?? primary?.admin_next_actions ?? []),
       ...(arbitration?.admin_next_actions ?? []),
+      ...(readinessDiagnostics.selectedDiagnostic?.next_actions ?? []),
       ...routeNextActions(decision)
-    ])
+    ]),
+    admin_diagnostics: {
+      fallback_used: readinessDiagnostics.fallbackUsed,
+      no_eligible_provider: readinessDiagnostics.noEligibleProvider,
+      evaluated_providers: readinessDiagnostics.diagnostics
+    }
   };
 }
 
@@ -373,5 +587,7 @@ export const __certifiedProviderRoutingInternals = {
   publicServiceName,
   providerCourierIdPresent,
   routingDecision,
-  selectedRate
+  selectedRate,
+  providerLaneCode,
+  providerRegistryCapability
 };
