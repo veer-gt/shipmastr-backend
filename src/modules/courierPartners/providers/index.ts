@@ -10,6 +10,16 @@ export {
   XpressbeesSandboxWorkflowAdapter,
   getXpressbeesSandboxReadiness
 } from "./xpressbees/xpressbees-sandbox.adapter.js";
+export {
+  createShadowfaxSandboxAdapter,
+  ShadowfaxSandboxWorkflowAdapter,
+  getShadowfaxSandboxReadiness
+} from "./shadowfax/shadowfax-sandbox.adapter.js";
+export {
+  createEkartSandboxAdapter,
+  EkartSandboxWorkflowAdapter,
+  getEkartSandboxReadiness
+} from "./ekart/ekart-sandbox.adapter.js";
 
 export function getInternalCourierProvider(code: InternalCourierProviderCode) {
   if (code === "bigship") {
