@@ -105,6 +105,18 @@ export type CourierProviderNdrRequest = CourierProviderWorkflowContext & {
   safeRemarks?: string | null;
 };
 
+export type CourierProviderNdrPreviewRequest = CourierProviderNdrRequest & {
+  ndrCaseId?: string | null;
+  safeReasonCode?: string | null;
+  phoneLast4?: string | null;
+  addressQualitySignal?: "VALID" | "NEEDS_REVIEW" | "UNKNOWN";
+};
+
+export type CourierProviderNdrContactUpdateRequest = CourierProviderNdrRequest & {
+  phoneLast4?: string | null;
+  addressUpdateSummary?: string | null;
+};
+
 export type CourierProviderWeightDisputeRequest = CourierProviderWorkflowContext & {
   awbNumber?: string | null;
   chargedWeightKg: number;
@@ -112,10 +124,50 @@ export type CourierProviderWeightDisputeRequest = CourierProviderWorkflowContext
   safeEvidenceRefs?: string[];
 };
 
+export type CourierProviderWeightDiscrepancyReadRequest = CourierProviderWorkflowContext & {
+  discrepancyCaseId?: string | null;
+  awbNumber?: string | null;
+};
+
+export type CourierProviderWeightDiscrepancyHistoryRequest = CourierProviderWeightDiscrepancyReadRequest & {
+  safePeriodLabel?: string | null;
+};
+
+export type CourierProviderWeightDiscrepancyRemarkRequest = CourierProviderWeightDisputeRequest & {
+  safeRemark?: string | null;
+};
+
+export type CourierProviderWeightDiscrepancyAcceptRequest = CourierProviderWeightDisputeRequest & {
+  acceptanceReason?: string | null;
+};
+
+export type CourierProviderCourierImageMetadataRequest = CourierProviderWorkflowContext & {
+  imageRef?: string | null;
+  fixtureOnly?: boolean;
+  metadata?: {
+    contentType?: string | null;
+    byteSize?: number | null;
+    capturedAt?: string | null;
+  };
+};
+
 export type CourierProviderCodRemittanceRequest = CourierProviderWorkflowContext & {
   remittanceReference?: string | null;
   amountPaise: number;
   safePeriodLabel?: string | null;
+};
+
+export type CourierProviderCodRemittanceReadRequest = CourierProviderCodRemittanceRequest & {
+  reconciliationReference?: string | null;
+};
+
+export type CourierProviderCodRemittanceReconciliationRequest = CourierProviderCodRemittanceRequest & {
+  ledgerSourceOfTruth?: "SHIPMASTR_WALLET_LEDGER";
+  providerAmountPaise?: number | null;
+};
+
+export type CourierProviderCodPayoutActionRequest = CourierProviderCodRemittanceRequest & {
+  payoutAction?: "RELEASE" | "MARK_PAID" | "ADJUST";
 };
 
 export interface CourierProviderWorkflowAdapter {

@@ -85,6 +85,7 @@ export function serializeAdminCourierProviderWorkflowDispatch(
     provider_raw_response_stored: false as const,
     provider_headers_stored: false as const,
     credential_values_exposed: false as const,
+    contract_data: safeValue(result.contract_data),
     adapter_result: result.adapter_result ? {
       capability: result.adapter_result.capability,
       mode: result.adapter_result.mode,
