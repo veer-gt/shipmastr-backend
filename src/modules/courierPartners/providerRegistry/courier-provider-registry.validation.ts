@@ -48,3 +48,11 @@ export const courierProviderWorkflowGuardSchema = z.object({
   capability: z.enum(courierProviderCapabilities),
   mode: z.enum(courierProviderRuntimeModes).optional().default("LIVE")
 });
+
+export const courierProviderReadinessQuerySchema = z.object({
+  merchant_id: z.string().trim().min(1).max(120).optional(),
+  provider_code: z.string().trim().min(1).max(40).optional().transform(parseCourierProviderCode),
+  status: z.enum(courierProviderLaneStatuses).optional(),
+  mode: z.enum(courierProviderRuntimeModes).optional().default("LIVE"),
+  capability: z.enum(courierProviderCapabilities).optional()
+});

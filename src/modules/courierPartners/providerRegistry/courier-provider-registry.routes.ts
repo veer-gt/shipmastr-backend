@@ -5,16 +5,21 @@ import {
   checkCourierProviderCapability,
   checkCourierProviderLiveWorkflowAllowed,
   getCourierProviderLane,
+  getCourierProviderLaneReadinessDiagnostic,
   listCourierProviderLanes,
+  listCourierProviderLaneReadinessDiagnostics,
   mapCourierProviderRawStatus
 } from "./courier-provider-registry.service.js";
 import {
   serializeAdminCourierProviderLane,
   serializeAdminCourierProviderLaneList,
+  serializeAdminCourierProviderLaneReadinessDiagnostic,
+  serializeAdminCourierProviderLaneReadinessDiagnosticList,
   serializeCourierProviderWorkflowGuard
 } from "./courier-provider-registry.serializer.js";
 import {
   courierProviderLaneListQuerySchema,
+  courierProviderReadinessQuerySchema,
   courierProviderWorkflowGuardSchema,
   parseCourierProviderCapability,
   parseCourierProviderLaneCode
@@ -55,11 +60,40 @@ adminCourierProviderRegistryRouter.get("/status-map/:rawStatus", async (req, res
   }));
 });
 
+adminCourierProviderRegistryRouter.get("/readiness", async (req, res) => {
+  const query = courierProviderReadinessQuerySchema.parse(req.query ?? {});
+  const data = await listCourierProviderLaneReadinessDiagnostics({
+    merchantId: query.merchant_id ?? null,
+    ...(query.provider_code ? { providerCode: query.provider_code } : {}),
+    ...(query.status ? { status: query.status } : {}),
+    mode: query.mode,
+    ...(query.capability ? { capability: query.capability } : {})
+  });
+  return res.json(successEnvelope(
+    "Courier provider lane readiness diagnostics fetched safely.",
+    serializeAdminCourierProviderLaneReadinessDiagnosticList(data)
+  ));
+});
+
 adminCourierProviderRegistryRouter.get("/:laneCode", async (req, res) => {
   const data = getCourierProviderLane(routeLane(req.params.laneCode));
   return res.json(successEnvelope(
     "Courier provider lane fetched safely.",
     { lane: serializeAdminCourierProviderLane(data.lane) }
+  ));
+});
+
+adminCourierProviderRegistryRouter.get("/:laneCode/readiness", async (req, res) => {
+  const query = courierProviderReadinessQuerySchema.parse(req.query ?? {});
+  const data = await getCourierProviderLaneReadinessDiagnostic({
+    laneCode: routeLane(req.params.laneCode),
+    merchantId: query.merchant_id ?? null,
+    mode: query.mode,
+    ...(query.capability ? { capability: query.capability } : {})
+  });
+  return res.json(successEnvelope(
+    "Courier provider lane readiness diagnostic fetched safely.",
+    serializeAdminCourierProviderLaneReadinessDiagnostic(data)
   ));
 });
 

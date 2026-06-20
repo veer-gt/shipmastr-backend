@@ -53,6 +53,14 @@ export const courierProviderCredentialReadinessStatuses = [
 ] as const;
 export type CourierProviderCredentialReadinessStatus = typeof courierProviderCredentialReadinessStatuses[number];
 
+export const courierProviderCredentialReferenceTypes = [
+  "NONE",
+  "CREDENTIAL_REF",
+  "ENV_REF",
+  "SECRET_MANAGER_REF"
+] as const;
+export type CourierProviderCredentialReferenceType = typeof courierProviderCredentialReferenceTypes[number];
+
 export const courierProviderCapabilities = [
   "RATE",
   "AWB",
@@ -120,9 +128,57 @@ export type CourierProviderLaneDefinition = {
 export type CourierProviderLaneCredentialReadiness = {
   status: CourierProviderCredentialReadinessStatus;
   credential_ref_configured: boolean;
+  env_ref_configured: boolean;
+  secret_manager_ref_configured: boolean;
+  reference: {
+    configured: boolean;
+    ref_type: CourierProviderCredentialReferenceType;
+    display_label: string;
+    credential_ref_configured: boolean;
+    env_ref_configured: boolean;
+    secret_manager_ref_configured: boolean;
+  };
+  mode: CourierProviderRuntimeMode;
   last_test_status: string | null;
   checked_at: string;
   blockers: string[];
+};
+
+export type CourierProviderCapabilityReadiness = {
+  capability: CourierProviderCapability;
+  supported: boolean;
+  status: "READY" | "BLOCKED" | "UNSUPPORTED";
+  blockers: string[];
+  next_actions: string[];
+};
+
+export type CourierProviderLaneReadinessDiagnostic = {
+  lane_code: CourierProviderLaneCode;
+  provider_code: CourierProviderCode;
+  requested_mode: CourierProviderRuntimeMode;
+  lane_status: CourierProviderLaneStatus;
+  status: CourierProviderCredentialReadinessStatus;
+  blocked: boolean;
+  blockers: string[];
+  next_actions: string[];
+  credential_readiness: CourierProviderLaneCredentialReadiness;
+  capability_matrix: CourierProviderCapabilityReadiness[];
+  public_network_name: "Shipmastr Courier Network";
+  public_outcomes: readonly [
+    "Shipmastr Smart",
+    "Shipmastr Economy",
+    "Shipmastr Express",
+    "Shipmastr COD Shield",
+    "Shipmastr Weight Guard",
+    "Shipmastr Autopilot"
+  ];
+  admin_context: {
+    provider_label_internal: string;
+    lane_type: CourierProviderLaneType;
+    transport_mode: CourierProviderTransportMode;
+    base_url_ref: string;
+    credential_reference_state: CourierProviderLaneCredentialReadiness["reference"];
+  };
 };
 
 export type CourierProviderWorkflowGuardStatus =
@@ -169,7 +225,8 @@ export type CourierProviderRegistryListQuery = {
 export type CourierProviderRegistryDependencies = {
   credentialReadinessProvider?: (
     merchantId: string | null,
-    lane: CourierProviderLaneDefinition
+    lane: CourierProviderLaneDefinition,
+    mode: CourierProviderRuntimeMode
   ) => Promise<CourierProviderLaneCredentialReadiness>;
   checkedAt?: string;
 };

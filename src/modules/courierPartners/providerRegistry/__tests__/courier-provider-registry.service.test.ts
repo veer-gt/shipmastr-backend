@@ -5,16 +5,48 @@ import {
   checkCourierProviderCapability,
   checkCourierProviderLiveWorkflowAllowed,
   getCourierProviderLane,
+  getCourierProviderLaneCredentialReadiness,
+  getCourierProviderLaneReadinessDiagnostic,
   listCourierProviderLanes,
   mapCourierProviderRawStatus
 } from "../courier-provider-registry.service.js";
 import {
+  serializeAdminCourierProviderLaneReadinessDiagnostic,
   serializeAdminCourierProviderLane,
   serializeSellerSafeProviderAvailability
 } from "../courier-provider-registry.serializer.js";
 import { courierProviderLaneCodes } from "../courier-provider-registry.types.js";
 
 const checkedAt = "2026-06-20T00:00:00.000Z";
+
+function fakeCredentialClient(record: Record<string, unknown> | null) {
+  return {
+    courierProviderCredential: {
+      findFirst: async () => record
+    }
+  } as never;
+}
+
+function readyCredentialReadiness(mode: "LIVE" | "SANDBOX" = "LIVE") {
+  return {
+    status: "READY" as const,
+    credential_ref_configured: true,
+    env_ref_configured: false,
+    secret_manager_ref_configured: false,
+    reference: {
+      configured: true,
+      ref_type: "CREDENTIAL_REF" as const,
+      display_label: "Credential vault reference configured",
+      credential_ref_configured: true,
+      env_ref_configured: false,
+      secret_manager_ref_configured: false
+    },
+    mode,
+    last_test_status: "PASS",
+    checked_at: checkedAt,
+    blockers: []
+  };
+}
 
 describe("courier provider registry foundation", () => {
   it("models the required provider lanes internally", () => {
@@ -57,6 +89,17 @@ describe("courier provider registry foundation", () => {
       credentialReadinessProvider: async () => ({
         status: "NOT_CONFIGURED",
         credential_ref_configured: false,
+        env_ref_configured: false,
+        secret_manager_ref_configured: false,
+        reference: {
+          configured: false,
+          ref_type: "NONE",
+          display_label: "Not configured",
+          credential_ref_configured: false,
+          env_ref_configured: false,
+          secret_manager_ref_configured: false
+        },
+        mode: "LIVE",
         last_test_status: null,
         checked_at: checkedAt,
         blockers: ["COURIER_PROVIDER_CREDENTIALS_NOT_CONFIGURED"]
@@ -77,13 +120,7 @@ describe("courier provider registry foundation", () => {
       mode: "LIVE"
     }, {
       checkedAt,
-      credentialReadinessProvider: async () => ({
-        status: "READY",
-        credential_ref_configured: true,
-        last_test_status: "PASS",
-        checked_at: checkedAt,
-        blockers: []
-      })
+      credentialReadinessProvider: async () => readyCredentialReadiness("LIVE")
     });
 
     assert.equal(result.allowed, true);
@@ -100,13 +137,7 @@ describe("courier provider registry foundation", () => {
       mode: "LIVE"
     }, {
       checkedAt,
-      credentialReadinessProvider: async () => ({
-        status: "READY",
-        credential_ref_configured: true,
-        last_test_status: "PASS",
-        checked_at: checkedAt,
-        blockers: []
-      })
+      credentialReadinessProvider: async () => readyCredentialReadiness("LIVE")
     });
 
     assert.equal(result.allowed, false);
@@ -122,13 +153,7 @@ describe("courier provider registry foundation", () => {
       mode: "LIVE"
     }, {
       checkedAt,
-      credentialReadinessProvider: async () => ({
-        status: "READY",
-        credential_ref_configured: true,
-        last_test_status: "PASS",
-        checked_at: checkedAt,
-        blockers: []
-      })
+      credentialReadinessProvider: async () => readyCredentialReadiness("LIVE")
     });
 
     assert.equal(result.allowed, false);
@@ -147,19 +172,106 @@ describe("courier provider registry foundation", () => {
       checkedAt,
       credentialReadinessProvider: async () => {
         credentialChecks += 1;
-        return {
-          status: "READY",
-          credential_ref_configured: true,
-          last_test_status: "PASS",
-          checked_at: checkedAt,
-          blockers: []
-        };
+        return readyCredentialReadiness("LIVE");
       }
     });
 
     assert.equal(credentialChecks, 1);
     assert.equal(result.allowed, true);
     assert.match(result.warnings.join(" "), /does not perform real courier\/provider calls/i);
+  });
+
+  it("reports missing credential references as safe blockers", async () => {
+    const lane = getCourierProviderLane("DELHIVERY_B2C_AIR").lane;
+    const readiness = await getCourierProviderLaneCredentialReadiness(
+      "merchant_1",
+      lane,
+      fakeCredentialClient(null),
+      { checkedAt },
+      "LIVE"
+    );
+
+    assert.equal(readiness.status, "NOT_CONFIGURED");
+    assert.equal(readiness.reference.configured, false);
+    assert.equal(readiness.reference.ref_type, "NONE");
+    assert.ok(readiness.blockers.includes("COURIER_PROVIDER_CREDENTIAL_REFS_MISSING"));
+  });
+
+  it("classifies environment references without exposing the ref value", async () => {
+    const lane = getCourierProviderLane("XPRESSBEES_AIR").lane;
+    const readiness = await getCourierProviderLaneCredentialReadiness(
+      "merchant_1",
+      lane,
+      fakeCredentialClient({
+        credentialRef: "env:XPRESSBEES_PRIVATE_VALUE",
+        status: "DRAFT",
+        mode: "SANDBOX",
+        lastTestStatus: null,
+        lastTestedAt: null,
+        updatedAt: new Date(checkedAt)
+      }),
+      { checkedAt },
+      "SANDBOX"
+    );
+    const json = JSON.stringify(readiness);
+
+    assert.equal(readiness.status, "REFERENCE_CONFIGURED");
+    assert.equal(readiness.reference.ref_type, "ENV_REF");
+    assert.equal(readiness.env_ref_configured, true);
+    assert.deepEqual(readiness.blockers, []);
+    assert.doesNotMatch(json, /XPRESSBEES_PRIVATE_VALUE|env:/i);
+  });
+
+  it("blocks live readiness until secret-manager refs pass checks", async () => {
+    const lane = getCourierProviderLane("SHIPROCKET").lane;
+    const readiness = await getCourierProviderLaneCredentialReadiness(
+      "merchant_1",
+      lane,
+      fakeCredentialClient({
+        credentialRef: "secret-manager:projects/shipmastr/secrets/shiprocket-token",
+        status: "ACTIVE",
+        mode: "LIVE",
+        lastTestStatus: "PENDING",
+        lastTestedAt: null,
+        updatedAt: new Date(checkedAt)
+      }),
+      { checkedAt },
+      "LIVE"
+    );
+    const json = JSON.stringify(readiness);
+
+    assert.equal(readiness.status, "REFERENCE_CONFIGURED");
+    assert.equal(readiness.reference.ref_type, "SECRET_MANAGER_REF");
+    assert.equal(readiness.secret_manager_ref_configured, true);
+    assert.ok(readiness.blockers.includes("COURIER_PROVIDER_CREDENTIALS_NOT_READY"));
+    assert.doesNotMatch(json, /projects\/shipmastr|shiprocket-token|secret-manager:/i);
+  });
+
+  it("returns safe admin readiness diagnostics with a capability matrix", async () => {
+    const diagnostic = await getCourierProviderLaneReadinessDiagnostic({
+      merchantId: "merchant_1",
+      laneCode: "BIGSHIP",
+      capability: "AWB",
+      mode: "LIVE"
+    }, { checkedAt }, fakeCredentialClient({
+      credentialRef: "credential-vault:provider/bigship/live",
+      status: "ACTIVE",
+      mode: "LIVE",
+      lastTestStatus: "PASS",
+      lastTestedAt: new Date(checkedAt),
+      updatedAt: new Date(checkedAt)
+    }));
+    const serialized = serializeAdminCourierProviderLaneReadinessDiagnostic(diagnostic);
+    const json = JSON.stringify(serialized);
+
+    assert.equal(serialized.status, "READY");
+    assert.equal(serialized.credential_readiness.reference.configured, true);
+    assert.equal(serialized.capability_matrix.length, 1);
+    const [capability] = serialized.capability_matrix;
+    assert.ok(capability);
+    assert.equal(capability.capability, "AWB");
+    assert.equal(capability.status, "READY");
+    assert.doesNotMatch(json, /credential-vault:provider|token|password|authorization|Bearer/i);
   });
 
   it("normalizes raw provider statuses into Shipmastr-safe statuses", () => {
