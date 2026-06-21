@@ -6,6 +6,7 @@ import {
 import {
   commercialRateCardGroupCodes,
   provisionalRateCardSourceTypes,
+  provisionalRateCardReviewStatuses,
   provisionalRateCardStatuses,
   provisionalRateCardZoneCodes,
   shipmastrOutcomeTierCodes,
@@ -13,6 +14,7 @@ import {
   type CommercialRateCardGroupCode,
   type ProvisionalRateCardDefinition,
   type ProvisionalRateCardSourceType,
+  type ProvisionalRateCardReviewStatus,
   type ProvisionalRateCardStatus,
   type ProvisionalRateCardZoneCode,
   type ShipmastrOutcomeTier,
@@ -22,6 +24,7 @@ import {
 const groupSet = new Set<string>(commercialRateCardGroupCodes);
 const tierSet = new Set<string>(shipmastrOutcomeTierCodes);
 const sourceSet = new Set<string>(provisionalRateCardSourceTypes);
+const reviewStatusSet = new Set<string>(provisionalRateCardReviewStatuses);
 const statusSet = new Set<string>(provisionalRateCardStatuses);
 const zoneSet = new Set<string>(provisionalRateCardZoneCodes);
 const laneSet = new Set<string>(courierProviderLaneCodes);
@@ -195,6 +198,48 @@ export const provisionalRateCardTemplates: ProvisionalRateCardDefinition[] = [
   }
 ];
 
+export const sampleProvisionalRateCardImportTemplate = {
+  name: "Internal Sample Silver Benchmark",
+  group_code: "SILVER",
+  source_type: "MANUAL_BENCHMARK",
+  status: "BENCHMARK_ONLY",
+  source_label: "Internal fake sample",
+  source_notes: "Example only. Replace with reviewed internal benchmark notes before import.",
+  review_by: "2026-07-31T00:00:00.000Z",
+  expires_at: "2026-08-31T00:00:00.000Z",
+  allowed_outcome_tiers: ["SHIPMASTR_SMART", "SHIPMASTR_ECONOMY"],
+  provider_lane_mappings: [
+    { outcome_code: "SHIPMASTR_SMART", lane_codes: ["DELHIVERY_B2C_SURFACE"] }
+  ],
+  charge_cells: [
+    {
+      lane_code: "DELHIVERY_B2C_SURFACE",
+      outcome_code: "SHIPMASTR_SMART",
+      zone_code: "WITHIN_CITY",
+      min_weight_kg: 0,
+      max_weight_kg: 0.5,
+      slab_order: 1,
+      package_type: "ANY",
+      charge_a_amount: 11,
+      charge_b_amount: 12,
+      charge_a_label: "PRIMARY_CHARGE",
+      charge_b_label: "SECONDARY_CHARGE",
+      cod_charge_a: 0,
+      cod_charge_b: 0,
+      cod_charge_policy: "COMPONENTS_ONLY",
+      volumetric_divisor: 5000,
+      rto_percentage: 0,
+      gst_status: "REVIEW_REQUIRED",
+      gst_percent: null,
+      notes: ["Fake values for template validation only."]
+    }
+  ],
+  internal_notes: [
+    "Fake internal sample only.",
+    "Do not use for official courier pricing, settlement, reconciliation, or seller quotes."
+  ]
+} as const;
+
 export function normalizeCommercialGroupCode(value: unknown): CommercialRateCardGroupCode {
   const code = String(value ?? "").trim().toUpperCase();
   if (!groupSet.has(code)) throw new HttpError(400, "PROVISIONAL_RATE_CARD_GROUP_UNSUPPORTED");
@@ -217,6 +262,12 @@ export function normalizeRateCardStatus(value: unknown): ProvisionalRateCardStat
   const status = String(value ?? "").trim().toUpperCase();
   if (!statusSet.has(status)) throw new HttpError(400, "PROVISIONAL_RATE_CARD_STATUS_UNSUPPORTED");
   return status as ProvisionalRateCardStatus;
+}
+
+export function normalizeRateCardReviewStatus(value: unknown): ProvisionalRateCardReviewStatus {
+  const status = String(value ?? "").trim().toUpperCase();
+  if (!reviewStatusSet.has(status)) throw new HttpError(400, "PROVISIONAL_RATE_CARD_REVIEW_STATUS_UNSUPPORTED");
+  return status as ProvisionalRateCardReviewStatus;
 }
 
 export function normalizeRateCardZoneCode(value: unknown): ProvisionalRateCardZoneCode {
@@ -265,6 +316,8 @@ export function normalizeProvisionalRateCardDefinition(card: ProvisionalRateCard
     zoneCode: normalizeRateCardZoneCode(cell.zoneCode),
     chargeALabel: cell.chargeALabel || "PRIMARY_CHARGE",
     chargeBLabel: cell.chargeBLabel || "SECONDARY_CHARGE",
+    volumetricDivisor: cell.volumetricDivisor || 5000,
+    rtoPercentage: cell.rtoPercentage || 0,
     currency: "INR" as const
   }));
 

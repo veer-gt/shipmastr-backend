@@ -39,6 +39,18 @@ export const provisionalRateCardStatuses = [
 ] as const;
 export type ProvisionalRateCardStatus = typeof provisionalRateCardStatuses[number];
 
+export const provisionalRateCardReviewStatuses = [
+  "DRAFT",
+  "IMPORTED",
+  "VALIDATION_FAILED",
+  "READY_FOR_REVIEW",
+  "APPROVED_INTERNAL",
+  "REJECTED",
+  "ARCHIVED",
+  "EXPIRED"
+] as const;
+export type ProvisionalRateCardReviewStatus = typeof provisionalRateCardReviewStatuses[number];
+
 export const provisionalRateCardZoneCodes = [
   "WITHIN_CITY",
   "WITHIN_STATE",
@@ -97,6 +109,8 @@ export type ProvisionalRateCardChargeCell = {
   codChargeA: number | null;
   codChargeB: number | null;
   codChargePolicy: "NOT_CONFIGURED" | "COMPONENTS_ONLY" | "OFFICIAL_CONFIRMED";
+  volumetricDivisor: number;
+  rtoPercentage: number;
   currency: "INR";
   gstTaxHandling: {
     status: "NOT_CONFIGURED" | "INCLUSIVE" | "EXCLUSIVE" | "REVIEW_REQUIRED";
@@ -165,4 +179,39 @@ export type ProvisionalRateCardSimulationResult = {
     } | null;
     warnings: string[];
   };
+};
+
+export type ProvisionalRateCardImportMetadata = {
+  sourceLabel: string | null;
+  sourceNotes: string | null;
+  uploadedBy: string | null;
+  createdBy: string | null;
+  importedAt: string | null;
+  reviewedBy: string | null;
+  reviewedAt: string | null;
+  expiresAt: string | null;
+  originalFileName: string | null;
+  checksum: string | null;
+};
+
+export type ProvisionalRateCardReviewRecord = ProvisionalRateCardDefinition & {
+  reviewStatus: ProvisionalRateCardReviewStatus;
+  validationErrors: string[];
+  validationWarnings: string[];
+  importMetadata: ProvisionalRateCardImportMetadata;
+};
+
+export type ProvisionalRateCardImportPreview = {
+  previewId: string;
+  valid: boolean;
+  errors: string[];
+  warnings: string[];
+  mutationPerformed: false;
+  liveProviderCallPerformed: false;
+  officialRateClaim: false;
+  settlementAllowed: false;
+  reconciliationAllowed: false;
+  publicSellerVisible: false;
+  checksum: string;
+  card: ProvisionalRateCardReviewRecord | null;
 };

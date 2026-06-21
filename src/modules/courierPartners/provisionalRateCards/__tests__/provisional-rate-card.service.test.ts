@@ -50,6 +50,8 @@ function fixtureCard(overrides: Partial<ProvisionalRateCardDefinition> = {}): Pr
       codChargeA: 1,
       codChargeB: 2,
       codChargePolicy: "COMPONENTS_ONLY",
+      volumetricDivisor: 5000,
+      rtoPercentage: 0,
       currency: "INR",
       gstTaxHandling: { status: "REVIEW_REQUIRED", gstPercent: null },
       notes: []
@@ -203,5 +205,6 @@ describe("provisional rate card group and tier foundation", () => {
     const routes = readFileSync(new URL("../../../../routes/index.ts", import.meta.url), "utf8");
     assert.match(routes, /apiRouter\.use\("\/admin\/rate-card-groups", requireAdminJwt, adminRateCardGroupsRouter\);/);
     assert.match(routes, /apiRouter\.use\("\/admin\/rate-card-tiers", requireAdminJwt, adminRateCardTiersRouter\);/);
+    assert.match(routes, /apiRouter\.use\("\/admin\/provisional-rate-cards", requireAdminJwt, adminProvisionalRateCardsRouter\);/);
   });
 });

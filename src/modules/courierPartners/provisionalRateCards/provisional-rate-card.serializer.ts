@@ -1,6 +1,8 @@
 import type {
   CommercialRateCardGroup,
   ProvisionalRateCardDefinition,
+  ProvisionalRateCardImportPreview,
+  ProvisionalRateCardReviewRecord,
   ProvisionalRateCardSimulationResult,
   ShipmastrOutcomeTier
 } from "./provisional-rate-card.types.js";
@@ -62,6 +64,77 @@ export function serializeAdminProvisionalRateCard(card: ProvisionalRateCardDefin
       meaning_confirmed: false
     },
     internal_notes: card.internalNotes
+  };
+}
+
+export function serializeAdminProvisionalRateCardReview(card: ProvisionalRateCardReviewRecord) {
+  return {
+    ...serializeAdminProvisionalRateCard(card),
+    review_status: card.reviewStatus,
+    validation_errors: card.validationErrors,
+    validation_warnings: card.validationWarnings,
+    import_metadata: {
+      source_label: card.importMetadata.sourceLabel,
+      source_notes: card.importMetadata.sourceNotes,
+      uploaded_by: card.importMetadata.uploadedBy ? "configured" : null,
+      created_by: card.importMetadata.createdBy ? "configured" : null,
+      imported_at: card.importMetadata.importedAt,
+      reviewed_by: card.importMetadata.reviewedBy ? "configured" : null,
+      reviewed_at: card.importMetadata.reviewedAt,
+      expires_at: card.importMetadata.expiresAt,
+      original_file_name: card.importMetadata.originalFileName,
+      checksum_configured: Boolean(card.importMetadata.checksum)
+    },
+    charge_cells: card.chargeCells.map((cell) => ({
+      lane_code: cell.laneCode,
+      outcome_code: cell.outcomeCode,
+      zone_code: cell.zoneCode,
+      weight_slab: {
+        min_weight_kg: cell.weightSlab.minWeightKg,
+        max_weight_kg: cell.weightSlab.maxWeightKg,
+        slab_order: cell.weightSlab.slabOrder,
+        package_type: cell.weightSlab.packageType,
+        active: cell.weightSlab.active
+      },
+      charge_components: {
+        charge_a_label: cell.chargeALabel,
+        charge_a_amount: cell.chargeAAmount,
+        charge_b_label: cell.chargeBLabel,
+        charge_b_amount: cell.chargeBAmount,
+        cod_charge_a: cell.codChargeA,
+        cod_charge_b: cell.codChargeB,
+        cod_charge_policy: cell.codChargePolicy,
+        volumetric_divisor: cell.volumetricDivisor,
+        rto_percentage: cell.rtoPercentage,
+        currency: cell.currency,
+        gst_tax_handling: {
+          status: cell.gstTaxHandling.status,
+          gst_percent: cell.gstTaxHandling.gstPercent
+        }
+      },
+      notes: cell.notes
+    })),
+    benchmark_only: card.sourceType === "MANUAL_BENCHMARK",
+    official_rate_claim: false,
+    mutation_performed: false,
+    live_provider_call_performed: false
+  };
+}
+
+export function serializeAdminProvisionalRateCardImportPreview(preview: ProvisionalRateCardImportPreview) {
+  return {
+    preview_id: preview.previewId,
+    valid: preview.valid,
+    errors: preview.errors,
+    warnings: preview.warnings,
+    mutation_performed: preview.mutationPerformed,
+    live_provider_call_performed: preview.liveProviderCallPerformed,
+    official_rate_claim: preview.officialRateClaim,
+    settlement_allowed: preview.settlementAllowed,
+    reconciliation_allowed: preview.reconciliationAllowed,
+    public_seller_visible: preview.publicSellerVisible,
+    checksum_configured: Boolean(preview.checksum),
+    card: preview.card ? serializeAdminProvisionalRateCardReview(preview.card) : null
   };
 }
 
