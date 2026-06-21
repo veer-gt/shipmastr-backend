@@ -263,7 +263,10 @@ describe("provisional rate card import and review workflow", () => {
   });
 
   it("does not add courier API or shipment mutation hooks", () => {
-    const source = readFileSync(new URL("../provisional-rate-card.service.ts", import.meta.url), "utf8");
+    const source = readFileSync(
+      `${process.cwd()}/src/modules/courierPartners/provisionalRateCards/provisional-rate-card.service.ts`,
+      "utf8"
+    );
     for (const forbidden of [
       "createLabel",
       "getRates",

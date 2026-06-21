@@ -12,7 +12,7 @@ import { codRemittancesRouter } from "../modules/codRemittances/cod-remittances.
 import { codDashboardRouter } from "../modules/codDashboard/cod-dashboard.routes.js";
 import { adminCourierPartnerApplicationRouter, courierPartnerApplicationRouter } from "../modules/courierPartnerApplications/courier-partner-application.routes.js";
 import { adminCourierProviderRegistryRouter } from "../modules/courierPartners/providerRegistry/courier-provider-registry.routes.js";
-import { adminProvisionalRateCardsRouter, adminRateCardGroupsRouter, adminRateCardTiersRouter } from "../modules/courierPartners/provisionalRateCards/provisional-rate-card.routes.js";
+import { adminProvisionalRateCardsRouter, adminRateCardGroupsRouter, adminRateCardTiersRouter, sellerProvisionalRateCardQuotesRouter } from "../modules/courierPartners/provisionalRateCards/provisional-rate-card.routes.js";
 import { courierPartnersRouter } from "../modules/courierPartners/courier-partners.routes.js";
 import { adminCourierPartnerRouter, courierOnboardingRouter } from "../modules/courierPartnerOnboarding/onboarding.routes.js";
 import { courierRouter } from "../modules/courier/courier.routes.js";
@@ -62,6 +62,7 @@ apiRouter.use("/admin/courier-provider-lanes", requireAdminJwt, adminCourierProv
 apiRouter.use("/admin/provisional-rate-cards", requireAdminJwt, adminProvisionalRateCardsRouter);
 apiRouter.use("/admin/rate-card-groups", requireAdminJwt, adminRateCardGroupsRouter);
 apiRouter.use("/admin/rate-card-tiers", requireAdminJwt, adminRateCardTiersRouter);
+apiRouter.use("/rate-card-quotes", requireJwtAuth, sellerProvisionalRateCardQuotesRouter);
 apiRouter.use("/admin/tax-compliance", requireAdminJwt, adminTaxComplianceRouter);
 apiRouter.use("/admin/automation", requireAdminJwt, adminAutomationRouter);
 apiRouter.use("/admin/domains", requireAdminJwt, adminDomainsRouter);
