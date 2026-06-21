@@ -140,8 +140,8 @@ adminProvisionalRateCardsRouter.post("/:id/reject", (req, res) => {
 });
 
 adminProvisionalRateCardsRouter.post("/:id/archive", (req, res) => {
-  provisionalRateCardReviewActionSchema.parse(req.body ?? {});
-  const card = archiveProvisionalRateCard(req.params.id, req.auth?.userId ?? null);
+  const body = provisionalRateCardReviewActionSchema.parse(req.body ?? {});
+  const card = archiveProvisionalRateCard(req.params.id, req.auth?.userId ?? null, body.reason || body.note || null);
   res.json(successEnvelope(
     "Provisional rate card archived safely.",
     { rate_card: serializeAdminProvisionalRateCardReview(card) }

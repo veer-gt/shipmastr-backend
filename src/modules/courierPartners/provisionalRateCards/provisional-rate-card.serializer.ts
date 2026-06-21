@@ -81,6 +81,12 @@ export function serializeAdminProvisionalRateCardReview(card: ProvisionalRateCar
       imported_at: card.importMetadata.importedAt,
       reviewed_by: card.importMetadata.reviewedBy ? "configured" : null,
       reviewed_at: card.importMetadata.reviewedAt,
+      rejected_by: card.importMetadata.rejectedBy ? "configured" : null,
+      rejected_at: card.importMetadata.rejectedAt,
+      rejection_reason_configured: Boolean(card.importMetadata.rejectionReason),
+      archived_by: card.importMetadata.archivedBy ? "configured" : null,
+      archived_at: card.importMetadata.archivedAt,
+      archive_reason_configured: Boolean(card.importMetadata.archiveReason),
       expires_at: card.importMetadata.expiresAt,
       original_file_name: card.importMetadata.originalFileName,
       checksum_configured: Boolean(card.importMetadata.checksum)

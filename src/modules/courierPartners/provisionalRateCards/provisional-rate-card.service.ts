@@ -82,6 +82,12 @@ function recordFromCard(
       importedAt: metadata.importedAt ?? null,
       reviewedBy: metadata.reviewedBy ?? null,
       reviewedAt: metadata.reviewedAt ?? null,
+      rejectedBy: metadata.rejectedBy ?? null,
+      rejectedAt: metadata.rejectedAt ?? null,
+      rejectionReason: metadata.rejectionReason ?? null,
+      archivedBy: metadata.archivedBy ?? null,
+      archivedAt: metadata.archivedAt ?? null,
+      archiveReason: metadata.archiveReason ?? null,
       expiresAt: metadata.expiresAt ?? null,
       originalFileName: metadata.originalFileName ?? null,
       checksum: metadata.checksum ?? null
@@ -290,6 +296,12 @@ function parseImportedDefinition(rawInput: unknown, actorId: string | null, now 
     importedAt: now.toISOString(),
     reviewedBy: null,
     reviewedAt: null,
+    rejectedBy: null,
+    rejectedAt: null,
+    rejectionReason: null,
+    archivedBy: null,
+    archivedAt: null,
+    archiveReason: null,
     expiresAt,
     originalFileName: cleanText(raw.original_file_name, 180),
     checksum
@@ -413,6 +425,7 @@ export function approveInternalProvisionalRateCard(id: string, actorId: string |
   const existing = getProvisionalRateCardReview(id);
   if (existing.reviewStatus === "ARCHIVED") throw new HttpError(409, "PROVISIONAL_RATE_CARD_ARCHIVED");
   if (existing.reviewStatus === "REJECTED") throw new HttpError(409, "PROVISIONAL_RATE_CARD_REJECTED");
+  if (existing.reviewStatus === "EXPIRED" || isReviewPast(existing, now)) throw new HttpError(409, "PROVISIONAL_RATE_CARD_EXPIRED");
   const next = recordFromCard({
     ...existing,
     status: "ACTIVE_INTERNAL",
@@ -438,31 +451,39 @@ export function approveInternalProvisionalRateCard(id: string, actorId: string |
 export function rejectProvisionalRateCard(id: string, actorId: string | null = null, reason: string | null = null, now = new Date()) {
   seedImportedRateCardStore();
   const existing = getProvisionalRateCardReview(id);
+  const rejectionReason = cleanText(reason, 500);
+  if (!rejectionReason) throw new HttpError(400, "PROVISIONAL_RATE_CARD_REJECTION_REASON_REQUIRED");
+  if (existing.reviewStatus === "ARCHIVED") throw new HttpError(409, "PROVISIONAL_RATE_CARD_ARCHIVED");
   const next = recordFromCard(existing, {
     ...existing.importMetadata,
-    reviewedBy: actorId,
-    reviewedAt: now.toISOString()
+    rejectedBy: actorId,
+    rejectedAt: now.toISOString(),
+    rejectionReason
   }, "REJECTED", [
     ...existing.validationWarnings,
-    ...(reason ? [`REJECTED: ${reason.slice(0, 160)}`] : ["REJECTED"])
+    `REJECTED: ${rejectionReason.slice(0, 160)}`
   ]);
   importedRateCardStore.set(id, next);
   return cloneReviewRecord(next);
 }
 
-export function archiveProvisionalRateCard(id: string, actorId: string | null = null, now = new Date()) {
+export function archiveProvisionalRateCard(id: string, actorId: string | null = null, reason: string | null = null, now = new Date()) {
   seedImportedRateCardStore();
   const existing = getProvisionalRateCardReview(id);
+  const archiveReason = cleanText(reason, 500);
+  if (!archiveReason) throw new HttpError(400, "PROVISIONAL_RATE_CARD_ARCHIVE_REASON_REQUIRED");
   const next = recordFromCard({
     ...existing,
     status: "ARCHIVED"
   }, {
     ...existing.importMetadata,
-    reviewedBy: actorId,
-    reviewedAt: now.toISOString()
+    archivedBy: actorId,
+    archivedAt: now.toISOString(),
+    archiveReason
   }, "ARCHIVED", [
     ...existing.validationWarnings,
-    "ARCHIVED_NOT_ACTIVE"
+    "ARCHIVED_NOT_ACTIVE",
+    `ARCHIVED: ${archiveReason.slice(0, 160)}`
   ]);
   importedRateCardStore.set(id, next);
   return cloneReviewRecord(next);
@@ -487,7 +508,19 @@ export function simulateProvisionalRateCard(
   input: ProvisionalRateCardSimulationInput,
   now = new Date()
 ): ProvisionalRateCardSimulationResult {
-  const card = getProvisionalRateCard(id);
+  let reviewStatus: ProvisionalRateCardReviewStatus | null = null;
+  let card: ProvisionalRateCardDefinition;
+  try {
+    const reviewRecord = getProvisionalRateCardReview(id);
+    reviewStatus = reviewRecord.reviewStatus;
+    card = reviewRecord;
+  } catch (error) {
+    if (error instanceof HttpError && error.status === 404) {
+      card = getProvisionalRateCard(id);
+    } else {
+      throw error;
+    }
+  }
   const outcomeCode = normalizeOutcomeTierCode(input.outcomeCode);
   const zoneCode = normalizeRateCardZoneCode(input.zoneCode);
 
@@ -502,8 +535,36 @@ export function simulateProvisionalRateCard(
     ...(card.reconciliationAllowed ? [] : ["RECONCILIATION_BLOCKED"])
   ];
 
+  const closedBlocker = reviewStatus === "REJECTED"
+    ? "PROVISIONAL_RATE_CARD_REJECTED"
+    : reviewStatus === "ARCHIVED"
+      ? "PROVISIONAL_RATE_CARD_ARCHIVED"
+      : reviewStatus === "EXPIRED" || card.status === "EXPIRED"
+        ? "PROVISIONAL_RATE_CARD_EXPIRED"
+        : isReviewPast(card, now)
+          ? "PROVISIONAL_RATE_CARD_REVIEW_PAST"
+          : null;
+
+  if (closedBlocker) {
+    return {
+      status: "BLOCKED",
+      blockerCode: closedBlocker,
+      sellerSafeQuote: null,
+      adminDiagnostics: {
+        sourceType: card.sourceType,
+        status: card.status,
+        official: card.official,
+        settlementAllowed: card.settlementAllowed,
+        reconciliationAllowed: card.reconciliationAllowed,
+        publicSellerVisible: card.publicSellerVisible,
+        laneCode: null,
+        chargeComponents: null,
+        warnings: [...warnings, closedBlocker]
+      }
+    };
+  }
+
   const blockedForSeller = input.sellerFacing === true
-    && card.status === "BENCHMARK_ONLY"
     && card.publicSellerVisible === false;
 
   if (blockedForSeller) {
