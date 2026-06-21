@@ -19,6 +19,7 @@ import {
   serializeAdminProvisionalRateCardImportPreview,
   serializeAdminProvisionalRateCardReview,
   serializeAdminProvisionalRateCardSimulation,
+  serializeSellerSafeProvisionalQuote,
   serializeShipmastrOutcomeTier
 } from "./provisional-rate-card.serializer.js";
 import {
@@ -30,6 +31,7 @@ import {
 export const adminRateCardGroupsRouter = Router();
 export const adminRateCardTiersRouter = Router();
 export const adminProvisionalRateCardsRouter = Router();
+export const sellerProvisionalRateCardQuotesRouter = Router();
 
 adminRateCardGroupsRouter.get("/", (_req, res) => res.json(successEnvelope(
   "Commercial rate card groups fetched safely.",
@@ -109,6 +111,27 @@ adminProvisionalRateCardsRouter.post("/:id/simulate", (req, res) => {
     "Provisional rate card simulation completed safely.",
     {
       simulation: serializeAdminProvisionalRateCardSimulation(simulation),
+      mutation_performed: false,
+      live_provider_call_performed: false
+    }
+  ));
+});
+
+sellerProvisionalRateCardQuotesRouter.post("/:id/simulate", (req, res) => {
+  const body = provisionalRateCardSimulationSchema.parse({
+    ...(req.body ?? {}),
+    seller_facing: true
+  });
+  const simulation = simulateProvisionalRateCard(req.params.id, {
+    outcomeCode: body.outcome_code,
+    zoneCode: body.zone_code,
+    weightKg: body.weight_kg,
+    sellerFacing: true
+  });
+  res.json(successEnvelope(
+    "Shipmastr quote simulation completed safely.",
+    {
+      simulation: serializeSellerSafeProvisionalQuote(simulation),
       mutation_performed: false,
       live_provider_call_performed: false
     }

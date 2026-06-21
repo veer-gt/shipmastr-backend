@@ -129,6 +129,47 @@ describe("provisional rate card group and tier foundation", () => {
     }
   });
 
+  it("limits seller-safe quote metadata to Shipmastr-branded tiers", () => {
+    const result = simulateProvisionalRateCard("silver-benchmark-template", {
+      outcomeCode: "SHIPMASTR_SMART",
+      zoneCode: "WITHIN_CITY",
+      weightKg: 0.5,
+      sellerFacing: true
+    });
+    const serialized = serializeSellerSafeProvisionalQuote(result);
+
+    assert.deepEqual(serialized.available_tiers.map((tier) => tier.tier_name), [
+      "Shipmastr Smart",
+      "Shipmastr Economy",
+      "Shipmastr Express",
+      "Shipmastr COD Shield",
+      "Shipmastr Weight Guard",
+      "Shipmastr Autopilot"
+    ]);
+    assert.equal(serialized.powered_by, "Shipmastr network");
+    assert.equal(serialized.quote, null);
+
+    const text = JSON.stringify(serialized);
+    for (const forbidden of [
+      "source_type",
+      "settlement_allowed",
+      "reconciliation_allowed",
+      "public_seller_visible",
+      "official",
+      "lane_code",
+      "DELHIVERY",
+      "XPRESSBEES",
+      "SHADOWFAX",
+      "EKART",
+      "BIGSHIP",
+      "SHIPROCKET",
+      "MANUAL_BENCHMARK",
+      "BENCHMARK_ONLY"
+    ]) {
+      assert.equal(text.includes(forbidden), false, `${forbidden} leaked to seller-safe quote metadata`);
+    }
+  });
+
   it("lets admin serializer show safe internal lane diagnostics", () => {
     const card = listProvisionalRateCards()[0]!;
     const serialized = serializeAdminProvisionalRateCard(card);
@@ -195,16 +236,32 @@ describe("provisional rate card group and tier foundation", () => {
   });
 
   it("does not make courier API or shipment mutation calls", () => {
-    const source = readFileSync(new URL("../provisional-rate-card.service.ts", import.meta.url), "utf8");
+    const source = readFileSync(
+      `${process.cwd()}/src/modules/courierPartners/provisionalRateCards/provisional-rate-card.service.ts`,
+      "utf8"
+    );
     for (const forbidden of ["createLabel", "getRates", "manifestOrder", "sendMail", "awbNumber", "trackingLastSyncedAt"]) {
       assert.equal(source.includes(forbidden), false, `${forbidden} should not appear in provisional rate card service`);
     }
   });
 
   it("documents route protection through admin-only mounts", () => {
-    const routes = readFileSync(new URL("../../../../routes/index.ts", import.meta.url), "utf8");
+    const routes = readFileSync(`${process.cwd()}/src/routes/index.ts`, "utf8");
     assert.match(routes, /apiRouter\.use\("\/admin\/rate-card-groups", requireAdminJwt, adminRateCardGroupsRouter\);/);
     assert.match(routes, /apiRouter\.use\("\/admin\/rate-card-tiers", requireAdminJwt, adminRateCardTiersRouter\);/);
     assert.match(routes, /apiRouter\.use\("\/admin\/provisional-rate-cards", requireAdminJwt, adminProvisionalRateCardsRouter\);/);
+    assert.match(routes, /apiRouter\.use\("\/rate-card-quotes", requireJwtAuth, sellerProvisionalRateCardQuotesRouter\);/);
+  });
+
+  it("forces seller-facing mode on the seller-safe quote route", () => {
+    const routeSource = readFileSync(
+      `${process.cwd()}/src/modules/courierPartners/provisionalRateCards/provisional-rate-card.routes.ts`,
+      "utf8"
+    );
+
+    assert.match(routeSource, /sellerProvisionalRateCardQuotesRouter\.post\("\/:id\/simulate"/);
+    assert.match(routeSource, /seller_facing:\s*true/);
+    assert.match(routeSource, /sellerFacing:\s*true/);
+    assert.match(routeSource, /serializeSellerSafeProvisionalQuote/);
   });
 });

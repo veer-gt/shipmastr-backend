@@ -6,6 +6,22 @@ import type {
   ProvisionalRateCardSimulationResult,
   ShipmastrOutcomeTier
 } from "./provisional-rate-card.types.js";
+import { shipmastrOutcomeTiers } from "./provisional-rate-card.rules.js";
+
+const sellerSafePoweredBy = "Shipmastr network";
+
+function sellerSafeOutcomeTiers() {
+  return shipmastrOutcomeTiers
+    .filter((tier) => tier.active && tier.sellerVisible)
+    .map((tier) => ({
+      tier_name: tier.displayName,
+      service_promise: sellerSafePoweredBy,
+      cod_shield_available: tier.displayName === "Shipmastr COD Shield",
+      weight_guard_available: tier.displayName === "Shipmastr Weight Guard"
+    }));
+}
+
+const sellerSafeTierNames = new Set(sellerSafeOutcomeTiers().map((tier) => tier.tier_name));
 
 export function serializeCommercialRateCardGroup(group: CommercialRateCardGroup) {
   return {
@@ -173,18 +189,25 @@ export function serializeAdminProvisionalRateCardSimulation(result: ProvisionalR
 }
 
 export function serializeSellerSafeProvisionalQuote(result: ProvisionalRateCardSimulationResult) {
+  const quote = result.sellerSafeQuote && sellerSafeTierNames.has(result.sellerSafeQuote.serviceTier)
+    ? {
+      service_tier: result.sellerSafeQuote.serviceTier,
+      price_estimate: result.sellerSafeQuote.priceEstimate,
+      currency: result.sellerSafeQuote.currency,
+      weight_slab: result.sellerSafeQuote.weightSlab,
+      zone_label: result.sellerSafeQuote.zoneLabel,
+      group_label: result.sellerSafeQuote.groupLabel,
+      service_promise: sellerSafePoweredBy,
+      cod_shield_available: result.sellerSafeQuote.serviceTier === "Shipmastr COD Shield",
+      weight_guard_available: result.sellerSafeQuote.serviceTier === "Shipmastr Weight Guard"
+    }
+    : null;
+
   return {
     status: result.status,
     blocker_code: result.blockerCode ? "QUOTE_NOT_PUBLICLY_AVAILABLE" : null,
-    quote: result.sellerSafeQuote
-      ? {
-        service_tier: result.sellerSafeQuote.serviceTier,
-        price_estimate: result.sellerSafeQuote.priceEstimate,
-        currency: result.sellerSafeQuote.currency,
-        weight_slab: result.sellerSafeQuote.weightSlab,
-        zone_label: result.sellerSafeQuote.zoneLabel,
-        group_label: result.sellerSafeQuote.groupLabel
-      }
-      : null
+    powered_by: sellerSafePoweredBy,
+    available_tiers: sellerSafeOutcomeTiers(),
+    quote
   };
 }
