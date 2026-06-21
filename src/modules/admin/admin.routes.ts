@@ -59,6 +59,16 @@ import { reconcileManualCodRemittance } from "./services/manual-cod-remittance-r
 import { approveManualSellerPayout } from "./services/manual-seller-payout-approval.service.js";
 import { releaseManualSellerPayout } from "./services/manual-seller-payout-release.service.js";
 import { markManualSellerPayoutPaid } from "./services/manual-seller-payout-paid.service.js";
+import {
+  getProvisionalRateCard,
+  listProvisionalRateCards,
+  simulateProvisionalRateCard
+} from "../courierPartners/provisionalRateCards/provisional-rate-card.service.js";
+import {
+  serializeAdminProvisionalRateCard,
+  serializeAdminProvisionalRateCardSimulation
+} from "../courierPartners/provisionalRateCards/provisional-rate-card.serializer.js";
+import { provisionalRateCardSimulationSchema } from "../courierPartners/provisionalRateCards/provisional-rate-card.validation.js";
 
 export const adminRouter = Router();
 
@@ -598,12 +608,47 @@ adminRouter.patch("/courier-users/:id", async (req, res) => {
   });
 });
 
-adminRouter.get("/rate-cards", async (_req, res) => {
+adminRouter.get("/rate-cards", async (req, res) => {
+  const scope = String(req.query.scope ?? req.query.kind ?? "").trim().toLowerCase();
+  if (scope === "provisional" || scope === "benchmark") {
+    return res.json({
+      rateCards: listProvisionalRateCards().map(serializeAdminProvisionalRateCard),
+      provisional: true,
+      officialRateClaim: false,
+      settlementAllowed: false,
+      reconciliationAllowed: false
+    });
+  }
+
   const rateCards = await prisma.rateCard.findMany({
     include: { courier: true },
     orderBy: [{ createdAt: "desc" }]
   });
   res.json({ rateCards });
+});
+
+adminRouter.get("/rate-cards/:id", async (req, res) => {
+  const card = getProvisionalRateCard(req.params.id);
+  res.json({
+    rateCard: serializeAdminProvisionalRateCard(card),
+    provisional: true,
+    officialRateClaim: false
+  });
+});
+
+adminRouter.post("/rate-cards/:id/simulate", async (req, res) => {
+  const body = provisionalRateCardSimulationSchema.parse(req.body ?? {});
+  const simulation = simulateProvisionalRateCard(req.params.id, {
+    outcomeCode: body.outcome_code,
+    zoneCode: body.zone_code,
+    weightKg: body.weight_kg,
+    sellerFacing: body.seller_facing
+  });
+  res.json({
+    simulation: serializeAdminProvisionalRateCardSimulation(simulation),
+    mutationPerformed: false,
+    liveProviderCallPerformed: false
+  });
 });
 
 adminRouter.post("/rate-cards", async (req, res) => {
