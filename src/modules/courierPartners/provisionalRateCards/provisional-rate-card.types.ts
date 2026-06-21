@@ -221,3 +221,29 @@ export type ProvisionalRateCardImportPreview = {
   checksum: string;
   card: ProvisionalRateCardReviewRecord | null;
 };
+
+export type OfficialRateCardIngestionReadinessInput = {
+  sourceType: ProvisionalRateCardSourceType;
+  status: ProvisionalRateCardStatus;
+  sourceLabel?: string | null;
+  sourceRecordId?: string | null;
+  contractId?: string | null;
+  signedDate?: string | null;
+  effectiveFrom?: string | null;
+  effectiveTo?: string | null;
+  approvedBy?: string | null;
+  documentRef?: string | null;
+  settlementAllowed?: boolean;
+  reconciliationAllowed?: boolean;
+  publicSellerVisible?: boolean;
+};
+
+export type OfficialRateCardIngestionReadinessResult = {
+  ready: boolean;
+  blockers: string[];
+  officialRatesEnabled: false;
+  settlementAllowed: false;
+  reconciliationAllowed: false;
+  mutationPerformed: false;
+  liveProviderCallPerformed: false;
+};

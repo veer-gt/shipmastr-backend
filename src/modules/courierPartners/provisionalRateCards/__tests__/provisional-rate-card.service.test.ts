@@ -8,6 +8,7 @@ import {
   normalizeProvisionalRateCard,
   simulateProvisionalRateCard
 } from "../provisional-rate-card.service.js";
+import { evaluateOfficialRateCardIngestionReadiness } from "../provisional-rate-card.rules.js";
 import {
   serializeAdminProvisionalRateCard,
   serializeAdminProvisionalRateCardSimulation,
@@ -233,6 +234,93 @@ describe("provisional rate card group and tier foundation", () => {
       official: true,
       officialContractRef: null
     })), /PROVISIONAL_RATE_CARD_OFFICIAL_METADATA_REQUIRED/);
+  });
+
+  it("blocks manual benchmark and benchmark-only records from official ingestion readiness", () => {
+    const readiness = evaluateOfficialRateCardIngestionReadiness({
+      sourceType: "MANUAL_BENCHMARK",
+      status: "BENCHMARK_ONLY",
+      sourceLabel: "USER_PROVIDED_REVIEWED_PROVISIONAL",
+      sourceRecordId: "phase-66-silver-rate-card-source-capture.csv",
+      contractId: "contract-1",
+      signedDate: "2026-06-21",
+      effectiveFrom: "2026-07-01",
+      effectiveTo: "2027-06-30",
+      approvedBy: "admin-1",
+      documentRef: "secure-ref-1"
+    });
+
+    assert.equal(readiness.ready, false);
+    assert.ok(readiness.blockers.includes("OFFICIAL_INGESTION_SOURCE_MUST_BE_OFFICIAL_CONTRACT"));
+    assert.ok(readiness.blockers.includes("MANUAL_BENCHMARK_CANNOT_BECOME_OFFICIAL_CONTRACT"));
+    assert.ok(readiness.blockers.includes("BENCHMARK_ONLY_CANNOT_BECOME_OFFICIAL_ACTIVE"));
+    assert.ok(readiness.blockers.includes("USER_PROVIDED_REVIEWED_PROVISIONAL_CANNOT_BECOME_OFFICIAL_CONTRACT"));
+    assert.ok(readiness.blockers.includes("SILVER_BENCHMARK_CANNOT_BE_OFFICIAL_SOURCE"));
+    assert.equal(readiness.officialRatesEnabled, false);
+    assert.equal(readiness.mutationPerformed, false);
+    assert.equal(readiness.liveProviderCallPerformed, false);
+  });
+
+  it("requires signed contract metadata before official activation readiness", () => {
+    const readiness = evaluateOfficialRateCardIngestionReadiness({
+      sourceType: "OFFICIAL_CONTRACT",
+      status: "OFFICIAL_ACTIVE"
+    });
+
+    assert.equal(readiness.ready, false);
+    assert.ok(readiness.blockers.includes("OFFICIAL_RATE_CARD_CONTRACT_ID_REQUIRED"));
+    assert.ok(readiness.blockers.includes("OFFICIAL_RATE_CARD_SIGNED_DATE_REQUIRED"));
+    assert.ok(readiness.blockers.includes("OFFICIAL_RATE_CARD_EFFECTIVE_FROM_REQUIRED"));
+    assert.ok(readiness.blockers.includes("OFFICIAL_RATE_CARD_EFFECTIVE_TO_REQUIRED"));
+    assert.ok(readiness.blockers.includes("OFFICIAL_RATE_CARD_APPROVED_BY_REQUIRED"));
+    assert.ok(readiness.blockers.includes("OFFICIAL_RATE_CARD_DOCUMENT_REF_REQUIRED"));
+  });
+
+  it("keeps official readiness separate from settlement, reconciliation, and seller visibility gates", () => {
+    const readiness = evaluateOfficialRateCardIngestionReadiness({
+      sourceType: "OFFICIAL_CONTRACT",
+      status: "OFFICIAL_PENDING",
+      contractId: "contract-1",
+      signedDate: "2026-06-21",
+      effectiveFrom: "2026-07-01",
+      effectiveTo: "2027-06-30",
+      approvedBy: "admin-1",
+      documentRef: "secure-ref-1",
+      settlementAllowed: true,
+      reconciliationAllowed: true,
+      publicSellerVisible: true
+    });
+
+    assert.equal(readiness.ready, false);
+    assert.ok(readiness.blockers.includes("OFFICIAL_RATE_CARD_FINANCE_GATE_REQUIRED_FOR_SETTLEMENT"));
+    assert.ok(readiness.blockers.includes("OFFICIAL_RATE_CARD_FINANCE_GATE_REQUIRED_FOR_RECONCILIATION"));
+    assert.ok(readiness.blockers.includes("OFFICIAL_RATE_CARD_SELLER_VISIBILITY_GATE_REQUIRED"));
+    assert.equal(readiness.settlementAllowed, false);
+    assert.equal(readiness.reconciliationAllowed, false);
+    assert.equal(readiness.officialRatesEnabled, false);
+  });
+
+  it("allows official ingestion readiness only after contract metadata is complete and non-mutating", () => {
+    const readiness = evaluateOfficialRateCardIngestionReadiness({
+      sourceType: "OFFICIAL_CONTRACT",
+      status: "OFFICIAL_PENDING",
+      sourceLabel: "Signed courier contract",
+      sourceRecordId: "secure-official-contract-ref",
+      contractId: "contract-1",
+      signedDate: "2026-06-21",
+      effectiveFrom: "2026-07-01",
+      effectiveTo: "2027-06-30",
+      approvedBy: "admin-1",
+      documentRef: "secure-ref-1"
+    });
+
+    assert.equal(readiness.ready, true);
+    assert.deepEqual(readiness.blockers, []);
+    assert.equal(readiness.officialRatesEnabled, false);
+    assert.equal(readiness.settlementAllowed, false);
+    assert.equal(readiness.reconciliationAllowed, false);
+    assert.equal(readiness.mutationPerformed, false);
+    assert.equal(readiness.liveProviderCallPerformed, false);
   });
 
   it("does not make courier API or shipment mutation calls", () => {

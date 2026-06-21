@@ -13,6 +13,8 @@ import {
   type CommercialRateCardGroup,
   type CommercialRateCardGroupCode,
   type ProvisionalRateCardDefinition,
+  type OfficialRateCardIngestionReadinessInput,
+  type OfficialRateCardIngestionReadinessResult,
   type ProvisionalRateCardSourceType,
   type ProvisionalRateCardReviewStatus,
   type ProvisionalRateCardStatus,
@@ -286,6 +288,98 @@ export function isReviewPast(card: { reviewBy?: string | null }, now = new Date(
   if (!card.reviewBy) return false;
   const reviewDate = new Date(card.reviewBy);
   return Number.isFinite(reviewDate.getTime()) && reviewDate.getTime() < now.getTime();
+}
+
+function hasText(value: unknown) {
+  return Boolean(String(value ?? "").trim());
+}
+
+function isUserProvidedProvisionalSource(input: OfficialRateCardIngestionReadinessInput) {
+  const source = [
+    input.sourceLabel,
+    input.sourceRecordId
+  ].map((value) => String(value ?? "").toUpperCase()).join(" ");
+
+  return source.includes("USER_PROVIDED_REVIEWED_PROVISIONAL");
+}
+
+function isCapturedSilverBenchmarkSource(input: OfficialRateCardIngestionReadinessInput) {
+  const source = [
+    input.sourceLabel,
+    input.sourceRecordId
+  ].map((value) => String(value ?? "").toUpperCase()).join(" ");
+
+  return source.includes("PHASE-66-SILVER-RATE-CARD-SOURCE-CAPTURE")
+    || source.includes("SILVER-RATE-CARD-SOURCE-CAPTURE")
+    || source.includes("SILVER USER PROVIDED REVIEWED PROVISIONAL")
+    || source.includes("SILVER_USER_PROVIDED_REVIEWED_PROVISIONAL");
+}
+
+export function evaluateOfficialRateCardIngestionReadiness(
+  input: OfficialRateCardIngestionReadinessInput
+): OfficialRateCardIngestionReadinessResult {
+  const sourceType = normalizeRateCardSourceType(input.sourceType);
+  const status = normalizeRateCardStatus(input.status);
+  const blockers = new Set<string>();
+
+  if (sourceType !== "OFFICIAL_CONTRACT") {
+    blockers.add("OFFICIAL_INGESTION_SOURCE_MUST_BE_OFFICIAL_CONTRACT");
+  }
+
+  if (sourceType === "MANUAL_BENCHMARK") {
+    blockers.add("MANUAL_BENCHMARK_CANNOT_BECOME_OFFICIAL_CONTRACT");
+  }
+
+  if (status === "BENCHMARK_ONLY") {
+    blockers.add("BENCHMARK_ONLY_CANNOT_BECOME_OFFICIAL_ACTIVE");
+  }
+
+  if (status !== "OFFICIAL_PENDING" && status !== "OFFICIAL_ACTIVE") {
+    blockers.add("OFFICIAL_INGESTION_STATUS_MUST_BE_OFFICIAL_PENDING_OR_ACTIVE");
+  }
+
+  if (isUserProvidedProvisionalSource(input)) {
+    blockers.add("USER_PROVIDED_REVIEWED_PROVISIONAL_CANNOT_BECOME_OFFICIAL_CONTRACT");
+  }
+
+  if (isCapturedSilverBenchmarkSource(input)) {
+    blockers.add("SILVER_BENCHMARK_CANNOT_BE_OFFICIAL_SOURCE");
+  }
+
+  const requiredMetadata = [
+    ["contractId", "OFFICIAL_RATE_CARD_CONTRACT_ID_REQUIRED"],
+    ["signedDate", "OFFICIAL_RATE_CARD_SIGNED_DATE_REQUIRED"],
+    ["effectiveFrom", "OFFICIAL_RATE_CARD_EFFECTIVE_FROM_REQUIRED"],
+    ["effectiveTo", "OFFICIAL_RATE_CARD_EFFECTIVE_TO_REQUIRED"],
+    ["approvedBy", "OFFICIAL_RATE_CARD_APPROVED_BY_REQUIRED"],
+    ["documentRef", "OFFICIAL_RATE_CARD_DOCUMENT_REF_REQUIRED"]
+  ] as const;
+
+  for (const [field, blocker] of requiredMetadata) {
+    if (!hasText(input[field])) blockers.add(blocker);
+  }
+
+  if (input.settlementAllowed) {
+    blockers.add("OFFICIAL_RATE_CARD_FINANCE_GATE_REQUIRED_FOR_SETTLEMENT");
+  }
+
+  if (input.reconciliationAllowed) {
+    blockers.add("OFFICIAL_RATE_CARD_FINANCE_GATE_REQUIRED_FOR_RECONCILIATION");
+  }
+
+  if (input.publicSellerVisible) {
+    blockers.add("OFFICIAL_RATE_CARD_SELLER_VISIBILITY_GATE_REQUIRED");
+  }
+
+  return {
+    ready: blockers.size === 0,
+    blockers: [...blockers],
+    officialRatesEnabled: false,
+    settlementAllowed: false,
+    reconciliationAllowed: false,
+    mutationPerformed: false,
+    liveProviderCallPerformed: false
+  };
 }
 
 export function normalizeProvisionalRateCardDefinition(card: ProvisionalRateCardDefinition): ProvisionalRateCardDefinition {
