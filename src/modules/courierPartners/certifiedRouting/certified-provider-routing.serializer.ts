@@ -13,7 +13,7 @@ function safeList(values: string[]) {
     .filter((value): value is string => Boolean(value)))];
 }
 
-export function serializeCertifiedProviderRouting(result: CertifiedProviderRoutingResult): CertifiedProviderRoutingResult {
+export function serializeCertifiedProviderRouting(result: CertifiedProviderRoutingResult) {
   return {
     shipment_id: result.shipment_id,
     public_network_name: "Shipmastr Courier Network",
@@ -23,7 +23,7 @@ export function serializeCertifiedProviderRouting(result: CertifiedProviderRouti
     selected_rate_id: result.selected_rate_id,
     selected_pickup_location_id: result.selected_pickup_location_id,
     internal_selection: {
-      provider_key_internal: result.internal_selection.provider_key_internal,
+      provider_key_internal: null,
       internal_courier_id_present: result.internal_selection.internal_courier_id_present,
       provider_rate_id_present: result.internal_selection.provider_rate_id_present,
       provider_refs_required: result.internal_selection.provider_refs_required
@@ -32,6 +32,25 @@ export function serializeCertifiedProviderRouting(result: CertifiedProviderRouti
     blockers: safeList(result.blockers),
     warnings: safeList(result.warnings),
     seller_safe_message: safeString(result.seller_safe_message) ?? "Shipmastr will keep this shipment in safe review.",
-    admin_next_actions: safeList(result.admin_next_actions)
+    admin_next_actions: safeList(result.admin_next_actions),
+    admin_diagnostics: {
+      fallback_used: result.admin_diagnostics.fallback_used,
+      no_eligible_provider: result.admin_diagnostics.no_eligible_provider,
+      evaluated_providers: result.admin_diagnostics.evaluated_providers.map((provider) => ({
+        provider_key_internal: null,
+        lane_code_internal: null,
+        eligible: provider.eligible,
+        preferred: provider.preferred,
+        selected: provider.selected,
+        fallback_reason: safeString(provider.fallback_reason),
+        lifecycle_state: safeString(provider.lifecycle_state) ?? "CHECKING",
+        capability_status: safeString(provider.capability_status) ?? "CHECKING",
+        registry_status: provider.registry_status,
+        pickup_available: provider.pickup_available,
+        blockers: safeList(provider.blockers),
+        warnings: safeList(provider.warnings),
+        next_actions: safeList(provider.next_actions)
+      }))
+    }
   };
 }

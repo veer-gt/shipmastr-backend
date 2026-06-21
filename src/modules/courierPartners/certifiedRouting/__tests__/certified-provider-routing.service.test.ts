@@ -5,10 +5,15 @@ import { evaluateCertifiedProviderRouting } from "../certified-provider-routing.
 import { serializeCertifiedProviderRouting } from "../certified-provider-routing.serializer.js";
 import type {
   CertifiedProviderRoutingDependencies,
-  CertifiedProviderRoutingRateCandidate
+  CertifiedProviderRoutingRateCandidate,
+  CertifiedProviderRoutingWorkflowGuard
 } from "../certified-provider-routing.types.js";
 import type { CourierLiveProviderKey } from "../../liveReadiness/courier-live-readiness.types.js";
 import type { CourierReadinessAutopilotProviderResult } from "../../readinessAutopilot/courier-readiness-autopilot.types.js";
+import type {
+  CourierProviderCapability,
+  CourierProviderLaneCode
+} from "../../providerRegistry/courier-provider-registry.types.js";
 
 const checkedAt = "2026-06-13T09:00:00.000Z";
 
@@ -101,10 +106,46 @@ function rate(overrides: Partial<CertifiedProviderRoutingRateCandidate> = {}): C
   };
 }
 
+function allowedGuard(input: {
+  laneCode: CourierProviderLaneCode | null;
+  capability: CourierProviderCapability;
+}): CertifiedProviderRoutingWorkflowGuard {
+  return {
+    lane_code: input.laneCode,
+    capability: input.capability,
+    requested_mode: "LIVE",
+    status: input.laneCode ? "ALLOWED" : "NOT_MODELED",
+    allowed: true,
+    blockers: [],
+    warnings: [],
+    next_actions: []
+  };
+}
+
+function blockedGuard(input: {
+  laneCode: CourierProviderLaneCode | null;
+  capability: CourierProviderCapability;
+  status?: CertifiedProviderRoutingWorkflowGuard["status"];
+  blockers: string[];
+}): CertifiedProviderRoutingWorkflowGuard {
+  return {
+    lane_code: input.laneCode,
+    capability: input.capability,
+    requested_mode: "LIVE",
+    status: input.status ?? "BLOCKED",
+    allowed: false,
+    blockers: input.blockers,
+    warnings: ["No external courier/provider call was made."],
+    next_actions: ["Review provider readiness before routing."]
+  };
+}
+
 function dependencies(providers: CourierReadinessAutopilotProviderResult[], input: {
   arbitrationDecision?: string;
   selectedPickup?: string | null;
+  selectedProvider?: CourierLiveProviderKey;
   rates?: CertifiedProviderRoutingRateCandidate[];
+  guardProvider?: CertifiedProviderRoutingDependencies["providerWorkflowGuardProvider"];
 } = {}): CertifiedProviderRoutingDependencies {
   return {
     shipmentProvider: async () => ({ id: "shipment_1", pickupLocationId: "pickup_1" }),
@@ -129,7 +170,7 @@ function dependencies(providers: CourierReadinessAutopilotProviderResult[], inpu
     arbitrationProvider: async () => ({
       decision: input.arbitrationDecision ?? "USE_SELECTED",
       selected_option: {
-        provider_key_internal: "SHIPROCKET",
+        provider_key_internal: input.selectedProvider ?? "SHIPROCKET",
         pickup_location_id: input.selectedPickup ?? "pickup_1",
         public_service_code: "shipmastr_smart"
       },
@@ -140,7 +181,11 @@ function dependencies(providers: CourierReadinessAutopilotProviderResult[], inpu
         ? ["Run a controlled alternate pickup trial. Do not Ship Now."]
         : ["Continue controlled checks."]
     }),
-    ratesProvider: async () => input.rates ?? [rate()]
+    ratesProvider: async () => input.rates ?? [rate()],
+    providerWorkflowGuardProvider: input.guardProvider ?? (async (_merchantId, guardInput) => allowedGuard({
+      laneCode: guardInput.laneCode,
+      capability: guardInput.providerCapability
+    }))
   };
 }
 
@@ -234,7 +279,136 @@ describe("certified provider routing engine", () => {
 
     assert.equal(result.decision, "TRY_ALTERNATE_PROVIDER");
     assert.equal(result.internal_selection.provider_key_internal, "SHIPMOZO");
+    assert.equal(result.admin_diagnostics.fallback_used, true);
     assert.match(result.seller_safe_message, /safe shipping path/i);
+  });
+
+  it("skips a disabled preferred provider lane and selects the next certified lane", async () => {
+    const result = await evaluateCertifiedProviderRouting("merchant_1", {
+      shipmentId: "shipment_1",
+      requestedCapability: "AWB"
+    }, dependencies([liveReady("BIGSHIP"), liveReady("SHIPROCKET")], {
+      arbitrationDecision: "USE_SELECTED",
+      selectedProvider: "BIGSHIP",
+      guardProvider: async (_merchantId, guardInput) => guardInput.providerKey === "BIGSHIP"
+        ? blockedGuard({
+          laneCode: guardInput.laneCode,
+          capability: guardInput.providerCapability,
+          blockers: ["COURIER_PROVIDER_LANE_DISABLED"]
+        })
+        : allowedGuard({ laneCode: guardInput.laneCode, capability: guardInput.providerCapability })
+    }));
+
+    assert.equal(result.decision, "TRY_ALTERNATE_PROVIDER");
+    assert.equal(result.internal_selection.provider_key_internal, "SHIPROCKET");
+    assert.equal(result.admin_diagnostics.fallback_used, true);
+    assert.ok(result.admin_diagnostics.evaluated_providers.some((provider) =>
+      provider.provider_key_internal === "BIGSHIP" && provider.fallback_reason === "LANE_DISABLED"
+    ));
+  });
+
+  it("skips a suspended preferred provider lane", async () => {
+    const result = await evaluateCertifiedProviderRouting("merchant_1", {
+      shipmentId: "shipment_1",
+      requestedCapability: "AWB"
+    }, dependencies([liveReady("BIGSHIP"), liveReady("SHIPROCKET")], {
+      selectedProvider: "BIGSHIP",
+      guardProvider: async (_merchantId, guardInput) => guardInput.providerKey === "BIGSHIP"
+        ? blockedGuard({
+          laneCode: guardInput.laneCode,
+          capability: guardInput.providerCapability,
+          blockers: ["COURIER_PROVIDER_LANE_SUSPENDED"]
+        })
+        : allowedGuard({ laneCode: guardInput.laneCode, capability: guardInput.providerCapability })
+    }));
+
+    assert.equal(result.internal_selection.provider_key_internal, "SHIPROCKET");
+    assert.ok(result.admin_diagnostics.evaluated_providers.some((provider) =>
+      provider.provider_key_internal === "BIGSHIP" && provider.fallback_reason === "LANE_SUSPENDED"
+    ));
+  });
+
+  it("skips a credential-missing preferred provider lane", async () => {
+    const result = await evaluateCertifiedProviderRouting("merchant_1", {
+      shipmentId: "shipment_1",
+      requestedCapability: "AWB"
+    }, dependencies([liveReady("BIGSHIP"), liveReady("SHIPROCKET")], {
+      selectedProvider: "BIGSHIP",
+      guardProvider: async (_merchantId, guardInput) => guardInput.providerKey === "BIGSHIP"
+        ? blockedGuard({
+          laneCode: guardInput.laneCode,
+          capability: guardInput.providerCapability,
+          blockers: ["COURIER_PROVIDER_CREDENTIALS_NOT_READY"]
+        })
+        : allowedGuard({ laneCode: guardInput.laneCode, capability: guardInput.providerCapability })
+    }));
+
+    assert.equal(result.internal_selection.provider_key_internal, "SHIPROCKET");
+    assert.ok(result.admin_diagnostics.evaluated_providers.some((provider) =>
+      provider.provider_key_internal === "BIGSHIP" && provider.fallback_reason === "CREDENTIALS_NOT_READY"
+    ));
+  });
+
+  it("skips unsupported provider capabilities", async () => {
+    const result = await evaluateCertifiedProviderRouting("merchant_1", {
+      shipmentId: "shipment_1",
+      requestedCapability: "LABEL"
+    }, dependencies([liveReady("BIGSHIP"), liveReady("SHIPROCKET")], {
+      selectedProvider: "BIGSHIP",
+      guardProvider: async (_merchantId, guardInput) => guardInput.providerKey === "BIGSHIP"
+        ? blockedGuard({
+          laneCode: guardInput.laneCode,
+          capability: guardInput.providerCapability,
+          status: "UNSUPPORTED",
+          blockers: ["COURIER_PROVIDER_CAPABILITY_UNSUPPORTED"]
+        })
+        : allowedGuard({ laneCode: guardInput.laneCode, capability: guardInput.providerCapability })
+    }));
+
+    assert.equal(result.decision, "TRY_ALTERNATE_PROVIDER");
+    assert.equal(result.internal_selection.provider_key_internal, "SHIPROCKET");
+    assert.ok(result.admin_diagnostics.evaluated_providers.some((provider) =>
+      provider.provider_key_internal === "BIGSHIP" && provider.fallback_reason === "CAPABILITY_UNSUPPORTED"
+    ));
+  });
+
+  it("skips uncertified providers when certification is required", async () => {
+    const result = await evaluateCertifiedProviderRouting("merchant_1", {
+      shipmentId: "shipment_1",
+      requestedCapability: "AWB"
+    }, dependencies([provider("BIGSHIP"), liveReady("SHIPROCKET")], {
+      selectedProvider: "BIGSHIP"
+    }));
+
+    assert.equal(result.decision, "TRY_ALTERNATE_PROVIDER");
+    assert.equal(result.internal_selection.provider_key_internal, "SHIPROCKET");
+    assert.ok(result.admin_diagnostics.evaluated_providers.some((item) =>
+      item.provider_key_internal === "BIGSHIP" && item.fallback_reason === "CERTIFICATION_NOT_READY"
+    ));
+  });
+
+  it("returns safe no-eligible-provider diagnostics without selecting a lane", async () => {
+    const result = await evaluateCertifiedProviderRouting("merchant_1", {
+      shipmentId: "shipment_1",
+      requestedCapability: "AWB"
+    }, dependencies([
+      provider("BIGSHIP", {
+        lifecycle_state: "BLOCKED",
+        capabilities: {
+          rates: "BLOCKED",
+          awb: "BLOCKED",
+          label: "BLOCKED",
+          tracking: "BLOCKED"
+        },
+        blockers: ["PROVIDER_CREDENTIALS_MISSING"]
+      }),
+      dryRunOnly("SHIPMOZO")
+    ]));
+
+    assert.equal(result.decision, "SAFE_REVIEW");
+    assert.equal(result.internal_selection.provider_key_internal, null);
+    assert.ok(result.blockers.includes("NO_ELIGIBLE_CERTIFIED_PROVIDER"));
+    assert.equal(result.admin_diagnostics.no_eligible_provider, true);
   });
 
   it("keeps seller-safe routing output free of provider names and ids", async () => {
@@ -247,11 +421,8 @@ describe("certified provider routing engine", () => {
       seller_safe_message: "Shiprocket provider pickup id pickup_123 is unavailable",
       warnings: ["Shipmozo rawHeaders should not appear"]
     });
-    assert.doesNotMatch(JSON.stringify({
-      message: serialized.seller_safe_message,
-      warnings: serialized.warnings,
-      tier: serialized.selected_public_service_name
-    }), /Shiprocket|Shipmozo|Bigship|provider pickup id|pickup_123|rawHeaders/i);
+    assert.equal(serialized.internal_selection.provider_key_internal, null);
+    assert.doesNotMatch(JSON.stringify(serialized), /Shiprocket|Shipmozo|Bigship|provider pickup id|pickup_123|rawHeaders|SHIPROCKET|SHIPMOZO|BIGSHIP/i);
   });
 
   it("does not call provider APIs and wires read-only routes/script sections", async () => {
