@@ -189,6 +189,12 @@ export type ProvisionalRateCardImportMetadata = {
   importedAt: string | null;
   reviewedBy: string | null;
   reviewedAt: string | null;
+  rejectedBy: string | null;
+  rejectedAt: string | null;
+  rejectionReason: string | null;
+  archivedBy: string | null;
+  archivedAt: string | null;
+  archiveReason: string | null;
   expiresAt: string | null;
   originalFileName: string | null;
   checksum: string | null;

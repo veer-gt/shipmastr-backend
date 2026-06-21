@@ -3,8 +3,10 @@ import { readFileSync } from "node:fs";
 import { beforeEach, describe, it } from "node:test";
 import {
   approveInternalProvisionalRateCard,
+  archiveProvisionalRateCard,
   importProvisionalRateCard,
   previewProvisionalRateCardImport,
+  rejectProvisionalRateCard,
   resetProvisionalRateCardReviewStoreForTests,
   sampleProvisionalRateCardImport,
   simulateProvisionalRateCard
@@ -114,7 +116,122 @@ describe("provisional rate card import and review workflow", () => {
     assert.equal(approved.settlementAllowed, false);
     assert.equal(approved.reconciliationAllowed, false);
     assert.equal(approved.publicSellerVisible, false);
+    assert.equal(approved.importMetadata.reviewedBy, "reviewer-user");
+    assert.ok(approved.importMetadata.reviewedAt);
+    assert.equal(approved.importMetadata.rejectedBy, null);
+    assert.equal(approved.importMetadata.archivedBy, null);
     assert.ok(approved.validationWarnings.includes("APPROVED_INTERNAL_NOT_OFFICIAL"));
+  });
+
+  it("reject requires a reason and keeps the record soft-blocked", () => {
+    const imported = importProvisionalRateCard(sampleTemplate(), "admin-user");
+
+    assert.throws(
+      () => rejectProvisionalRateCard(imported.id, "checker-user", ""),
+      /PROVISIONAL_RATE_CARD_REJECTION_REASON_REQUIRED/
+    );
+
+    const rejected = rejectProvisionalRateCard(imported.id, "checker-user", "Source does not match reviewed commercial file.");
+
+    assert.equal(rejected.reviewStatus, "REJECTED");
+    assert.equal(rejected.status, "BENCHMARK_ONLY");
+    assert.equal(rejected.official, false);
+    assert.equal(rejected.settlementAllowed, false);
+    assert.equal(rejected.reconciliationAllowed, false);
+    assert.equal(rejected.publicSellerVisible, false);
+    assert.equal(rejected.importMetadata.rejectedBy, "checker-user");
+    assert.ok(rejected.importMetadata.rejectedAt);
+    assert.equal(rejected.importMetadata.rejectionReason, "Source does not match reviewed commercial file.");
+
+    const simulation = simulateProvisionalRateCard(imported.id, {
+      outcomeCode: "SHIPMASTR_SMART",
+      zoneCode: "WITHIN_CITY",
+      weightKg: 0.5,
+      sellerFacing: false
+    });
+
+    assert.equal(simulation.status, "BLOCKED");
+    assert.equal(simulation.blockerCode, "PROVISIONAL_RATE_CARD_REJECTED");
+    assert.equal(simulation.sellerSafeQuote, null);
+  });
+
+  it("archive requires a reason and keeps the record out of quote eligibility", () => {
+    const imported = importProvisionalRateCard(sampleTemplate(), "admin-user");
+
+    assert.throws(
+      () => archiveProvisionalRateCard(imported.id, "checker-user", ""),
+      /PROVISIONAL_RATE_CARD_ARCHIVE_REASON_REQUIRED/
+    );
+
+    const archived = archiveProvisionalRateCard(imported.id, "checker-user", "Superseded by newer benchmark review.");
+
+    assert.equal(archived.reviewStatus, "ARCHIVED");
+    assert.equal(archived.status, "ARCHIVED");
+    assert.equal(archived.official, false);
+    assert.equal(archived.settlementAllowed, false);
+    assert.equal(archived.reconciliationAllowed, false);
+    assert.equal(archived.publicSellerVisible, false);
+    assert.equal(archived.importMetadata.archivedBy, "checker-user");
+    assert.ok(archived.importMetadata.archivedAt);
+    assert.equal(archived.importMetadata.archiveReason, "Superseded by newer benchmark review.");
+
+    const simulation = simulateProvisionalRateCard(imported.id, {
+      outcomeCode: "SHIPMASTR_SMART",
+      zoneCode: "WITHIN_CITY",
+      weightKg: 0.5,
+      sellerFacing: true
+    });
+
+    assert.equal(simulation.status, "BLOCKED");
+    assert.equal(simulation.blockerCode, "PROVISIONAL_RATE_CARD_ARCHIVED");
+    assert.equal(simulation.sellerSafeQuote, null);
+    assert.equal(simulation.adminDiagnostics.laneCode, null);
+  });
+
+  it("blocks expired benchmark cards from simulation and internal approval", () => {
+    const imported = importProvisionalRateCard(sampleTemplate({
+      expires_at: "2026-01-01T00:00:00.000Z"
+    }), "admin-user", new Date("2026-06-21T00:00:00.000Z"));
+
+    assert.equal(imported.reviewStatus, "EXPIRED");
+    assert.throws(
+      () => approveInternalProvisionalRateCard(imported.id, "checker-user", new Date("2026-06-21T00:00:00.000Z")),
+      /PROVISIONAL_RATE_CARD_EXPIRED/
+    );
+
+    const simulation = simulateProvisionalRateCard(imported.id, {
+      outcomeCode: "SHIPMASTR_SMART",
+      zoneCode: "WITHIN_CITY",
+      weightKg: 0.5,
+      sellerFacing: false
+    }, new Date("2026-06-21T00:00:00.000Z"));
+
+    assert.equal(simulation.status, "BLOCKED");
+    assert.equal(simulation.blockerCode, "PROVISIONAL_RATE_CARD_EXPIRED");
+    assert.equal(simulation.sellerSafeQuote, null);
+  });
+
+  it("blocks seller-facing simulations whenever benchmark data is hidden from sellers", () => {
+    const imported = importProvisionalRateCard(sampleTemplate(), "admin-user");
+    const approved = approveInternalProvisionalRateCard(imported.id, "reviewer-user");
+
+    assert.equal(approved.status, "ACTIVE_INTERNAL");
+    assert.equal(approved.publicSellerVisible, false);
+
+    const simulation = simulateProvisionalRateCard(imported.id, {
+      outcomeCode: "SHIPMASTR_SMART",
+      zoneCode: "WITHIN_CITY",
+      weightKg: 0.5,
+      sellerFacing: true
+    });
+
+    assert.equal(simulation.status, "BLOCKED");
+    assert.equal(simulation.blockerCode, "BENCHMARK_ONLY_NOT_PUBLIC_SELLER_VISIBLE");
+    assert.equal(simulation.sellerSafeQuote, null);
+    const sellerSerialized = JSON.stringify(serializeSellerSafeProvisionalQuote(simulation));
+    for (const forbidden of ["DELHIVERY", "XPRESSBEES", "SHADOWFAX", "EKART", "BIGSHIP", "SHIPROCKET", "MANUAL_BENCHMARK", "BENCHMARK_ONLY"]) {
+      assert.equal(sellerSerialized.includes(forbidden), false, `${forbidden} leaked to seller-safe serialization`);
+    }
   });
 
   it("shows lane diagnostics to admin while seller serializer hides provider lanes", () => {
