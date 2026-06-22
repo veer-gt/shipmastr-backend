@@ -3778,7 +3778,7 @@ export async function runRepeatBuyerSmoke(input: {
   }
 
   const lastOrderDate = input.lastOrderDate || lastOrder.createdAt.toISOString();
-  const daysSinceLastOrder = daysBetween(lastOrderDate) ?? 0;
+  const daysSinceLastOrder = cleanOptionalNumber(input.daysSinceLastOrder) ?? daysBetween(lastOrderDate) ?? 0;
   if (daysSinceLastOrder < metadata.repeatBuyerWindowDays) {
     throw new Error("REPEAT_BUYER_WINDOW_NOT_REACHED");
   }
