@@ -19,7 +19,9 @@ import {
   assertWeightProofStorageEnabled,
   buildWeightProofObjectKey,
   createWeightProofStorageRuntime,
-  InMemoryWeightProofStorageAdapter
+  InMemoryWeightProofStorageAdapter,
+  R2WeightProofStorageAdapter,
+  resolveR2WeightProofStorageConfig
 } from "./shipping-weight-proof-storage.js";
 import { serializeWeightProofSellerSafe } from "./shipping-weight-proof.serializer.js";
 
@@ -99,6 +101,28 @@ function makeContext(client: any, storage = new InMemoryWeightProofStorageAdapte
   };
 }
 
+function makeR2Adapter(options: {
+  send?: (command: any) => Promise<any>;
+  presigner?: (client: any, command: any, options: { expiresIn: number }) => Promise<string>;
+  maxImageBytes?: number;
+} = {}) {
+  return new R2WeightProofStorageAdapter({
+    bucket: "private-weight-proofs",
+    endpoint: "https://account.example.r2.cloudflarestorage.com",
+    region: "auto",
+    accessKeyId: "test",
+    secretAccessKey: "test",
+    signedGetTtlMs: 300000,
+    maxImageBytes: options.maxImageBytes ?? 10 * 1024 * 1024,
+    client: {
+      send: options.send ?? (async () => ({}))
+    } as any,
+    presigner: options.presigner as any
+  });
+}
+
+const r2ObjectKey = "weight-proofs/seller_123/2026/06/AWB_123/capture_123.jpg";
+
 describe("shipping weight proof foundation", () => {
   it("calculates volumetric and chargeable weight in grams", () => {
     assert.equal(calculateVolumetricWeightGrams(10, 20, 30), 1200);
@@ -175,7 +199,7 @@ describe("shipping weight proof foundation", () => {
       awbNumber: "AWB_123",
       declaredWeightGrams: 1000,
       dimensions: { lengthCm: 10, widthCm: 20, heightCm: 30 }
-    }, context), /WEIGHT_PROOF_OBJECT_NOT_FOUND/);
+    }, context), /WEIGHT_GUARD_OBJECT_NOT_FOUND/);
   });
 
   it("finalizes proof when the mock object exists", async () => {
@@ -268,6 +292,7 @@ describe("shipping weight proof foundation", () => {
             provider: "mock",
             storage,
             uploadTtlMs: 600000,
+            signedGetTtlMs: 300000,
             maxImageBytes: 1024
           },
           weightProofClient: client,
@@ -292,7 +317,7 @@ describe("shipping weight proof foundation", () => {
     assert.equal(runtime.enabled, false);
     assert.throws(
       () => assertWeightProofStorageEnabled(runtime),
-      (error) => error instanceof HttpError && error.message === "WEIGHT_PROOF_STORAGE_DISABLED"
+      (error) => error instanceof HttpError && error.message === "WEIGHT_GUARD_STORAGE_DISABLED"
     );
   });
 
@@ -352,5 +377,166 @@ describe("shipping weight proof foundation", () => {
     assert.equal(routeResponse.chargeableWeightGrams, 1240);
     assert.equal(routeResponse.proofStatus, "READY_FOR_DISPUTE");
     assert.doesNotMatch(text, /imageObjectKey|image_object_key|signed|downloadUrl|download_url|r2\.dev/i);
+  });
+
+  it("rejects missing R2 storage configuration safely", () => {
+    assert.throws(
+      () => createWeightProofStorageRuntime({
+        WEIGHT_GUARD_PROOF_STORAGE_ENABLED: "true",
+        WEIGHT_GUARD_STORAGE_PROVIDER: "r2"
+      }),
+      (error) => error instanceof HttpError && error.message === "WEIGHT_GUARD_STORAGE_MISCONFIGURED"
+    );
+  });
+
+  it("builds the R2 S3 endpoint from account id without public developer URLs", () => {
+    const config = resolveR2WeightProofStorageConfig({
+      WEIGHT_GUARD_R2_ACCOUNT_ID: "shipmastr-account",
+      WEIGHT_GUARD_R2_ACCESS_KEY_ID: "test",
+      WEIGHT_GUARD_R2_SECRET_ACCESS_KEY: "test",
+      WEIGHT_GUARD_R2_BUCKET: "private-weight-proofs"
+    });
+
+    assert.equal(config.endpoint, "https://shipmastr-account.r2.cloudflarestorage.com");
+    assert.doesNotMatch(config.endpoint, /r2\.dev/i);
+    assert.equal(config.region, "auto");
+  });
+
+  it("rejects public R2 developer endpoints as storage config", () => {
+    assert.throws(
+      () => resolveR2WeightProofStorageConfig({
+        WEIGHT_GUARD_R2_ENDPOINT: ["https://pub-example.r2", "dev"].join("."),
+        WEIGHT_GUARD_R2_ACCESS_KEY_ID: "test",
+        WEIGHT_GUARD_R2_SECRET_ACCESS_KEY: "test",
+        WEIGHT_GUARD_R2_BUCKET: "private-weight-proofs"
+      }),
+      (error) => error instanceof HttpError && error.message === "WEIGHT_GUARD_STORAGE_MISCONFIGURED"
+    );
+  });
+
+  it("creates R2 presigned PUT URLs through an injected presigner only", async () => {
+    const presignCalls: any[] = [];
+    const adapter = makeR2Adapter({
+      presigner: async (_client, command, options) => {
+        presignCalls.push({ command, options });
+        return "https://signed.example/put";
+      }
+    });
+
+    const result = await adapter.createPresignedPutUrl({
+      objectKey: r2ObjectKey,
+      contentType: "image/jpeg",
+      expectedByteSize: 1024,
+      expiresAt: new Date(Date.now() + 600000)
+    });
+
+    assert.equal(result.uploadUrl, "https://signed.example/put");
+    assert.equal(result.method, "PUT");
+    assert.deepEqual(result.headers, { "content-type": "image/jpeg" });
+    assert.equal(presignCalls.length, 1);
+    assert.equal(presignCalls[0].command.input.Bucket, "private-weight-proofs");
+    assert.equal(presignCalls[0].command.input.Key, r2ObjectKey);
+    assert.equal(presignCalls[0].command.input.ContentType, "image/jpeg");
+    assert.equal(presignCalls[0].command.input.ContentLength, 1024);
+    assert.equal(presignCalls[0].command.input.ACL, undefined);
+    assert.ok(presignCalls[0].options.expiresIn > 0);
+  });
+
+  it("checks R2 object metadata through the injected client", async () => {
+    const lastModified = new Date("2026-06-22T10:05:00.000Z");
+    const adapter = makeR2Adapter({
+      send: async (command) => {
+        assert.equal(command.input.Bucket, "private-weight-proofs");
+        assert.equal(command.input.Key, r2ObjectKey);
+        return {
+          ContentLength: 2048,
+          ContentType: "image/png",
+          LastModified: lastModified
+        };
+      }
+    });
+
+    const object = await adapter.headObject({ objectKey: r2ObjectKey });
+    assert.equal(object.exists, true);
+    assert.equal(object.contentLength, 2048);
+    assert.equal(object.contentType, "image/png");
+    assert.equal(object.updatedAt, lastModified);
+  });
+
+  it("handles R2 HeadObject not found and unsafe failures without leaking config", async () => {
+    const missing = makeR2Adapter({
+      send: async () => {
+        throw Object.assign(new Error("missing"), {
+          name: "NotFound",
+          $metadata: { httpStatusCode: 404 }
+        });
+      }
+    });
+    assert.deepEqual(await missing.headObject({ objectKey: r2ObjectKey }), { exists: false });
+
+    const failed = makeR2Adapter({
+      send: async () => {
+        throw new Error("connection failed with internal details");
+      }
+    });
+    await assert.rejects(
+      () => failed.headObject({ objectKey: r2ObjectKey }),
+      (error) => error instanceof HttpError && error.message === "WEIGHT_GUARD_OBJECT_HEAD_FAILED"
+    );
+  });
+
+  it("keeps signed GET URLs internal to the storage adapter", async () => {
+    const adapter = makeR2Adapter({
+      presigner: async () => "https://signed.example/get"
+    });
+
+    const result = await adapter.createPresignedGetUrl({
+      objectKey: r2ObjectKey,
+      expiresAt: new Date(Date.now() + 300000)
+    });
+    assert.equal(result.downloadUrl, "https://signed.example/get");
+
+    const sellerSafe = serializeWeightProofSellerSafe({
+      id: "proof_1",
+      captureSessionId: "capture_123",
+      awbNumber: "AWB_123",
+      declaredWeightGrams: 1000,
+      volumetricWeightGrams: 1200,
+      chargeableWeightGrams: 1200,
+      capturedAt: new Date("2026-06-22T10:05:00.000Z"),
+      createdAt: new Date("2026-06-22T10:05:00.000Z")
+    });
+    assert.doesNotMatch(JSON.stringify(sellerSafe), /signed\.example|downloadUrl|download_url|imageObjectKey|image_object_key/i);
+  });
+
+  it("preserves R2 content type and max byte validation", async () => {
+    let presignCalls = 0;
+    const adapter = makeR2Adapter({
+      maxImageBytes: 1024,
+      presigner: async () => {
+        presignCalls += 1;
+        return "https://signed.example/put";
+      }
+    });
+
+    await assert.rejects(
+      () => adapter.createPresignedPutUrl({
+        objectKey: r2ObjectKey,
+        contentType: "application/pdf",
+        expectedByteSize: 100,
+        expiresAt: new Date(Date.now() + 600000)
+      }),
+      /WEIGHT_PROOF_CONTENT_TYPE_INVALID/
+    );
+    await assert.rejects(
+      () => adapter.createPresignedPutUrl({
+        objectKey: r2ObjectKey,
+        contentType: "image/png",
+        expectedByteSize: 2048,
+        expiresAt: new Date(Date.now() + 600000)
+      }),
+      /WEIGHT_GUARD_IMAGE_TOO_LARGE/
+    );
+    assert.equal(presignCalls, 0);
   });
 });

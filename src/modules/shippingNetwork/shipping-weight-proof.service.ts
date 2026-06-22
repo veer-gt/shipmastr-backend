@@ -289,7 +289,7 @@ export async function finalizeWeightProofCapture(input: FinalizeWeightProofCaptu
   }
 
   const object = await context.storage.headObject({ objectKey: session.imageObjectKey });
-  if (!object.exists) throw new HttpError(409, "WEIGHT_PROOF_OBJECT_NOT_FOUND");
+  if (!object.exists) throw new HttpError(409, "WEIGHT_GUARD_OBJECT_NOT_FOUND");
 
   const proof = await runInTransaction(client, async (tx) => {
     const created = await tx.shippingWeightProof.create({

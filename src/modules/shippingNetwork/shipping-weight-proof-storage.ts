@@ -1,8 +1,16 @@
+import {
+  GetObjectCommand,
+  HeadObjectCommand,
+  PutObjectCommand,
+  S3Client
+} from "@aws-sdk/client-s3";
+import { getSignedUrl } from "@aws-sdk/s3-request-presigner";
 import { HttpError } from "../../lib/httpError.js";
 
 const SAFE_SEGMENT = /^[A-Za-z0-9_-]+$/;
 const MAX_AWB_LENGTH = 64;
 const MAX_SEGMENT_LENGTH = 160;
+const ALLOWED_IMAGE_CONTENT_TYPES = new Set(["image/jpeg", "image/png"]);
 
 export type CreatePresignedPutUrlInput = {
   objectKey: string;
@@ -60,6 +68,7 @@ export type WeightProofStorageRuntime = {
   provider: WeightProofStorageProvider;
   storage: WeightProofStorageAdapter;
   uploadTtlMs: number;
+  signedGetTtlMs: number;
   maxImageBytes: number;
 };
 
@@ -67,8 +76,34 @@ export type WeightProofStorageEnvSource = {
   WEIGHT_GUARD_PROOF_STORAGE_ENABLED?: string | boolean | undefined;
   WEIGHT_GUARD_STORAGE_PROVIDER?: string | undefined;
   WEIGHT_GUARD_UPLOAD_TTL_SECONDS?: string | number | undefined;
+  WEIGHT_GUARD_SIGNED_GET_TTL_SECONDS?: string | number | undefined;
   WEIGHT_GUARD_MAX_IMAGE_BYTES?: string | number | undefined;
+  WEIGHT_GUARD_R2_ACCOUNT_ID?: string | undefined;
+  WEIGHT_GUARD_R2_ACCESS_KEY_ID?: string | undefined;
+  WEIGHT_GUARD_R2_SECRET_ACCESS_KEY?: string | undefined;
+  WEIGHT_GUARD_R2_BUCKET?: string | undefined;
+  WEIGHT_GUARD_R2_REGION?: string | undefined;
+  WEIGHT_GUARD_R2_ENDPOINT?: string | undefined;
 };
+
+export type R2WeightProofStorageConfig = {
+  bucket: string;
+  endpoint: string;
+  region: string;
+  accessKeyId: string;
+  secretAccessKey: string;
+  signedGetTtlMs: number;
+  maxImageBytes: number;
+  client?: S3Client | undefined;
+  presigner?: R2Presigner | undefined;
+};
+
+type R2PresignableCommand = PutObjectCommand | GetObjectCommand;
+export type R2Presigner = (
+  client: S3Client,
+  command: R2PresignableCommand,
+  options: { expiresIn: number }
+) => Promise<string>;
 
 function safeSegment(label: string, value: string, maxLength = MAX_SEGMENT_LENGTH) {
   const trimmed = String(value ?? "").trim();
@@ -108,10 +143,29 @@ export function validateWeightProofObjectKey(objectKey: string) {
 }
 
 function extensionForContentType(contentType: string | undefined) {
-  const normalized = String(contentType ?? "image/jpeg").trim().toLowerCase();
+  const normalized = normalizeWeightProofContentType(contentType);
   if (normalized === "image/jpeg") return "jpg";
   if (normalized === "image/png") return "png";
   throw new HttpError(400, "WEIGHT_PROOF_CONTENT_TYPE_INVALID");
+}
+
+export function normalizeWeightProofContentType(contentType: string | undefined) {
+  const normalized = String(contentType ?? "image/jpeg").trim().toLowerCase();
+  if (!ALLOWED_IMAGE_CONTENT_TYPES.has(normalized)) {
+    throw new HttpError(400, "WEIGHT_PROOF_CONTENT_TYPE_INVALID");
+  }
+  return normalized;
+}
+
+function validateExpectedByteSizeForStorage(value: number | null | undefined, maxImageBytes: number) {
+  if (value === undefined || value === null) return;
+  if (!Number.isInteger(value) || value <= 0) throw new HttpError(400, "WEIGHT_PROOF_EXPECTED_SIZE_INVALID");
+  if (value > maxImageBytes) throw new HttpError(400, "WEIGHT_GUARD_IMAGE_TOO_LARGE");
+}
+
+function secondsUntil(expiresAt: Date) {
+  const seconds = Math.ceil((expiresAt.getTime() - Date.now()) / 1000);
+  return Math.max(1, seconds);
 }
 
 export function buildWeightProofObjectKey(input: BuildWeightProofObjectKeyInput) {
@@ -182,29 +236,101 @@ export class InMemoryWeightProofStorageAdapter implements WeightProofStorageAdap
 
 export class DisabledWeightProofStorageAdapter implements WeightProofStorageAdapter {
   async createPresignedPutUrl(): Promise<CreatePresignedPutUrlResult> {
-    throw new HttpError(503, "WEIGHT_PROOF_STORAGE_DISABLED");
+    throw new HttpError(503, "WEIGHT_GUARD_STORAGE_DISABLED");
   }
 
   async headObject(): Promise<HeadObjectResult> {
-    throw new HttpError(503, "WEIGHT_PROOF_STORAGE_DISABLED");
+    throw new HttpError(503, "WEIGHT_GUARD_STORAGE_DISABLED");
   }
 
   async createPresignedGetUrl(): Promise<CreatePresignedGetUrlResult> {
-    throw new HttpError(503, "WEIGHT_PROOF_STORAGE_DISABLED");
+    throw new HttpError(503, "WEIGHT_GUARD_STORAGE_DISABLED");
   }
 }
 
-export class R2WeightProofStorageAdapter extends DisabledWeightProofStorageAdapter {
-  async createPresignedPutUrl(): Promise<CreatePresignedPutUrlResult> {
-    throw new HttpError(503, "WEIGHT_PROOF_R2_ADAPTER_NOT_CONFIGURED");
+function objectNotFound(error: unknown) {
+  const candidate = error as { name?: string; $metadata?: { httpStatusCode?: number } };
+  return candidate.name === "NotFound" || candidate.name === "NoSuchKey" || candidate.$metadata?.httpStatusCode === 404;
+}
+
+export class R2WeightProofStorageAdapter implements WeightProofStorageAdapter {
+  private readonly bucket: string;
+  private readonly client: S3Client;
+  private readonly presigner: R2Presigner;
+  private readonly signedGetTtlMs: number;
+  private readonly maxImageBytes: number;
+
+  constructor(config: R2WeightProofStorageConfig) {
+    this.bucket = config.bucket;
+    this.client = config.client ?? new S3Client({
+      region: config.region,
+      endpoint: config.endpoint,
+      credentials: {
+        accessKeyId: config.accessKeyId,
+        secretAccessKey: config.secretAccessKey
+      }
+    });
+    this.presigner = config.presigner ?? ((client, command, options) => getSignedUrl(client, command, options));
+    this.signedGetTtlMs = config.signedGetTtlMs;
+    this.maxImageBytes = config.maxImageBytes;
   }
 
-  async headObject(): Promise<HeadObjectResult> {
-    throw new HttpError(503, "WEIGHT_PROOF_R2_ADAPTER_NOT_CONFIGURED");
+  async createPresignedPutUrl(input: CreatePresignedPutUrlInput): Promise<CreatePresignedPutUrlResult> {
+    const objectKey = validateWeightProofObjectKey(input.objectKey);
+    const contentType = normalizeWeightProofContentType(input.contentType);
+    validateExpectedByteSizeForStorage(input.expectedByteSize, this.maxImageBytes);
+    try {
+      const command = new PutObjectCommand({
+        Bucket: this.bucket,
+        Key: objectKey,
+        ContentType: contentType,
+        ...(input.expectedByteSize ? { ContentLength: input.expectedByteSize } : {})
+      });
+      const uploadUrl = await this.presigner(this.client, command, { expiresIn: secondsUntil(input.expiresAt) });
+      return {
+        uploadUrl,
+        method: "PUT",
+        headers: {
+          "content-type": contentType
+        },
+        expiresAt: input.expiresAt
+      };
+    } catch {
+      throw new HttpError(503, "WEIGHT_GUARD_UPLOAD_URL_FAILED");
+    }
   }
 
-  async createPresignedGetUrl(): Promise<CreatePresignedGetUrlResult> {
-    throw new HttpError(503, "WEIGHT_PROOF_R2_ADAPTER_NOT_CONFIGURED");
+  async headObject(input: HeadObjectInput): Promise<HeadObjectResult> {
+    const objectKey = validateWeightProofObjectKey(input.objectKey);
+    try {
+      const object = await this.client.send(new HeadObjectCommand({
+        Bucket: this.bucket,
+        Key: objectKey
+      }));
+      return {
+        exists: true,
+        contentLength: object.ContentLength ?? null,
+        contentType: object.ContentType ?? null,
+        updatedAt: object.LastModified ?? null
+      };
+    } catch (error) {
+      if (objectNotFound(error)) return { exists: false };
+      throw new HttpError(503, "WEIGHT_GUARD_OBJECT_HEAD_FAILED");
+    }
+  }
+
+  async createPresignedGetUrl(input: CreatePresignedGetUrlInput): Promise<CreatePresignedGetUrlResult> {
+    const objectKey = validateWeightProofObjectKey(input.objectKey);
+    const expiresAt = input.expiresAt ?? new Date(Date.now() + this.signedGetTtlMs);
+    try {
+      const downloadUrl = await this.presigner(this.client, new GetObjectCommand({
+        Bucket: this.bucket,
+        Key: objectKey
+      }), { expiresIn: secondsUntil(expiresAt) });
+      return { downloadUrl, expiresAt };
+    } catch {
+      throw new HttpError(503, "WEIGHT_GUARD_UPLOAD_URL_FAILED");
+    }
   }
 }
 
@@ -232,6 +358,34 @@ function provider(value: string | undefined): WeightProofStorageProvider {
   return "disabled";
 }
 
+function stringValue(value: string | undefined) {
+  const trimmed = String(value ?? "").trim();
+  return trimmed || undefined;
+}
+
+export function resolveR2WeightProofStorageConfig(source: WeightProofStorageEnvSource = process.env): R2WeightProofStorageConfig {
+  const accountId = stringValue(source.WEIGHT_GUARD_R2_ACCOUNT_ID);
+  const endpoint = stringValue(source.WEIGHT_GUARD_R2_ENDPOINT)
+    ?? (accountId ? `https://${accountId}.r2.cloudflarestorage.com` : undefined);
+  const publicR2DeveloperHost = ["r2", "dev"].join(".");
+  const safeEndpoint = endpoint?.replace(/\/+$/, "");
+  const bucket = stringValue(source.WEIGHT_GUARD_R2_BUCKET);
+  const accessKeyId = stringValue(source.WEIGHT_GUARD_R2_ACCESS_KEY_ID);
+  const secretAccessKey = stringValue(source.WEIGHT_GUARD_R2_SECRET_ACCESS_KEY);
+  if (!safeEndpoint || safeEndpoint.toLowerCase().includes(publicR2DeveloperHost) || !bucket || !accessKeyId || !secretAccessKey) {
+    throw new HttpError(503, "WEIGHT_GUARD_STORAGE_MISCONFIGURED");
+  }
+  return {
+    bucket,
+    endpoint: safeEndpoint,
+    region: stringValue(source.WEIGHT_GUARD_R2_REGION) ?? "auto",
+    accessKeyId,
+    secretAccessKey,
+    signedGetTtlMs: numberInRange(source.WEIGHT_GUARD_SIGNED_GET_TTL_SECONDS, 300, 30, 3600) * 1000,
+    maxImageBytes: numberInRange(source.WEIGHT_GUARD_MAX_IMAGE_BYTES, 10 * 1024 * 1024, 1, 50 * 1024 * 1024)
+  };
+}
+
 export function getRouteMockWeightProofStorageAdapter() {
   return routeMockStorage;
 }
@@ -240,11 +394,12 @@ export function createWeightProofStorageRuntime(source: WeightProofStorageEnvSou
   const enabled = bool(source.WEIGHT_GUARD_PROOF_STORAGE_ENABLED, false);
   const selectedProvider = enabled ? provider(source.WEIGHT_GUARD_STORAGE_PROVIDER) : "disabled";
   const uploadTtlMs = numberInRange(source.WEIGHT_GUARD_UPLOAD_TTL_SECONDS, 600, 60, 3600) * 1000;
+  const signedGetTtlMs = numberInRange(source.WEIGHT_GUARD_SIGNED_GET_TTL_SECONDS, 300, 30, 3600) * 1000;
   const maxImageBytes = numberInRange(source.WEIGHT_GUARD_MAX_IMAGE_BYTES, 10 * 1024 * 1024, 1, 50 * 1024 * 1024);
   const storage = selectedProvider === "mock"
     ? routeMockStorage
     : selectedProvider === "r2"
-      ? new R2WeightProofStorageAdapter()
+      ? new R2WeightProofStorageAdapter(resolveR2WeightProofStorageConfig(source))
       : new DisabledWeightProofStorageAdapter();
 
   return {
@@ -252,14 +407,12 @@ export function createWeightProofStorageRuntime(source: WeightProofStorageEnvSou
     provider: selectedProvider,
     storage,
     uploadTtlMs,
+    signedGetTtlMs,
     maxImageBytes
   };
 }
 
 export function assertWeightProofStorageEnabled(runtime: WeightProofStorageRuntime) {
-  if (!runtime.enabled) throw new HttpError(503, "WEIGHT_PROOF_STORAGE_DISABLED");
-  if (runtime.provider === "r2" && runtime.storage instanceof R2WeightProofStorageAdapter) {
-    throw new HttpError(503, "WEIGHT_PROOF_R2_ADAPTER_NOT_CONFIGURED");
-  }
+  if (!runtime.enabled) throw new HttpError(503, "WEIGHT_GUARD_STORAGE_DISABLED");
   return runtime;
 }
