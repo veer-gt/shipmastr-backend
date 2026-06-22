@@ -30,7 +30,7 @@ export type InitWeightProofCaptureInput = {
 
 export type FinalizeWeightProofCaptureInput = {
   captureSessionId: string;
-  awbNumber: string;
+  awbNumber?: string | undefined;
   declaredWeightGrams: number;
   dimensions: ProofDimensionsInput;
   deviceId?: string | undefined;
@@ -74,7 +74,7 @@ function nullable(value: string | null | undefined) {
 
 function validateContentType(value: string | null | undefined) {
   const contentType = String(value ?? "image/jpeg").trim().toLowerCase();
-  if (contentType !== "image/jpeg") throw new HttpError(400, "WEIGHT_PROOF_CONTENT_TYPE_INVALID");
+  if (contentType !== "image/jpeg" && contentType !== "image/png") throw new HttpError(400, "WEIGHT_PROOF_CONTENT_TYPE_INVALID");
   return contentType;
 }
 
@@ -200,6 +200,7 @@ export async function initWeightProofCapture(input: InitWeightProofCaptureInput,
       already_finalized: false,
       proof: null,
       capture: serializeWeightProofCaptureSession(existingSession),
+      objectKey: existingSession.imageObjectKey,
       upload
     };
   }
@@ -210,7 +211,8 @@ export async function initWeightProofCapture(input: InitWeightProofCaptureInput,
     sellerOrMerchantId: merchantId,
     awbNumber,
     captureSessionId,
-    capturedAt: createdAt
+    capturedAt: createdAt,
+    contentType
   });
   const session = await client.shippingWeightProofCaptureSession.create({
     data: {
@@ -238,6 +240,7 @@ export async function initWeightProofCapture(input: InitWeightProofCaptureInput,
     already_finalized: false,
     proof: null,
     capture: serializeWeightProofCaptureSession(session),
+    objectKey: session.imageObjectKey,
     upload
   };
 }
@@ -245,7 +248,6 @@ export async function initWeightProofCapture(input: InitWeightProofCaptureInput,
 export async function finalizeWeightProofCapture(input: FinalizeWeightProofCaptureInput, context: WeightProofServiceContext) {
   const client = db(context);
   const merchantId = requireMerchantId(context.merchantId);
-  const awbNumber = validateWeightProofAwbNumber(input.awbNumber);
   const declaredWeightGrams = validateDeclaredWeightGrams(input.declaredWeightGrams);
   const dimensions = normalizeProofDimensions(input.dimensions);
   const volumetricWeightGrams = calculateVolumetricWeightGrams(dimensions.lengthCm, dimensions.widthCm, dimensions.heightCm);
@@ -258,6 +260,7 @@ export async function finalizeWeightProofCapture(input: FinalizeWeightProofCaptu
     }
   });
   if (!session) throw new HttpError(404, "WEIGHT_PROOF_CAPTURE_SESSION_NOT_FOUND");
+  const awbNumber = validateWeightProofAwbNumber(input.awbNumber ?? session.awbNumber);
   if (session.awbNumber !== awbNumber) throw new HttpError(409, "WEIGHT_PROOF_AWB_SESSION_MISMATCH");
 
   const existingProof = await client.shippingWeightProof.findFirst({

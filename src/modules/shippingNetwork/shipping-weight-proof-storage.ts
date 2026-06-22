@@ -44,6 +44,7 @@ export type BuildWeightProofObjectKeyInput = {
   awbNumber: string;
   captureSessionId: string;
   capturedAt?: Date | undefined;
+  contentType?: string | undefined;
 };
 
 export interface WeightProofStorageAdapter {
@@ -51,6 +52,23 @@ export interface WeightProofStorageAdapter {
   headObject(input: HeadObjectInput): Promise<HeadObjectResult>;
   createPresignedGetUrl(input: CreatePresignedGetUrlInput): Promise<CreatePresignedGetUrlResult>;
 }
+
+export type WeightProofStorageProvider = "disabled" | "mock" | "r2";
+
+export type WeightProofStorageRuntime = {
+  enabled: boolean;
+  provider: WeightProofStorageProvider;
+  storage: WeightProofStorageAdapter;
+  uploadTtlMs: number;
+  maxImageBytes: number;
+};
+
+export type WeightProofStorageEnvSource = {
+  WEIGHT_GUARD_PROOF_STORAGE_ENABLED?: string | boolean | undefined;
+  WEIGHT_GUARD_STORAGE_PROVIDER?: string | undefined;
+  WEIGHT_GUARD_UPLOAD_TTL_SECONDS?: string | number | undefined;
+  WEIGHT_GUARD_MAX_IMAGE_BYTES?: string | number | undefined;
+};
 
 function safeSegment(label: string, value: string, maxLength = MAX_SEGMENT_LENGTH) {
   const trimmed = String(value ?? "").trim();
@@ -81,11 +99,19 @@ export function validateWeightProofObjectKey(objectKey: string) {
     throw new HttpError(400, "WEIGHT_PROOF_OBJECT_KEY_INVALID");
   }
   safeSegment("AWB_NUMBER", awbNumber, MAX_AWB_LENGTH);
-  if (!fileName.endsWith(".jpg")) {
+  if (!fileName.endsWith(".jpg") && !fileName.endsWith(".png")) {
     throw new HttpError(400, "WEIGHT_PROOF_OBJECT_KEY_INVALID");
   }
-  safeSegment("CAPTURE_SESSION_ID", fileName.slice(0, -4));
+  const extensionLength = fileName.endsWith(".jpg") ? 4 : 4;
+  safeSegment("CAPTURE_SESSION_ID", fileName.slice(0, -extensionLength));
   return trimmed;
+}
+
+function extensionForContentType(contentType: string | undefined) {
+  const normalized = String(contentType ?? "image/jpeg").trim().toLowerCase();
+  if (normalized === "image/jpeg") return "jpg";
+  if (normalized === "image/png") return "png";
+  throw new HttpError(400, "WEIGHT_PROOF_CONTENT_TYPE_INVALID");
 }
 
 export function buildWeightProofObjectKey(input: BuildWeightProofObjectKeyInput) {
@@ -95,8 +121,9 @@ export function buildWeightProofObjectKey(input: BuildWeightProofObjectKeyInput)
   const capturedAt = input.capturedAt ?? new Date();
   const year = String(capturedAt.getUTCFullYear());
   const month = String(capturedAt.getUTCMonth() + 1).padStart(2, "0");
+  const extension = extensionForContentType(input.contentType);
 
-  return validateWeightProofObjectKey(`weight-proofs/${sellerOrMerchantId}/${year}/${month}/${awbNumber}/${captureSessionId}.jpg`);
+  return validateWeightProofObjectKey(`weight-proofs/${sellerOrMerchantId}/${year}/${month}/${awbNumber}/${captureSessionId}.${extension}`);
 }
 
 export class InMemoryWeightProofStorageAdapter implements WeightProofStorageAdapter {
@@ -151,4 +178,88 @@ export class InMemoryWeightProofStorageAdapter implements WeightProofStorageAdap
       updatedAt: input.updatedAt ?? new Date()
     });
   }
+}
+
+export class DisabledWeightProofStorageAdapter implements WeightProofStorageAdapter {
+  async createPresignedPutUrl(): Promise<CreatePresignedPutUrlResult> {
+    throw new HttpError(503, "WEIGHT_PROOF_STORAGE_DISABLED");
+  }
+
+  async headObject(): Promise<HeadObjectResult> {
+    throw new HttpError(503, "WEIGHT_PROOF_STORAGE_DISABLED");
+  }
+
+  async createPresignedGetUrl(): Promise<CreatePresignedGetUrlResult> {
+    throw new HttpError(503, "WEIGHT_PROOF_STORAGE_DISABLED");
+  }
+}
+
+export class R2WeightProofStorageAdapter extends DisabledWeightProofStorageAdapter {
+  async createPresignedPutUrl(): Promise<CreatePresignedPutUrlResult> {
+    throw new HttpError(503, "WEIGHT_PROOF_R2_ADAPTER_NOT_CONFIGURED");
+  }
+
+  async headObject(): Promise<HeadObjectResult> {
+    throw new HttpError(503, "WEIGHT_PROOF_R2_ADAPTER_NOT_CONFIGURED");
+  }
+
+  async createPresignedGetUrl(): Promise<CreatePresignedGetUrlResult> {
+    throw new HttpError(503, "WEIGHT_PROOF_R2_ADAPTER_NOT_CONFIGURED");
+  }
+}
+
+const routeMockStorage = new InMemoryWeightProofStorageAdapter();
+
+function bool(value: string | boolean | undefined, defaultValue: boolean) {
+  if (typeof value === "boolean") return value;
+  if (typeof value === "string") {
+    const normalized = value.trim().toLowerCase();
+    if (["true", "1", "yes", "on"].includes(normalized)) return true;
+    if (["false", "0", "no", "off", ""].includes(normalized)) return false;
+  }
+  return defaultValue;
+}
+
+function numberInRange(value: string | number | undefined, defaultValue: number, min: number, max: number) {
+  const parsed = Number(value ?? defaultValue);
+  if (!Number.isFinite(parsed)) return defaultValue;
+  return Math.min(max, Math.max(min, Math.trunc(parsed)));
+}
+
+function provider(value: string | undefined): WeightProofStorageProvider {
+  const normalized = String(value ?? "disabled").trim().toLowerCase();
+  if (normalized === "mock" || normalized === "r2" || normalized === "disabled") return normalized;
+  return "disabled";
+}
+
+export function getRouteMockWeightProofStorageAdapter() {
+  return routeMockStorage;
+}
+
+export function createWeightProofStorageRuntime(source: WeightProofStorageEnvSource = process.env): WeightProofStorageRuntime {
+  const enabled = bool(source.WEIGHT_GUARD_PROOF_STORAGE_ENABLED, false);
+  const selectedProvider = enabled ? provider(source.WEIGHT_GUARD_STORAGE_PROVIDER) : "disabled";
+  const uploadTtlMs = numberInRange(source.WEIGHT_GUARD_UPLOAD_TTL_SECONDS, 600, 60, 3600) * 1000;
+  const maxImageBytes = numberInRange(source.WEIGHT_GUARD_MAX_IMAGE_BYTES, 10 * 1024 * 1024, 1, 50 * 1024 * 1024);
+  const storage = selectedProvider === "mock"
+    ? routeMockStorage
+    : selectedProvider === "r2"
+      ? new R2WeightProofStorageAdapter()
+      : new DisabledWeightProofStorageAdapter();
+
+  return {
+    enabled: enabled && selectedProvider !== "disabled",
+    provider: selectedProvider,
+    storage,
+    uploadTtlMs,
+    maxImageBytes
+  };
+}
+
+export function assertWeightProofStorageEnabled(runtime: WeightProofStorageRuntime) {
+  if (!runtime.enabled) throw new HttpError(503, "WEIGHT_PROOF_STORAGE_DISABLED");
+  if (runtime.provider === "r2" && runtime.storage instanceof R2WeightProofStorageAdapter) {
+    throw new HttpError(503, "WEIGHT_PROOF_R2_ADAPTER_NOT_CONFIGURED");
+  }
+  return runtime;
 }
