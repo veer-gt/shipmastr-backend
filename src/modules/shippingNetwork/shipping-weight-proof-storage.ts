@@ -5,6 +5,7 @@ import {
   S3Client
 } from "@aws-sdk/client-s3";
 import { getSignedUrl } from "@aws-sdk/s3-request-presigner";
+import { Storage } from "@google-cloud/storage";
 import { HttpError } from "../../lib/httpError.js";
 
 const SAFE_SEGMENT = /^[A-Za-z0-9_-]+$/;
@@ -61,7 +62,7 @@ export interface WeightProofStorageAdapter {
   createPresignedGetUrl(input: CreatePresignedGetUrlInput): Promise<CreatePresignedGetUrlResult>;
 }
 
-export type WeightProofStorageProvider = "disabled" | "mock" | "r2";
+export type WeightProofStorageProvider = "disabled" | "mock" | "r2" | "gcs";
 
 export type WeightProofStorageRuntime = {
   enabled: boolean;
@@ -84,6 +85,8 @@ export type WeightProofStorageEnvSource = {
   WEIGHT_GUARD_R2_BUCKET?: string | undefined;
   WEIGHT_GUARD_R2_REGION?: string | undefined;
   WEIGHT_GUARD_R2_ENDPOINT?: string | undefined;
+  WEIGHT_GUARD_GCS_BUCKET?: string | undefined;
+  WEIGHT_GUARD_GCS_PROJECT_ID?: string | undefined;
 };
 
 export type R2WeightProofStorageConfig = {
@@ -96,6 +99,36 @@ export type R2WeightProofStorageConfig = {
   maxImageBytes: number;
   client?: S3Client | undefined;
   presigner?: R2Presigner | undefined;
+};
+
+export type GcsSignedUrlAction = "read" | "write";
+
+export type GcsWeightProofFile = {
+  getSignedUrl(config: {
+    version: "v4";
+    action: GcsSignedUrlAction;
+    expires: Date;
+    contentType?: string | undefined;
+  }): Promise<[string]>;
+  getMetadata(): Promise<[{
+    size?: string | number | undefined;
+    contentType?: string | undefined;
+    updated?: string | Date | undefined;
+    timeCreated?: string | Date | undefined;
+  }]>;
+};
+
+export type GcsWeightProofBucket = {
+  file(objectKey: string): GcsWeightProofFile;
+};
+
+export type GcsWeightProofStorageConfig = {
+  bucket: string;
+  projectId: string;
+  signedGetTtlMs: number;
+  maxImageBytes: number;
+  bucketClient?: GcsWeightProofBucket | undefined;
+  storage?: Storage | undefined;
 };
 
 type R2PresignableCommand = PutObjectCommand | GetObjectCommand;
@@ -253,6 +286,14 @@ function objectNotFound(error: unknown) {
   return candidate.name === "NotFound" || candidate.name === "NoSuchKey" || candidate.$metadata?.httpStatusCode === 404;
 }
 
+function gcsObjectNotFound(error: unknown) {
+  const candidate = error as { code?: number | string; name?: string; message?: string };
+  return candidate.code === 404
+    || candidate.code === "404"
+    || candidate.name === "NotFound"
+    || /not\s*found/i.test(candidate.message ?? "");
+}
+
 export class R2WeightProofStorageAdapter implements WeightProofStorageAdapter {
   private readonly bucket: string;
   private readonly client: S3Client;
@@ -334,6 +375,76 @@ export class R2WeightProofStorageAdapter implements WeightProofStorageAdapter {
   }
 }
 
+export class GcsWeightProofStorageAdapter implements WeightProofStorageAdapter {
+  private readonly bucket: GcsWeightProofBucket;
+  private readonly signedGetTtlMs: number;
+  private readonly maxImageBytes: number;
+
+  constructor(config: GcsWeightProofStorageConfig) {
+    this.bucket = config.bucketClient ?? (config.storage ?? new Storage({
+      projectId: config.projectId
+    })).bucket(config.bucket) as unknown as GcsWeightProofBucket;
+    this.signedGetTtlMs = config.signedGetTtlMs;
+    this.maxImageBytes = config.maxImageBytes;
+  }
+
+  async createPresignedPutUrl(input: CreatePresignedPutUrlInput): Promise<CreatePresignedPutUrlResult> {
+    const objectKey = validateWeightProofObjectKey(input.objectKey);
+    const contentType = normalizeWeightProofContentType(input.contentType);
+    validateExpectedByteSizeForStorage(input.expectedByteSize, this.maxImageBytes);
+    try {
+      const [uploadUrl] = await this.bucket.file(objectKey).getSignedUrl({
+        version: "v4",
+        action: "write",
+        expires: input.expiresAt,
+        contentType
+      });
+      return {
+        uploadUrl,
+        method: "PUT",
+        headers: {
+          "content-type": contentType
+        },
+        expiresAt: input.expiresAt
+      };
+    } catch {
+      throw new HttpError(503, "WEIGHT_GUARD_GCS_SIGNED_URL_FAILED");
+    }
+  }
+
+  async headObject(input: HeadObjectInput): Promise<HeadObjectResult> {
+    const objectKey = validateWeightProofObjectKey(input.objectKey);
+    try {
+      const [metadata] = await this.bucket.file(objectKey).getMetadata();
+      const updatedAt = metadata.updated ?? metadata.timeCreated;
+      return {
+        exists: true,
+        contentLength: metadata.size === undefined ? null : Number(metadata.size),
+        contentType: metadata.contentType ?? null,
+        updatedAt: updatedAt ? new Date(updatedAt) : null
+      };
+    } catch (error) {
+      if (gcsObjectNotFound(error)) throw new HttpError(404, "WEIGHT_GUARD_GCS_OBJECT_NOT_FOUND");
+      throw new HttpError(503, "WEIGHT_GUARD_OBJECT_HEAD_FAILED");
+    }
+  }
+
+  async createPresignedGetUrl(input: CreatePresignedGetUrlInput): Promise<CreatePresignedGetUrlResult> {
+    const objectKey = validateWeightProofObjectKey(input.objectKey);
+    const expiresAt = input.expiresAt ?? new Date(Date.now() + this.signedGetTtlMs);
+    try {
+      const [downloadUrl] = await this.bucket.file(objectKey).getSignedUrl({
+        version: "v4",
+        action: "read",
+        expires: expiresAt
+      });
+      return { downloadUrl, expiresAt };
+    } catch {
+      throw new HttpError(503, "WEIGHT_GUARD_GCS_SIGNED_URL_FAILED");
+    }
+  }
+}
+
 const routeMockStorage = new InMemoryWeightProofStorageAdapter();
 
 function bool(value: string | boolean | undefined, defaultValue: boolean) {
@@ -354,7 +465,7 @@ function numberInRange(value: string | number | undefined, defaultValue: number,
 
 function provider(value: string | undefined): WeightProofStorageProvider {
   const normalized = String(value ?? "disabled").trim().toLowerCase();
-  if (normalized === "mock" || normalized === "r2" || normalized === "disabled") return normalized;
+  if (normalized === "mock" || normalized === "r2" || normalized === "gcs" || normalized === "disabled") return normalized;
   return "disabled";
 }
 
@@ -386,6 +497,17 @@ export function resolveR2WeightProofStorageConfig(source: WeightProofStorageEnvS
   };
 }
 
+export function resolveGcsWeightProofStorageConfig(source: WeightProofStorageEnvSource = process.env): GcsWeightProofStorageConfig {
+  const bucket = stringValue(source.WEIGHT_GUARD_GCS_BUCKET);
+  if (!bucket) throw new HttpError(503, "WEIGHT_GUARD_GCS_MISCONFIGURED");
+  return {
+    bucket,
+    projectId: stringValue(source.WEIGHT_GUARD_GCS_PROJECT_ID) ?? "shipmastr-core-prod",
+    signedGetTtlMs: numberInRange(source.WEIGHT_GUARD_SIGNED_GET_TTL_SECONDS, 300, 30, 3600) * 1000,
+    maxImageBytes: numberInRange(source.WEIGHT_GUARD_MAX_IMAGE_BYTES, 10 * 1024 * 1024, 1, 50 * 1024 * 1024)
+  };
+}
+
 export function getRouteMockWeightProofStorageAdapter() {
   return routeMockStorage;
 }
@@ -400,7 +522,9 @@ export function createWeightProofStorageRuntime(source: WeightProofStorageEnvSou
     ? routeMockStorage
     : selectedProvider === "r2"
       ? new R2WeightProofStorageAdapter(resolveR2WeightProofStorageConfig(source))
-      : new DisabledWeightProofStorageAdapter();
+      : selectedProvider === "gcs"
+        ? new GcsWeightProofStorageAdapter(resolveGcsWeightProofStorageConfig(source))
+        : new DisabledWeightProofStorageAdapter();
 
   return {
     enabled: enabled && selectedProvider !== "disabled",

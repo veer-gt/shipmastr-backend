@@ -19,8 +19,10 @@ import {
   assertWeightProofStorageEnabled,
   buildWeightProofObjectKey,
   createWeightProofStorageRuntime,
+  GcsWeightProofStorageAdapter,
   InMemoryWeightProofStorageAdapter,
   R2WeightProofStorageAdapter,
+  resolveGcsWeightProofStorageConfig,
   resolveR2WeightProofStorageConfig
 } from "./shipping-weight-proof-storage.js";
 import { serializeWeightProofSellerSafe } from "./shipping-weight-proof.serializer.js";
@@ -122,6 +124,39 @@ function makeR2Adapter(options: {
 }
 
 const r2ObjectKey = "weight-proofs/seller_123/2026/06/AWB_123/capture_123.jpg";
+
+function makeGcsAdapter(options: {
+  getSignedUrl?: (config: any) => Promise<[string]>;
+  getMetadata?: () => Promise<[any]>;
+  maxImageBytes?: number;
+} = {}) {
+  const calls: any[] = [];
+  const adapter = new GcsWeightProofStorageAdapter({
+    bucket: "private-weight-proofs",
+    projectId: "shipmastr-core-prod",
+    signedGetTtlMs: 300000,
+    maxImageBytes: options.maxImageBytes ?? 10 * 1024 * 1024,
+    bucketClient: {
+      file: (objectKey: string) => ({
+        getSignedUrl: async (config: any) => {
+          calls.push({ method: "getSignedUrl", objectKey, config });
+          if (options.getSignedUrl) return options.getSignedUrl(config);
+          return [`https://signed.example/gcs-${config.action}`];
+        },
+        getMetadata: async () => {
+          calls.push({ method: "getMetadata", objectKey });
+          if (options.getMetadata) return options.getMetadata();
+          return [{
+            size: "2048",
+            contentType: "image/jpeg",
+            updated: "2026-06-22T10:05:00.000Z"
+          }];
+        }
+      })
+    }
+  });
+  return { adapter, calls };
+}
 
 describe("shipping weight proof foundation", () => {
   it("calculates volumetric and chargeable weight in grams", () => {
@@ -538,5 +573,137 @@ describe("shipping weight proof foundation", () => {
       /WEIGHT_GUARD_IMAGE_TOO_LARGE/
     );
     assert.equal(presignCalls, 0);
+  });
+
+  it("rejects missing GCS bucket configuration safely", () => {
+    assert.throws(
+      () => createWeightProofStorageRuntime({
+        WEIGHT_GUARD_PROOF_STORAGE_ENABLED: "true",
+        WEIGHT_GUARD_STORAGE_PROVIDER: "gcs"
+      }),
+      (error) => error instanceof HttpError && error.message === "WEIGHT_GUARD_GCS_MISCONFIGURED"
+    );
+  });
+
+  it("resolves GCS storage config with the Shipmastr staging project default", () => {
+    const config = resolveGcsWeightProofStorageConfig({
+      WEIGHT_GUARD_GCS_BUCKET: "private-weight-proofs"
+    });
+
+    assert.equal(config.bucket, "private-weight-proofs");
+    assert.equal(config.projectId, "shipmastr-core-prod");
+    assert.equal(config.signedGetTtlMs, 300000);
+    assert.equal(config.maxImageBytes, 10 * 1024 * 1024);
+  });
+
+  it("creates GCS signed PUT URLs through an injected bucket only", async () => {
+    const { adapter, calls } = makeGcsAdapter();
+
+    const result = await adapter.createPresignedPutUrl({
+      objectKey: r2ObjectKey,
+      contentType: "image/png",
+      expectedByteSize: 1024,
+      expiresAt: new Date("2026-06-22T10:10:00.000Z")
+    });
+
+    assert.equal(result.uploadUrl, "https://signed.example/gcs-write");
+    assert.equal(result.method, "PUT");
+    assert.deepEqual(result.headers, { "content-type": "image/png" });
+    assert.equal(calls.length, 1);
+    assert.equal(calls[0].objectKey, r2ObjectKey);
+    assert.deepEqual(calls[0].config, {
+      version: "v4",
+      action: "write",
+      expires: new Date("2026-06-22T10:10:00.000Z"),
+      contentType: "image/png"
+    });
+  });
+
+  it("checks GCS object metadata through an injected bucket", async () => {
+    const { adapter, calls } = makeGcsAdapter({
+      getMetadata: async () => [{
+        size: "4096",
+        contentType: "image/png",
+        updated: "2026-06-22T10:06:00.000Z"
+      }]
+    });
+
+    const object = await adapter.headObject({ objectKey: r2ObjectKey });
+    assert.equal(object.exists, true);
+    assert.equal(object.contentLength, 4096);
+    assert.equal(object.contentType, "image/png");
+    assert.deepEqual(object.updatedAt, new Date("2026-06-22T10:06:00.000Z"));
+    assert.equal(calls.length, 1);
+    assert.equal(calls[0].method, "getMetadata");
+  });
+
+  it("handles GCS missing objects and metadata failures without leaking config", async () => {
+    const missing = makeGcsAdapter({
+      getMetadata: async () => {
+        throw Object.assign(new Error("not found"), { code: 404 });
+      }
+    });
+    await assert.rejects(
+      () => missing.adapter.headObject({ objectKey: r2ObjectKey }),
+      (error) => error instanceof HttpError && error.message === "WEIGHT_GUARD_GCS_OBJECT_NOT_FOUND"
+    );
+
+    const failed = makeGcsAdapter({
+      getMetadata: async () => {
+        throw new Error("internal storage details");
+      }
+    });
+    await assert.rejects(
+      () => failed.adapter.headObject({ objectKey: r2ObjectKey }),
+      (error) => error instanceof HttpError && error.message === "WEIGHT_GUARD_OBJECT_HEAD_FAILED"
+    );
+  });
+
+  it("keeps GCS signed GET URLs internal to the storage adapter", async () => {
+    const { adapter } = makeGcsAdapter({
+      getSignedUrl: async (config) => [`https://signed.example/gcs-${config.action}`]
+    });
+
+    const result = await adapter.createPresignedGetUrl({
+      objectKey: r2ObjectKey,
+      expiresAt: new Date("2026-06-22T10:10:00.000Z")
+    });
+    assert.equal(result.downloadUrl, "https://signed.example/gcs-read");
+
+    const sellerSafe = serializeWeightProofSellerSafe({
+      id: "proof_1",
+      captureSessionId: "capture_123",
+      awbNumber: "AWB_123",
+      declaredWeightGrams: 1000,
+      volumetricWeightGrams: 1200,
+      chargeableWeightGrams: 1200,
+      capturedAt: new Date("2026-06-22T10:05:00.000Z"),
+      createdAt: new Date("2026-06-22T10:05:00.000Z")
+    });
+    assert.doesNotMatch(JSON.stringify(sellerSafe), /signed\.example|downloadUrl|download_url|imageObjectKey|image_object_key/i);
+  });
+
+  it("preserves GCS content type and max byte validation before signing", async () => {
+    const { adapter, calls } = makeGcsAdapter({ maxImageBytes: 1024 });
+
+    await assert.rejects(
+      () => adapter.createPresignedPutUrl({
+        objectKey: r2ObjectKey,
+        contentType: "application/pdf",
+        expectedByteSize: 100,
+        expiresAt: new Date(Date.now() + 600000)
+      }),
+      /WEIGHT_PROOF_CONTENT_TYPE_INVALID/
+    );
+    await assert.rejects(
+      () => adapter.createPresignedPutUrl({
+        objectKey: r2ObjectKey,
+        contentType: "image/png",
+        expectedByteSize: 2048,
+        expiresAt: new Date(Date.now() + 600000)
+      }),
+      /WEIGHT_GUARD_IMAGE_TOO_LARGE/
+    );
+    assert.equal(calls.length, 0);
   });
 });
