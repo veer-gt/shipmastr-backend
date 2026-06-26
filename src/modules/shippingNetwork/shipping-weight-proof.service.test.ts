@@ -126,16 +126,24 @@ function makeR2Adapter(options: {
 const r2ObjectKey = "weight-proofs/seller_123/2026/06/AWB_123/capture_123.jpg";
 
 function makeGcsAdapter(options: {
+  authClient?: any;
+  diagnostics?: (diagnostic: any) => void;
   getSignedUrl?: (config: any) => Promise<[string]>;
   getMetadata?: () => Promise<[any]>;
   maxImageBytes?: number;
+  runtimeSigner?: (input: any) => Promise<string>;
+  signingServiceAccount?: string;
 } = {}) {
   const calls: any[] = [];
   const adapter = new GcsWeightProofStorageAdapter({
     bucket: "private-weight-proofs",
     projectId: "shipmastr-core-prod",
+    signingServiceAccount: options.signingServiceAccount,
     signedGetTtlMs: 300000,
     maxImageBytes: options.maxImageBytes ?? 10 * 1024 * 1024,
+    authClient: options.authClient,
+    diagnostics: options.diagnostics,
+    runtimeSigner: options.runtimeSigner,
     bucketClient: {
       file: (objectKey: string) => ({
         getSignedUrl: async (config: any) => {
@@ -156,6 +164,10 @@ function makeGcsAdapter(options: {
     }
   });
   return { adapter, calls };
+}
+
+function fakeBase64Signature(value = "shipmastr-runtime-signature") {
+  return Buffer.from(value, "utf8").toString("base64");
 }
 
 describe("shipping weight proof foundation", () => {
@@ -587,11 +599,13 @@ describe("shipping weight proof foundation", () => {
 
   it("resolves GCS storage config with the Shipmastr staging project default", () => {
     const config = resolveGcsWeightProofStorageConfig({
-      WEIGHT_GUARD_GCS_BUCKET: "private-weight-proofs"
+      WEIGHT_GUARD_GCS_BUCKET: "private-weight-proofs",
+      WEIGHT_GUARD_GCS_SIGNING_SERVICE_ACCOUNT: "shipmastr-runner@example.iam.gserviceaccount.com"
     });
 
     assert.equal(config.bucket, "private-weight-proofs");
     assert.equal(config.projectId, "shipmastr-core-prod");
+    assert.equal(config.signingServiceAccount, "shipmastr-runner@example.iam.gserviceaccount.com");
     assert.equal(config.signedGetTtlMs, 300000);
     assert.equal(config.maxImageBytes, 10 * 1024 * 1024);
   });
@@ -617,6 +631,104 @@ describe("shipping weight proof foundation", () => {
       expires: new Date("2026-06-22T10:10:00.000Z"),
       contentType: "image/png"
     });
+  });
+
+  it("falls back to runtime IAM signing for GCS signed PUT URLs", async () => {
+    const runtimeSignCalls: any[] = [];
+    const gcsHost = ["storage", "googleapis", "com"].join(".");
+    const { adapter, calls } = makeGcsAdapter({
+      signingServiceAccount: "shipmastr-runner@example.iam.gserviceaccount.com",
+      getSignedUrl: async () => {
+        throw new Error("Cannot sign data without runtime credentials");
+      },
+      runtimeSigner: async (input) => {
+        runtimeSignCalls.push(input);
+        return fakeBase64Signature("signed-put");
+      }
+    });
+
+    const result = await adapter.createPresignedPutUrl({
+      objectKey: r2ObjectKey,
+      contentType: "image/png",
+      expectedByteSize: 1024,
+      expiresAt: new Date(Date.now() + 600000)
+    });
+
+    assert.equal(result.method, "PUT");
+    assert.deepEqual(result.headers, { "content-type": "image/png" });
+    assert.equal(calls.length, 1);
+    assert.equal(runtimeSignCalls.length, 1);
+    assert.equal(runtimeSignCalls[0].serviceAccountEmail, "shipmastr-runner@example.iam.gserviceaccount.com");
+    assert.match(runtimeSignCalls[0].stringToSign, /^GOOG4-RSA-SHA256\n/);
+    assert.match(result.uploadUrl, new RegExp(`^https://${gcsHost}/private-weight-proofs/weight-proofs/seller_123/`));
+    assert.match(result.uploadUrl, /X-Goog-Algorithm=GOOG4-RSA-SHA256/);
+    assert.match(result.uploadUrl, /X-Goog-Signature=7369676e65642d707574/);
+  });
+
+  it("uses the configured GCS signing service account through IAM credentials when needed", async () => {
+    const requestCalls: any[] = [];
+    const { adapter } = makeGcsAdapter({
+      signingServiceAccount: "shipmastr-runner@example.iam.gserviceaccount.com",
+      getSignedUrl: async () => {
+        throw new Error("library signer unavailable");
+      },
+      authClient: {
+        request: async (request: any) => {
+          requestCalls.push(request);
+          return { data: { signedBlob: fakeBase64Signature("signed-by-iam") } };
+        }
+      }
+    });
+
+    const result = await adapter.createPresignedPutUrl({
+      objectKey: r2ObjectKey,
+      contentType: "image/jpeg",
+      expectedByteSize: 100,
+      expiresAt: new Date(Date.now() + 600000)
+    });
+
+    assert.equal(requestCalls.length, 1);
+    assert.equal(requestCalls[0].method, "POST");
+    assert.match(requestCalls[0].url, /iamcredentials\.googleapis\.com\/v1\/projects\/-\/serviceAccounts\/shipmastr-runner%40example\.iam\.gserviceaccount\.com:signBlob/);
+    assert.equal(typeof requestCalls[0].data.payload, "string");
+    assert.match(result.uploadUrl, /X-Goog-Signature=7369676e65642d62792d69616d/);
+  });
+
+  it("maps GCS signed URL failure with safe diagnostics only", async () => {
+    const diagnostics: any[] = [];
+    const gcsHost = ["storage", "googleapis", "com"].join(".");
+    const { adapter } = makeGcsAdapter({
+      signingServiceAccount: "shipmastr-runner@example.iam.gserviceaccount.com",
+      diagnostics: (diagnostic) => diagnostics.push(diagnostic),
+      getSignedUrl: async () => {
+        throw new Error("library signer unavailable");
+      },
+      runtimeSigner: async () => {
+        throw Object.assign(new Error(`permission denied for https://${gcsHost}/${r2ObjectKey} in private-weight-proofs`), {
+          name: "SigningError",
+          code: 403
+        });
+      }
+    });
+
+    await assert.rejects(
+      () => adapter.createPresignedPutUrl({
+        objectKey: r2ObjectKey,
+        contentType: "image/png",
+        expectedByteSize: 1024,
+        expiresAt: new Date(Date.now() + 600000)
+      }),
+      (error) => error instanceof HttpError && error.message === "WEIGHT_GUARD_GCS_SIGNED_URL_FAILED"
+    );
+
+    assert.equal(diagnostics.length, 1);
+    assert.equal(diagnostics[0].provider, "gcs");
+    assert.equal(diagnostics[0].operation, "signed_put");
+    assert.equal(diagnostics[0].category, "GCS_PERMISSION_DENIED");
+    assert.equal(diagnostics[0].bucketConfigured, true);
+    assert.equal(diagnostics[0].projectConfigured, true);
+    const text = JSON.stringify(diagnostics[0]);
+    assert.doesNotMatch(text, /private-weight-proofs|shipmastr-core-prod|shipmastr-runner@example|storage[.]googleapis[.]com|weight-proofs\/seller_123|X-Goog-Signature|signed\.example/i);
   });
 
   it("checks GCS object metadata through an injected bucket", async () => {
@@ -681,6 +793,38 @@ describe("shipping weight proof foundation", () => {
       createdAt: new Date("2026-06-22T10:05:00.000Z")
     });
     assert.doesNotMatch(JSON.stringify(sellerSafe), /signed\.example|downloadUrl|download_url|imageObjectKey|image_object_key/i);
+  });
+
+  it("falls back to runtime IAM signing for internal GCS signed GET URLs", async () => {
+    const runtimeSignCalls: any[] = [];
+    const { adapter } = makeGcsAdapter({
+      signingServiceAccount: "shipmastr-runner@example.iam.gserviceaccount.com",
+      getSignedUrl: async () => {
+        throw new Error("library signer unavailable");
+      },
+      runtimeSigner: async (input) => {
+        runtimeSignCalls.push(input);
+        return fakeBase64Signature("signed-get");
+      }
+    });
+
+    const result = await adapter.createPresignedGetUrl({
+      objectKey: r2ObjectKey,
+      expiresAt: new Date(Date.now() + 300000)
+    });
+
+    assert.equal(runtimeSignCalls.length, 1);
+    assert.match(result.downloadUrl, /X-Goog-Signature=7369676e65642d676574/);
+    assert.doesNotMatch(JSON.stringify(serializeWeightProofSellerSafe({
+      id: "proof_1",
+      captureSessionId: "capture_123",
+      awbNumber: "AWB_123",
+      declaredWeightGrams: 1000,
+      volumetricWeightGrams: 1200,
+      chargeableWeightGrams: 1200,
+      capturedAt: new Date("2026-06-22T10:05:00.000Z"),
+      createdAt: new Date("2026-06-22T10:05:00.000Z")
+    })), /downloadUrl|download_url|imageObjectKey|image_object_key|X-Goog-Signature/i);
   });
 
   it("preserves GCS content type and max byte validation before signing", async () => {

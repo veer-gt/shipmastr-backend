@@ -1,3 +1,4 @@
+import { createHash } from "node:crypto";
 import {
   GetObjectCommand,
   HeadObjectCommand,
@@ -7,6 +8,7 @@ import {
 import { getSignedUrl } from "@aws-sdk/s3-request-presigner";
 import { Storage } from "@google-cloud/storage";
 import { HttpError } from "../../lib/httpError.js";
+import { logger } from "../../lib/logger.js";
 
 const SAFE_SEGMENT = /^[A-Za-z0-9_-]+$/;
 const MAX_AWB_LENGTH = 64;
@@ -87,6 +89,7 @@ export type WeightProofStorageEnvSource = {
   WEIGHT_GUARD_R2_ENDPOINT?: string | undefined;
   WEIGHT_GUARD_GCS_BUCKET?: string | undefined;
   WEIGHT_GUARD_GCS_PROJECT_ID?: string | undefined;
+  WEIGHT_GUARD_GCS_SIGNING_SERVICE_ACCOUNT?: string | undefined;
 };
 
 export type R2WeightProofStorageConfig = {
@@ -122,12 +125,50 @@ export type GcsWeightProofBucket = {
   file(objectKey: string): GcsWeightProofFile;
 };
 
+export type GcsRuntimeSignInput = {
+  serviceAccountEmail: string;
+  stringToSign: string;
+};
+
+export type GcsRuntimeSigner = (input: GcsRuntimeSignInput) => Promise<string>;
+
+export type GcsWeightProofAuthClient = {
+  getCredentials?: () => Promise<{ client_email?: string | null | undefined }>;
+  request?: (options: {
+    method: "POST";
+    url: string;
+    data: { payload: string };
+  }) => Promise<{ data?: { signedBlob?: string | undefined } | undefined }>;
+  sign?: (data: string, endpoint?: string) => Promise<string>;
+};
+
+export type GcsSignedUrlDiagnostic = {
+  provider: "gcs";
+  operation: "signed_put" | "signed_get";
+  category: string;
+  errorClass: string;
+  errorName: string | null;
+  errorCode: string | number | null;
+  sanitizedMessage: string;
+  bucketConfigured: boolean;
+  projectConfigured: boolean;
+  signingServiceAccountConfigured: boolean;
+  contentTypeAccepted: boolean;
+  runtimeSignerConfigured: boolean;
+};
+
+export type GcsWeightProofDiagnosticsReporter = (diagnostic: GcsSignedUrlDiagnostic) => void;
+
 export type GcsWeightProofStorageConfig = {
   bucket: string;
   projectId: string;
+  signingServiceAccount?: string | undefined;
   signedGetTtlMs: number;
   maxImageBytes: number;
+  authClient?: GcsWeightProofAuthClient | undefined;
   bucketClient?: GcsWeightProofBucket | undefined;
+  diagnostics?: GcsWeightProofDiagnosticsReporter | undefined;
+  runtimeSigner?: GcsRuntimeSigner | undefined;
   storage?: Storage | undefined;
 };
 
@@ -199,6 +240,55 @@ function validateExpectedByteSizeForStorage(value: number | null | undefined, ma
 function secondsUntil(expiresAt: Date) {
   const seconds = Math.ceil((expiresAt.getTime() - Date.now()) / 1000);
   return Math.max(1, seconds);
+}
+
+function encodeGcsComponent(value: string) {
+  return encodeURIComponent(value).replace(/[!'()*]/g, (character) => `%${character.charCodeAt(0).toString(16).toUpperCase()}`);
+}
+
+function encodeGcsObjectPath(objectKey: string) {
+  return objectKey.split("/").map(encodeGcsComponent).join("/");
+}
+
+function gcsTimestamp(date: Date) {
+  return date.toISOString().replace(/[-:]/g, "").replace(/\.\d{3}Z$/, "Z");
+}
+
+function gcsDateStamp(date: Date) {
+  return gcsTimestamp(date).slice(0, 8);
+}
+
+function canonicalGcsQuery(params: Record<string, string>) {
+  return Object.keys(params).sort().map((key) => `${encodeGcsComponent(key)}=${encodeGcsComponent(params[key]!)}`).join("&");
+}
+
+function sha256Hex(value: string) {
+  return createHash("sha256").update(value).digest("hex");
+}
+
+function safeErrorField(value: unknown, maxLength = 180, redactedValues: Array<string | undefined> = []) {
+  let safe = String(value ?? "")
+    .replace(/https?:\/\/[^\s")]+/gi, "[redacted-url]")
+    .replace(/storage[.]googleapis[.]com/gi, "[redacted-storage-host]")
+    .replace(/weight-proofs\/[A-Za-z0-9_./=-]+/g, "weight-proofs/[redacted-object-key]")
+    .replace(/Bearer\s+[A-Za-z0-9._-]+/gi, "Bearer [redacted-token]")
+    .replace(/([?&](?:X-Goog-Signature|X-Goog-Credential|X-Goog-Security-Token|token|secret)=)[^&\s]+/gi, "$1[redacted]")
+    .replace(/\b(private[_-]?key|client[_-]?secret|secret|token)\b/gi, "[redacted-sensitive-word]")
+    .slice(0, maxLength);
+  for (const valueToRedact of redactedValues) {
+    if (valueToRedact) safe = safe.split(valueToRedact).join("[redacted-config]");
+  }
+  return safe;
+}
+
+function safeGcsErrorCategory(error: unknown) {
+  const candidate = error as { code?: string | number; message?: string; name?: string; status?: string | number };
+  const combined = `${candidate.code ?? ""} ${candidate.status ?? ""} ${candidate.name ?? ""} ${candidate.message ?? ""}`.toLowerCase();
+  if (combined.includes("permission") || combined.includes("denied") || combined.includes("forbidden") || combined.includes("403")) return "GCS_PERMISSION_DENIED";
+  if (combined.includes("sign") || combined.includes("iamcredentials") || combined.includes("service account")) return "GCS_SIGNING_FAILED";
+  if (combined.includes("not found") || combined.includes("404")) return "GCS_RESOURCE_NOT_FOUND";
+  if (combined.includes("credential") || combined.includes("auth")) return "GCS_AUTH_FAILED";
+  return "GCS_SIGNED_URL_FAILED";
 }
 
 export function buildWeightProofObjectKey(input: BuildWeightProofObjectKeyInput) {
@@ -377,28 +467,167 @@ export class R2WeightProofStorageAdapter implements WeightProofStorageAdapter {
 
 export class GcsWeightProofStorageAdapter implements WeightProofStorageAdapter {
   private readonly bucket: GcsWeightProofBucket;
+  private readonly bucketName: string;
+  private readonly projectId: string;
+  private readonly signingServiceAccount?: string | undefined;
+  private readonly authClient?: GcsWeightProofAuthClient | undefined;
+  private readonly runtimeSigner?: GcsRuntimeSigner | undefined;
+  private readonly diagnostics: GcsWeightProofDiagnosticsReporter;
   private readonly signedGetTtlMs: number;
   private readonly maxImageBytes: number;
 
   constructor(config: GcsWeightProofStorageConfig) {
-    this.bucket = config.bucketClient ?? (config.storage ?? new Storage({
+    const storage = config.storage ?? new Storage({
       projectId: config.projectId
-    })).bucket(config.bucket) as unknown as GcsWeightProofBucket;
+    });
+    this.bucket = config.bucketClient ?? storage.bucket(config.bucket) as unknown as GcsWeightProofBucket;
+    this.bucketName = config.bucket;
+    this.projectId = config.projectId;
+    this.signingServiceAccount = config.signingServiceAccount;
+    this.authClient = config.authClient ?? (storage as unknown as { authClient?: GcsWeightProofAuthClient }).authClient;
+    this.runtimeSigner = config.runtimeSigner;
+    this.diagnostics = config.diagnostics ?? ((diagnostic) => {
+      logger.warn({ weightGuardStorage: diagnostic }, "Weight Guard GCS signed URL generation failed");
+    });
     this.signedGetTtlMs = config.signedGetTtlMs;
     this.maxImageBytes = config.maxImageBytes;
+  }
+
+  private logSignedUrlFailure(operation: GcsSignedUrlDiagnostic["operation"], error: unknown, contentTypeAccepted: boolean) {
+    const candidate = error as { code?: string | number; message?: string; name?: string };
+    const redactedValues = [this.bucketName, this.projectId, this.signingServiceAccount];
+    this.diagnostics({
+      provider: "gcs",
+      operation,
+      category: safeGcsErrorCategory(error),
+      errorClass: error instanceof Error ? error.constructor.name : typeof error,
+      errorName: candidate.name ? safeErrorField(candidate.name, 80, redactedValues) : null,
+      errorCode: candidate.code ?? null,
+      sanitizedMessage: safeErrorField(candidate.message ?? error, 180, redactedValues),
+      bucketConfigured: Boolean(this.bucketName),
+      projectConfigured: Boolean(this.projectId),
+      signingServiceAccountConfigured: Boolean(this.signingServiceAccount),
+      contentTypeAccepted,
+      runtimeSignerConfigured: Boolean(this.runtimeSigner)
+    });
+  }
+
+  private async resolveSigningServiceAccount() {
+    if (this.signingServiceAccount) return this.signingServiceAccount;
+    const credentials = await this.authClient?.getCredentials?.();
+    const email = String(credentials?.client_email ?? "").trim();
+    if (!email) throw new Error("GCS_SIGNING_SERVICE_ACCOUNT_UNAVAILABLE");
+    return email;
+  }
+
+  private async signRuntimeBlob(stringToSign: string, serviceAccountEmail: string) {
+    if (this.runtimeSigner) {
+      const signedBlob = await this.runtimeSigner({ serviceAccountEmail, stringToSign });
+      if (!signedBlob) throw new Error("GCS_SIGNING_EMPTY_SIGNATURE");
+      return signedBlob;
+    }
+
+    if (this.authClient?.request) {
+      const payload = Buffer.from(stringToSign, "utf8").toString("base64");
+      const encodedEmail = encodeURIComponent(serviceAccountEmail);
+      const response = await this.authClient.request({
+        method: "POST",
+        url: `https://iamcredentials.googleapis.com/v1/projects/-/serviceAccounts/${encodedEmail}:signBlob`,
+        data: { payload }
+      });
+      const signedBlob = response.data?.signedBlob;
+      if (!signedBlob) throw new Error("GCS_SIGNING_EMPTY_SIGNATURE");
+      return signedBlob;
+    }
+
+    if (this.authClient?.sign) {
+      const signedBlob = await this.authClient.sign(stringToSign);
+      if (!signedBlob) throw new Error("GCS_SIGNING_EMPTY_SIGNATURE");
+      return signedBlob;
+    }
+
+    throw new Error("GCS_SIGNING_AUTH_CLIENT_UNAVAILABLE");
+  }
+
+  private async createRuntimeSignedUrl(input: {
+    objectKey: string;
+    action: GcsSignedUrlAction;
+    expiresAt: Date;
+    contentType?: string | undefined;
+  }) {
+    const requestDate = new Date();
+    const dateTime = gcsTimestamp(requestDate);
+    const dateStamp = gcsDateStamp(requestDate);
+    const method = input.action === "write" ? "PUT" : "GET";
+    const host = ["storage", "googleapis", "com"].join(".");
+    const canonicalUri = `/${encodeGcsComponent(this.bucketName)}/${encodeGcsObjectPath(input.objectKey)}`;
+    const headers: Record<string, string> = { host };
+    if (input.action === "write" && input.contentType) headers["content-type"] = input.contentType;
+    const signedHeaders = Object.keys(headers).sort().join(";");
+    const canonicalHeaders = Object.keys(headers).sort().map((key) => `${key}:${headers[key]!.trim()}\n`).join("");
+    const serviceAccountEmail = await this.resolveSigningServiceAccount();
+    const credentialScope = `${dateStamp}/auto/storage/goog4_request`;
+    const query = {
+      "X-Goog-Algorithm": "GOOG4-RSA-SHA256",
+      "X-Goog-Credential": `${serviceAccountEmail}/${credentialScope}`,
+      "X-Goog-Date": dateTime,
+      "X-Goog-Expires": String(secondsUntil(input.expiresAt)),
+      "X-Goog-SignedHeaders": signedHeaders
+    };
+    const canonicalQuery = canonicalGcsQuery(query);
+    const canonicalRequest = [
+      method,
+      canonicalUri,
+      canonicalQuery,
+      canonicalHeaders,
+      signedHeaders,
+      "UNSIGNED-PAYLOAD"
+    ].join("\n");
+    const stringToSign = [
+      "GOOG4-RSA-SHA256",
+      dateTime,
+      credentialScope,
+      sha256Hex(canonicalRequest)
+    ].join("\n");
+    const signatureBase64 = await this.signRuntimeBlob(stringToSign, serviceAccountEmail);
+    const signatureHex = Buffer.from(signatureBase64, "base64").toString("hex");
+    return `https://${host}${canonicalUri}?${canonicalQuery}&X-Goog-Signature=${signatureHex}`;
+  }
+
+  private async createGcsSignedUrl(input: {
+    objectKey: string;
+    action: GcsSignedUrlAction;
+    expiresAt: Date;
+    contentType?: string | undefined;
+  }) {
+    try {
+      const [signedUrl] = await this.bucket.file(input.objectKey).getSignedUrl({
+        version: "v4",
+        action: input.action,
+        expires: input.expiresAt,
+        ...(input.contentType ? { contentType: input.contentType } : {})
+      });
+      return signedUrl;
+    } catch {
+      try {
+        return await this.createRuntimeSignedUrl(input);
+      } catch (runtimeError) {
+        this.logSignedUrlFailure(input.action === "write" ? "signed_put" : "signed_get", runtimeError, Boolean(input.contentType));
+        throw new HttpError(503, "WEIGHT_GUARD_GCS_SIGNED_URL_FAILED");
+      }
+    }
   }
 
   async createPresignedPutUrl(input: CreatePresignedPutUrlInput): Promise<CreatePresignedPutUrlResult> {
     const objectKey = validateWeightProofObjectKey(input.objectKey);
     const contentType = normalizeWeightProofContentType(input.contentType);
     validateExpectedByteSizeForStorage(input.expectedByteSize, this.maxImageBytes);
-    try {
-      const [uploadUrl] = await this.bucket.file(objectKey).getSignedUrl({
-        version: "v4",
-        action: "write",
-        expires: input.expiresAt,
-        contentType
-      });
+    const uploadUrl = await this.createGcsSignedUrl({
+      objectKey,
+      action: "write",
+      expiresAt: input.expiresAt,
+      contentType
+    });
       return {
         uploadUrl,
         method: "PUT",
@@ -407,9 +636,6 @@ export class GcsWeightProofStorageAdapter implements WeightProofStorageAdapter {
         },
         expiresAt: input.expiresAt
       };
-    } catch {
-      throw new HttpError(503, "WEIGHT_GUARD_GCS_SIGNED_URL_FAILED");
-    }
   }
 
   async headObject(input: HeadObjectInput): Promise<HeadObjectResult> {
@@ -432,16 +658,12 @@ export class GcsWeightProofStorageAdapter implements WeightProofStorageAdapter {
   async createPresignedGetUrl(input: CreatePresignedGetUrlInput): Promise<CreatePresignedGetUrlResult> {
     const objectKey = validateWeightProofObjectKey(input.objectKey);
     const expiresAt = input.expiresAt ?? new Date(Date.now() + this.signedGetTtlMs);
-    try {
-      const [downloadUrl] = await this.bucket.file(objectKey).getSignedUrl({
-        version: "v4",
-        action: "read",
-        expires: expiresAt
-      });
-      return { downloadUrl, expiresAt };
-    } catch {
-      throw new HttpError(503, "WEIGHT_GUARD_GCS_SIGNED_URL_FAILED");
-    }
+    const downloadUrl = await this.createGcsSignedUrl({
+      objectKey,
+      action: "read",
+      expiresAt
+    });
+    return { downloadUrl, expiresAt };
   }
 }
 
@@ -503,6 +725,7 @@ export function resolveGcsWeightProofStorageConfig(source: WeightProofStorageEnv
   return {
     bucket,
     projectId: stringValue(source.WEIGHT_GUARD_GCS_PROJECT_ID) ?? "shipmastr-core-prod",
+    signingServiceAccount: stringValue(source.WEIGHT_GUARD_GCS_SIGNING_SERVICE_ACCOUNT),
     signedGetTtlMs: numberInRange(source.WEIGHT_GUARD_SIGNED_GET_TTL_SECONDS, 300, 30, 3600) * 1000,
     maxImageBytes: numberInRange(source.WEIGHT_GUARD_MAX_IMAGE_BYTES, 10 * 1024 * 1024, 1, 50 * 1024 * 1024)
   };

@@ -48,12 +48,18 @@ WEIGHT_GUARD_PROOF_STORAGE_ENABLED=true
 WEIGHT_GUARD_STORAGE_PROVIDER=gcs
 WEIGHT_GUARD_GCS_BUCKET=<staging-private-bucket>
 WEIGHT_GUARD_GCS_PROJECT_ID=shipmastr-core-prod
+WEIGHT_GUARD_GCS_SIGNING_SERVICE_ACCOUNT=<staging-cloud-run-service-account-email>
 WEIGHT_GUARD_UPLOAD_TTL_SECONDS=600
 WEIGHT_GUARD_SIGNED_GET_TTL_SECONDS=300
 WEIGHT_GUARD_MAX_IMAGE_BYTES=10485760
 ```
 
 Do not set Cloudflare R2 credentials for the GCS path.
+
+`WEIGHT_GUARD_GCS_SIGNING_SERVICE_ACCOUNT` is optional when the runtime can infer the
+Cloud Run service account from application default credentials. Set it on staging when
+signed URL generation needs an explicit Google-managed runtime identity. Do not use
+downloaded service account JSON keys or private keys.
 
 ## Staging Smoke Sequence
 
