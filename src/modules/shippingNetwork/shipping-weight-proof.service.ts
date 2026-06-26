@@ -6,6 +6,7 @@ import { prisma } from "../../lib/prisma.js";
 import { getSellerShipment } from "./shipping-shipments.service.js";
 import {
   buildWeightProofObjectKey,
+  getWeightProofObjectKeyDiagnostics,
   type WeightProofStorageAdapter
 } from "./shipping-weight-proof-storage.js";
 import {
@@ -170,13 +171,21 @@ function isObjectMissingError(error: unknown) {
   );
 }
 
-function logUploadVerificationFailure(category: string, status: number) {
+function logUploadVerificationFailure(category: string, status: number, objectKey: string) {
   logger.warn({
     weightGuardFinalize: {
       category,
-      status
+      status,
+      ...getWeightProofObjectKeyDiagnostics(objectKey)
     }
   }, "Weight Guard upload verification failed");
+}
+
+function uploadVerificationErrorDetails(category: string, objectKey: string) {
+  return {
+    category,
+    ...getWeightProofObjectKeyDiagnostics(objectKey)
+  };
 }
 
 async function verifyUploadedObject(context: WeightProofServiceContext, objectKey: string) {
@@ -189,10 +198,11 @@ async function verifyUploadedObject(context: WeightProofServiceContext, objectKe
       if (object.exists) return object;
     } catch (error) {
       if (!isObjectMissingError(error)) {
-        logUploadVerificationFailure("WEIGHT_GUARD_UPLOAD_NOT_VERIFIED", 503);
-        throw new HttpError(503, "WEIGHT_GUARD_UPLOAD_NOT_VERIFIED", {
-          category: "WEIGHT_GUARD_UPLOAD_NOT_VERIFIED"
-        });
+        logUploadVerificationFailure("WEIGHT_GUARD_UPLOAD_NOT_VERIFIED", 503, objectKey);
+        throw new HttpError(503, "WEIGHT_GUARD_UPLOAD_NOT_VERIFIED", uploadVerificationErrorDetails(
+          "WEIGHT_GUARD_UPLOAD_NOT_VERIFIED",
+          objectKey
+        ));
       }
     }
 
@@ -200,10 +210,11 @@ async function verifyUploadedObject(context: WeightProofServiceContext, objectKe
     if (delayMs !== undefined) await wait(delayMs);
   }
 
-  logUploadVerificationFailure("WEIGHT_GUARD_OBJECT_NOT_FOUND", 409);
-  throw new HttpError(409, "WEIGHT_GUARD_OBJECT_NOT_FOUND", {
-    category: "WEIGHT_GUARD_OBJECT_NOT_FOUND"
-  });
+  logUploadVerificationFailure("WEIGHT_GUARD_OBJECT_NOT_FOUND", 409, objectKey);
+  throw new HttpError(409, "WEIGHT_GUARD_OBJECT_NOT_FOUND", uploadVerificationErrorDetails(
+    "WEIGHT_GUARD_OBJECT_NOT_FOUND",
+    objectKey
+  ));
 }
 
 export async function initWeightProofCapture(input: InitWeightProofCaptureInput, context: WeightProofServiceContext) {

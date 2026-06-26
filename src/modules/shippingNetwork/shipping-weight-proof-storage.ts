@@ -14,6 +14,7 @@ const SAFE_SEGMENT = /^[A-Za-z0-9_-]+$/;
 const MAX_AWB_LENGTH = 64;
 const MAX_SEGMENT_LENGTH = 160;
 const ALLOWED_IMAGE_CONTENT_TYPES = new Set(["image/jpeg", "image/png"]);
+export const WEIGHT_GUARD_DIAGNOSTIC_OBJECT_PREFIX = "weight-guard-diagnostics";
 
 export type CreatePresignedPutUrlInput = {
   objectKey: string;
@@ -221,6 +222,32 @@ export function validateWeightProofObjectKey(objectKey: string) {
   return trimmed;
 }
 
+export function validateWeightGuardDiagnosticObjectKey(objectKey: string) {
+  const trimmed = String(objectKey ?? "").trim();
+  if (!trimmed || trimmed.includes("..") || trimmed.includes("\\") || /\s|[\u0000-\u001f\u007f]/.test(trimmed)) {
+    throw new HttpError(400, "WEIGHT_GUARD_DIAGNOSTIC_OBJECT_KEY_INVALID");
+  }
+  const parts = trimmed.split("/");
+  if (parts.length !== 2 || parts[0] !== WEIGHT_GUARD_DIAGNOSTIC_OBJECT_PREFIX) {
+    throw new HttpError(400, "WEIGHT_GUARD_DIAGNOSTIC_OBJECT_KEY_INVALID");
+  }
+  const fileName = parts[1]!;
+  if (!fileName.endsWith(".jpg") && !fileName.endsWith(".png")) {
+    throw new HttpError(400, "WEIGHT_GUARD_DIAGNOSTIC_OBJECT_KEY_INVALID");
+  }
+  const extensionLength = fileName.endsWith(".jpg") ? 4 : 4;
+  safeSegment("DIAGNOSTIC_OBJECT_ID", fileName.slice(0, -extensionLength));
+  return trimmed;
+}
+
+export function validateWeightProofStorageObjectKey(objectKey: string) {
+  const trimmed = String(objectKey ?? "").trim();
+  if (trimmed.startsWith(`${WEIGHT_GUARD_DIAGNOSTIC_OBJECT_PREFIX}/`)) {
+    return validateWeightGuardDiagnosticObjectKey(trimmed);
+  }
+  return validateWeightProofObjectKey(trimmed);
+}
+
 function extensionForContentType(contentType: string | undefined) {
   const normalized = normalizeWeightProofContentType(contentType);
   if (normalized === "image/jpeg") return "jpg";
@@ -271,12 +298,28 @@ function sha256Hex(value: string) {
   return createHash("sha256").update(value).digest("hex");
 }
 
+export function getWeightProofObjectKeyDiagnostics(objectKey: string | null | undefined) {
+  const trimmed = String(objectKey ?? "").trim();
+  const objectKeyPrefixCategory = trimmed.startsWith("weight-proofs/")
+    ? "weight-proofs"
+    : trimmed.startsWith(`${WEIGHT_GUARD_DIAGNOSTIC_OBJECT_PREFIX}/`)
+      ? WEIGHT_GUARD_DIAGNOSTIC_OBJECT_PREFIX
+      : "unknown";
+  return {
+    objectKeyPresent: Boolean(trimmed),
+    objectKeyHash: trimmed ? sha256Hex(trimmed).slice(0, 16) : null,
+    objectKeyPrefixCategory
+  };
+}
+
 function safeErrorField(value: unknown, maxLength = 180, redactedValues: Array<string | undefined> = []) {
   let safe = String(value ?? "")
     .replace(/https?:\/\/[^\s")]+/gi, "[redacted-url]")
     .replace(/storage[.]googleapis[.]com/gi, "[redacted-storage-host]")
     .replace(/\b(imageObjectKey|image_object_key|objectKey)\b\s*[:=]\s*["']?weight-proofs\/[A-Za-z0-9_./=-]+["']?/gi, "$1=object-key-redacted")
     .replace(/weight-proofs\/[A-Za-z0-9_./=-]+/g, "object-key-redacted")
+    .replace(/\b(imageObjectKey|image_object_key|objectKey)\b\s*[:=]\s*["']?weight-guard-diagnostics\/[A-Za-z0-9_./=-]+["']?/gi, "$1=diagnostic-object-key-redacted")
+    .replace(/weight-guard-diagnostics\/[A-Za-z0-9_./=-]+/g, "diagnostic-object-key-redacted")
     .replace(/Bearer\s+[A-Za-z0-9._-]+/gi, "Bearer [redacted-token]")
     .replace(/([?&](?:X-Goog-Signature|X-Goog-Credential|X-Goog-Security-Token|token|secret)=)[^&\s]+/gi, "$1[redacted]")
     .replace(/\b(private[_-]?key|client[_-]?secret|secret|token)\b/gi, "[redacted-sensitive-word]")
@@ -310,6 +353,12 @@ export function buildWeightProofObjectKey(input: BuildWeightProofObjectKeyInput)
   return validateWeightProofObjectKey(`weight-proofs/${sellerOrMerchantId}/${year}/${month}/${awbNumber}/${captureSessionId}.${extension}`);
 }
 
+export function buildWeightGuardDiagnosticObjectKey(input: { diagnosticId: string; contentType?: string | undefined }) {
+  const diagnosticId = safeSegment("DIAGNOSTIC_OBJECT_ID", input.diagnosticId);
+  const extension = extensionForContentType(input.contentType);
+  return validateWeightGuardDiagnosticObjectKey(`${WEIGHT_GUARD_DIAGNOSTIC_OBJECT_PREFIX}/${diagnosticId}.${extension}`);
+}
+
 export class InMemoryWeightProofStorageAdapter implements WeightProofStorageAdapter {
   private readonly objects = new Map<string, {
     contentLength: number;
@@ -318,7 +367,7 @@ export class InMemoryWeightProofStorageAdapter implements WeightProofStorageAdap
   }>();
 
   async createPresignedPutUrl(input: CreatePresignedPutUrlInput): Promise<CreatePresignedPutUrlResult> {
-    const objectKey = validateWeightProofObjectKey(input.objectKey);
+    const objectKey = validateWeightProofStorageObjectKey(input.objectKey);
     return {
       uploadUrl: `mock://weight-proof-put/${encodeURIComponent(objectKey)}`,
       method: "PUT",
@@ -330,7 +379,7 @@ export class InMemoryWeightProofStorageAdapter implements WeightProofStorageAdap
   }
 
   async headObject(input: HeadObjectInput): Promise<HeadObjectResult> {
-    const objectKey = validateWeightProofObjectKey(input.objectKey);
+    const objectKey = validateWeightProofStorageObjectKey(input.objectKey);
     const object = this.objects.get(objectKey);
     if (!object) return { exists: false };
     return {
@@ -342,7 +391,7 @@ export class InMemoryWeightProofStorageAdapter implements WeightProofStorageAdap
   }
 
   async createPresignedGetUrl(input: CreatePresignedGetUrlInput): Promise<CreatePresignedGetUrlResult> {
-    const objectKey = validateWeightProofObjectKey(input.objectKey);
+    const objectKey = validateWeightProofStorageObjectKey(input.objectKey);
     return {
       downloadUrl: `mock://weight-proof-get/${encodeURIComponent(objectKey)}`,
       expiresAt: input.expiresAt
@@ -355,7 +404,7 @@ export class InMemoryWeightProofStorageAdapter implements WeightProofStorageAdap
     contentType?: string | undefined;
     updatedAt?: Date | undefined;
   }) {
-    const objectKey = validateWeightProofObjectKey(input.objectKey);
+    const objectKey = validateWeightProofStorageObjectKey(input.objectKey);
     this.objects.set(objectKey, {
       contentLength: input.contentLength ?? 1,
       contentType: input.contentType ?? "image/jpeg",
@@ -504,7 +553,7 @@ export class R2WeightProofStorageAdapter implements WeightProofStorageAdapter {
   }
 
   async createPresignedPutUrl(input: CreatePresignedPutUrlInput): Promise<CreatePresignedPutUrlResult> {
-    const objectKey = validateWeightProofObjectKey(input.objectKey);
+    const objectKey = validateWeightProofStorageObjectKey(input.objectKey);
     const contentType = normalizeWeightProofContentType(input.contentType);
     validateExpectedByteSizeForStorage(input.expectedByteSize, this.maxImageBytes);
     try {
@@ -529,7 +578,7 @@ export class R2WeightProofStorageAdapter implements WeightProofStorageAdapter {
   }
 
   async headObject(input: HeadObjectInput): Promise<HeadObjectResult> {
-    const objectKey = validateWeightProofObjectKey(input.objectKey);
+    const objectKey = validateWeightProofStorageObjectKey(input.objectKey);
     try {
       const object = await this.client.send(new HeadObjectCommand({
         Bucket: this.bucket,
@@ -548,7 +597,7 @@ export class R2WeightProofStorageAdapter implements WeightProofStorageAdapter {
   }
 
   async createPresignedGetUrl(input: CreatePresignedGetUrlInput): Promise<CreatePresignedGetUrlResult> {
-    const objectKey = validateWeightProofObjectKey(input.objectKey);
+    const objectKey = validateWeightProofStorageObjectKey(input.objectKey);
     const expiresAt = input.expiresAt ?? new Date(Date.now() + this.signedGetTtlMs);
     try {
       const downloadUrl = await this.presigner(this.client, new GetObjectCommand({
@@ -748,7 +797,7 @@ export class GcsWeightProofStorageAdapter implements WeightProofStorageAdapter {
   }
 
   async createPresignedPutUrl(input: CreatePresignedPutUrlInput): Promise<CreatePresignedPutUrlResult> {
-    const objectKey = validateWeightProofObjectKey(input.objectKey);
+    const objectKey = validateWeightProofStorageObjectKey(input.objectKey);
     const contentType = normalizeWeightProofContentType(input.contentType);
     validateExpectedByteSizeForStorage(input.expectedByteSize, this.maxImageBytes);
     const signed = await this.createGcsSignedUrl({
@@ -769,7 +818,7 @@ export class GcsWeightProofStorageAdapter implements WeightProofStorageAdapter {
   }
 
   async headObject(input: HeadObjectInput): Promise<HeadObjectResult> {
-    const objectKey = validateWeightProofObjectKey(input.objectKey);
+    const objectKey = validateWeightProofStorageObjectKey(input.objectKey);
     try {
       const [metadata] = await this.bucket.file(objectKey).getMetadata();
       const updatedAt = metadata.updated ?? metadata.timeCreated;
@@ -786,7 +835,7 @@ export class GcsWeightProofStorageAdapter implements WeightProofStorageAdapter {
   }
 
   async createPresignedGetUrl(input: CreatePresignedGetUrlInput): Promise<CreatePresignedGetUrlResult> {
-    const objectKey = validateWeightProofObjectKey(input.objectKey);
+    const objectKey = validateWeightProofStorageObjectKey(input.objectKey);
     const expiresAt = input.expiresAt ?? new Date(Date.now() + this.signedGetTtlMs);
     const signed = await this.createGcsSignedUrl({
       objectKey,

@@ -1,5 +1,6 @@
 import assert from "node:assert/strict";
 import { readFileSync } from "node:fs";
+import { createRequire } from "node:module";
 import { describe, it } from "node:test";
 import type { Request } from "express";
 import { HttpError } from "../../lib/httpError.js";
@@ -17,8 +18,10 @@ import {
 } from "./shipping-weight-proof.service.js";
 import {
   assertWeightProofStorageEnabled,
+  buildWeightGuardDiagnosticObjectKey,
   buildWeightProofObjectKey,
   createWeightProofStorageRuntime,
+  getWeightProofObjectKeyDiagnostics,
   GcsWeightProofStorageAdapter,
   InMemoryWeightProofStorageAdapter,
   R2WeightProofStorageAdapter,
@@ -26,6 +29,9 @@ import {
   resolveR2WeightProofStorageConfig
 } from "./shipping-weight-proof-storage.js";
 import { serializeWeightProofSellerSafe } from "./shipping-weight-proof.serializer.js";
+
+const require = createRequire(import.meta.url);
+const putHeadSelfTestScript: any = require("../../../scripts/weight-guard-gcs-put-head-self-test.cjs");
 
 function makeClient() {
   const shipments: any[] = [];
@@ -253,7 +259,57 @@ describe("shipping weight proof foundation", () => {
       awbNumber: "AWB_123",
       declaredWeightGrams: 1000,
       dimensions: { lengthCm: 10, widthCm: 20, heightCm: 30 }
-    }, context), /WEIGHT_GUARD_OBJECT_NOT_FOUND/);
+    }, context), (error) => {
+      assert.ok(error instanceof HttpError);
+      assert.equal(error.status, 409);
+      assert.equal(error.message, "WEIGHT_GUARD_OBJECT_NOT_FOUND");
+      assert.equal((error as any).details?.category, "WEIGHT_GUARD_OBJECT_NOT_FOUND");
+      assert.equal((error as any).details?.objectKeyPrefixCategory, "weight-proofs");
+      assert.equal((error as any).details?.objectKeyPresent, true);
+      assert.match(String((error as any).details?.objectKeyHash), /^[a-f0-9]{16}$/);
+      const text = JSON.stringify(error);
+      assert.doesNotMatch(text, /weight-proofs\/seller_123|imageObjectKey|image_object_key/i);
+      return true;
+    });
+  });
+
+  it("finalize verifies the exact session image object key", async () => {
+    const client = makeClient();
+    let headObjectKey = "";
+    const storage = {
+      createPresignedPutUrl: async () => ({
+        uploadUrl: "mock://weight-proof-put/session-key",
+        method: "PUT" as const,
+        headers: { "content-type": "image/jpeg" },
+        expiresAt: new Date("2026-06-22T10:15:00.000Z")
+      }),
+      headObject: async ({ objectKey }: any) => {
+        headObjectKey = objectKey;
+        return {
+          exists: true,
+          contentLength: 2048,
+          contentType: "image/jpeg",
+          updatedAt: new Date("2026-06-22T10:05:00.000Z")
+        };
+      },
+      createPresignedGetUrl: async () => ({
+        downloadUrl: "mock://weight-proof-get/session-key",
+        expiresAt: new Date("2026-06-22T10:15:00.000Z")
+      })
+    };
+    const context = makeContext(client, storage);
+    await initWeightProofCapture({ awbNumber: "AWB_123" }, context);
+    const sessionKey = client.__state.sessions[0].imageObjectKey;
+
+    await finalizeWeightProofCapture({
+      captureSessionId: "capture_123",
+      awbNumber: "AWB_123",
+      declaredWeightGrams: 1000,
+      dimensions: { lengthCm: 10, widthCm: 20, heightCm: 30 }
+    }, context);
+
+    assert.equal(headObjectKey, sessionKey);
+    assert.equal(getWeightProofObjectKeyDiagnostics(headObjectKey).objectKeyHash, getWeightProofObjectKeyDiagnostics(sessionKey).objectKeyHash);
   });
 
   it("retries object verification briefly before finalizing", async () => {
@@ -329,6 +385,9 @@ describe("shipping weight proof foundation", () => {
       assert.ok(error instanceof HttpError);
       assert.equal(error.status, 503);
       assert.equal(error.message, "WEIGHT_GUARD_UPLOAD_NOT_VERIFIED");
+      assert.equal((error as any).details?.category, "WEIGHT_GUARD_UPLOAD_NOT_VERIFIED");
+      assert.equal((error as any).details?.objectKeyPrefixCategory, "weight-proofs");
+      assert.match(String((error as any).details?.objectKeyHash), /^[a-f0-9]{16}$/);
       const text = JSON.stringify(error);
       assert.doesNotMatch(text, /weight-proofs\/seller_123|imageObjectKey|image_object_key|private-weight-proofs|signed\.example/i);
       return true;
@@ -718,6 +777,105 @@ describe("shipping weight proof foundation", () => {
       expires: new Date("2026-06-22T10:10:00.000Z"),
       contentType: "image/png"
     });
+  });
+
+  it("allows a narrow diagnostic GCS object prefix for PUT and HEAD self-tests", async () => {
+    const diagnosticKey = buildWeightGuardDiagnosticObjectKey({
+      diagnosticId: "put_head_1780000000000",
+      contentType: "image/png"
+    });
+    const { adapter, calls } = makeGcsAdapter({
+      getMetadata: async () => [{
+        size: "68",
+        contentType: "image/png",
+        updated: "2026-06-22T10:06:00.000Z"
+      }]
+    });
+
+    await adapter.createPresignedPutUrl({
+      objectKey: diagnosticKey,
+      contentType: "image/png",
+      expectedByteSize: 68,
+      expiresAt: new Date("2026-06-22T10:10:00.000Z")
+    });
+    const head = await adapter.headObject({ objectKey: diagnosticKey });
+    const diagnostics = getWeightProofObjectKeyDiagnostics(diagnosticKey);
+
+    assert.equal(head.exists, true);
+    assert.equal(calls[0].objectKey, diagnosticKey);
+    assert.equal(calls[1].objectKey, diagnosticKey);
+    assert.equal(diagnostics.objectKeyPrefixCategory, "weight-guard-diagnostics");
+    assert.match(String(diagnostics.objectKeyHash), /^[a-f0-9]{16}$/);
+  });
+
+  it("runs the GCS PUT+HEAD self-test without leaking signed URLs or object keys", async () => {
+    const writes: string[] = [];
+    const objectKeys: string[] = [];
+    const originalFetch = globalThis.fetch;
+    globalThis.fetch = (async (_url: string | URL | Request, init?: RequestInit) => {
+      assert.equal(init?.method, "PUT");
+      const headers = init?.headers as Record<string, string>;
+      assert.equal(headers["Content-Type"], "image/png");
+      assert.equal(headers["x-goog-content-sha256"], "UNSIGNED-PAYLOAD");
+      assert.equal(Object.prototype.hasOwnProperty.call(headers, "Authorization"), false);
+      return { status: 200 } as Response;
+    }) as typeof fetch;
+    try {
+      const output = await putHeadSelfTestScript.runPutHeadSelfTest({
+        source: {
+          WEIGHT_GUARD_GCS_PUT_HEAD_SELF_TEST: putHeadSelfTestScript.APPROVAL_FLAG,
+          WEIGHT_GUARD_PROOF_STORAGE_ENABLED: "true",
+          WEIGHT_GUARD_STORAGE_PROVIDER: "gcs",
+          WEIGHT_GUARD_GCS_BUCKET: "private-weight-proofs",
+          WEIGHT_GUARD_GCS_PROJECT_ID: "shipmastr-core-prod",
+          APP_ENV: "staging"
+        },
+        storageModule: {
+          buildWeightGuardDiagnosticObjectKey,
+          getWeightProofObjectKeyDiagnostics,
+          resolveGcsWeightProofStorageConfig
+        },
+        adapter: {
+          createPresignedPutUrl: async (input: any) => {
+            objectKeys.push(input.objectKey);
+            return {
+              uploadUrl: "https://signed.example/gcs-write?X-Goog-Signature=unsafe",
+              method: "PUT" as const,
+              headers: {
+                "content-type": "image/png",
+                "x-goog-content-sha256": "UNSIGNED-PAYLOAD"
+              },
+              expiresAt: input.expiresAt
+            };
+          },
+          headObject: async (input: any) => {
+            objectKeys.push(input.objectKey);
+            return {
+              exists: true,
+              contentLength: 68,
+              contentType: "image/png",
+              updatedAt: new Date("2026-06-22T10:06:00.000Z")
+            };
+          }
+        },
+        now: new Date("2026-06-22T10:06:00.000Z"),
+        write: (line: string) => writes.push(line)
+      });
+
+      assert.equal(output.signedUrlGenerated, true);
+      assert.equal(output.putStatus, 200);
+      assert.equal(output.putOk, true);
+      assert.equal(output.headVerified, true);
+      assert.equal(output.sameObjectKeyHash, true);
+      assert.equal(output.requiredHeadersUsed, true);
+      assert.equal(output.errorCategory, "none");
+      assert.equal(objectKeys.length, 2);
+      assert.equal(objectKeys[0], objectKeys[1]);
+      const text = writes.join("\n");
+      assert.doesNotMatch(text, /signed\.example|weight-guard-diagnostics\/|weight-proofs\/|private-weight-proofs|shipmastr-core-prod|X-Goog-Signature/i);
+    } finally {
+      globalThis.fetch = originalFetch;
+    }
   });
 
   it("uses explicit signer directly for GCS signed PUT URLs without metadata email lookup", async () => {
