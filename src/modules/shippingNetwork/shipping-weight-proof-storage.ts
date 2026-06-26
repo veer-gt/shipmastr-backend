@@ -122,8 +122,17 @@ export type GcsWeightProofFile = {
   }]>;
 };
 
+export type GcsWeightProofListedFile = {
+  name?: string | undefined;
+};
+
 export type GcsWeightProofBucket = {
   file(objectKey: string): GcsWeightProofFile;
+  getFiles?(options: {
+    prefix: string;
+    autoPaginate?: boolean | undefined;
+    maxResults?: number | undefined;
+  }): Promise<[GcsWeightProofListedFile[]]>;
 };
 
 export type GcsRuntimeSignInput = {
@@ -248,6 +257,14 @@ export function validateWeightProofStorageObjectKey(objectKey: string) {
   return validateWeightProofObjectKey(trimmed);
 }
 
+export function validateWeightGuardDiagnosticObjectPrefix(prefix: string) {
+  const trimmed = String(prefix ?? "").trim();
+  if (trimmed !== `${WEIGHT_GUARD_DIAGNOSTIC_OBJECT_PREFIX}/`) {
+    throw new HttpError(400, "WEIGHT_GUARD_DIAGNOSTIC_OBJECT_PREFIX_INVALID");
+  }
+  return trimmed;
+}
+
 function extensionForContentType(contentType: string | undefined) {
   const normalized = normalizeWeightProofContentType(contentType);
   if (normalized === "image/jpeg") return "jpg";
@@ -363,6 +380,12 @@ export function getGcsSignedUrlObjectPathDiagnostics(input: {
     signedPathHasEncodedSlash,
     sameObjectKeyHash: Boolean(rawKeyHash && signedPathKeyHash && rawKeyHash === signedPathKeyHash)
   };
+}
+
+export function getWeightProofObjectKeyPrefix(objectKey: string) {
+  const rawObjectKey = validateWeightProofStorageObjectKey(objectKey);
+  const lastSlash = rawObjectKey.lastIndexOf("/");
+  return rawObjectKey.slice(0, lastSlash + 1);
 }
 
 function safeErrorField(value: unknown, maxLength = 180, redactedValues: Array<string | undefined> = []) {
@@ -882,8 +905,31 @@ export class GcsWeightProofStorageAdapter implements WeightProofStorageAdapter {
         updatedAt: updatedAt ? new Date(updatedAt) : null
       };
     } catch (error) {
-      if (gcsObjectNotFound(error)) throw new HttpError(404, "WEIGHT_GUARD_GCS_OBJECT_NOT_FOUND");
+      if (gcsObjectNotFound(error)) return { exists: false };
       throw new HttpError(503, "WEIGHT_GUARD_OBJECT_HEAD_FAILED");
+    }
+  }
+
+  async listObjectKeyDiagnosticsByPrefix(input: { prefix: string; maxResults?: number | undefined }) {
+    const prefix = validateWeightGuardDiagnosticObjectPrefix(input.prefix);
+    if (!this.bucket.getFiles) return [];
+    try {
+      const [files] = await this.bucket.getFiles({
+        prefix,
+        autoPaginate: false,
+        maxResults: Math.min(Math.max(input.maxResults ?? 20, 1), 100)
+      });
+      return files.flatMap((file) => {
+        const objectKey = String(file.name ?? "").trim();
+        if (!objectKey.startsWith(prefix)) return [];
+        try {
+          return [getWeightProofObjectKeyDiagnostics(validateWeightGuardDiagnosticObjectKey(objectKey))];
+        } catch {
+          return [];
+        }
+      });
+    } catch {
+      return [];
     }
   }
 

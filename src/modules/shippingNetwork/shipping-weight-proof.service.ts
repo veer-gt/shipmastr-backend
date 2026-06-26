@@ -210,9 +210,9 @@ async function verifyUploadedObject(context: WeightProofServiceContext, objectKe
     if (delayMs !== undefined) await wait(delayMs);
   }
 
-  logUploadVerificationFailure("WEIGHT_GUARD_OBJECT_NOT_FOUND", 409, objectKey);
-  throw new HttpError(409, "WEIGHT_GUARD_OBJECT_NOT_FOUND", uploadVerificationErrorDetails(
-    "WEIGHT_GUARD_OBJECT_NOT_FOUND",
+  logUploadVerificationFailure("WEIGHT_GUARD_UPLOAD_NOT_VERIFIED", 503, objectKey);
+  throw new HttpError(503, "WEIGHT_GUARD_UPLOAD_NOT_VERIFIED", uploadVerificationErrorDetails(
+    "WEIGHT_GUARD_UPLOAD_NOT_VERIFIED",
     objectKey
   ));
 }

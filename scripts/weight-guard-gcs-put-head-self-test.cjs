@@ -105,9 +105,8 @@ function buildSafeOutput(input = {}) {
     putStatus: input.putStatus ?? null,
     putOk: Boolean(input.putOk),
     headVerified: Boolean(input.headVerified),
-    rawKeyHash: input.rawKeyHash ?? null,
-    signedPathKeyHash: input.signedPathKeyHash ?? null,
-    headKeyHash: input.headKeyHash ?? null,
+    metadataVerified: Boolean(input.metadataVerified),
+    listFoundMatchingHash: Boolean(input.listFoundMatchingHash),
     sameObjectKeyHash: Boolean(input.sameObjectKeyHash),
     requiredHeadersUsed: Boolean(input.requiredHeadersUsed),
     errorCategory: input.errorCategory || "none"
@@ -148,6 +147,49 @@ function buildSignedPathDiagnostics(storageModule, input) {
   };
 }
 
+function wait(ms) {
+  return ms > 0 ? new Promise((resolve) => setTimeout(resolve, ms)) : Promise.resolve();
+}
+
+async function verifyHeadWithRetry(adapter, objectKey, storageModule, options = {}) {
+  const retryDelaysMs = options.retryDelaysMs ?? [150, 350];
+  const attempts = Math.min(retryDelaysMs.length + 1, 3);
+  const headObjectDiagnostics = storageModule.getWeightProofObjectKeyDiagnostics(objectKey);
+  let lastError = null;
+  for (let attempt = 0; attempt < attempts; attempt += 1) {
+    try {
+      const head = await adapter.headObject({ objectKey });
+      if (head?.exists) {
+        return {
+          headVerified: true,
+          metadataVerified: true,
+          headObjectDiagnostics
+        };
+      }
+    } catch (error) {
+      lastError = error;
+    }
+    const delay = retryDelaysMs[attempt];
+    if (attempt < attempts - 1 && delay !== undefined) await wait(delay);
+  }
+  if (lastError) throw lastError;
+  return {
+    headVerified: false,
+    metadataVerified: false,
+    headObjectDiagnostics
+  };
+}
+
+async function listDiagnosticMatchingHash(adapter, objectKey, storageModule) {
+  if (typeof adapter.listObjectKeyDiagnosticsByPrefix !== "function" || typeof storageModule.getWeightProofObjectKeyPrefix !== "function") {
+    return false;
+  }
+  const expectedHash = storageModule.getWeightProofObjectKeyDiagnostics(objectKey).objectKeyHash;
+  const prefix = storageModule.getWeightProofObjectKeyPrefix(objectKey);
+  const listed = await adapter.listObjectKeyDiagnosticsByPrefix({ prefix, maxResults: 20 });
+  return listed.some((diagnostic) => diagnostic?.objectKeyHash === expectedHash);
+}
+
 async function runPutHeadSelfTest(options = {}) {
   const source = options.source ?? process.env;
   const write = options.write ?? ((text) => console.log(text));
@@ -183,6 +225,8 @@ async function runPutHeadSelfTest(options = {}) {
   let putStatus = null;
   let putOk = false;
   let headVerified = false;
+  let metadataVerified = false;
+  let listFoundMatchingHash = false;
   let requiredHeadersUsed = false;
 
   try {
@@ -212,8 +256,11 @@ async function runPutHeadSelfTest(options = {}) {
     putOk = [200, 201, 204].includes(response.status);
     if (putOk) {
       headObjectDiagnostics = storageModule.getWeightProofObjectKeyDiagnostics(objectKey);
-      const head = await adapter.headObject({ objectKey });
-      headVerified = Boolean(head.exists);
+      const verification = await verifyHeadWithRetry(adapter, objectKey, storageModule);
+      headObjectDiagnostics = verification.headObjectDiagnostics;
+      headVerified = verification.headVerified;
+      metadataVerified = verification.metadataVerified;
+      listFoundMatchingHash = await listDiagnosticMatchingHash(adapter, objectKey, storageModule);
     }
     const sameObjectKeyHash = Boolean(
       rawObjectDiagnostics.objectKeyHash
@@ -225,9 +272,8 @@ async function runPutHeadSelfTest(options = {}) {
       putStatus,
       putOk,
       headVerified,
-      rawKeyHash: rawObjectDiagnostics.objectKeyHash,
-      signedPathKeyHash: signedPathDiagnostics.signedPathKeyHash,
-      headKeyHash: headObjectDiagnostics.objectKeyHash,
+      metadataVerified,
+      listFoundMatchingHash,
       sameObjectKeyHash,
       requiredHeadersUsed,
       errorCategory: !signedPathDiagnostics.sameObjectKeyHash
@@ -235,12 +281,15 @@ async function runPutHeadSelfTest(options = {}) {
         : headVerified
           ? "none"
           : putOk
-            ? "HEAD_NOT_VERIFIED"
+            ? "WEIGHT_GUARD_UPLOAD_NOT_VERIFIED"
             : "SIGNED_PUT_NOT_OK"
     });
     write(JSON.stringify(output, null, 2));
     return output;
   } catch (error) {
+    if (putOk && !listFoundMatchingHash) {
+      listFoundMatchingHash = await listDiagnosticMatchingHash(adapter, objectKey, storageModule).catch(() => false);
+    }
     const sameObjectKeyHash = Boolean(
       rawObjectDiagnostics.objectKeyHash
         && rawObjectDiagnostics.objectKeyHash === signedPathDiagnostics.signedPathKeyHash
@@ -251,9 +300,8 @@ async function runPutHeadSelfTest(options = {}) {
       putStatus,
       putOk,
       headVerified,
-      rawKeyHash: rawObjectDiagnostics.objectKeyHash,
-      signedPathKeyHash: signedPathDiagnostics.signedPathKeyHash,
-      headKeyHash: headObjectDiagnostics.objectKeyHash,
+      metadataVerified,
+      listFoundMatchingHash,
       sameObjectKeyHash,
       requiredHeadersUsed,
       errorCategory: signedPathDiagnostics.signedPathKeyHash && !signedPathDiagnostics.sameObjectKeyHash

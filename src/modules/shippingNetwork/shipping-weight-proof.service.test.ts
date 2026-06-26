@@ -23,6 +23,7 @@ import {
   buildWeightProofObjectKey,
   createWeightProofStorageRuntime,
   getGcsSignedUrlObjectPathDiagnostics,
+  getWeightProofObjectKeyPrefix,
   getWeightProofObjectKeyDiagnostics,
   GcsWeightProofStorageAdapter,
   InMemoryWeightProofStorageAdapter,
@@ -138,6 +139,7 @@ function makeGcsAdapter(options: {
   accessTokenProvider?: () => Promise<string | { token?: string | null } | null>;
   authClient?: any;
   diagnostics?: (diagnostic: any) => void;
+  getFiles?: (options: any) => Promise<[any[]]>;
   getSignedUrl?: (config: any) => Promise<[string]>;
   getMetadata?: () => Promise<[any]>;
   iamSignBlobRequest?: (input: any) => Promise<any>;
@@ -160,6 +162,11 @@ function makeGcsAdapter(options: {
     runtimeSigner: options.runtimeSigner,
     serviceAccountEmailResolver: options.serviceAccountEmailResolver,
     bucketClient: {
+      getFiles: async (config: any) => {
+        calls.push({ method: "getFiles", config });
+        if (options.getFiles) return options.getFiles(config);
+        return [[]];
+      },
       file: (objectKey: string) => ({
         getSignedUrl: async (config: any) => {
           calls.push({ method: "getSignedUrl", objectKey, config });
@@ -263,9 +270,9 @@ describe("shipping weight proof foundation", () => {
       dimensions: { lengthCm: 10, widthCm: 20, heightCm: 30 }
     }, context), (error) => {
       assert.ok(error instanceof HttpError);
-      assert.equal(error.status, 409);
-      assert.equal(error.message, "WEIGHT_GUARD_OBJECT_NOT_FOUND");
-      assert.equal((error as any).details?.category, "WEIGHT_GUARD_OBJECT_NOT_FOUND");
+      assert.equal(error.status, 503);
+      assert.equal(error.message, "WEIGHT_GUARD_UPLOAD_NOT_VERIFIED");
+      assert.equal((error as any).details?.category, "WEIGHT_GUARD_UPLOAD_NOT_VERIFIED");
       assert.equal((error as any).details?.objectKeyPrefixCategory, "weight-proofs");
       assert.equal((error as any).details?.objectKeyPresent, true);
       assert.match(String((error as any).details?.objectKeyHash), /^[a-f0-9]{16}$/);
@@ -873,6 +880,7 @@ describe("shipping weight proof foundation", () => {
         storageModule: {
           buildWeightGuardDiagnosticObjectKey,
           getGcsSignedUrlObjectPathDiagnostics,
+          getWeightProofObjectKeyPrefix,
           getWeightProofObjectKeyDiagnostics,
           resolveGcsWeightProofStorageConfig
         },
@@ -897,6 +905,11 @@ describe("shipping weight proof foundation", () => {
               contentType: "image/png",
               updatedAt: new Date("2026-06-22T10:06:00.000Z")
             };
+          },
+          listObjectKeyDiagnosticsByPrefix: async (input: any) => {
+            assert.equal(input.prefix, "weight-guard-diagnostics/");
+            const objectKey = objectKeys[0];
+            return [getWeightProofObjectKeyDiagnostics(objectKey)];
           }
         },
         now: new Date("2026-06-22T10:06:00.000Z"),
@@ -907,14 +920,78 @@ describe("shipping weight proof foundation", () => {
       assert.equal(output.putStatus, 200);
       assert.equal(output.putOk, true);
       assert.equal(output.headVerified, true);
-      assert.match(String(output.rawKeyHash), /^[a-f0-9]{16}$/);
-      assert.equal(output.signedPathKeyHash, output.rawKeyHash);
-      assert.equal(output.headKeyHash, output.rawKeyHash);
+      assert.equal(output.metadataVerified, true);
+      assert.equal(output.listFoundMatchingHash, true);
       assert.equal(output.sameObjectKeyHash, true);
       assert.equal(output.requiredHeadersUsed, true);
       assert.equal(output.errorCategory, "none");
       assert.equal(objectKeys.length, 2);
       assert.equal(objectKeys[0], objectKeys[1]);
+      const text = writes.join("\n");
+      assert.doesNotMatch(text, /signed\.example|weight-guard-diagnostics\/|weight-proofs\/|private-weight-proofs|shipmastr-core-prod|X-Goog-Signature/i);
+    } finally {
+      globalThis.fetch = originalFetch;
+    }
+  });
+
+  it("keeps PUT+HEAD diagnostics safe when metadata verification fails but prefix listing finds the hash", async () => {
+    const writes: string[] = [];
+    const objectKeys: string[] = [];
+    const originalFetch = globalThis.fetch;
+    globalThis.fetch = (async (_url: string | URL | Request, init?: RequestInit) => {
+      assert.equal(init?.method, "PUT");
+      return { status: 200 } as Response;
+    }) as typeof fetch;
+    try {
+      const output = await putHeadSelfTestScript.runPutHeadSelfTest({
+        source: {
+          WEIGHT_GUARD_GCS_PUT_HEAD_SELF_TEST: putHeadSelfTestScript.APPROVAL_FLAG,
+          WEIGHT_GUARD_PROOF_STORAGE_ENABLED: "true",
+          WEIGHT_GUARD_STORAGE_PROVIDER: "gcs",
+          WEIGHT_GUARD_GCS_BUCKET: "private-weight-proofs",
+          WEIGHT_GUARD_GCS_PROJECT_ID: "shipmastr-core-prod",
+          APP_ENV: "staging"
+        },
+        storageModule: {
+          buildWeightGuardDiagnosticObjectKey,
+          getGcsSignedUrlObjectPathDiagnostics,
+          getWeightProofObjectKeyPrefix,
+          getWeightProofObjectKeyDiagnostics,
+          resolveGcsWeightProofStorageConfig
+        },
+        adapter: {
+          createPresignedPutUrl: async (input: any) => {
+            objectKeys.push(input.objectKey);
+            return {
+              uploadUrl: `https://storage.googleapis.com/private-weight-proofs/${input.objectKey}?X-Goog-Signature=unsafe`,
+              method: "PUT" as const,
+              headers: {
+                "content-type": "image/png",
+                "x-goog-content-sha256": "UNSIGNED-PAYLOAD"
+              },
+              expiresAt: input.expiresAt
+            };
+          },
+          headObject: async (input: any) => {
+            objectKeys.push(input.objectKey);
+            throw new Error("metadata unavailable for private object");
+          },
+          listObjectKeyDiagnosticsByPrefix: async () => [
+            getWeightProofObjectKeyDiagnostics(objectKeys[0])
+          ]
+        },
+        now: new Date("2026-06-22T10:06:00.000Z"),
+        write: (line: string) => writes.push(line)
+      });
+
+      assert.equal(output.signedUrlGenerated, true);
+      assert.equal(output.putOk, true);
+      assert.equal(output.headVerified, false);
+      assert.equal(output.metadataVerified, false);
+      assert.equal(output.listFoundMatchingHash, true);
+      assert.equal(output.sameObjectKeyHash, true);
+      assert.equal(objectKeys.length, 4);
+      assert.equal(new Set(objectKeys).size, 1);
       const text = writes.join("\n");
       assert.doesNotMatch(text, /signed\.example|weight-guard-diagnostics\/|weight-proofs\/|private-weight-proofs|shipmastr-core-prod|X-Goog-Signature/i);
     } finally {
@@ -1144,16 +1221,63 @@ describe("shipping weight proof foundation", () => {
     assert.equal(calls[0].method, "getMetadata");
   });
 
+  it("uses authenticated GCS metadata lookup without public object HEAD", async () => {
+    const originalFetch = globalThis.fetch;
+    let fetchCalls = 0;
+    globalThis.fetch = (async () => {
+      fetchCalls += 1;
+      throw new Error("public HEAD should not be used for private proof metadata");
+    }) as typeof fetch;
+    try {
+      const { adapter, calls } = makeGcsAdapter({
+        getMetadata: async () => [{
+          size: "68",
+          contentType: "image/png",
+          updated: "2026-06-22T10:06:00.000Z"
+        }]
+      });
+
+      const object = await adapter.headObject({ objectKey: r2ObjectKey });
+
+      assert.equal(object.exists, true);
+      assert.equal(fetchCalls, 0);
+      assert.equal(calls.length, 1);
+      assert.equal(calls[0].method, "getMetadata");
+      assert.equal(calls[0].objectKey, r2ObjectKey);
+    } finally {
+      globalThis.fetch = originalFetch;
+    }
+  });
+
+  it("lists diagnostic object hashes by prefix without exposing object keys", async () => {
+    const diagnosticKey = buildWeightGuardDiagnosticObjectKey({
+      diagnosticId: "put_head_1780000000000",
+      contentType: "image/png"
+    });
+    const { adapter, calls } = makeGcsAdapter({
+      getFiles: async () => [[{ name: diagnosticKey }]]
+    });
+
+    const listed = await adapter.listObjectKeyDiagnosticsByPrefix({
+      prefix: "weight-guard-diagnostics/",
+      maxResults: 20
+    });
+
+    assert.equal(listed.length, 1);
+    assert.equal(listed[0]?.objectKeyPrefixCategory, "weight-guard-diagnostics");
+    assert.match(String(listed[0]?.objectKeyHash), /^[a-f0-9]{16}$/);
+    assert.equal(calls[0].method, "getFiles");
+    const text = JSON.stringify(listed);
+    assert.doesNotMatch(text, /weight-guard-diagnostics\/|put_head_|private-weight-proofs|storage[.]googleapis[.]com/i);
+  });
+
   it("handles GCS missing objects and metadata failures without leaking config", async () => {
     const missing = makeGcsAdapter({
       getMetadata: async () => {
         throw Object.assign(new Error("not found"), { code: 404 });
       }
     });
-    await assert.rejects(
-      () => missing.adapter.headObject({ objectKey: r2ObjectKey }),
-      (error) => error instanceof HttpError && error.message === "WEIGHT_GUARD_GCS_OBJECT_NOT_FOUND"
-    );
+    assert.deepEqual(await missing.adapter.headObject({ objectKey: r2ObjectKey }), { exists: false });
 
     const failed = makeGcsAdapter({
       getMetadata: async () => {
