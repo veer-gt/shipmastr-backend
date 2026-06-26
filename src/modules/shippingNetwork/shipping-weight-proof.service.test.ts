@@ -18,9 +18,11 @@ import {
 } from "./shipping-weight-proof.service.js";
 import {
   assertWeightProofStorageEnabled,
+  buildGcsXmlPathStyleObjectPath,
   buildWeightGuardDiagnosticObjectKey,
   buildWeightProofObjectKey,
   createWeightProofStorageRuntime,
+  getGcsSignedUrlObjectPathDiagnostics,
   getWeightProofObjectKeyDiagnostics,
   GcsWeightProofStorageAdapter,
   InMemoryWeightProofStorageAdapter,
@@ -779,6 +781,44 @@ describe("shipping weight proof foundation", () => {
     });
   });
 
+  it("canonicalizes GCS XML object paths per segment without encoding slash separators", () => {
+    const diagnosticKey = buildWeightGuardDiagnosticObjectKey({
+      diagnosticId: "put_head_1780000000000",
+      contentType: "image/png"
+    });
+
+    const encodedPath = buildGcsXmlPathStyleObjectPath(diagnosticKey);
+
+    assert.equal(encodedPath, "weight-guard-diagnostics/put_head_1780000000000.png");
+    assert.doesNotMatch(encodedPath, /%2F/i);
+    assert.throws(
+      () => buildGcsXmlPathStyleObjectPath("weight-guard-diagnostics/../put_head_1780000000000.png"),
+      /WEIGHT_GUARD_DIAGNOSTIC_OBJECT_KEY_INVALID/
+    );
+  });
+
+  it("detects whole-key GCS path encoding as an object identity mismatch without leaking keys", () => {
+    const rawObjectKey = "weight-guard-diagnostics/put_head_1780000000000.png";
+    const good = getGcsSignedUrlObjectPathDiagnostics({
+      rawObjectKey,
+      bucketName: "private-weight-proofs",
+      signedUrl: "https://signed.example/private-weight-proofs/weight-guard-diagnostics/put_head_1780000000000.png?X-Goog-Signature=unsafe"
+    });
+    const bad = getGcsSignedUrlObjectPathDiagnostics({
+      rawObjectKey,
+      bucketName: "private-weight-proofs",
+      signedUrl: "https://signed.example/private-weight-proofs/weight-guard-diagnostics%2Fput_head_1780000000000.png?X-Goog-Signature=unsafe"
+    });
+
+    assert.equal(good.sameObjectKeyHash, true);
+    assert.equal(good.signedPathHasEncodedSlash, false);
+    assert.equal(bad.sameObjectKeyHash, false);
+    assert.equal(bad.signedPathHasEncodedSlash, true);
+    assert.notEqual(bad.rawKeyHash, bad.signedPathKeyHash);
+    const text = JSON.stringify({ good, bad });
+    assert.doesNotMatch(text, /weight-guard-diagnostics\/|private-weight-proofs|X-Goog-Signature|https?:\/\//i);
+  });
+
   it("allows a narrow diagnostic GCS object prefix for PUT and HEAD self-tests", async () => {
     const diagnosticKey = buildWeightGuardDiagnosticObjectKey({
       diagnosticId: "put_head_1780000000000",
@@ -832,6 +872,7 @@ describe("shipping weight proof foundation", () => {
         },
         storageModule: {
           buildWeightGuardDiagnosticObjectKey,
+          getGcsSignedUrlObjectPathDiagnostics,
           getWeightProofObjectKeyDiagnostics,
           resolveGcsWeightProofStorageConfig
         },
@@ -839,7 +880,7 @@ describe("shipping weight proof foundation", () => {
           createPresignedPutUrl: async (input: any) => {
             objectKeys.push(input.objectKey);
             return {
-              uploadUrl: "https://signed.example/gcs-write?X-Goog-Signature=unsafe",
+              uploadUrl: `https://storage.googleapis.com/private-weight-proofs/${input.objectKey}?X-Goog-Signature=unsafe`,
               method: "PUT" as const,
               headers: {
                 "content-type": "image/png",
@@ -866,6 +907,9 @@ describe("shipping weight proof foundation", () => {
       assert.equal(output.putStatus, 200);
       assert.equal(output.putOk, true);
       assert.equal(output.headVerified, true);
+      assert.match(String(output.rawKeyHash), /^[a-f0-9]{16}$/);
+      assert.equal(output.signedPathKeyHash, output.rawKeyHash);
+      assert.equal(output.headKeyHash, output.rawKeyHash);
       assert.equal(output.sameObjectKeyHash, true);
       assert.equal(output.requiredHeadersUsed, true);
       assert.equal(output.errorCategory, "none");
@@ -915,6 +959,7 @@ describe("shipping weight proof foundation", () => {
     assert.equal(runtimeSignCalls[0].serviceAccountEmail, "shipmastr-runner@example.iam.gserviceaccount.com");
     assert.match(runtimeSignCalls[0].stringToSign, /^GOOG4-RSA-SHA256\n/);
     assert.match(result.uploadUrl, new RegExp(`^https://${gcsHost}/private-weight-proofs/weight-proofs/seller_123/`));
+    assert.doesNotMatch(result.uploadUrl, /weight-proofs%2Fseller_123/i);
     assert.match(result.uploadUrl, /X-Goog-Algorithm=GOOG4-RSA-SHA256/);
     assert.match(result.uploadUrl, /X-Goog-Signature=7369676e65642d707574/);
   });

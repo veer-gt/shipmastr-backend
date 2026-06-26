@@ -278,8 +278,21 @@ function encodeGcsComponent(value: string) {
   return encodeURIComponent(value).replace(/[!'()*]/g, (character) => `%${character.charCodeAt(0).toString(16).toUpperCase()}`);
 }
 
-function encodeGcsObjectPath(objectKey: string) {
-  return objectKey.split("/").map(encodeGcsComponent).join("/");
+export function encodeGcsXmlPathSegment(value: string) {
+  const segment = String(value ?? "");
+  if (!segment || segment === "." || segment === ".." || segment.includes("/") || segment.includes("\\") || /[\u0000-\u001f\u007f]/.test(segment)) {
+    throw new HttpError(400, "WEIGHT_GUARD_GCS_OBJECT_PATH_INVALID");
+  }
+  return encodeGcsComponent(segment);
+}
+
+export function buildGcsXmlPathStyleObjectPath(objectKey: string) {
+  const rawObjectKey = validateWeightProofStorageObjectKey(objectKey);
+  return rawObjectKey.split("/").map(encodeGcsXmlPathSegment).join("/");
+}
+
+function buildGcsXmlPathStyleCanonicalUri(bucketName: string, objectKey: string) {
+  return `/${encodeGcsComponent(bucketName)}/${buildGcsXmlPathStyleObjectPath(objectKey)}`;
 }
 
 function gcsTimestamp(date: Date) {
@@ -309,6 +322,46 @@ export function getWeightProofObjectKeyDiagnostics(objectKey: string | null | un
     objectKeyPresent: Boolean(trimmed),
     objectKeyHash: trimmed ? sha256Hex(trimmed).slice(0, 16) : null,
     objectKeyPrefixCategory
+  };
+}
+
+export function getGcsSignedUrlObjectPathDiagnostics(input: {
+  rawObjectKey: string | null | undefined;
+  signedUrl: string | null | undefined;
+  bucketName: string | null | undefined;
+}) {
+  const rawObjectKey = String(input.rawObjectKey ?? "").trim();
+  const rawKeyHash = rawObjectKey ? sha256Hex(rawObjectKey).slice(0, 16) : null;
+  let signedPathKeyHash: string | null = null;
+  let signedPathPresent = false;
+  let signedPathHasEncodedSlash = false;
+
+  try {
+    const bucketName = String(input.bucketName ?? "").trim();
+    const signedUrl = String(input.signedUrl ?? "").trim();
+    if (bucketName && signedUrl) {
+      const url = new URL(signedUrl);
+      const pathSegments = url.pathname.replace(/^\/+/, "").split("/");
+      const bucketSegment = pathSegments.shift();
+      if (bucketSegment && decodeURIComponent(bucketSegment) === bucketName && pathSegments.length > 0) {
+        signedPathPresent = true;
+        signedPathHasEncodedSlash = pathSegments.some((segment) => /%2f/i.test(segment));
+        const signedPathKey = signedPathHasEncodedSlash
+          ? pathSegments.join("/")
+          : pathSegments.map((segment) => decodeURIComponent(segment)).join("/");
+        signedPathKeyHash = sha256Hex(signedPathKey).slice(0, 16);
+      }
+    }
+  } catch {
+    signedPathPresent = false;
+  }
+
+  return {
+    rawKeyHash,
+    signedPathKeyHash,
+    signedPathPresent,
+    signedPathHasEncodedSlash,
+    sameObjectKeyHash: Boolean(rawKeyHash && signedPathKeyHash && rawKeyHash === signedPathKeyHash)
   };
 }
 
@@ -718,7 +771,7 @@ export class GcsWeightProofStorageAdapter implements WeightProofStorageAdapter {
     const dateStamp = gcsDateStamp(requestDate);
     const method = input.action === "write" ? "PUT" : "GET";
     const host = ["storage", "googleapis", "com"].join(".");
-    const canonicalUri = `/${encodeGcsComponent(this.bucketName)}/${encodeGcsObjectPath(input.objectKey)}`;
+    const canonicalUri = buildGcsXmlPathStyleCanonicalUri(this.bucketName, input.objectKey);
     const headers: Record<string, string> = { host };
     const requiredHeaders: Record<string, string> = {};
     if (input.action === "write") {

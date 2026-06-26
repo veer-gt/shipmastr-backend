@@ -25,6 +25,8 @@ weight-proofs/{sellerOrMerchantId}/{yyyy}/{mm}/{awbNumber}/{captureSessionId}.jp
 
 PNG proofs use the same path shape with a `.png` suffix.
 
+GCS object keys are stored raw internally. Signed URL paths must encode each path segment separately and must preserve `/` separators; do not encode the full object key in a way that turns separators into `%2F`.
+
 ## Service Account Permissions
 
 Grant the staging Cloud Run service account bucket-level access only for the staging bucket:

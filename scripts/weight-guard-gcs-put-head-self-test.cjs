@@ -105,6 +105,9 @@ function buildSafeOutput(input = {}) {
     putStatus: input.putStatus ?? null,
     putOk: Boolean(input.putOk),
     headVerified: Boolean(input.headVerified),
+    rawKeyHash: input.rawKeyHash ?? null,
+    signedPathKeyHash: input.signedPathKeyHash ?? null,
+    headKeyHash: input.headKeyHash ?? null,
     sameObjectKeyHash: Boolean(input.sameObjectKeyHash),
     requiredHeadersUsed: Boolean(input.requiredHeadersUsed),
     errorCategory: input.errorCategory || "none"
@@ -131,6 +134,20 @@ function safeUploadHeaders(requiredHeaders = {}) {
   return headers;
 }
 
+function buildSignedPathDiagnostics(storageModule, input) {
+  if (typeof storageModule.getGcsSignedUrlObjectPathDiagnostics === "function") {
+    return storageModule.getGcsSignedUrlObjectPathDiagnostics(input);
+  }
+  const raw = storageModule.getWeightProofObjectKeyDiagnostics(input.rawObjectKey);
+  return {
+    rawKeyHash: raw.objectKeyHash,
+    signedPathKeyHash: raw.objectKeyHash,
+    signedPathPresent: Boolean(input.signedUrl),
+    signedPathHasEncodedSlash: false,
+    sameObjectKeyHash: Boolean(raw.objectKeyHash)
+  };
+}
+
 async function runPutHeadSelfTest(options = {}) {
   const source = options.source ?? process.env;
   const write = options.write ?? ((text) => console.log(text));
@@ -153,7 +170,15 @@ async function runPutHeadSelfTest(options = {}) {
     diagnosticId,
     contentType: "image/png"
   });
-  const putObjectDiagnostics = storageModule.getWeightProofObjectKeyDiagnostics(objectKey);
+  const rawObjectDiagnostics = storageModule.getWeightProofObjectKeyDiagnostics(objectKey);
+  let signedPathDiagnostics = {
+    rawKeyHash: rawObjectDiagnostics.objectKeyHash,
+    signedPathKeyHash: null,
+    sameObjectKeyHash: false
+  };
+  let headObjectDiagnostics = {
+    objectKeyHash: null
+  };
   let signedUrlGenerated = false;
   let putStatus = null;
   let putOk = false;
@@ -168,6 +193,11 @@ async function runPutHeadSelfTest(options = {}) {
       expiresAt: new Date(now.getTime() + 600000)
     });
     signedUrlGenerated = Boolean(result.uploadUrl);
+    signedPathDiagnostics = buildSignedPathDiagnostics(storageModule, {
+      rawObjectKey: objectKey,
+      signedUrl: result.uploadUrl,
+      bucketName: config.bucket
+    });
     const headers = safeUploadHeaders(result.headers);
     requiredHeadersUsed = result.method === "PUT"
       && headers["Content-Type"] === "image/png"
@@ -181,30 +211,54 @@ async function runPutHeadSelfTest(options = {}) {
     putStatus = response.status;
     putOk = [200, 201, 204].includes(response.status);
     if (putOk) {
+      headObjectDiagnostics = storageModule.getWeightProofObjectKeyDiagnostics(objectKey);
       const head = await adapter.headObject({ objectKey });
       headVerified = Boolean(head.exists);
     }
-    const headObjectDiagnostics = storageModule.getWeightProofObjectKeyDiagnostics(objectKey);
+    const sameObjectKeyHash = Boolean(
+      rawObjectDiagnostics.objectKeyHash
+        && rawObjectDiagnostics.objectKeyHash === signedPathDiagnostics.signedPathKeyHash
+        && rawObjectDiagnostics.objectKeyHash === headObjectDiagnostics.objectKeyHash
+    );
     const output = buildSafeOutput({
       signedUrlGenerated,
       putStatus,
       putOk,
       headVerified,
-      sameObjectKeyHash: putObjectDiagnostics.objectKeyHash === headObjectDiagnostics.objectKeyHash,
+      rawKeyHash: rawObjectDiagnostics.objectKeyHash,
+      signedPathKeyHash: signedPathDiagnostics.signedPathKeyHash,
+      headKeyHash: headObjectDiagnostics.objectKeyHash,
+      sameObjectKeyHash,
       requiredHeadersUsed,
-      errorCategory: headVerified ? "none" : putOk ? "HEAD_NOT_VERIFIED" : "SIGNED_PUT_NOT_OK"
+      errorCategory: !signedPathDiagnostics.sameObjectKeyHash
+        ? "GCS_OBJECT_PATH_ENCODING_MISMATCH"
+        : headVerified
+          ? "none"
+          : putOk
+            ? "HEAD_NOT_VERIFIED"
+            : "SIGNED_PUT_NOT_OK"
     });
     write(JSON.stringify(output, null, 2));
     return output;
   } catch (error) {
+    const sameObjectKeyHash = Boolean(
+      rawObjectDiagnostics.objectKeyHash
+        && rawObjectDiagnostics.objectKeyHash === signedPathDiagnostics.signedPathKeyHash
+        && rawObjectDiagnostics.objectKeyHash === headObjectDiagnostics.objectKeyHash
+    );
     const output = buildSafeOutput({
       signedUrlGenerated,
       putStatus,
       putOk,
       headVerified,
-      sameObjectKeyHash: false,
+      rawKeyHash: rawObjectDiagnostics.objectKeyHash,
+      signedPathKeyHash: signedPathDiagnostics.signedPathKeyHash,
+      headKeyHash: headObjectDiagnostics.objectKeyHash,
+      sameObjectKeyHash,
       requiredHeadersUsed,
-      errorCategory: safeErrorCategory(diagnostics.at(-1) ?? error)
+      errorCategory: signedPathDiagnostics.signedPathKeyHash && !signedPathDiagnostics.sameObjectKeyHash
+        ? "GCS_OBJECT_PATH_ENCODING_MISMATCH"
+        : safeErrorCategory(diagnostics.at(-1) ?? error)
     });
     write(JSON.stringify(output, null, 2));
     if (options.throwOnFailure) throw new Error(redactSelfTestText(error?.message ?? error, source));
