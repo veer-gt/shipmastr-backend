@@ -132,6 +132,7 @@ function makeGcsAdapter(options: {
   getMetadata?: () => Promise<[any]>;
   maxImageBytes?: number;
   runtimeSigner?: (input: any) => Promise<string>;
+  serviceAccountEmailResolver?: () => Promise<string | null | undefined>;
   signingServiceAccount?: string;
 } = {}) {
   const calls: any[] = [];
@@ -144,6 +145,7 @@ function makeGcsAdapter(options: {
     authClient: options.authClient,
     diagnostics: options.diagnostics,
     runtimeSigner: options.runtimeSigner,
+    serviceAccountEmailResolver: options.serviceAccountEmailResolver,
     bucketClient: {
       file: (objectKey: string) => ({
         getSignedUrl: async (config: any) => {
@@ -397,9 +399,10 @@ describe("shipping weight proof foundation", () => {
 
     assert.equal(routeResponse.status, "CAPTURE_SESSION_CREATED");
     assert.equal(routeResponse.captureSessionId, "route_capture");
-    assert.equal(routeResponse.objectKey, "weight-proofs/seller_123/2026/06/AWB_ROUTE/route_capture.png");
+    assert.equal(Object.prototype.hasOwnProperty.call(routeResponse, "objectKey"), false);
     assert.match(String(routeResponse.uploadUrl), /^mock:\/\/weight-proof-put\//);
     assert.deepEqual(routeResponse.requiredHeaders, { "Content-Type": "image/png" });
+    assert.doesNotMatch(JSON.stringify(routeResponse), /weight-proofs\/seller_123|imageObjectKey|image_object_key/i);
   });
 
   it("finalizes through route shape without exposing storage fields", async () => {
@@ -655,7 +658,10 @@ describe("shipping weight proof foundation", () => {
     });
 
     assert.equal(result.method, "PUT");
-    assert.deepEqual(result.headers, { "content-type": "image/png" });
+    assert.deepEqual(result.headers, {
+      "content-type": "image/png",
+      "x-goog-content-sha256": "UNSIGNED-PAYLOAD"
+    });
     assert.equal(calls.length, 1);
     assert.equal(runtimeSignCalls.length, 1);
     assert.equal(runtimeSignCalls[0].serviceAccountEmail, "shipmastr-runner@example.iam.gserviceaccount.com");
@@ -663,6 +669,35 @@ describe("shipping weight proof foundation", () => {
     assert.match(result.uploadUrl, new RegExp(`^https://${gcsHost}/private-weight-proofs/weight-proofs/seller_123/`));
     assert.match(result.uploadUrl, /X-Goog-Algorithm=GOOG4-RSA-SHA256/);
     assert.match(result.uploadUrl, /X-Goog-Signature=7369676e65642d707574/);
+  });
+
+  it("infers the GCS signing service account through a runtime resolver when credentials omit it", async () => {
+    const requestCalls: any[] = [];
+    const { adapter } = makeGcsAdapter({
+      getSignedUrl: async () => {
+        throw new Error("library signer unavailable");
+      },
+      serviceAccountEmailResolver: async () => "shipmastr-runner@example.iam.gserviceaccount.com",
+      authClient: {
+        getCredentials: async () => ({}),
+        request: async (request: any) => {
+          requestCalls.push(request);
+          return { data: { signedBlob: fakeBase64Signature("signed-by-metadata-email") } };
+        }
+      }
+    });
+
+    const result = await adapter.createPresignedPutUrl({
+      objectKey: r2ObjectKey,
+      contentType: "image/png",
+      expectedByteSize: 100,
+      expiresAt: new Date(Date.now() + 600000)
+    });
+
+    assert.equal(requestCalls.length, 1);
+    assert.match(requestCalls[0].url, /shipmastr-runner%40example\.iam\.gserviceaccount\.com:signBlob/);
+    assert.equal(result.headers["x-goog-content-sha256"], "UNSIGNED-PAYLOAD");
+    assert.match(result.uploadUrl, /X-Goog-SignedHeaders=.*x-goog-content-sha256/);
   });
 
   it("uses the configured GCS signing service account through IAM credentials when needed", async () => {
@@ -704,7 +739,7 @@ describe("shipping weight proof foundation", () => {
         throw new Error("library signer unavailable");
       },
       runtimeSigner: async () => {
-        throw Object.assign(new Error(`permission denied for https://${gcsHost}/${r2ObjectKey} in private-weight-proofs`), {
+        throw Object.assign(new Error(`permission denied for https://${gcsHost}/${r2ObjectKey} imageObjectKey=${r2ObjectKey} in private-weight-proofs`), {
           name: "SigningError",
           code: 403
         });
@@ -728,7 +763,37 @@ describe("shipping weight proof foundation", () => {
     assert.equal(diagnostics[0].bucketConfigured, true);
     assert.equal(diagnostics[0].projectConfigured, true);
     const text = JSON.stringify(diagnostics[0]);
+    assert.match(text, /object-key-redacted/);
     assert.doesNotMatch(text, /private-weight-proofs|shipmastr-core-prod|shipmastr-runner@example|storage[.]googleapis[.]com|weight-proofs\/seller_123|X-Goog-Signature|signed\.example/i);
+  });
+
+  it("fails GCS init signing safely when no service account identity can be resolved", async () => {
+    const diagnostics: any[] = [];
+    const { adapter } = makeGcsAdapter({
+      diagnostics: (diagnostic) => diagnostics.push(diagnostic),
+      getSignedUrl: async () => {
+        throw new Error("library signer unavailable");
+      },
+      serviceAccountEmailResolver: async () => null,
+      authClient: {
+        getCredentials: async () => ({})
+      }
+    });
+
+    await assert.rejects(
+      () => adapter.createPresignedPutUrl({
+        objectKey: r2ObjectKey,
+        contentType: "image/jpeg",
+        expectedByteSize: 100,
+        expiresAt: new Date(Date.now() + 600000)
+      }),
+      (error) => error instanceof HttpError && error.message === "WEIGHT_GUARD_GCS_SIGNED_URL_FAILED"
+    );
+
+    assert.equal(diagnostics.length, 1);
+    assert.equal(diagnostics[0].category, "GCS_SIGNING_FAILED");
+    const text = JSON.stringify(diagnostics[0]);
+    assert.doesNotMatch(text, /weight-proofs\/seller_123|private-weight-proofs|storage[.]googleapis[.]com|X-Goog-Signature/i);
   });
 
   it("checks GCS object metadata through an injected bucket", async () => {

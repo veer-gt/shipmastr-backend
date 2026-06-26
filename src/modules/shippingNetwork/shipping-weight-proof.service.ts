@@ -200,7 +200,6 @@ export async function initWeightProofCapture(input: InitWeightProofCaptureInput,
       already_finalized: false,
       proof: null,
       capture: serializeWeightProofCaptureSession(existingSession),
-      objectKey: existingSession.imageObjectKey,
       upload
     };
   }
@@ -240,7 +239,6 @@ export async function initWeightProofCapture(input: InitWeightProofCaptureInput,
     already_finalized: false,
     proof: null,
     capture: serializeWeightProofCaptureSession(session),
-    objectKey: session.imageObjectKey,
     upload
   };
 }

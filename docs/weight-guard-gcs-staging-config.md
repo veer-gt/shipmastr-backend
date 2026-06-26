@@ -57,9 +57,10 @@ WEIGHT_GUARD_MAX_IMAGE_BYTES=10485760
 Do not set Cloudflare R2 credentials for the GCS path.
 
 `WEIGHT_GUARD_GCS_SIGNING_SERVICE_ACCOUNT` is optional when the runtime can infer the
-Cloud Run service account from application default credentials. Set it on staging when
-signed URL generation needs an explicit Google-managed runtime identity. Do not use
-downloaded service account JSON keys or private keys.
+Cloud Run service account from application default credentials or the Cloud Run
+metadata service. Set it on staging when signed URL generation logs the safe category
+`GCS_SIGNING_SERVICE_ACCOUNT_UNAVAILABLE`. Do not use downloaded service account JSON
+keys or private keys.
 
 ## Staging Smoke Sequence
 

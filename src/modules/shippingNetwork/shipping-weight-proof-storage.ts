@@ -131,6 +131,7 @@ export type GcsRuntimeSignInput = {
 };
 
 export type GcsRuntimeSigner = (input: GcsRuntimeSignInput) => Promise<string>;
+export type GcsServiceAccountEmailResolver = () => Promise<string | null | undefined>;
 
 export type GcsWeightProofAuthClient = {
   getCredentials?: () => Promise<{ client_email?: string | null | undefined }>;
@@ -169,6 +170,7 @@ export type GcsWeightProofStorageConfig = {
   bucketClient?: GcsWeightProofBucket | undefined;
   diagnostics?: GcsWeightProofDiagnosticsReporter | undefined;
   runtimeSigner?: GcsRuntimeSigner | undefined;
+  serviceAccountEmailResolver?: GcsServiceAccountEmailResolver | undefined;
   storage?: Storage | undefined;
 };
 
@@ -270,7 +272,8 @@ function safeErrorField(value: unknown, maxLength = 180, redactedValues: Array<s
   let safe = String(value ?? "")
     .replace(/https?:\/\/[^\s")]+/gi, "[redacted-url]")
     .replace(/storage[.]googleapis[.]com/gi, "[redacted-storage-host]")
-    .replace(/weight-proofs\/[A-Za-z0-9_./=-]+/g, "weight-proofs/[redacted-object-key]")
+    .replace(/\b(imageObjectKey|image_object_key|objectKey)\b\s*[:=]\s*["']?weight-proofs\/[A-Za-z0-9_./=-]+["']?/gi, "$1=object-key-redacted")
+    .replace(/weight-proofs\/[A-Za-z0-9_./=-]+/g, "object-key-redacted")
     .replace(/Bearer\s+[A-Za-z0-9._-]+/gi, "Bearer [redacted-token]")
     .replace(/([?&](?:X-Goog-Signature|X-Goog-Credential|X-Goog-Security-Token|token|secret)=)[^&\s]+/gi, "$1[redacted]")
     .replace(/\b(private[_-]?key|client[_-]?secret|secret|token)\b/gi, "[redacted-sensitive-word]")
@@ -384,6 +387,34 @@ function gcsObjectNotFound(error: unknown) {
     || /not\s*found/i.test(candidate.message ?? "");
 }
 
+const GCS_UNSIGNED_PAYLOAD_HEADER = "x-goog-content-sha256";
+const GCS_UNSIGNED_PAYLOAD_VALUE = "UNSIGNED-PAYLOAD";
+const GCS_METADATA_SERVICE_ACCOUNT_EMAIL_URL = "http://metadata.google.internal/computeMetadata/v1/instance/service-accounts/default/email";
+
+async function resolveCloudRunServiceAccountEmail() {
+  if (typeof fetch !== "function") return null;
+  const controller = typeof AbortController === "function" ? new AbortController() : null;
+  const timeout = controller ? setTimeout(() => controller.abort(), 1000) : null;
+  try {
+    const response = await fetch(GCS_METADATA_SERVICE_ACCOUNT_EMAIL_URL, {
+      headers: { "Metadata-Flavor": "Google" },
+      ...(controller ? { signal: controller.signal } : {})
+    });
+    if (!response.ok) return null;
+    const email = String(await response.text()).trim();
+    return email.includes("@") ? email : null;
+  } catch {
+    return null;
+  } finally {
+    if (timeout) clearTimeout(timeout);
+  }
+}
+
+type GcsSignedUrlResult = {
+  signedUrl: string;
+  requiredHeaders: Record<string, string>;
+};
+
 export class R2WeightProofStorageAdapter implements WeightProofStorageAdapter {
   private readonly bucket: string;
   private readonly client: S3Client;
@@ -472,6 +503,7 @@ export class GcsWeightProofStorageAdapter implements WeightProofStorageAdapter {
   private readonly signingServiceAccount?: string | undefined;
   private readonly authClient?: GcsWeightProofAuthClient | undefined;
   private readonly runtimeSigner?: GcsRuntimeSigner | undefined;
+  private readonly serviceAccountEmailResolver: GcsServiceAccountEmailResolver;
   private readonly diagnostics: GcsWeightProofDiagnosticsReporter;
   private readonly signedGetTtlMs: number;
   private readonly maxImageBytes: number;
@@ -486,6 +518,7 @@ export class GcsWeightProofStorageAdapter implements WeightProofStorageAdapter {
     this.signingServiceAccount = config.signingServiceAccount;
     this.authClient = config.authClient ?? (storage as unknown as { authClient?: GcsWeightProofAuthClient }).authClient;
     this.runtimeSigner = config.runtimeSigner;
+    this.serviceAccountEmailResolver = config.serviceAccountEmailResolver ?? resolveCloudRunServiceAccountEmail;
     this.diagnostics = config.diagnostics ?? ((diagnostic) => {
       logger.warn({ weightGuardStorage: diagnostic }, "Weight Guard GCS signed URL generation failed");
     });
@@ -516,8 +549,10 @@ export class GcsWeightProofStorageAdapter implements WeightProofStorageAdapter {
     if (this.signingServiceAccount) return this.signingServiceAccount;
     const credentials = await this.authClient?.getCredentials?.();
     const email = String(credentials?.client_email ?? "").trim();
-    if (!email) throw new Error("GCS_SIGNING_SERVICE_ACCOUNT_UNAVAILABLE");
-    return email;
+    if (email) return email;
+    const runtimeEmail = String(await this.serviceAccountEmailResolver().catch(() => null) ?? "").trim();
+    if (runtimeEmail) return runtimeEmail;
+    throw new Error("GCS_SIGNING_SERVICE_ACCOUNT_UNAVAILABLE");
   }
 
   private async signRuntimeBlob(stringToSign: string, serviceAccountEmail: string) {
@@ -554,7 +589,7 @@ export class GcsWeightProofStorageAdapter implements WeightProofStorageAdapter {
     action: GcsSignedUrlAction;
     expiresAt: Date;
     contentType?: string | undefined;
-  }) {
+  }): Promise<GcsSignedUrlResult> {
     const requestDate = new Date();
     const dateTime = gcsTimestamp(requestDate);
     const dateStamp = gcsDateStamp(requestDate);
@@ -562,7 +597,12 @@ export class GcsWeightProofStorageAdapter implements WeightProofStorageAdapter {
     const host = ["storage", "googleapis", "com"].join(".");
     const canonicalUri = `/${encodeGcsComponent(this.bucketName)}/${encodeGcsObjectPath(input.objectKey)}`;
     const headers: Record<string, string> = { host };
-    if (input.action === "write" && input.contentType) headers["content-type"] = input.contentType;
+    const requiredHeaders: Record<string, string> = {};
+    if (input.action === "write") {
+      if (input.contentType) headers["content-type"] = input.contentType;
+      headers[GCS_UNSIGNED_PAYLOAD_HEADER] = GCS_UNSIGNED_PAYLOAD_VALUE;
+      requiredHeaders[GCS_UNSIGNED_PAYLOAD_HEADER] = GCS_UNSIGNED_PAYLOAD_VALUE;
+    }
     const signedHeaders = Object.keys(headers).sort().join(";");
     const canonicalHeaders = Object.keys(headers).sort().map((key) => `${key}:${headers[key]!.trim()}\n`).join("");
     const serviceAccountEmail = await this.resolveSigningServiceAccount();
@@ -591,7 +631,10 @@ export class GcsWeightProofStorageAdapter implements WeightProofStorageAdapter {
     ].join("\n");
     const signatureBase64 = await this.signRuntimeBlob(stringToSign, serviceAccountEmail);
     const signatureHex = Buffer.from(signatureBase64, "base64").toString("hex");
-    return `https://${host}${canonicalUri}?${canonicalQuery}&X-Goog-Signature=${signatureHex}`;
+    return {
+      signedUrl: `https://${host}${canonicalUri}?${canonicalQuery}&X-Goog-Signature=${signatureHex}`,
+      requiredHeaders
+    };
   }
 
   private async createGcsSignedUrl(input: {
@@ -599,7 +642,7 @@ export class GcsWeightProofStorageAdapter implements WeightProofStorageAdapter {
     action: GcsSignedUrlAction;
     expiresAt: Date;
     contentType?: string | undefined;
-  }) {
+  }): Promise<GcsSignedUrlResult> {
     try {
       const [signedUrl] = await this.bucket.file(input.objectKey).getSignedUrl({
         version: "v4",
@@ -607,7 +650,10 @@ export class GcsWeightProofStorageAdapter implements WeightProofStorageAdapter {
         expires: input.expiresAt,
         ...(input.contentType ? { contentType: input.contentType } : {})
       });
-      return signedUrl;
+      return {
+        signedUrl,
+        requiredHeaders: {}
+      };
     } catch {
       try {
         return await this.createRuntimeSignedUrl(input);
@@ -622,20 +668,21 @@ export class GcsWeightProofStorageAdapter implements WeightProofStorageAdapter {
     const objectKey = validateWeightProofObjectKey(input.objectKey);
     const contentType = normalizeWeightProofContentType(input.contentType);
     validateExpectedByteSizeForStorage(input.expectedByteSize, this.maxImageBytes);
-    const uploadUrl = await this.createGcsSignedUrl({
+    const signed = await this.createGcsSignedUrl({
       objectKey,
       action: "write",
       expiresAt: input.expiresAt,
       contentType
     });
-      return {
-        uploadUrl,
-        method: "PUT",
-        headers: {
-          "content-type": contentType
-        },
-        expiresAt: input.expiresAt
-      };
+    return {
+      uploadUrl: signed.signedUrl,
+      method: "PUT",
+      headers: {
+        "content-type": contentType,
+        ...signed.requiredHeaders
+      },
+      expiresAt: input.expiresAt
+    };
   }
 
   async headObject(input: HeadObjectInput): Promise<HeadObjectResult> {
@@ -658,12 +705,12 @@ export class GcsWeightProofStorageAdapter implements WeightProofStorageAdapter {
   async createPresignedGetUrl(input: CreatePresignedGetUrlInput): Promise<CreatePresignedGetUrlResult> {
     const objectKey = validateWeightProofObjectKey(input.objectKey);
     const expiresAt = input.expiresAt ?? new Date(Date.now() + this.signedGetTtlMs);
-    const downloadUrl = await this.createGcsSignedUrl({
+    const signed = await this.createGcsSignedUrl({
       objectKey,
       action: "read",
       expiresAt
     });
-    return { downloadUrl, expiresAt };
+    return { downloadUrl: signed.signedUrl, expiresAt };
   }
 }
 

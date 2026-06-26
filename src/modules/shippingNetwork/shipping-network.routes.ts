@@ -207,6 +207,19 @@ export function createWeightProofRouteContext(req: Request, options: { requireSt
   return context;
 }
 
+function serializeWeightProofUploadHeaders(headers: Record<string, string> | undefined) {
+  const serialized: Record<string, string> = {};
+  for (const [key, value] of Object.entries(headers ?? {})) {
+    const headerName = String(key || "").trim().toLowerCase();
+    const headerValue = String(value ?? "").trim();
+    if (!headerName || !headerValue) continue;
+    if (headerName === "content-type") serialized["Content-Type"] = headerValue;
+    if (headerName === "x-goog-content-sha256") serialized["x-goog-content-sha256"] = headerValue;
+  }
+  if (!serialized["Content-Type"]) serialized["Content-Type"] = "image/jpeg";
+  return serialized;
+}
+
 function assertWeightProofImageSize(expectedByteSize: number | undefined, runtime: WeightProofStorageRuntime) {
   if (expectedByteSize !== undefined && expectedByteSize > runtime.maxImageBytes) {
     throw new ShippingValidationError("Weight proof image is larger than the configured limit.", [{
@@ -233,12 +246,9 @@ export function serializeInitWeightProofRouteResult(result: Awaited<ReturnType<t
     status: result.created ? "CAPTURE_SESSION_CREATED" : "CAPTURE_SESSION_REUSED",
     captureSessionId: result.capture?.capture_session_id ?? null,
     awbNumber: result.capture?.awb_number ?? null,
-    objectKey: result.objectKey ?? null,
     uploadUrl: result.upload?.uploadUrl ?? null,
     expiresAt: result.upload?.expiresAt ?? null,
-    requiredHeaders: {
-      "Content-Type": result.upload?.headers["content-type"] ?? "image/jpeg"
-    }
+    requiredHeaders: serializeWeightProofUploadHeaders(result.upload?.headers)
   };
 }
 
