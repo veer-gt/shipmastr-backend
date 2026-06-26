@@ -125,7 +125,9 @@ function buildSafeSelfTestOutput(input) {
     errorCategory: safeCategory,
     safeErrorClass: signedUrlGenerated ? "none" : redactSelfTestText(errorClass, input.source),
     safeMessage: signedUrlGenerated ? "none" : redactSelfTestText(rawMessage, input.source),
-    signingServiceAccountConfigured: Boolean(stringValue(input.source?.WEIGHT_GUARD_GCS_SIGNING_SERVICE_ACCOUNT))
+    signingServiceAccountConfigured: Boolean(stringValue(input.source?.WEIGHT_GUARD_GCS_SIGNING_SERVICE_ACCOUNT)),
+    explicitSignerConfigured: Boolean(stringValue(input.source?.WEIGHT_GUARD_GCS_SIGNING_SERVICE_ACCOUNT)),
+    metadataEmailNeeded: !Boolean(stringValue(input.source?.WEIGHT_GUARD_GCS_SIGNING_SERVICE_ACCOUNT))
   };
 }
 
@@ -172,7 +174,9 @@ async function runSelfTest(options = {}) {
     const output = buildSafeSelfTestOutput({
       source,
       signedUrlGenerated: Boolean(result.uploadUrl),
-      requiredHeadersPresent: result.method === "PUT" && result.headers?.["content-type"] === "image/png",
+      requiredHeadersPresent: result.method === "PUT"
+        && result.headers?.["content-type"] === "image/png"
+        && result.headers?.["x-goog-content-sha256"] === "UNSIGNED-PAYLOAD",
       diagnostic: null,
       error: null
     });

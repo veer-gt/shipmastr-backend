@@ -37,7 +37,14 @@ Minimum expected role:
 
 - Storage Object User on the staging Weight Guard bucket.
 
-If signed URL generation requires service account signing permissions in the active runtime, grant only the narrow IAM permission required for the staging service account and document the grant before testing.
+For Cloud Run staging and production, set the explicit signing service account env var and grant only the narrow IAM permission required for that service account to call IAM Credentials `signBlob`. Do not grant broad owner/editor roles.
+
+The backend signs V4 URLs by using:
+
+- `WEIGHT_GUARD_GCS_SIGNING_SERVICE_ACCOUNT` as the signer email.
+- Google-managed application default credentials or runtime metadata only to obtain an OAuth token for the IAM Credentials `signBlob` call.
+
+No downloaded service account JSON key, private key, or credential file is required.
 
 ## Cloud Run Env
 
@@ -56,11 +63,9 @@ WEIGHT_GUARD_MAX_IMAGE_BYTES=10485760
 
 Do not set Cloudflare R2 credentials for the GCS path.
 
-`WEIGHT_GUARD_GCS_SIGNING_SERVICE_ACCOUNT` is optional when the runtime can infer the
-Cloud Run service account from application default credentials or the Cloud Run
-metadata service. Set it on staging when signed URL generation logs the safe category
-`GCS_SIGNING_SERVICE_ACCOUNT_UNAVAILABLE`. Do not use downloaded service account JSON
-keys or private keys.
+`WEIGHT_GUARD_GCS_SIGNING_SERVICE_ACCOUNT` is recommended for Cloud Run staging and production. When it is set, the backend uses that email directly for IAM Credentials `signBlob` and does not need the metadata service account email lookup. The runtime still needs Google-managed ADC/metadata access to obtain an OAuth token for the `signBlob` request.
+
+Do not log, copy, screenshot, or store signed URLs, object keys, bucket names, OAuth tokens, private keys, or service account JSON credentials.
 
 ## Staging Smoke Sequence
 

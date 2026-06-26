@@ -99,6 +99,8 @@ test("Weight Guard GCS self-test success output never prints signed URL or objec
   assert.equal(result.signedUrlGenerated, true);
   assert.equal(result.requiredHeadersPresent, true);
   assert.equal(result.errorCategory, "none");
+  assert.equal(result.explicitSignerConfigured, true);
+  assert.equal(result.metadataEmailNeeded, false);
   assert.equal(writes.length, 1);
   assertNoSelfTestLeaks(result);
   assertNoSelfTestLeaks(writes[0]);
@@ -126,7 +128,34 @@ test("Weight Guard GCS self-test failure output keeps safe category and redacts 
   assert.equal(result.signedUrlGenerated, false);
   assert.equal(result.requiredHeadersPresent, false);
   assert.equal(result.errorCategory, "IAM_SIGN_BLOB_DENIED");
+  assert.equal(result.explicitSignerConfigured, true);
+  assert.equal(result.metadataEmailNeeded, false);
   assert.equal(writes.length, 1);
   assertNoSelfTestLeaks(result);
   assertNoSelfTestLeaks(writes[0]);
+});
+
+test("Weight Guard GCS self-test reports metadata email needed only without explicit signer", () => {
+  const withExplicitSigner = script.buildSafeSelfTestOutput({
+    source: approvedEnv,
+    signedUrlGenerated: false,
+    requiredHeadersPresent: false,
+    diagnostic: null,
+    error: new Error("safe diagnostic")
+  });
+  const withoutExplicitSigner = script.buildSafeSelfTestOutput({
+    source: {
+      ...approvedEnv,
+      WEIGHT_GUARD_GCS_SIGNING_SERVICE_ACCOUNT: ""
+    },
+    signedUrlGenerated: false,
+    requiredHeadersPresent: false,
+    diagnostic: null,
+    error: new Error("safe diagnostic")
+  });
+
+  assert.equal(withExplicitSigner.explicitSignerConfigured, true);
+  assert.equal(withExplicitSigner.metadataEmailNeeded, false);
+  assert.equal(withoutExplicitSigner.explicitSignerConfigured, false);
+  assert.equal(withoutExplicitSigner.metadataEmailNeeded, true);
 });
