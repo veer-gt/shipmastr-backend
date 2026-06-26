@@ -1,6 +1,7 @@
 import { randomUUID } from "node:crypto";
 import { WeightProofCaptureStatus, type Prisma } from "@prisma/client";
 import { HttpError } from "../../lib/httpError.js";
+import { logger } from "../../lib/logger.js";
 import { prisma } from "../../lib/prisma.js";
 import { getSellerShipment } from "./shipping-shipments.service.js";
 import {
@@ -44,10 +45,12 @@ export type WeightProofServiceContext = {
   now?: (() => Date) | undefined;
   uploadTtlMs?: number | undefined;
   idFactory?: (() => string) | undefined;
+  headObjectRetryDelaysMs?: number[] | undefined;
 };
 
 const SAFE_AWB = /^[A-Za-z0-9_-]{1,64}$/;
 const DEFAULT_UPLOAD_TTL_MS = 15 * 60 * 1000;
+const DEFAULT_HEAD_OBJECT_RETRY_DELAYS_MS = [150, 350];
 
 function db(context: WeightProofServiceContext): Db {
   return context.client ?? prisma;
@@ -153,6 +156,54 @@ async function runInTransaction<T>(client: Db, operation: (tx: Db) => Promise<T>
     return txClient.$transaction((tx) => operation(tx));
   }
   return operation(client);
+}
+
+function wait(ms: number) {
+  return ms > 0 ? new Promise((resolve) => setTimeout(resolve, ms)) : Promise.resolve();
+}
+
+function isObjectMissingError(error: unknown) {
+  return error instanceof HttpError && (
+    error.message === "WEIGHT_GUARD_OBJECT_NOT_FOUND"
+    || error.message === "WEIGHT_GUARD_GCS_OBJECT_NOT_FOUND"
+    || error.status === 404
+  );
+}
+
+function logUploadVerificationFailure(category: string, status: number) {
+  logger.warn({
+    weightGuardFinalize: {
+      category,
+      status
+    }
+  }, "Weight Guard upload verification failed");
+}
+
+async function verifyUploadedObject(context: WeightProofServiceContext, objectKey: string) {
+  const retryDelays = context.headObjectRetryDelaysMs ?? DEFAULT_HEAD_OBJECT_RETRY_DELAYS_MS;
+  const attempts = retryDelays.length + 1;
+
+  for (let attempt = 0; attempt < attempts; attempt += 1) {
+    try {
+      const object = await context.storage.headObject({ objectKey });
+      if (object.exists) return object;
+    } catch (error) {
+      if (!isObjectMissingError(error)) {
+        logUploadVerificationFailure("WEIGHT_GUARD_UPLOAD_NOT_VERIFIED", 503);
+        throw new HttpError(503, "WEIGHT_GUARD_UPLOAD_NOT_VERIFIED", {
+          category: "WEIGHT_GUARD_UPLOAD_NOT_VERIFIED"
+        });
+      }
+    }
+
+    const delayMs = retryDelays[attempt];
+    if (delayMs !== undefined) await wait(delayMs);
+  }
+
+  logUploadVerificationFailure("WEIGHT_GUARD_OBJECT_NOT_FOUND", 409);
+  throw new HttpError(409, "WEIGHT_GUARD_OBJECT_NOT_FOUND", {
+    category: "WEIGHT_GUARD_OBJECT_NOT_FOUND"
+  });
 }
 
 export async function initWeightProofCapture(input: InitWeightProofCaptureInput, context: WeightProofServiceContext) {
@@ -286,8 +337,7 @@ export async function finalizeWeightProofCapture(input: FinalizeWeightProofCaptu
     throw new HttpError(409, "WEIGHT_PROOF_CAPTURE_SESSION_EXPIRED");
   }
 
-  const object = await context.storage.headObject({ objectKey: session.imageObjectKey });
-  if (!object.exists) throw new HttpError(409, "WEIGHT_GUARD_OBJECT_NOT_FOUND");
+  const object = await verifyUploadedObject(context, session.imageObjectKey);
 
   const proof = await runInTransaction(client, async (tx) => {
     const created = await tx.shippingWeightProof.create({

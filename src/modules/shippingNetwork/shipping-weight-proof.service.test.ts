@@ -93,13 +93,14 @@ function makeClient() {
   return client;
 }
 
-function makeContext(client: any, storage = new InMemoryWeightProofStorageAdapter()) {
+function makeContext(client: any, storage: any = new InMemoryWeightProofStorageAdapter(), options: { headObjectRetryDelaysMs?: number[] } = {}) {
   return {
     merchantId: "seller_123",
     storage,
     client,
     now: () => new Date("2026-06-22T10:00:00.000Z"),
-    idFactory: () => "capture_123"
+    idFactory: () => "capture_123",
+    headObjectRetryDelaysMs: options.headObjectRetryDelaysMs ?? []
   };
 }
 
@@ -253,6 +254,85 @@ describe("shipping weight proof foundation", () => {
       declaredWeightGrams: 1000,
       dimensions: { lengthCm: 10, widthCm: 20, heightCm: 30 }
     }, context), /WEIGHT_GUARD_OBJECT_NOT_FOUND/);
+  });
+
+  it("retries object verification briefly before finalizing", async () => {
+    const client = makeClient();
+    let headCalls = 0;
+    const storage = {
+      createPresignedPutUrl: async () => ({
+        uploadUrl: "mock://weight-proof-put/retry",
+        method: "PUT" as const,
+        headers: { "content-type": "image/jpeg" },
+        expiresAt: new Date("2026-06-22T10:15:00.000Z")
+      }),
+      headObject: async () => {
+        headCalls += 1;
+        if (headCalls < 3) return { exists: false };
+        return {
+          exists: true,
+          contentLength: 2048,
+          contentType: "image/jpeg",
+          updatedAt: new Date("2026-06-22T10:05:00.000Z")
+        };
+      },
+      createPresignedGetUrl: async () => ({
+        downloadUrl: "mock://weight-proof-get/retry",
+        expiresAt: new Date("2026-06-22T10:15:00.000Z")
+      })
+    };
+    const context = makeContext(client, storage, { headObjectRetryDelaysMs: [0, 0] });
+    await initWeightProofCapture({ awbNumber: "AWB_123" }, context);
+
+    const result = await finalizeWeightProofCapture({
+      captureSessionId: "capture_123",
+      awbNumber: "AWB_123",
+      declaredWeightGrams: 1000,
+      dimensions: { lengthCm: 10, widthCm: 20, heightCm: 30 }
+    }, context);
+
+    assert.equal(headCalls, 3);
+    assert.equal(result.finalized, true);
+    assert.equal(result.proof.proof_status, "captured");
+  });
+
+  it("maps object head failures to a safe upload verification category", async () => {
+    const client = makeClient();
+    const storage = {
+      createPresignedPutUrl: async () => ({
+        uploadUrl: "mock://weight-proof-put/head-failure",
+        method: "PUT" as const,
+        headers: { "content-type": "image/jpeg" },
+        expiresAt: new Date("2026-06-22T10:15:00.000Z")
+      }),
+      headObject: async () => {
+        throw new HttpError(503, "WEIGHT_GUARD_OBJECT_HEAD_FAILED", {
+          imageObjectKey: r2ObjectKey,
+          bucket: "private-weight-proofs",
+          signedUrl: "https://signed.example/unsafe"
+        });
+      },
+      createPresignedGetUrl: async () => ({
+        downloadUrl: "mock://weight-proof-get/head-failure",
+        expiresAt: new Date("2026-06-22T10:15:00.000Z")
+      })
+    };
+    const context = makeContext(client, storage, { headObjectRetryDelaysMs: [0] });
+    await initWeightProofCapture({ awbNumber: "AWB_123" }, context);
+
+    await assert.rejects(() => finalizeWeightProofCapture({
+      captureSessionId: "capture_123",
+      awbNumber: "AWB_123",
+      declaredWeightGrams: 1000,
+      dimensions: { lengthCm: 10, widthCm: 20, heightCm: 30 }
+    }, context), (error) => {
+      assert.ok(error instanceof HttpError);
+      assert.equal(error.status, 503);
+      assert.equal(error.message, "WEIGHT_GUARD_UPLOAD_NOT_VERIFIED");
+      const text = JSON.stringify(error);
+      assert.doesNotMatch(text, /weight-proofs\/seller_123|imageObjectKey|image_object_key|private-weight-proofs|signed\.example/i);
+      return true;
+    });
   });
 
   it("finalizes proof when the mock object exists", async () => {
