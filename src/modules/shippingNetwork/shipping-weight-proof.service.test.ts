@@ -37,6 +37,7 @@ import { serializeWeightProofSellerSafe } from "./shipping-weight-proof.serializ
 
 const require = createRequire(import.meta.url);
 const putHeadSelfTestScript: any = require("../../../scripts/weight-guard-gcs-put-head-self-test.cjs");
+const backendMediatedSelfTestScript: any = require("../../../scripts/weight-guard-backend-mediated-upload-self-test.cjs");
 
 function makeClient() {
   const shipments: any[] = [];
@@ -388,6 +389,156 @@ describe("shipping weight proof foundation", () => {
 
     const text = JSON.stringify(upload);
     assert.doesNotMatch(text, /weight-proofs\/seller_123|imageObjectKey|image_object_key|objectKey|private-weight-proofs|storage[.]googleapis|signed/i);
+  });
+
+  it("guards the backend-mediated staging self-test runner behind explicit approval", () => {
+    assert.throws(() => backendMediatedSelfTestScript.assertSelfTestSafety({
+      APP_ENV: "staging",
+      NODE_ENV: "production",
+      DATABASE_URL: "postgresql://redacted@cloudsql/staging",
+      JWT_SECRET: "test-jwt-secret",
+      WEIGHT_GUARD_PROOF_STORAGE_ENABLED: "true",
+      WEIGHT_GUARD_STORAGE_PROVIDER: "gcs",
+      SHIPMASTR_STAGING_API_BASE_URL: "https://shipmastr-api-staging-jscfc5kumq-el.a.run.app"
+    }), /approval/i);
+
+    assert.doesNotThrow(() => backendMediatedSelfTestScript.assertSelfTestSafety({
+      APP_ENV: "staging",
+      NODE_ENV: "production",
+      DATABASE_URL: "postgresql://redacted@cloudsql/staging",
+      JWT_SECRET: "test-jwt-secret",
+      WEIGHT_GUARD_BACKEND_UPLOAD_SELF_TEST: backendMediatedSelfTestScript.APPROVAL_FLAG,
+      WEIGHT_GUARD_PROOF_STORAGE_ENABLED: "true",
+      WEIGHT_GUARD_STORAGE_PROVIDER: "gcs",
+      SHIPMASTR_STAGING_API_BASE_URL: "https://shipmastr-api-staging-jscfc5kumq-el.a.run.app"
+    }));
+  });
+
+  it("redacts backend-mediated self-test errors and output", () => {
+    const redacted = backendMediatedSelfTestScript.redactText(
+      "Bearer token123 imageObjectKey=weight-proofs/seller/2026/06/AWB/session.jpg https://storage.googleapis.com/private-bucket/object?X-Goog-Signature=unsafe DATABASE_URL=postgresql://secret",
+      {
+        DATABASE_URL: "postgresql://secret",
+        JWT_SECRET: "jwt-secret",
+        WEIGHT_GUARD_GCS_BUCKET: "private-bucket",
+        WEIGHT_GUARD_GCS_PROJECT_ID: "shipmastr-core-prod"
+      }
+    );
+    assert.doesNotMatch(redacted, /token123|weight-proofs\/seller|storage[.]googleapis|private-bucket|postgresql:\/\/secret|X-Goog-Signature/i);
+
+    const output = backendMediatedSelfTestScript.buildSafeOutput({
+      authenticatedSellerContext: true,
+      testAwb: "WGSTAGEUI999",
+      uploadMode: "BACKEND_MEDIATED",
+      uploadEndpointPresent: true,
+      uploadVerified: true,
+      finalizeSucceeded: true,
+      getProofSellerSafe: true,
+      directSignedUploadUsed: false,
+      gcsWriteHappened: true,
+      dbMutationScope: "staging_test_session_only"
+    });
+    assert.doesNotMatch(JSON.stringify(output), /Bearer|Authorization|imageObjectKey|objectKey|bucket|storage[.]googleapis|signedUrl|signed_url|X-Goog|private_key/i);
+  });
+
+  it("runs the backend-mediated self-test flow through authenticated API calls without leaking internals", async () => {
+    const originalFetch = globalThis.fetch;
+    const calls: Array<{ method: string; url: string; hasAuthorization: boolean }> = [];
+    const makeEnvelope = (data: unknown, status = 200) => new Response(JSON.stringify({
+      success: true,
+      message: "ok",
+      data,
+      error: null
+    }), {
+      status,
+      headers: { "Content-Type": "application/json" }
+    });
+    globalThis.fetch = (async (input: RequestInfo | URL, init?: RequestInit) => {
+      const url = String(input);
+      const method = String(init?.method ?? "GET").toUpperCase();
+      calls.push({
+        method,
+        url,
+        hasAuthorization: Boolean((init?.headers as Record<string, string> | undefined)?.Authorization)
+      });
+      if (url.endsWith("/v1/shipping/weight-proofs/init")) {
+        return makeEnvelope({
+          status: "CAPTURE_SESSION_CREATED",
+          captureSessionId: "capture_self_test",
+          awbNumber: "WGSTAGEUI999",
+          uploadMode: "BACKEND_MEDIATED",
+          uploadEndpoint: "/api/v1/shipping/weight-proofs/upload",
+          requiredHeaders: {}
+        }, 201);
+      }
+      if (url.endsWith("/v1/shipping/weight-proofs/upload")) {
+        return makeEnvelope({
+          status: "UPLOAD_VERIFIED",
+          uploadVerified: true,
+          proofStatus: "UPLOAD_VERIFIED",
+          nextAction: "FINALIZE"
+        }, 201);
+      }
+      if (url.endsWith("/v1/shipping/weight-proofs/finalize")) {
+        return makeEnvelope({
+          status: "PROOF_LOGGED",
+          awbNumber: "WGSTAGEUI999",
+          declaredWeightGrams: 1240,
+          volumetricWeightGrams: 950,
+          chargeableWeightGrams: 1240,
+          proofStatus: "READY_FOR_DISPUTE"
+        }, 201);
+      }
+      if (url.endsWith("/v1/shipping/weight-proofs/WGSTAGEUI999")) {
+        return makeEnvelope({
+          status: "available",
+          proof_status: "captured",
+          awb_number: "WGSTAGEUI999",
+          declared_weight_grams: 1240
+        });
+      }
+      return new Response("not found", { status: 404 });
+    }) as typeof fetch;
+
+    try {
+      const writes: string[] = [];
+      const output = await backendMediatedSelfTestScript.runBackendMediatedUploadSelfTest({
+        source: {
+          APP_ENV: "staging",
+          NODE_ENV: "production",
+          DATABASE_URL: "postgresql://redacted@cloudsql/staging",
+          JWT_SECRET: "test-jwt-secret",
+          WEIGHT_GUARD_BACKEND_UPLOAD_SELF_TEST: backendMediatedSelfTestScript.APPROVAL_FLAG,
+          WEIGHT_GUARD_PROOF_STORAGE_ENABLED: "true",
+          WEIGHT_GUARD_STORAGE_PROVIDER: "gcs",
+          SHIPMASTR_STAGING_API_BASE_URL: "https://shipmastr-api-staging-jscfc5kumq-el.a.run.app"
+        },
+        prisma: { $disconnect: async () => undefined },
+        fixture: {
+          id: "wg_stage_backend_mediated_shipment_wgstageui999",
+          sellerId: "wg_stage_backend_mediated_merchant",
+          awbNumber: "WGSTAGEUI999"
+        },
+        token: "redacted-test-token",
+        write: (text: string) => writes.push(text),
+        throwOnFailure: true
+      });
+
+      assert.equal(output.errorCategory, null);
+      assert.equal(output.authenticatedSellerContext, true);
+      assert.equal(output.uploadMode, "BACKEND_MEDIATED");
+      assert.equal(output.uploadEndpointPresent, true);
+      assert.equal(output.uploadVerified, true);
+      assert.equal(output.finalizeSucceeded, true);
+      assert.equal(output.getProofSellerSafe, true);
+      assert.equal(output.directSignedUploadUsed, false);
+      assert.equal(calls.length, 4);
+      assert.deepEqual(calls.map((call) => call.method), ["POST", "POST", "POST", "GET"]);
+      assert.ok(calls.every((call) => call.hasAuthorization));
+      assert.doesNotMatch(writes.join("\n"), /redacted-test-token|Authorization|Bearer|imageObjectKey|objectKey|bucket|storage[.]googleapis|signedUrl|signed_url|X-Goog|weight-proofs\//i);
+    } finally {
+      globalThis.fetch = originalFetch;
+    }
   });
 
   it("fails backend upload safely when metadata verification does not confirm the object", async () => {
