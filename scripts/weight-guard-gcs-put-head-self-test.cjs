@@ -11,6 +11,7 @@ dotenv.config();
 const APPROVAL_FLAG = "YES_I_APPROVE_STAGING_GCS_DIAGNOSTIC_UPLOAD";
 const OPERATION = "put_head_self_test";
 const METADATA_SERVICE_ACCOUNT_EMAIL_URL = "http://metadata.google.internal/computeMetadata/v1/instance/service-accounts/default/email";
+const DIAGNOSTIC_CONTENT_TYPE = "application/octet-stream";
 const DIAGNOSTIC_PNG = Buffer.from(
   "iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAADUlEQVR42mP8z8BQDwAFgwJ/lc9V7wAAAABJRU5ErkJggg==",
   "base64"
@@ -275,7 +276,12 @@ function buildOfficialSigningFailureDiagnostics({ source, diagnostic, error, run
     explicitSigningServiceAccountHash: runtimeIdentity?.explicitSigningServiceAccountHash ?? null,
     sameSignerHash: triState(runtimeIdentity?.sameSignerHash),
     signerEmailPresent: Boolean(runtimeIdentity?.signerEmailPresent),
-    metadataEmailNeeded: Boolean(runtimeIdentity?.metadataEmailNeeded)
+    metadataEmailNeeded: Boolean(runtimeIdentity?.metadataEmailNeeded),
+    expiresFormat: diagnostic?.expiresFormat ?? "unknown",
+    ttlSeconds: Number.isInteger(diagnostic?.ttlSeconds) ? diagnostic.ttlSeconds : null,
+    contentTypePresent: Boolean(diagnostic?.contentTypePresent),
+    officialConfigShapeValid: Boolean(diagnostic?.officialConfigShapeValid),
+    hasUnsupportedOfficialSignedUrlOptions: Boolean(diagnostic?.hasUnsupportedOfficialSignedUrlOptions)
   };
 }
 
@@ -316,7 +322,12 @@ function buildSafeOutput(input = {}) {
     explicitSigningServiceAccountHash: input.explicitSigningServiceAccountHash ?? null,
     sameSignerHash: triState(input.sameSignerHash),
     signerEmailPresent: Boolean(input.signerEmailPresent),
-    metadataEmailNeeded: Boolean(input.metadataEmailNeeded)
+    metadataEmailNeeded: Boolean(input.metadataEmailNeeded),
+    expiresFormat: input.expiresFormat || "unknown",
+    ttlSeconds: Number.isInteger(input.ttlSeconds) ? input.ttlSeconds : null,
+    contentTypePresent: Boolean(input.contentTypePresent),
+    officialConfigShapeValid: Boolean(input.officialConfigShapeValid),
+    hasUnsupportedOfficialSignedUrlOptions: Boolean(input.hasUnsupportedOfficialSignedUrlOptions)
   };
 }
 
@@ -516,6 +527,20 @@ async function runPutHeadSelfTest(options = {}) {
     diagnosticId,
     contentType: "image/png"
   });
+  const expiresAt = new Date(now.getTime() + 600000);
+  const officialConfigDiagnostics = typeof storageModule.buildOfficialGcsWriteSignedUrlConfig === "function"
+    ? storageModule.buildOfficialGcsWriteSignedUrlConfig({
+      expiresAt,
+      contentType: DIAGNOSTIC_CONTENT_TYPE,
+      nowMs: now.getTime()
+    }).diagnostics
+    : {
+      expiresFormat: "unknown",
+      ttlSeconds: null,
+      contentTypePresent: true,
+      officialConfigShapeValid: false,
+      hasUnsupportedOfficialSignedUrlOptions: false
+    };
   const rawObjectDiagnostics = storageModule.getWeightProofObjectKeyDiagnostics(objectKey);
   let signedPathDiagnostics = {
     rawKeyHash: rawObjectDiagnostics.objectKeyHash,
@@ -547,9 +572,9 @@ async function runPutHeadSelfTest(options = {}) {
   try {
     const result = await adapter.createPresignedPutUrl({
       objectKey,
-      contentType: "image/png",
+      contentType: DIAGNOSTIC_CONTENT_TYPE,
       expectedByteSize: DIAGNOSTIC_PNG.length,
-      expiresAt: new Date(now.getTime() + 600000)
+      expiresAt
     });
     signedUrlGenerated = Boolean(result.uploadUrl);
     signedPathDiagnostics = buildSignedPathDiagnostics(storageModule, {
@@ -559,7 +584,7 @@ async function runPutHeadSelfTest(options = {}) {
     });
     const headers = safeUploadHeaders(result.headers);
     requiredHeadersUsed = result.method === "PUT"
-      && headers["Content-Type"] === "image/png"
+      && headers["Content-Type"] === DIAGNOSTIC_CONTENT_TYPE
       && (!headers["x-goog-content-sha256"] || headers["x-goog-content-sha256"] === "UNSIGNED-PAYLOAD")
       && !Object.prototype.hasOwnProperty.call(headers, "Authorization")
       && Object.keys(headers).every((header) => ["Content-Type", "x-goog-content-sha256"].includes(header));
@@ -616,7 +641,8 @@ async function runPutHeadSelfTest(options = {}) {
       sameObjectKeyHash,
       requiredHeadersUsed,
       errorCategory: classification === "GCS_OBJECT_KEY_VARIANT_IDENTIFIED" ? "none" : classification,
-      classification
+      classification,
+      ...officialConfigDiagnostics
     });
     write(JSON.stringify(output, null, 2));
     return output;
@@ -658,7 +684,8 @@ async function runPutHeadSelfTest(options = {}) {
       requiredHeadersUsed,
       errorCategory: classification === "GCS_OBJECT_KEY_VARIANT_IDENTIFIED" ? "none" : classification,
       classification,
-      ...officialSigningFailure
+      ...officialSigningFailure,
+      ...officialConfigDiagnostics
     });
     write(JSON.stringify(output, null, 2));
     if (options.throwOnFailure) throw new Error(redactSelfTestText(error?.message ?? error, source));

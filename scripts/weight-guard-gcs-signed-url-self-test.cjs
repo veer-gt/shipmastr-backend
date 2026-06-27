@@ -9,6 +9,7 @@ dotenv.config();
 
 const APPROVAL_FLAG = "YES_I_APPROVE_STAGING_SIGNED_URL_DIAGNOSTIC";
 const OPERATION = "signed_put_self_test";
+const DIAGNOSTIC_CONTENT_TYPE = "application/octet-stream";
 
 class SelfTestSafetyError extends Error {
   constructor(message, category = "SELF_TEST_SAFETY_REFUSED") {
@@ -167,7 +168,7 @@ async function runSelfTest(options = {}) {
   try {
     const result = await adapter.createPresignedPutUrl({
       objectKey,
-      contentType: "image/png",
+      contentType: DIAGNOSTIC_CONTENT_TYPE,
       expectedByteSize: 2048,
       expiresAt: new Date(now.getTime() + 600000)
     });
@@ -175,7 +176,7 @@ async function runSelfTest(options = {}) {
       source,
       signedUrlGenerated: Boolean(result.uploadUrl),
       requiredHeadersPresent: result.method === "PUT"
-        && result.headers?.["content-type"] === "image/png"
+        && result.headers?.["content-type"] === DIAGNOSTIC_CONTENT_TYPE
         && (!result.headers?.["x-goog-content-sha256"] || result.headers?.["x-goog-content-sha256"] === "UNSIGNED-PAYLOAD"),
       diagnostic: null,
       error: null

@@ -44,8 +44,9 @@ For Cloud Run staging and production, use the runtime service account and bucket
 The backend generates write V4 URLs by using:
 
 - `bucket.file(rawObjectKey)` as the object reference.
-- Official Storage client `getSignedUrl` with `version: "v4"` and `action: "write"`.
+- Official Storage client `getSignedUrl` with `version: "v4"`, `action: "write"`, `contentType`, and an absolute millisecond timestamp expiration.
 - Minimal upload headers from the backend response, normally only `Content-Type`.
+- No custom canonical request fields, query parameters, signer fields, private keys, or service account key files for runtime upload signing.
 
 Metadata verification uses the same raw object key with `bucket.file(rawObjectKey).getMetadata()` through the authenticated backend client.
 
@@ -69,6 +70,8 @@ WEIGHT_GUARD_MAX_IMAGE_BYTES=10485760
 Do not set Cloudflare R2 credentials for the GCS path.
 
 `WEIGHT_GUARD_GCS_SIGNING_SERVICE_ACCOUNT` may remain configured for internal signed-read fallback paths, but runtime upload signing uses the official Storage client write URL path. The runtime still needs Google-managed ADC/metadata access compatible with the Storage client and any internal read fallback.
+
+Runtime uploads do not use the custom IAM signer path. That path remains reserved for internal signed-read fallback behavior only.
 
 Do not log, copy, screenshot, or store signed URLs, object keys, bucket names, OAuth tokens, private keys, or service account JSON credentials.
 

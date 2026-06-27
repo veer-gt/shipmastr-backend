@@ -14,6 +14,8 @@ const SAFE_SEGMENT = /^[A-Za-z0-9_-]+$/;
 const MAX_AWB_LENGTH = 64;
 const MAX_SEGMENT_LENGTH = 160;
 const ALLOWED_IMAGE_CONTENT_TYPES = new Set(["image/jpeg", "image/png"]);
+const OFFICIAL_GCS_FALLBACK_UPLOAD_CONTENT_TYPE = "application/octet-stream";
+const SUPPORTED_OFFICIAL_GCS_WRITE_SIGNED_URL_OPTION_KEYS = new Set(["version", "action", "expires", "contentType"]);
 export const WEIGHT_GUARD_DIAGNOSTIC_OBJECT_PREFIX = "weight-guard-diagnostics";
 
 export type CreatePresignedPutUrlInput = {
@@ -111,7 +113,7 @@ export type GcsWeightProofFile = {
   getSignedUrl(config: {
     version: "v4";
     action: GcsSignedUrlAction;
-    expires: Date;
+    expires: Date | number;
     contentType?: string | undefined;
   }): Promise<[string]>;
   getMetadata(): Promise<[{
@@ -167,6 +169,11 @@ export type GcsSignedUrlDiagnostic = {
   signingServiceAccountConfigured: boolean;
   contentTypeAccepted: boolean;
   runtimeSignerConfigured: boolean;
+  expiresFormat?: "timestamp_ms" | "date" | "unknown" | undefined;
+  ttlSeconds?: number | null | undefined;
+  contentTypePresent?: boolean | undefined;
+  officialConfigShapeValid?: boolean | undefined;
+  hasUnsupportedOfficialSignedUrlOptions?: boolean | undefined;
 };
 
 export type GcsWeightProofDiagnosticsReporter = (diagnostic: GcsSignedUrlDiagnostic) => void;
@@ -286,9 +293,51 @@ function validateExpectedByteSizeForStorage(value: number | null | undefined, ma
   if (value > maxImageBytes) throw new HttpError(400, "WEIGHT_GUARD_IMAGE_TOO_LARGE");
 }
 
-function secondsUntil(expiresAt: Date) {
-  const seconds = Math.ceil((expiresAt.getTime() - Date.now()) / 1000);
+function secondsUntil(expiresAt: Date, nowMs = Date.now()) {
+  const seconds = Math.ceil((expiresAt.getTime() - nowMs) / 1000);
   return Math.max(1, seconds);
+}
+
+function normalizeOfficialGcsWriteContentType(contentType: string | undefined) {
+  const normalized = String(contentType ?? "").trim().toLowerCase();
+  if (!normalized) return OFFICIAL_GCS_FALLBACK_UPLOAD_CONTENT_TYPE;
+  if (ALLOWED_IMAGE_CONTENT_TYPES.has(normalized) || normalized === OFFICIAL_GCS_FALLBACK_UPLOAD_CONTENT_TYPE) {
+    return normalized;
+  }
+  throw new HttpError(400, "WEIGHT_PROOF_CONTENT_TYPE_INVALID");
+}
+
+export function buildOfficialGcsWriteSignedUrlConfig(input: {
+  expiresAt: Date;
+  contentType?: string | undefined;
+  nowMs?: number | undefined;
+}) {
+  const nowMs = input.nowMs ?? Date.now();
+  const ttlSeconds = secondsUntil(input.expiresAt, nowMs);
+  const contentType = normalizeOfficialGcsWriteContentType(input.contentType);
+  const expires = nowMs + ttlSeconds * 1000;
+  const config = {
+    version: "v4" as const,
+    action: "write" as const,
+    expires,
+    contentType
+  };
+  const hasUnsupportedOfficialSignedUrlOptions = Object.keys(config).some((key) => !SUPPORTED_OFFICIAL_GCS_WRITE_SIGNED_URL_OPTION_KEYS.has(key));
+  return {
+    config,
+    diagnostics: {
+      expiresFormat: "timestamp_ms" as const,
+      ttlSeconds,
+      contentTypePresent: Boolean(contentType),
+      officialConfigShapeValid: Number.isFinite(expires)
+        && expires > 0
+        && contentType.length > 0
+        && config.version === "v4"
+        && config.action === "write"
+        && !hasUnsupportedOfficialSignedUrlOptions,
+      hasUnsupportedOfficialSignedUrlOptions
+    }
+  };
 }
 
 function encodeGcsComponent(value: string) {
@@ -719,7 +768,15 @@ export class GcsWeightProofStorageAdapter implements WeightProofStorageAdapter {
     this.maxImageBytes = config.maxImageBytes;
   }
 
-  private logSignedUrlFailure(operation: GcsSignedUrlDiagnostic["operation"], error: unknown, contentTypeAccepted: boolean) {
+  private logSignedUrlFailure(
+    operation: GcsSignedUrlDiagnostic["operation"],
+    error: unknown,
+    contentTypeAccepted: boolean,
+    configDiagnostics: Partial<Pick<
+      GcsSignedUrlDiagnostic,
+      "expiresFormat" | "ttlSeconds" | "contentTypePresent" | "officialConfigShapeValid" | "hasUnsupportedOfficialSignedUrlOptions"
+    >> = {}
+  ) {
     const candidate = error as { code?: string | number; message?: string; name?: string };
     const redactedValues = [this.bucketName, this.projectId, this.signingServiceAccount];
     this.diagnostics({
@@ -734,7 +791,8 @@ export class GcsWeightProofStorageAdapter implements WeightProofStorageAdapter {
       projectConfigured: Boolean(this.projectId),
       signingServiceAccountConfigured: Boolean(this.signingServiceAccount),
       contentTypeAccepted,
-      runtimeSignerConfigured: Boolean(this.runtimeSigner)
+      runtimeSignerConfigured: Boolean(this.runtimeSigner),
+      ...configDiagnostics
     });
   }
 
@@ -838,6 +896,20 @@ export class GcsWeightProofStorageAdapter implements WeightProofStorageAdapter {
     expiresAt: Date;
     contentType?: string | undefined;
   }): Promise<GcsSignedUrlResult> {
+    if (input.action === "write") {
+      const officialWriteConfig = buildOfficialGcsWriteSignedUrlConfig({
+        expiresAt: input.expiresAt,
+        contentType: input.contentType
+      });
+      const [signedUrl] = await this.bucket.file(input.objectKey).getSignedUrl(officialWriteConfig.config);
+      return {
+        signedUrl,
+        requiredHeaders: {
+          "content-type": officialWriteConfig.config.contentType
+        }
+      };
+    }
+
     const [signedUrl] = await this.bucket.file(input.objectKey).getSignedUrl({
       version: "v4",
       action: input.action,
@@ -857,10 +929,14 @@ export class GcsWeightProofStorageAdapter implements WeightProofStorageAdapter {
     contentType?: string | undefined;
   }): Promise<GcsSignedUrlResult> {
     if (input.action === "write") {
+      const configDiagnostics = buildOfficialGcsWriteSignedUrlConfig({
+        expiresAt: input.expiresAt,
+        contentType: input.contentType
+      }).diagnostics;
       try {
         return await this.createOfficialGcsSignedUrl(input);
       } catch (error) {
-        this.logSignedUrlFailure("signed_put", error, Boolean(input.contentType));
+        this.logSignedUrlFailure("signed_put", error, Boolean(input.contentType), configDiagnostics);
         throw new HttpError(503, "WEIGHT_GUARD_GCS_SIGNED_URL_FAILED");
       }
     }
@@ -890,10 +966,7 @@ export class GcsWeightProofStorageAdapter implements WeightProofStorageAdapter {
     return {
       uploadUrl: signed.signedUrl,
       method: "PUT",
-      headers: {
-        "content-type": contentType,
-        ...signed.requiredHeaders
-      },
+      headers: signed.requiredHeaders,
       expiresAt: input.expiresAt
     };
   }

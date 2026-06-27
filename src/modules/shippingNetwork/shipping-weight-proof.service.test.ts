@@ -18,6 +18,7 @@ import {
 } from "./shipping-weight-proof.service.js";
 import {
   assertWeightProofStorageEnabled,
+  buildOfficialGcsWriteSignedUrlConfig,
   buildGcsXmlPathStyleObjectPath,
   buildWeightGuardDiagnosticObjectKey,
   buildWeightProofObjectKey,
@@ -767,12 +768,14 @@ describe("shipping weight proof foundation", () => {
 
   it("creates GCS signed PUT URLs through an injected bucket only", async () => {
     const { adapter, calls } = makeGcsAdapter();
+    const issuedAt = Date.now();
+    const expiresAt = new Date(issuedAt + 600000);
 
     const result = await adapter.createPresignedPutUrl({
       objectKey: r2ObjectKey,
       contentType: "image/png",
       expectedByteSize: 1024,
-      expiresAt: new Date("2026-06-22T10:10:00.000Z")
+      expiresAt
     });
 
     assert.equal(result.uploadUrl, "https://signed.example/gcs-write");
@@ -780,11 +783,38 @@ describe("shipping weight proof foundation", () => {
     assert.deepEqual(result.headers, { "content-type": "image/png" });
     assert.equal(calls.length, 1);
     assert.equal(calls[0].objectKey, r2ObjectKey);
-    assert.deepEqual(calls[0].config, {
+    assert.equal(calls[0].config.version, "v4");
+    assert.equal(calls[0].config.action, "write");
+    assert.equal(calls[0].config.contentType, "image/png");
+    assert.equal(typeof calls[0].config.expires, "number");
+    assert.ok(calls[0].config.expires >= issuedAt + 600000);
+    assert.ok(calls[0].config.expires <= expiresAt.getTime() + 1000);
+    assert.deepEqual(Object.keys(calls[0].config).sort(), ["action", "contentType", "expires", "version"]);
+    assert.equal(Object.prototype.hasOwnProperty.call(calls[0].config, "extensionHeaders"), false);
+    assert.equal(Object.prototype.hasOwnProperty.call(calls[0].config, "queryParams"), false);
+    assert.equal(Object.prototype.hasOwnProperty.call(calls[0].config, "signingServiceAccount"), false);
+  });
+
+  it("builds official GCS write signed URL config with safe timestamp shape", () => {
+    const nowMs = Date.parse("2026-06-22T10:00:00.000Z");
+    const result = buildOfficialGcsWriteSignedUrlConfig({
+      expiresAt: new Date(nowMs + 600000),
+      contentType: "image/jpeg",
+      nowMs
+    });
+
+    assert.deepEqual(result.config, {
       version: "v4",
       action: "write",
-      expires: new Date("2026-06-22T10:10:00.000Z"),
-      contentType: "image/png"
+      expires: nowMs + 600000,
+      contentType: "image/jpeg"
+    });
+    assert.deepEqual(result.diagnostics, {
+      expiresFormat: "timestamp_ms",
+      ttlSeconds: 600,
+      contentTypePresent: true,
+      officialConfigShapeValid: true,
+      hasUnsupportedOfficialSignedUrlOptions: false
     });
   });
 
@@ -862,7 +892,7 @@ describe("shipping weight proof foundation", () => {
     globalThis.fetch = (async (_url: string | URL | Request, init?: RequestInit) => {
       assert.equal(init?.method, "PUT");
       const headers = init?.headers as Record<string, string>;
-      assert.equal(headers["Content-Type"], "image/png");
+      assert.equal(headers["Content-Type"], "application/octet-stream");
       assert.equal(Object.prototype.hasOwnProperty.call(headers, "Authorization"), false);
       return { status: 200 } as Response;
     }) as typeof fetch;
@@ -878,6 +908,7 @@ describe("shipping weight proof foundation", () => {
         },
         storageModule: {
           buildWeightGuardDiagnosticObjectKey,
+          buildOfficialGcsWriteSignedUrlConfig,
           buildGcsXmlPathStyleObjectPath,
           getGcsSignedUrlObjectPathDiagnostics,
           getWeightProofObjectKeyPrefix,
@@ -891,7 +922,7 @@ describe("shipping weight proof foundation", () => {
               uploadUrl: `https://storage.googleapis.com/private-weight-proofs/${input.objectKey}?X-Goog-Signature=unsafe`,
               method: "PUT" as const,
               headers: {
-                "content-type": "image/png"
+                "content-type": "application/octet-stream"
               },
               expiresAt: input.expiresAt
             };
@@ -929,6 +960,11 @@ describe("shipping weight proof foundation", () => {
       assert.equal(output.listFoundMatchingHash, true);
       assert.equal(output.sameObjectKeyHash, true);
       assert.equal(output.requiredHeadersUsed, true);
+      assert.equal(output.expiresFormat, "timestamp_ms");
+      assert.equal(output.ttlSeconds, 600);
+      assert.equal(output.contentTypePresent, true);
+      assert.equal(output.officialConfigShapeValid, true);
+      assert.equal(output.hasUnsupportedOfficialSignedUrlOptions, false);
       assert.equal(output.errorCategory, "PUT_200_WITHOUT_GCS_OBJECT_GENERATION");
       assert.equal(output.classification, "PUT_200_WITHOUT_GCS_OBJECT_GENERATION");
       assert.equal(output.metadataCandidateResults.some((candidate: any) => candidate.candidateName === "raw" && candidate.metadataFound), true);
@@ -962,6 +998,7 @@ describe("shipping weight proof foundation", () => {
         },
         storageModule: {
           buildWeightGuardDiagnosticObjectKey,
+          buildOfficialGcsWriteSignedUrlConfig,
           buildGcsXmlPathStyleObjectPath,
           getGcsSignedUrlObjectPathDiagnostics,
           getWeightProofObjectKeyPrefix,
@@ -975,7 +1012,7 @@ describe("shipping weight proof foundation", () => {
               uploadUrl: `https://storage.googleapis.com/private-weight-proofs/${input.objectKey}?X-Goog-Signature=unsafe`,
               method: "PUT" as const,
               headers: {
-                "content-type": "image/png"
+                "content-type": "application/octet-stream"
               },
               expiresAt: input.expiresAt
             };
@@ -1000,6 +1037,10 @@ describe("shipping weight proof foundation", () => {
       assert.equal(output.listFoundMatchingHash, true);
       assert.equal(output.sameObjectKeyHash, true);
       assert.equal(output.classification, "PUT_200_WITHOUT_GCS_OBJECT_GENERATION");
+      assert.equal(output.expiresFormat, "timestamp_ms");
+      assert.equal(output.contentTypePresent, true);
+      assert.equal(output.officialConfigShapeValid, true);
+      assert.equal(output.hasUnsupportedOfficialSignedUrlOptions, false);
       assert.ok(objectKeys.length >= 4);
       const text = writes.join("\n");
       assert.doesNotMatch(text, /signed\.example|weight-guard-diagnostics\/|weight-proofs\/|private-weight-proofs|shipmastr-core-prod|X-Goog-Signature/i);
@@ -1036,6 +1077,7 @@ describe("shipping weight proof foundation", () => {
         },
         storageModule: {
           buildWeightGuardDiagnosticObjectKey,
+          buildOfficialGcsWriteSignedUrlConfig,
           buildGcsXmlPathStyleObjectPath,
           getGcsSignedUrlObjectPathDiagnostics,
           getWeightProofObjectKeyPrefix,
@@ -1049,7 +1091,7 @@ describe("shipping weight proof foundation", () => {
               uploadUrl: `https://storage.googleapis.com/private-weight-proofs/${input.objectKey}?X-Goog-Signature=unsafe`,
               method: "PUT" as const,
               headers: {
-                "content-type": "image/png"
+                "content-type": "application/octet-stream"
               },
               expiresAt: input.expiresAt
             };
@@ -1071,6 +1113,10 @@ describe("shipping weight proof foundation", () => {
       assert.equal(output.contentLengthResponseHeaderPresent, true);
       assert.equal(output.classification, "GCS_OBJECT_KEY_VARIANT_IDENTIFIED");
       assert.equal(output.errorCategory, "none");
+      assert.equal(output.expiresFormat, "timestamp_ms");
+      assert.equal(output.contentTypePresent, true);
+      assert.equal(output.officialConfigShapeValid, true);
+      assert.equal(output.hasUnsupportedOfficialSignedUrlOptions, false);
       assert.equal(output.metadataCandidateResults.some((candidate: any) => candidate.candidateName === "raw" && candidate.metadataFound), true);
       assert.equal(output.metadataCandidateResults.every((candidate: any) => Object.prototype.hasOwnProperty.call(candidate, "candidateHash")), true);
       const text = writes.join("\n");
@@ -1094,6 +1140,7 @@ describe("shipping weight proof foundation", () => {
       },
       storageModule: {
         buildWeightGuardDiagnosticObjectKey,
+        buildOfficialGcsWriteSignedUrlConfig,
         buildGcsXmlPathStyleObjectPath,
         getGcsSignedUrlObjectPathDiagnostics,
         getWeightProofObjectKeyPrefix,
@@ -1133,6 +1180,11 @@ describe("shipping weight proof foundation", () => {
     assert.equal(output.sameSignerHash, false);
     assert.equal(output.signerEmailPresent, true);
     assert.equal(output.metadataEmailNeeded, false);
+    assert.equal(output.expiresFormat, "timestamp_ms");
+    assert.equal(output.ttlSeconds, 600);
+    assert.equal(output.contentTypePresent, true);
+    assert.equal(output.officialConfigShapeValid, true);
+    assert.equal(output.hasUnsupportedOfficialSignedUrlOptions, false);
     const text = writes.join("\n");
     assert.doesNotMatch(text, /shipmastr-runner@example|metadata-runner@example|private-weight-proofs|shipmastr-core-prod|storage[.]googleapis[.]com|weight-guard-diagnostics\/|X-Goog-Signature|https?:\/\//i);
   });
@@ -1196,8 +1248,11 @@ describe("shipping weight proof foundation", () => {
     assert.equal(calls[0].objectKey, r2ObjectKey);
     assert.equal(calls[0].config.version, "v4");
     assert.equal(calls[0].config.action, "write");
-    assert.deepEqual(calls[0].config.expires, result.expiresAt);
+    assert.equal(typeof calls[0].config.expires, "number");
+    assert.ok(calls[0].config.expires >= result.expiresAt.getTime());
+    assert.ok(calls[0].config.expires <= result.expiresAt.getTime() + 1000);
     assert.equal(calls[0].config.contentType, "image/png");
+    assert.deepEqual(Object.keys(calls[0].config).sort(), ["action", "contentType", "expires", "version"]);
     assert.equal(metadataEmailCalls, 0);
     assert.equal(runtimeSignCalls.length, 0);
   });
@@ -1246,6 +1301,10 @@ describe("shipping weight proof foundation", () => {
     assert.equal(diagnostics.length, 1);
     assert.equal(diagnostics[0].operation, "signed_put");
     assert.equal(diagnostics[0].category, "GCS_SIGNING_FAILED");
+    assert.equal(diagnostics[0].expiresFormat, "timestamp_ms");
+    assert.equal(diagnostics[0].contentTypePresent, true);
+    assert.equal(diagnostics[0].officialConfigShapeValid, true);
+    assert.equal(diagnostics[0].hasUnsupportedOfficialSignedUrlOptions, false);
   });
 
   it("does not call IAM signBlob for GCS signed PUT URLs", async () => {
@@ -1281,6 +1340,7 @@ describe("shipping weight proof foundation", () => {
     assert.equal(calls.length, 1);
     assert.equal(calls[0].method, "getSignedUrl");
     assert.equal(calls[0].objectKey, r2ObjectKey);
+    assert.deepEqual(Object.keys(calls[0].config).sort(), ["action", "contentType", "expires", "version"]);
   });
 
   it("ignores invalid runtime signer config for official GCS signed PUT URLs", async () => {
@@ -1346,6 +1406,11 @@ describe("shipping weight proof foundation", () => {
     assert.equal(diagnostics[0].category, "GCS_PERMISSION_DENIED");
     assert.equal(diagnostics[0].bucketConfigured, true);
     assert.equal(diagnostics[0].projectConfigured, true);
+    assert.equal(diagnostics[0].expiresFormat, "timestamp_ms");
+    assert.equal(diagnostics[0].ttlSeconds, 600);
+    assert.equal(diagnostics[0].contentTypePresent, true);
+    assert.equal(diagnostics[0].officialConfigShapeValid, true);
+    assert.equal(diagnostics[0].hasUnsupportedOfficialSignedUrlOptions, false);
     assert.equal(runtimeSignCalls, 0);
     const text = JSON.stringify(diagnostics[0]);
     assert.match(text, /object-key-redacted/);
@@ -1381,6 +1446,10 @@ describe("shipping weight proof foundation", () => {
 
     assert.equal(diagnostics.length, 1);
     assert.equal(diagnostics[0].category, "GCS_SIGNING_FAILED");
+    assert.equal(diagnostics[0].expiresFormat, "timestamp_ms");
+    assert.equal(diagnostics[0].contentTypePresent, true);
+    assert.equal(diagnostics[0].officialConfigShapeValid, true);
+    assert.equal(diagnostics[0].hasUnsupportedOfficialSignedUrlOptions, false);
     assert.equal(metadataEmailCalls, 0);
     const text = JSON.stringify(diagnostics[0]);
     assert.doesNotMatch(text, /weight-proofs\/seller_123|private-weight-proofs|storage[.]googleapis[.]com|X-Goog-Signature/i);
