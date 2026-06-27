@@ -53,6 +53,13 @@ export type CreatePresignedGetUrlResult = {
   expiresAt: Date;
 };
 
+export type PutObjectInput = {
+  objectKey: string;
+  body: Buffer | Uint8Array;
+  contentType: string;
+  sizeBytes: number;
+};
+
 export type BuildWeightProofObjectKeyInput = {
   sellerOrMerchantId: string;
   awbNumber: string;
@@ -63,6 +70,7 @@ export type BuildWeightProofObjectKeyInput = {
 
 export interface WeightProofStorageAdapter {
   createPresignedPutUrl(input: CreatePresignedPutUrlInput): Promise<CreatePresignedPutUrlResult>;
+  putObject(input: PutObjectInput): Promise<HeadObjectResult>;
   headObject(input: HeadObjectInput): Promise<HeadObjectResult>;
   createPresignedGetUrl(input: CreatePresignedGetUrlInput): Promise<CreatePresignedGetUrlResult>;
 }
@@ -116,6 +124,13 @@ export type GcsWeightProofFile = {
     expires: Date | number;
     contentType?: string | undefined;
   }): Promise<[string]>;
+  save(data: Buffer | Uint8Array, options: {
+    resumable?: boolean | undefined;
+    contentType?: string | undefined;
+    metadata?: {
+      contentType?: string | undefined;
+    } | undefined;
+  }): Promise<unknown>;
   getMetadata(): Promise<[{
     size?: string | number | undefined;
     contentType?: string | undefined;
@@ -291,6 +306,17 @@ function validateExpectedByteSizeForStorage(value: number | null | undefined, ma
   if (value === undefined || value === null) return;
   if (!Number.isInteger(value) || value <= 0) throw new HttpError(400, "WEIGHT_PROOF_EXPECTED_SIZE_INVALID");
   if (value > maxImageBytes) throw new HttpError(400, "WEIGHT_GUARD_IMAGE_TOO_LARGE");
+}
+
+function validateBackendUploadSizeForStorage(value: number, maxImageBytes: number) {
+  if (!Number.isInteger(value) || value <= 0) throw new HttpError(400, "WEIGHT_GUARD_UPLOAD_SESSION_INVALID");
+  if (value > maxImageBytes) throw new HttpError(413, "WEIGHT_GUARD_UPLOAD_TOO_LARGE");
+}
+
+function normalizeBackendUploadBody(body: Buffer | Uint8Array) {
+  if (Buffer.isBuffer(body)) return body;
+  if (body instanceof Uint8Array) return Buffer.from(body);
+  throw new HttpError(400, "WEIGHT_GUARD_UPLOAD_SESSION_INVALID");
 }
 
 function secondsUntil(expiresAt: Date, nowMs = Date.now()) {
@@ -515,6 +541,32 @@ export class InMemoryWeightProofStorageAdapter implements WeightProofStorageAdap
     };
   }
 
+  async putObject(input: PutObjectInput | {
+    objectKey: string;
+    contentLength?: number | undefined;
+    contentType?: string | undefined;
+    updatedAt?: Date | undefined;
+  }): Promise<HeadObjectResult> {
+    const objectKey = validateWeightProofStorageObjectKey(input.objectKey);
+    if (!("body" in input)) {
+      this.objects.set(objectKey, {
+        contentLength: input.contentLength ?? 1,
+        contentType: input.contentType ?? "image/jpeg",
+        updatedAt: input.updatedAt ?? new Date()
+      });
+      return this.headObject({ objectKey });
+    }
+    const contentType = normalizeWeightProofContentType(input.contentType);
+    const body = normalizeBackendUploadBody(input.body);
+    validateBackendUploadSizeForStorage(input.sizeBytes, Number.MAX_SAFE_INTEGER);
+    this.objects.set(objectKey, {
+      contentLength: body.byteLength,
+      contentType,
+      updatedAt: new Date()
+    });
+    return this.headObject({ objectKey });
+  }
+
   async createPresignedGetUrl(input: CreatePresignedGetUrlInput): Promise<CreatePresignedGetUrlResult> {
     const objectKey = validateWeightProofStorageObjectKey(input.objectKey);
     return {
@@ -523,19 +575,6 @@ export class InMemoryWeightProofStorageAdapter implements WeightProofStorageAdap
     };
   }
 
-  putObject(input: {
-    objectKey: string;
-    contentLength?: number | undefined;
-    contentType?: string | undefined;
-    updatedAt?: Date | undefined;
-  }) {
-    const objectKey = validateWeightProofStorageObjectKey(input.objectKey);
-    this.objects.set(objectKey, {
-      contentLength: input.contentLength ?? 1,
-      contentType: input.contentType ?? "image/jpeg",
-      updatedAt: input.updatedAt ?? new Date()
-    });
-  }
 }
 
 export class DisabledWeightProofStorageAdapter implements WeightProofStorageAdapter {
@@ -544,6 +583,10 @@ export class DisabledWeightProofStorageAdapter implements WeightProofStorageAdap
   }
 
   async headObject(): Promise<HeadObjectResult> {
+    throw new HttpError(503, "WEIGHT_GUARD_STORAGE_DISABLED");
+  }
+
+  async putObject(): Promise<HeadObjectResult> {
     throw new HttpError(503, "WEIGHT_GUARD_STORAGE_DISABLED");
   }
 
@@ -716,6 +759,25 @@ export class R2WeightProofStorageAdapter implements WeightProofStorageAdapter {
     } catch (error) {
       if (objectNotFound(error)) return { exists: false };
       throw new HttpError(503, "WEIGHT_GUARD_OBJECT_HEAD_FAILED");
+    }
+  }
+
+  async putObject(input: PutObjectInput): Promise<HeadObjectResult> {
+    const objectKey = validateWeightProofStorageObjectKey(input.objectKey);
+    const contentType = normalizeWeightProofContentType(input.contentType);
+    const body = normalizeBackendUploadBody(input.body);
+    validateBackendUploadSizeForStorage(input.sizeBytes, this.maxImageBytes);
+    try {
+      await this.client.send(new PutObjectCommand({
+        Bucket: this.bucket,
+        Key: objectKey,
+        Body: body,
+        ContentType: contentType,
+        ContentLength: input.sizeBytes
+      }));
+      return this.headObject({ objectKey });
+    } catch {
+      throw new HttpError(503, "WEIGHT_GUARD_UPLOAD_NOT_VERIFIED");
     }
   }
 
@@ -985,6 +1047,23 @@ export class GcsWeightProofStorageAdapter implements WeightProofStorageAdapter {
     } catch (error) {
       if (gcsObjectNotFound(error)) return { exists: false };
       throw new HttpError(503, "WEIGHT_GUARD_OBJECT_HEAD_FAILED");
+    }
+  }
+
+  async putObject(input: PutObjectInput): Promise<HeadObjectResult> {
+    const objectKey = validateWeightProofStorageObjectKey(input.objectKey);
+    const contentType = normalizeWeightProofContentType(input.contentType);
+    const body = normalizeBackendUploadBody(input.body);
+    validateBackendUploadSizeForStorage(input.sizeBytes, this.maxImageBytes);
+    try {
+      await this.bucket.file(objectKey).save(body, {
+        resumable: false,
+        contentType,
+        metadata: { contentType }
+      });
+      return this.headObject({ objectKey });
+    } catch {
+      throw new HttpError(503, "WEIGHT_GUARD_UPLOAD_NOT_VERIFIED");
     }
   }
 

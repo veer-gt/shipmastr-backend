@@ -1,5 +1,6 @@
 import { Router, type Request, type Response } from "express";
 import multer from "multer";
+import { HttpError } from "../../lib/httpError.js";
 import {
   autopilotPreferenceSchema,
   autopilotRecommendSchema,
@@ -84,6 +85,7 @@ import {
   finalizeWeightProofCapture,
   getWeightProofByAwb,
   initWeightProofCapture,
+  uploadWeightProofImage,
   type WeightProofServiceContext
 } from "./shipping-weight-proof.service.js";
 import {
@@ -94,6 +96,7 @@ import {
 import {
   finalizeWeightProofCaptureRouteSchema,
   initWeightProofCaptureRouteSchema,
+  uploadWeightProofCaptureRouteSchema,
   weightProofAwbRouteParamSchema
 } from "./shipping-weight-proof.validation.js";
 import {
@@ -159,6 +162,13 @@ const csvUpload = multer({
   storage: multer.memoryStorage(),
   limits: { fileSize: 2 * 1024 * 1024 }
 });
+const weightProofImageUpload = multer({
+  storage: multer.memoryStorage(),
+  limits: {
+    files: 1,
+    fileSize: 10 * 1024 * 1024
+  }
+});
 
 function sendValidationError(res: Response, error: ShippingValidationError) {
   return res.status(400).json({
@@ -196,7 +206,9 @@ export function createWeightProofRouteContext(req: Request, options: { requireSt
   const context: WeightProofServiceContext = {
     merchantId: req.auth!.merchantId,
     storage: activeRuntime.storage,
-    uploadTtlMs: activeRuntime.uploadTtlMs
+    uploadTtlMs: activeRuntime.uploadTtlMs,
+    maxImageBytes: activeRuntime.maxImageBytes,
+    uploadMode: activeRuntime.provider === "gcs" ? "BACKEND_MEDIATED" : "DIRECT_SIGNED_URL"
   };
   const client = req.app.locals.weightProofClient;
   if (client) context.client = client;
@@ -229,6 +241,25 @@ function assertWeightProofImageSize(expectedByteSize: number | undefined, runtim
   }
 }
 
+function runWeightProofImageUpload(req: Request, res: Response) {
+  return new Promise<void>((resolve, reject) => {
+    weightProofImageUpload.single("file")(req, res, (error) => {
+      if (!error) {
+        resolve();
+        return;
+      }
+      const code = typeof error === "object" && error !== null && "code" in error
+        ? String((error as { code?: unknown }).code ?? "")
+        : "";
+      if (code === "LIMIT_FILE_SIZE") {
+        reject(new HttpError(413, "WEIGHT_GUARD_UPLOAD_TOO_LARGE"));
+        return;
+      }
+      reject(error);
+    });
+  });
+}
+
 export function serializeInitWeightProofRouteResult(result: Awaited<ReturnType<typeof initWeightProofCapture>>) {
   if (result.proof) {
     return {
@@ -242,13 +273,26 @@ export function serializeInitWeightProofRouteResult(result: Awaited<ReturnType<t
     };
   }
 
+  const upload = result.upload;
+  const isBackendMediated = upload?.uploadMode === "BACKEND_MEDIATED";
   return {
     status: result.created ? "CAPTURE_SESSION_CREATED" : "CAPTURE_SESSION_REUSED",
     captureSessionId: result.capture?.capture_session_id ?? null,
     awbNumber: result.capture?.awb_number ?? null,
-    uploadUrl: result.upload?.uploadUrl ?? null,
-    expiresAt: result.upload?.expiresAt ?? null,
-    requiredHeaders: serializeWeightProofUploadHeaders(result.upload?.headers)
+    uploadMode: upload?.uploadMode ?? null,
+    uploadEndpoint: upload && isBackendMediated && "uploadEndpoint" in upload ? upload.uploadEndpoint : null,
+    uploadUrl: upload && "uploadUrl" in upload ? upload.uploadUrl : null,
+    expiresAt: upload?.expiresAt ?? null,
+    requiredHeaders: isBackendMediated ? {} : serializeWeightProofUploadHeaders(upload?.headers)
+  };
+}
+
+export function serializeWeightProofUploadRouteResult(result: Awaited<ReturnType<typeof uploadWeightProofImage>>) {
+  return {
+    status: "UPLOAD_VERIFIED",
+    uploadVerified: result.uploadVerified,
+    proofStatus: result.proofStatus,
+    nextAction: result.nextAction
   };
 }
 
@@ -581,6 +625,29 @@ shippingNetworkRouter.post("/weight-proofs/init", async (req, res) => {
   return res.status(result.created ? 201 : 200).json(successEnvelope(
     result.created ? "Weight proof capture session created successfully." : "Weight proof capture session fetched successfully.",
     serializeInitWeightProofRouteResult(result)
+  ));
+});
+
+shippingNetworkRouter.post("/weight-proofs/upload", async (req, res) => {
+  await runWeightProofImageUpload(req, res);
+  const body = uploadWeightProofCaptureRouteSchema.parse({
+    capture_session_id: req.body?.capture_session_id ?? req.body?.captureSessionId ?? req.body?.session_id ?? req.body?.sessionId,
+    awb_number: req.body?.awb_number ?? req.body?.awbNumber
+  });
+  if (!req.file?.buffer) throw new HttpError(400, "WEIGHT_GUARD_UPLOAD_SESSION_INVALID");
+  const context = createWeightProofRouteContext(req);
+  const result = await uploadWeightProofImage({
+    captureSessionId: body.capture_session_id,
+    ...(body.awb_number ? { awbNumber: body.awb_number } : {}),
+    file: {
+      buffer: req.file.buffer,
+      contentType: req.file.mimetype,
+      sizeBytes: req.file.size
+    }
+  }, context);
+  return res.status(201).json(successEnvelope(
+    "Weight proof image uploaded successfully.",
+    serializeWeightProofUploadRouteResult(result)
   ));
 });
 

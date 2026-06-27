@@ -53,6 +53,11 @@ export const finalizeWeightProofCaptureRouteSchema = z.object({
   captured_at: z.coerce.date().optional()
 }).strict();
 
+export const uploadWeightProofCaptureRouteSchema = z.object({
+  capture_session_id: z.string().trim().min(1),
+  awb_number: awbNumberSchema.optional()
+}).strict();
+
 export const weightProofAwbRouteParamSchema = z.object({
   awbNumber: awbNumberSchema
 }).strict();
@@ -63,3 +68,4 @@ export type WeightProofDimensionsRequest = z.infer<typeof weightProofDimensionsS
 export type WeightProofAwbParam = z.infer<typeof weightProofAwbParamSchema>;
 export type InitWeightProofCaptureRouteRequest = z.infer<typeof initWeightProofCaptureRouteSchema>;
 export type FinalizeWeightProofCaptureRouteRequest = z.infer<typeof finalizeWeightProofCaptureRouteSchema>;
+export type UploadWeightProofCaptureRouteRequest = z.infer<typeof uploadWeightProofCaptureRouteSchema>;

@@ -14,6 +14,7 @@ import {
   calculateVolumetricWeightGrams,
   finalizeWeightProofCapture,
   initWeightProofCapture,
+  uploadWeightProofImage,
   validateWeightProofAwbNumber
 } from "./shipping-weight-proof.service.js";
 import {
@@ -103,13 +104,19 @@ function makeClient() {
   return client;
 }
 
-function makeContext(client: any, storage: any = new InMemoryWeightProofStorageAdapter(), options: { headObjectRetryDelaysMs?: number[] } = {}) {
+function makeContext(client: any, storage: any = new InMemoryWeightProofStorageAdapter(), options: {
+  headObjectRetryDelaysMs?: number[];
+  maxImageBytes?: number;
+  uploadMode?: "DIRECT_SIGNED_URL" | "BACKEND_MEDIATED";
+} = {}) {
   return {
     merchantId: "seller_123",
     storage,
     client,
     now: () => new Date("2026-06-22T10:00:00.000Z"),
     idFactory: () => "capture_123",
+    ...(options.maxImageBytes === undefined ? {} : { maxImageBytes: options.maxImageBytes }),
+    ...(options.uploadMode === undefined ? {} : { uploadMode: options.uploadMode }),
     headObjectRetryDelaysMs: options.headObjectRetryDelaysMs ?? []
   };
 }
@@ -143,6 +150,7 @@ function makeGcsAdapter(options: {
   getFiles?: (options: any) => Promise<[any[]]>;
   getSignedUrl?: (config: any) => Promise<[string]>;
   getMetadata?: () => Promise<[any]>;
+  save?: (data: Buffer | Uint8Array, options: any) => Promise<unknown>;
   iamSignBlobRequest?: (input: any) => Promise<any>;
   maxImageBytes?: number;
   runtimeSigner?: (input: any) => Promise<string>;
@@ -173,6 +181,11 @@ function makeGcsAdapter(options: {
           calls.push({ method: "getSignedUrl", objectKey, config });
           if (options.getSignedUrl) return options.getSignedUrl(config);
           return [`https://signed.example/gcs-${config.action}`];
+        },
+        save: async (data: Buffer | Uint8Array, config: any) => {
+          calls.push({ method: "save", objectKey, size: data.byteLength, config });
+          if (options.save) return options.save(data, config);
+          return undefined;
         },
         getMetadata: async () => {
           calls.push({ method: "getMetadata", objectKey });
@@ -256,7 +269,162 @@ describe("shipping weight proof foundation", () => {
     assert.equal(result.created, true);
     assert.equal(result.capture?.capture_session_id, "capture_123");
     assert.equal(result.upload?.method, "PUT");
-    assert.match(result.upload?.uploadUrl ?? "", /^mock:\/\/weight-proof-put\//);
+    assert.match(result.upload && "uploadUrl" in result.upload ? result.upload.uploadUrl : "", /^mock:\/\/weight-proof-put\//);
+  });
+
+  it("initializes a backend-mediated capture session without signed upload details", async () => {
+    const client = makeClient();
+    const result = await initWeightProofCapture({
+      awbNumber: "AWB_123",
+      contentType: "image/png",
+      expectedByteSize: 1024
+    }, makeContext(client, new InMemoryWeightProofStorageAdapter(), { uploadMode: "BACKEND_MEDIATED" }));
+
+    assert.equal(result.created, true);
+    assert.equal(result.upload?.uploadMode, "BACKEND_MEDIATED");
+    assert.equal(result.upload?.method, "POST");
+    assert.equal(result.upload && "uploadEndpoint" in result.upload ? result.upload.uploadEndpoint : "", "/api/v1/shipping/weight-proofs/upload");
+    assert.equal(result.upload && "uploadUrl" in result.upload ? result.upload.uploadUrl : undefined, undefined);
+    assert.deepEqual(result.upload?.headers, {});
+    assert.doesNotMatch(JSON.stringify(result.upload), /signed|uploadUrl|objectKey|imageObjectKey|storage[.]googleapis|private-weight-proofs/i);
+  });
+
+  it("uploads proof images through the backend and then finalizes", async () => {
+    const client = makeClient();
+    const storage = new InMemoryWeightProofStorageAdapter();
+    const context = makeContext(client, storage, { uploadMode: "BACKEND_MEDIATED" });
+    await initWeightProofCapture({ awbNumber: "AWB_123", contentType: "image/png" }, context);
+
+    const upload = await uploadWeightProofImage({
+      captureSessionId: "capture_123",
+      awbNumber: "AWB_123",
+      file: {
+        buffer: Buffer.from("safe-test-image"),
+        contentType: "image/png",
+        sizeBytes: Buffer.byteLength("safe-test-image")
+      }
+    }, context);
+
+    assert.equal(upload.uploadVerified, true);
+    assert.equal(upload.proofStatus, "UPLOAD_VERIFIED");
+    assert.equal(upload.nextAction, "FINALIZE");
+
+    const finalized = await finalizeWeightProofCapture({
+      captureSessionId: "capture_123",
+      awbNumber: "AWB_123",
+      declaredWeightGrams: 1000,
+      dimensions: { lengthCm: 10, widthCm: 20, heightCm: 30 }
+    }, context);
+
+    assert.equal(finalized.finalized, true);
+    assert.equal(finalized.proof.proof_status, "captured");
+  });
+
+  it("rejects backend upload attempts outside the owning seller scope", async () => {
+    const client = makeClient();
+    const context = makeContext(client, new InMemoryWeightProofStorageAdapter(), { uploadMode: "BACKEND_MEDIATED" });
+    await initWeightProofCapture({ awbNumber: "AWB_123" }, context);
+
+    await assert.rejects(() => uploadWeightProofImage({
+      captureSessionId: "capture_123",
+      awbNumber: "AWB_123",
+      file: {
+        buffer: Buffer.from("safe-test-image"),
+        contentType: "image/jpeg",
+        sizeBytes: Buffer.byteLength("safe-test-image")
+      }
+    }, { ...context, merchantId: "seller_other" }), (error) => {
+      assert.ok(error instanceof HttpError);
+      assert.equal(error.status, 403);
+      assert.equal(error.message, "WEIGHT_GUARD_UPLOAD_FORBIDDEN");
+      return true;
+    });
+  });
+
+  it("validates backend upload file type and size safely", async () => {
+    const client = makeClient();
+    const context = makeContext(client, new InMemoryWeightProofStorageAdapter(), {
+      uploadMode: "BACKEND_MEDIATED",
+      maxImageBytes: 4
+    });
+    await initWeightProofCapture({ awbNumber: "AWB_123", contentType: "image/jpeg" }, context);
+
+    await assert.rejects(() => uploadWeightProofImage({
+      captureSessionId: "capture_123",
+      awbNumber: "AWB_123",
+      file: {
+        buffer: Buffer.from("safe"),
+        contentType: "application/pdf",
+        sizeBytes: 4
+      }
+    }, context), /WEIGHT_GUARD_UNSUPPORTED_IMAGE_TYPE/);
+
+    await assert.rejects(() => uploadWeightProofImage({
+      captureSessionId: "capture_123",
+      awbNumber: "AWB_123",
+      file: {
+        buffer: Buffer.from("too-large"),
+        contentType: "image/jpeg",
+        sizeBytes: 9
+      }
+    }, context), /WEIGHT_GUARD_UPLOAD_TOO_LARGE/);
+  });
+
+  it("keeps backend upload responses seller-safe", async () => {
+    const client = makeClient();
+    const storage = new InMemoryWeightProofStorageAdapter();
+    const context = makeContext(client, storage, { uploadMode: "BACKEND_MEDIATED" });
+    await initWeightProofCapture({ awbNumber: "AWB_123" }, context);
+
+    const upload = await uploadWeightProofImage({
+      captureSessionId: "capture_123",
+      awbNumber: "AWB_123",
+      file: {
+        buffer: Buffer.from("safe-test-image"),
+        contentType: "image/jpeg",
+        sizeBytes: Buffer.byteLength("safe-test-image")
+      }
+    }, context);
+
+    const text = JSON.stringify(upload);
+    assert.doesNotMatch(text, /weight-proofs\/seller_123|imageObjectKey|image_object_key|objectKey|private-weight-proofs|storage[.]googleapis|signed/i);
+  });
+
+  it("fails backend upload safely when metadata verification does not confirm the object", async () => {
+    const client = makeClient();
+    const storage = {
+      createPresignedPutUrl: async () => ({
+        uploadUrl: "mock://weight-proof-put/backend-upload",
+        method: "PUT" as const,
+        headers: { "content-type": "image/jpeg" },
+        expiresAt: new Date("2026-06-22T10:15:00.000Z")
+      }),
+      putObject: async () => ({ exists: true }),
+      headObject: async () => ({ exists: false }),
+      createPresignedGetUrl: async () => ({
+        downloadUrl: "mock://weight-proof-get/backend-upload",
+        expiresAt: new Date("2026-06-22T10:15:00.000Z")
+      })
+    };
+    const context = makeContext(client, storage, { uploadMode: "BACKEND_MEDIATED" });
+    await initWeightProofCapture({ awbNumber: "AWB_123" }, context);
+
+    await assert.rejects(() => uploadWeightProofImage({
+      captureSessionId: "capture_123",
+      awbNumber: "AWB_123",
+      file: {
+        buffer: Buffer.from("safe-test-image"),
+        contentType: "image/jpeg",
+        sizeBytes: Buffer.byteLength("safe-test-image")
+      }
+    }, context), (error) => {
+      assert.ok(error instanceof HttpError);
+      assert.equal(error.status, 503);
+      assert.equal(error.message, "WEIGHT_GUARD_UPLOAD_NOT_VERIFIED");
+      const text = JSON.stringify(error);
+      assert.doesNotMatch(text, /weight-proofs\/seller_123|imageObjectKey|image_object_key|private-weight-proofs|storage[.]googleapis|signed/i);
+      return true;
+    });
   });
 
   it("rejects finalize when the uploaded object is missing", async () => {
@@ -477,9 +645,12 @@ describe("shipping weight proof foundation", () => {
 
   it("wires authenticated shipping routes for proof capture", () => {
     const routes = readFileSync("src/modules/shippingNetwork/shipping-network.routes.ts", "utf8");
+    const rootRoutes = readFileSync("src/routes/index.ts", "utf8");
     assert.match(routes, /shippingNetworkRouter\.post\("\/weight-proofs\/init"/);
+    assert.match(routes, /shippingNetworkRouter\.post\("\/weight-proofs\/upload"/);
     assert.match(routes, /shippingNetworkRouter\.post\("\/weight-proofs\/finalize"/);
     assert.match(routes, /shippingNetworkRouter\.get\("\/weight-proofs\/:awbNumber"/);
+    assert.match(rootRoutes, /apiRouter\.use\("\/shipping", requireJwtAuth, shippingNetworkRouter\)/);
   });
 
   it("builds route service context from authenticated merchant scope", () => {
@@ -509,6 +680,33 @@ describe("shipping weight proof foundation", () => {
     assert.equal(context.storage, storage);
     assert.equal(context.client, client);
     assert.equal(context.uploadTtlMs, 600000);
+    assert.equal(context.maxImageBytes, 1024);
+    assert.equal(context.uploadMode, "DIRECT_SIGNED_URL");
+  });
+
+  it("uses backend-mediated route context for GCS storage", () => {
+    const client = makeClient();
+    const storage = new InMemoryWeightProofStorageAdapter();
+    const request = {
+      auth: { merchantId: "seller_auth_scope" },
+      app: {
+        locals: {
+          weightProofStorageRuntime: {
+            enabled: true,
+            provider: "gcs",
+            storage,
+            uploadTtlMs: 600000,
+            signedGetTtlMs: 300000,
+            maxImageBytes: 1024
+          },
+          weightProofClient: client
+        }
+      }
+    } as unknown as Request;
+
+    const context = createWeightProofRouteContext(request);
+    assert.equal(context.uploadMode, "BACKEND_MEDIATED");
+    assert.equal(context.maxImageBytes, 1024);
   });
 
   it("returns a safe disabled storage error before live route work", () => {
@@ -556,6 +754,24 @@ describe("shipping weight proof foundation", () => {
     assert.match(String(routeResponse.uploadUrl), /^mock:\/\/weight-proof-put\//);
     assert.deepEqual(routeResponse.requiredHeaders, { "Content-Type": "image/png" });
     assert.doesNotMatch(JSON.stringify(routeResponse), /weight-proofs\/seller_123|imageObjectKey|image_object_key/i);
+  });
+
+  it("serializes backend-mediated route init without signed upload URL fields", async () => {
+    const client = makeClient();
+    const result = await initWeightProofCapture({
+      awbNumber: "AWB_ROUTE",
+      contentType: "image/png",
+      expectedByteSize: 100
+    }, makeContext(client, new InMemoryWeightProofStorageAdapter(), { uploadMode: "BACKEND_MEDIATED" }));
+    const routeResponse = serializeInitWeightProofRouteResult(result);
+    const text = JSON.stringify(routeResponse);
+
+    assert.equal(routeResponse.status, "CAPTURE_SESSION_CREATED");
+    assert.equal(routeResponse.uploadMode, "BACKEND_MEDIATED");
+    assert.equal(routeResponse.uploadEndpoint, "/api/v1/shipping/weight-proofs/upload");
+    assert.equal(routeResponse.uploadUrl, null);
+    assert.deepEqual(routeResponse.requiredHeaders, {});
+    assert.doesNotMatch(text, /weight-proofs\/seller_123|imageObjectKey|image_object_key|private-weight-proofs|storage[.]googleapis|signed/i);
   });
 
   it("finalizes through route shape without exposing storage fields", async () => {

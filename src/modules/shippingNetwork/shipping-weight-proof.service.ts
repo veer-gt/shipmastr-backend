@@ -7,6 +7,7 @@ import { getSellerShipment } from "./shipping-shipments.service.js";
 import {
   buildWeightProofObjectKey,
   getWeightProofObjectKeyDiagnostics,
+  normalizeWeightProofContentType,
   type WeightProofStorageAdapter
 } from "./shipping-weight-proof-storage.js";
 import {
@@ -39,12 +40,26 @@ export type FinalizeWeightProofCaptureInput = {
   capturedAt?: Date | undefined;
 };
 
+export type UploadWeightProofImageInput = {
+  captureSessionId: string;
+  awbNumber?: string | undefined;
+  file: {
+    buffer: Buffer;
+    contentType?: string | undefined;
+    sizeBytes: number;
+  };
+};
+
+export type WeightProofUploadMode = "DIRECT_SIGNED_URL" | "BACKEND_MEDIATED";
+
 export type WeightProofServiceContext = {
   merchantId: string;
   storage: WeightProofStorageAdapter;
   client?: Db | undefined;
   now?: (() => Date) | undefined;
   uploadTtlMs?: number | undefined;
+  maxImageBytes?: number | undefined;
+  uploadMode?: WeightProofUploadMode | undefined;
   idFactory?: (() => string) | undefined;
   headObjectRetryDelaysMs?: number[] | undefined;
 };
@@ -82,10 +97,26 @@ function validateContentType(value: string | null | undefined) {
   return contentType;
 }
 
+function validateUploadImageContentType(value: string | null | undefined) {
+  try {
+    return normalizeWeightProofContentType(value ?? undefined);
+  } catch {
+    throw new HttpError(400, "WEIGHT_GUARD_UNSUPPORTED_IMAGE_TYPE");
+  }
+}
+
 function validateExpectedByteSize(value: number | null | undefined) {
   if (value === undefined || value === null) return null;
   if (!Number.isInteger(value) || value <= 0) throw new HttpError(400, "WEIGHT_PROOF_EXPECTED_SIZE_INVALID");
   return value;
+}
+
+function validateUploadImageSize(value: number, context: WeightProofServiceContext) {
+  const sizeBytes = Number(value);
+  if (!Number.isInteger(sizeBytes) || sizeBytes <= 0) throw new HttpError(400, "WEIGHT_GUARD_UPLOAD_SESSION_INVALID");
+  const maxImageBytes = context.maxImageBytes ?? 10 * 1024 * 1024;
+  if (sizeBytes > maxImageBytes) throw new HttpError(413, "WEIGHT_GUARD_UPLOAD_TOO_LARGE");
+  return sizeBytes;
 }
 
 export function validateWeightProofAwbNumber(awbNumber: string) {
@@ -217,6 +248,35 @@ async function verifyUploadedObject(context: WeightProofServiceContext, objectKe
   ));
 }
 
+async function createUploadInstruction(input: {
+  context: WeightProofServiceContext;
+  objectKey: string;
+  contentType: string;
+  expectedByteSize: number | null;
+  expiresAt: Date;
+}) {
+  if (input.context.uploadMode === "BACKEND_MEDIATED") {
+    return {
+      uploadMode: "BACKEND_MEDIATED" as const,
+      uploadEndpoint: "/api/v1/shipping/weight-proofs/upload",
+      method: "POST" as const,
+      headers: {},
+      expiresAt: input.expiresAt
+    };
+  }
+
+  const direct = await input.context.storage.createPresignedPutUrl({
+    objectKey: input.objectKey,
+    contentType: input.contentType,
+    expectedByteSize: input.expectedByteSize,
+    expiresAt: input.expiresAt
+  });
+  return {
+    uploadMode: "DIRECT_SIGNED_URL" as const,
+    ...direct
+  };
+}
+
 export async function initWeightProofCapture(input: InitWeightProofCaptureInput, context: WeightProofServiceContext) {
   const client = db(context);
   const merchantId = requireMerchantId(context.merchantId);
@@ -251,7 +311,8 @@ export async function initWeightProofCapture(input: InitWeightProofCaptureInput,
     orderBy: { createdAt: "desc" }
   });
   if (existingSession) {
-    const upload = await context.storage.createPresignedPutUrl({
+    const upload = await createUploadInstruction({
+      context,
       objectKey: existingSession.imageObjectKey,
       contentType: existingSession.contentType,
       expectedByteSize: existingSession.expectedByteSize,
@@ -289,7 +350,8 @@ export async function initWeightProofCapture(input: InitWeightProofCaptureInput,
       expiresAt
     }
   });
-  const upload = await context.storage.createPresignedPutUrl({
+  const upload = await createUploadInstruction({
+    context,
     objectKey: session.imageObjectKey,
     contentType: session.contentType,
     expectedByteSize: session.expectedByteSize,
@@ -302,6 +364,47 @@ export async function initWeightProofCapture(input: InitWeightProofCaptureInput,
     proof: null,
     capture: serializeWeightProofCaptureSession(session),
     upload
+  };
+}
+
+export async function uploadWeightProofImage(input: UploadWeightProofImageInput, context: WeightProofServiceContext) {
+  const client = db(context);
+  const merchantId = requireMerchantId(context.merchantId);
+  const captureSessionId = String(input.captureSessionId ?? "").trim();
+  if (!captureSessionId) throw new HttpError(400, "WEIGHT_GUARD_UPLOAD_SESSION_INVALID");
+  const session = await client.shippingWeightProofCaptureSession.findFirst({
+    where: {
+      id: captureSessionId
+    }
+  });
+  if (!session) throw new HttpError(404, "WEIGHT_GUARD_UPLOAD_SESSION_INVALID");
+  if (session.merchantId !== merchantId) throw new HttpError(403, "WEIGHT_GUARD_UPLOAD_FORBIDDEN");
+  const awbNumber = validateWeightProofAwbNumber(input.awbNumber ?? session.awbNumber);
+  if (session.awbNumber !== awbNumber) throw new HttpError(409, "WEIGHT_GUARD_UPLOAD_SESSION_INVALID");
+  if (session.status !== WeightProofCaptureStatus.CREATED) throw new HttpError(409, "WEIGHT_GUARD_UPLOAD_SESSION_INVALID");
+  if (session.expiresAt.getTime() <= now(context).getTime()) {
+    await client.shippingWeightProofCaptureSession.update({
+      where: { id: session.id },
+      data: { status: WeightProofCaptureStatus.EXPIRED }
+    });
+    throw new HttpError(409, "WEIGHT_GUARD_UPLOAD_SESSION_INVALID");
+  }
+  if (!input.file?.buffer) throw new HttpError(400, "WEIGHT_GUARD_UPLOAD_SESSION_INVALID");
+  const contentType = validateUploadImageContentType(input.file.contentType ?? session.contentType);
+  if (session.contentType !== contentType) throw new HttpError(400, "WEIGHT_GUARD_UNSUPPORTED_IMAGE_TYPE");
+  const sizeBytes = validateUploadImageSize(input.file.sizeBytes, context);
+  await context.storage.putObject({
+    objectKey: session.imageObjectKey,
+    body: input.file.buffer,
+    contentType,
+    sizeBytes
+  });
+  const object = await verifyUploadedObject(context, session.imageObjectKey);
+  if (!object.exists) throw new HttpError(503, "WEIGHT_GUARD_UPLOAD_NOT_VERIFIED");
+  return {
+    uploadVerified: true,
+    proofStatus: "UPLOAD_VERIFIED",
+    nextAction: "FINALIZE"
   };
 }
 
