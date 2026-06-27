@@ -166,7 +166,17 @@ export type GcsMediaUploadRequest = (input: {
   body: Buffer;
   contentType: string;
   sizeBytes: number;
-}) => Promise<{ ok: boolean; status: number }>;
+}) => Promise<{
+  ok: boolean;
+  status: number;
+  metadata?: {
+    name?: string | undefined;
+    size?: string | number | undefined;
+    contentType?: string | undefined;
+    updated?: string | Date | undefined;
+    timeCreated?: string | Date | undefined;
+  } | null | undefined;
+}>;
 export type GcsIamSignBlobRequest = (input: {
   url: string;
   accessToken: string;
@@ -715,9 +725,22 @@ async function defaultGcsMediaUploadRequest(input: Parameters<GcsMediaUploadRequ
     },
     body: uploadBody
   });
+  const metadata = await response.json().catch(() => null);
   return {
     ok: response.ok,
-    status: response.status
+    status: response.status,
+    metadata
+  };
+}
+
+function headObjectFromGcsMetadata(metadata: Awaited<ReturnType<GcsMediaUploadRequest>>["metadata"], expectedObjectKey: string): HeadObjectResult | null {
+  if (!metadata || (metadata.name && metadata.name !== expectedObjectKey)) return null;
+  const updatedAt = metadata.updated ?? metadata.timeCreated;
+  return {
+    exists: true,
+    contentLength: metadata.size === undefined ? null : Number(metadata.size),
+    contentType: metadata.contentType ?? null,
+    updatedAt: updatedAt ? new Date(updatedAt) : null
   };
 }
 
@@ -1101,6 +1124,7 @@ export class GcsWeightProofStorageAdapter implements WeightProofStorageAdapter {
     const contentType = normalizeWeightProofContentType(input.contentType);
     const body = normalizeBackendUploadBody(input.body);
     validateBackendUploadSizeForStorage(input.sizeBytes, this.maxImageBytes);
+    let uploadedObject: HeadObjectResult | null = null;
     try {
       const accessToken = await this.resolveRuntimeAccessToken();
       const result = await this.mediaUploadRequest({
@@ -1111,9 +1135,12 @@ export class GcsWeightProofStorageAdapter implements WeightProofStorageAdapter {
         sizeBytes: input.sizeBytes
       });
       if (!result.ok) throw new Error(`GCS_MEDIA_UPLOAD_STATUS_${result.status}`);
+      uploadedObject = headObjectFromGcsMetadata(result.metadata, objectKey);
     } catch {
       throw new HttpError(503, "BACKEND_UPLOAD_STORAGE_PUT_FAILED");
     }
+
+    if (uploadedObject?.exists) return uploadedObject;
 
     try {
       const object = await this.headObject({ objectKey });

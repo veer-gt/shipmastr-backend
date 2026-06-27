@@ -151,7 +151,7 @@ function makeGcsAdapter(options: {
   getFiles?: (options: any) => Promise<[any[]]>;
   getSignedUrl?: (config: any) => Promise<[string]>;
   getMetadata?: () => Promise<[any]>;
-  mediaUploadRequest?: (input: any) => Promise<{ ok: boolean; status: number }>;
+  mediaUploadRequest?: (input: any) => Promise<{ ok: boolean; status: number; metadata?: any }>;
   save?: (data: Buffer | Uint8Array, options: any) => Promise<unknown>;
   iamSignBlobRequest?: (input: any) => Promise<any>;
   maxImageBytes?: number;
@@ -179,7 +179,16 @@ function makeGcsAdapter(options: {
         sizeBytes: input.sizeBytes
       });
       if (options.mediaUploadRequest) return options.mediaUploadRequest(input);
-      return { ok: true, status: 200 };
+      return {
+        ok: true,
+        status: 200,
+        metadata: {
+          name: String(new URL(input.url).searchParams.get("name") ?? ""),
+          size: String(input.sizeBytes),
+          contentType: input.contentType,
+          updated: "2026-06-22T10:06:00.000Z"
+        }
+      };
     },
     runtimeSigner: options.runtimeSigner,
     serviceAccountEmailResolver: options.serviceAccountEmailResolver,
@@ -2040,7 +2049,7 @@ describe("shipping weight proof foundation", () => {
       sizeBytes: Buffer.byteLength("safe-test-image")
     });
     assert.equal(uploaded.exists, true);
-    assert.deepEqual(success.calls.map((call) => call.method), ["mediaUpload", "getMetadata"]);
+    assert.deepEqual(success.calls.map((call) => call.method), ["mediaUpload"]);
 
     const putFailed = makeGcsAdapter({
       accessTokenProvider: async () => "test-access-token",
@@ -2058,6 +2067,7 @@ describe("shipping weight proof foundation", () => {
 
     const metadataFailed = makeGcsAdapter({
       accessTokenProvider: async () => "test-access-token",
+      mediaUploadRequest: async () => ({ ok: true, status: 200, metadata: null }),
       getMetadata: async () => {
         throw Object.assign(new Error("not found"), { code: 404 });
       }
