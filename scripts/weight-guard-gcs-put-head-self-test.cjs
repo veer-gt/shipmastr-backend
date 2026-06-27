@@ -1,6 +1,7 @@
 #!/usr/bin/env node
 
 const { existsSync } = require("node:fs");
+const { createHash } = require("node:crypto");
 const path = require("node:path");
 const { pathToFileURL } = require("node:url");
 const dotenv = require("dotenv");
@@ -9,6 +10,7 @@ dotenv.config();
 
 const APPROVAL_FLAG = "YES_I_APPROVE_STAGING_GCS_DIAGNOSTIC_UPLOAD";
 const OPERATION = "put_head_self_test";
+const METADATA_SERVICE_ACCOUNT_EMAIL_URL = "http://metadata.google.internal/computeMetadata/v1/instance/service-accounts/default/email";
 const DIAGNOSTIC_PNG = Buffer.from(
   "iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAADUlEQVR42mP8z8BQDwAFgwJ/lc9V7wAAAABJRU5ErkJggg==",
   "base64"
@@ -29,6 +31,28 @@ function booleanTrue(value) {
 function stringValue(value) {
   const trimmed = String(value ?? "").trim();
   return trimmed || "";
+}
+
+function triState(value) {
+  if (value === true || value === false) return value;
+  if (value === "true") return true;
+  if (value === "false") return false;
+  return "unknown";
+}
+
+function hashIdentity(value) {
+  const normalized = String(value ?? "").trim().toLowerCase();
+  if (!normalized) return null;
+  return createHash("sha256").update(normalized).digest("hex").slice(0, 16);
+}
+
+function safeErrorCode(value) {
+  if (value === null || value === undefined) return null;
+  const text = String(value).trim();
+  if (!text) return null;
+  if (/^[0-9]{3,6}$/.test(text)) return text;
+  if (/^[A-Z0-9_:-]{1,80}$/.test(text) && !/[@/\\.?=&]/.test(text)) return text;
+  return null;
 }
 
 function assertPutHeadSelfTestSafety(source = process.env) {
@@ -99,6 +123,162 @@ function safeErrorCategory(error) {
   return "UNKNOWN_PUT_HEAD_FAILURE";
 }
 
+function officialFailureText(diagnostic, error) {
+  return [
+    diagnostic?.category,
+    diagnostic?.sanitizedMessage,
+    diagnostic?.errorName,
+    diagnostic?.errorClass,
+    diagnostic?.errorCode,
+    error?.code,
+    error?.status,
+    error?.name,
+    error?.message
+  ].filter(Boolean).map(String).join(" ").toLowerCase();
+}
+
+function classifyOfficialGetSignedUrlFailure(diagnostic, error) {
+  const joined = officialFailureText(diagnostic, error);
+
+  if (
+    (joined.includes("iamcredentials.googleapis.com") || joined.includes("service account credentials api") || joined.includes("serviceusage"))
+    && (joined.includes("disabled") || joined.includes("not enabled") || joined.includes("has not been used"))
+  ) {
+    return "SERVICE_ACCOUNT_CREDENTIALS_API_DISABLED";
+  }
+
+  if (
+    (joined.includes("signblob") || joined.includes("sign blob") || joined.includes("iam.serviceaccounts.signblob"))
+    && (joined.includes("denied") || joined.includes("permission") || joined.includes("403") || joined.includes("forbidden"))
+  ) {
+    return "IAM_SIGN_BLOB_DENIED";
+  }
+
+  if (
+    (joined.includes("client_email") || joined.includes("service account email") || joined.includes("signer email") || joined.includes("metadata email"))
+    && (joined.includes("missing") || joined.includes("unavailable") || joined.includes("not found") || joined.includes("could not"))
+  ) {
+    return "SIGNER_EMAIL_UNAVAILABLE";
+  }
+
+  if (
+    joined.includes("private_key")
+    || joined.includes("private key")
+    || joined.includes("cannot sign")
+    || joined.includes("no signer")
+    || joined.includes("missing signer")
+    || joined.includes("signing without")
+  ) {
+    return "NO_PRIVATE_KEY_OR_SIGNER";
+  }
+
+  if (
+    (joined.includes("mismatch") || joined.includes("does not match") || joined.includes("invalid_grant"))
+    && (joined.includes("signer") || joined.includes("service account"))
+  ) {
+    return "SIGNING_SERVICE_ACCOUNT_MISMATCH";
+  }
+
+  if (
+    joined.includes("storage.objects.create")
+    || (joined.includes("object create") && (joined.includes("denied") || joined.includes("permission") || joined.includes("403")))
+  ) {
+    return "STORAGE_OBJECT_CREATE_PERMISSION_MISSING";
+  }
+
+  if (
+    joined.includes("storage.objects.get")
+    || joined.includes("storage.objects.list")
+    || ((joined.includes("object get") || joined.includes("object list")) && (joined.includes("denied") || joined.includes("permission") || joined.includes("403")))
+  ) {
+    return "STORAGE_OBJECT_GET_PERMISSION_MISSING";
+  }
+
+  if (
+    joined.includes("invalid")
+    || joined.includes("expires")
+    || joined.includes("contenttype")
+    || joined.includes("content-type")
+    || joined.includes("argument")
+    || joined.includes("config")
+    || joined.includes("action")
+  ) {
+    return "OFFICIAL_GET_SIGNED_URL_CONFIG_INVALID";
+  }
+
+  return "UNKNOWN_SIGNED_URL_FAILURE";
+}
+
+function likelyPermissionValues(category) {
+  return {
+    serviceAccountCredentialsApiLikely: category === "SERVICE_ACCOUNT_CREDENTIALS_API_DISABLED" ? false : "unknown",
+    signBlobLikelyAllowed: category === "IAM_SIGN_BLOB_DENIED" ? false : "unknown",
+    storageCreateLikelyAllowed: category === "STORAGE_OBJECT_CREATE_PERMISSION_MISSING" ? false : "unknown",
+    storageGetLikelyAllowed: category === "STORAGE_OBJECT_GET_PERMISSION_MISSING" ? false : "unknown"
+  };
+}
+
+async function resolveRuntimeServiceAccountEmail(options = {}) {
+  if (typeof options.metadataEmailResolver === "function") {
+    const email = await options.metadataEmailResolver();
+    return stringValue(email);
+  }
+
+  const fetchImpl = options.fetchImpl ?? globalThis.fetch;
+  if (typeof fetchImpl !== "function") return "";
+
+  const controller = typeof AbortController === "function" ? new AbortController() : null;
+  const timer = controller ? setTimeout(() => controller.abort(), options.timeoutMs ?? 1000) : null;
+  try {
+    const response = await fetchImpl(METADATA_SERVICE_ACCOUNT_EMAIL_URL, {
+      headers: { "Metadata-Flavor": "Google" },
+      signal: controller?.signal
+    });
+    if (!response?.ok || typeof response.text !== "function") return "";
+    return stringValue(await response.text());
+  } catch {
+    return "";
+  } finally {
+    if (timer) clearTimeout(timer);
+  }
+}
+
+async function buildRuntimeIdentityDiagnostics(source, options = {}) {
+  const explicitSigner = stringValue(source.WEIGHT_GUARD_GCS_SIGNING_SERVICE_ACCOUNT);
+  const runtimeEmail = await resolveRuntimeServiceAccountEmail(options).catch(() => "");
+  const runtimeServiceAccountHash = hashIdentity(runtimeEmail);
+  const explicitSigningServiceAccountHash = hashIdentity(explicitSigner);
+  return {
+    runtimeServiceAccountHash,
+    explicitSigningServiceAccountHash,
+    sameSignerHash: runtimeServiceAccountHash && explicitSigningServiceAccountHash
+      ? runtimeServiceAccountHash === explicitSigningServiceAccountHash
+      : "unknown",
+    signerEmailPresent: Boolean(explicitSigner || runtimeEmail),
+    metadataEmailNeeded: !Boolean(explicitSigner),
+    adcAvailable: runtimeEmail ? true : "unknown"
+  };
+}
+
+function buildOfficialSigningFailureDiagnostics({ source, diagnostic, error, runtimeIdentity }) {
+  const errorCategory = classifyOfficialGetSignedUrlFailure(diagnostic, error);
+  return {
+    errorCategory,
+    errorCode: safeErrorCode(diagnostic?.errorCode ?? error?.code ?? error?.status),
+    hasMessage: Boolean(diagnostic?.sanitizedMessage || error?.message),
+    hasStack: false,
+    signerConfigured: Boolean(stringValue(source.WEIGHT_GUARD_GCS_SIGNING_SERVICE_ACCOUNT)),
+    adcAvailable: triState(runtimeIdentity?.adcAvailable),
+    explicitSignerConfigured: Boolean(stringValue(source.WEIGHT_GUARD_GCS_SIGNING_SERVICE_ACCOUNT)),
+    ...likelyPermissionValues(errorCategory),
+    runtimeServiceAccountHash: runtimeIdentity?.runtimeServiceAccountHash ?? null,
+    explicitSigningServiceAccountHash: runtimeIdentity?.explicitSigningServiceAccountHash ?? null,
+    sameSignerHash: triState(runtimeIdentity?.sameSignerHash),
+    signerEmailPresent: Boolean(runtimeIdentity?.signerEmailPresent),
+    metadataEmailNeeded: Boolean(runtimeIdentity?.metadataEmailNeeded)
+  };
+}
+
 function buildSafeOutput(input = {}) {
   return {
     signedUrlGenerated: Boolean(input.signedUrlGenerated),
@@ -121,7 +301,22 @@ function buildSafeOutput(input = {}) {
     sameObjectKeyHash: Boolean(input.sameObjectKeyHash),
     requiredHeadersUsed: Boolean(input.requiredHeadersUsed),
     errorCategory: input.errorCategory || "none",
-    classification: input.classification || input.errorCategory || "none"
+    classification: input.classification || input.errorCategory || "none",
+    errorCode: input.errorCode ?? null,
+    hasMessage: Boolean(input.hasMessage),
+    hasStack: false,
+    signerConfigured: Boolean(input.signerConfigured),
+    adcAvailable: triState(input.adcAvailable),
+    explicitSignerConfigured: Boolean(input.explicitSignerConfigured),
+    serviceAccountCredentialsApiLikely: triState(input.serviceAccountCredentialsApiLikely),
+    signBlobLikelyAllowed: triState(input.signBlobLikelyAllowed),
+    storageCreateLikelyAllowed: triState(input.storageCreateLikelyAllowed),
+    storageGetLikelyAllowed: triState(input.storageGetLikelyAllowed),
+    runtimeServiceAccountHash: input.runtimeServiceAccountHash ?? null,
+    explicitSigningServiceAccountHash: input.explicitSigningServiceAccountHash ?? null,
+    sameSignerHash: triState(input.sameSignerHash),
+    signerEmailPresent: Boolean(input.signerEmailPresent),
+    metadataEmailNeeded: Boolean(input.metadataEmailNeeded)
   };
 }
 
@@ -344,6 +539,10 @@ async function runPutHeadSelfTest(options = {}) {
     xGoogStoredContentLengthPresent: false,
     contentLengthResponseHeaderPresent: false
   };
+  const runtimeIdentity = await buildRuntimeIdentityDiagnostics(source, {
+    metadataEmailResolver: options.metadataEmailResolver,
+    fetchImpl: options.metadataFetch
+  });
 
   try {
     const result = await adapter.createPresignedPutUrl({
@@ -430,7 +629,15 @@ async function runPutHeadSelfTest(options = {}) {
         && rawObjectDiagnostics.objectKeyHash === signedPathDiagnostics.signedPathKeyHash
         && rawObjectDiagnostics.objectKeyHash === headObjectDiagnostics.objectKeyHash
     );
-    const classification = classifyPutHeadDiagnostic({
+    const officialSigningFailure = !signedUrlGenerated
+      ? buildOfficialSigningFailureDiagnostics({
+        source,
+        diagnostic: diagnostics.at(-1) ?? null,
+        error,
+        runtimeIdentity
+      })
+      : null;
+    const classification = officialSigningFailure?.errorCategory ?? classifyPutHeadDiagnostic({
       putOk,
       putResponseFacts,
       metadataCandidateResults,
@@ -450,7 +657,8 @@ async function runPutHeadSelfTest(options = {}) {
       sameObjectKeyHash,
       requiredHeadersUsed,
       errorCategory: classification === "GCS_OBJECT_KEY_VARIANT_IDENTIFIED" ? "none" : classification,
-      classification
+      classification,
+      ...officialSigningFailure
     });
     write(JSON.stringify(output, null, 2));
     if (options.throwOnFailure) throw new Error(redactSelfTestText(error?.message ?? error, source));
@@ -477,6 +685,10 @@ module.exports = {
   buildSafeOutput,
   redactSelfTestText,
   runPutHeadSelfTest,
+  buildOfficialSigningFailureDiagnostics,
+  buildRuntimeIdentityDiagnostics,
+  classifyOfficialGetSignedUrlFailure,
+  hashIdentity,
   safeErrorCategory,
   safeUploadHeaders
 };

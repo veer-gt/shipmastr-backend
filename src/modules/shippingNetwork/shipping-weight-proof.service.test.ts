@@ -913,6 +913,7 @@ describe("shipping weight proof foundation", () => {
           }
         },
         now: new Date("2026-06-22T10:06:00.000Z"),
+        metadataEmailResolver: async () => "metadata-runner@example.iam.gserviceaccount.com",
         write: (line: string) => writes.push(line)
       });
 
@@ -988,6 +989,7 @@ describe("shipping weight proof foundation", () => {
           ]
         },
         now: new Date("2026-06-22T10:06:00.000Z"),
+        metadataEmailResolver: async () => "metadata-runner@example.iam.gserviceaccount.com",
         write: (line: string) => writes.push(line)
       });
 
@@ -1059,6 +1061,7 @@ describe("shipping weight proof foundation", () => {
           listObjectKeyDiagnosticsByPrefix: async () => []
         },
         now: new Date("2026-06-22T10:06:00.000Z"),
+        metadataEmailResolver: async () => "metadata-runner@example.iam.gserviceaccount.com",
         write: (line: string) => writes.push(line)
       });
 
@@ -1075,6 +1078,89 @@ describe("shipping weight proof foundation", () => {
     } finally {
       globalThis.fetch = originalFetch;
     }
+  });
+
+  it("classifies official GCS signed URL failure without leaking signer or object details", async () => {
+    const writes: string[] = [];
+    const output = await putHeadSelfTestScript.runPutHeadSelfTest({
+      source: {
+        WEIGHT_GUARD_GCS_PUT_HEAD_SELF_TEST: putHeadSelfTestScript.APPROVAL_FLAG,
+        WEIGHT_GUARD_PROOF_STORAGE_ENABLED: "true",
+        WEIGHT_GUARD_STORAGE_PROVIDER: "gcs",
+        WEIGHT_GUARD_GCS_BUCKET: "private-weight-proofs",
+        WEIGHT_GUARD_GCS_PROJECT_ID: "shipmastr-core-prod",
+        WEIGHT_GUARD_GCS_SIGNING_SERVICE_ACCOUNT: "shipmastr-runner@example.iam.gserviceaccount.com",
+        APP_ENV: "staging"
+      },
+      storageModule: {
+        buildWeightGuardDiagnosticObjectKey,
+        buildGcsXmlPathStyleObjectPath,
+        getGcsSignedUrlObjectPathDiagnostics,
+        getWeightProofObjectKeyPrefix,
+        getWeightProofObjectKeyDiagnostics,
+        resolveGcsWeightProofStorageConfig
+      },
+      adapter: {
+        createPresignedPutUrl: async () => {
+          throw Object.assign(
+            new Error("iam.serviceAccounts.signBlob denied for shipmastr-runner@example.iam.gserviceaccount.com on https://storage.googleapis.com/private-weight-proofs/weight-guard-diagnostics/put_head_1780000000000.png?X-Goog-Signature=unsafe"),
+            { code: 403 }
+          );
+        },
+        headObject: async () => ({ exists: false }),
+        listObjectKeyDiagnosticsByPrefix: async () => []
+      },
+      now: new Date("2026-06-22T10:06:00.000Z"),
+      metadataEmailResolver: async () => "metadata-runner@example.iam.gserviceaccount.com",
+      write: (line: string) => writes.push(line)
+    });
+
+    assert.equal(output.signedUrlGenerated, false);
+    assert.equal(output.putOk, false);
+    assert.equal(output.errorCategory, "IAM_SIGN_BLOB_DENIED");
+    assert.equal(output.classification, "IAM_SIGN_BLOB_DENIED");
+    assert.equal(output.errorCode, "403");
+    assert.equal(output.hasMessage, true);
+    assert.equal(output.hasStack, false);
+    assert.equal(output.signerConfigured, true);
+    assert.equal(output.explicitSignerConfigured, true);
+    assert.equal(output.adcAvailable, true);
+    assert.equal(output.signBlobLikelyAllowed, false);
+    assert.equal(output.storageCreateLikelyAllowed, "unknown");
+    assert.equal(output.storageGetLikelyAllowed, "unknown");
+    assert.match(String(output.runtimeServiceAccountHash), /^[a-f0-9]{16}$/);
+    assert.match(String(output.explicitSigningServiceAccountHash), /^[a-f0-9]{16}$/);
+    assert.equal(output.sameSignerHash, false);
+    assert.equal(output.signerEmailPresent, true);
+    assert.equal(output.metadataEmailNeeded, false);
+    const text = writes.join("\n");
+    assert.doesNotMatch(text, /shipmastr-runner@example|metadata-runner@example|private-weight-proofs|shipmastr-core-prod|storage[.]googleapis[.]com|weight-guard-diagnostics\/|X-Goog-Signature|https?:\/\//i);
+  });
+
+  it("maps official GCS signing failures into specific safe categories", () => {
+    assert.equal(
+      putHeadSelfTestScript.classifyOfficialGetSignedUrlFailure(
+        { sanitizedMessage: "iamcredentials.googleapis.com API has not been used in project and is disabled" },
+        null
+      ),
+      "SERVICE_ACCOUNT_CREDENTIALS_API_DISABLED"
+    );
+    assert.equal(
+      putHeadSelfTestScript.classifyOfficialGetSignedUrlFailure(null, new Error("client_email missing; service account email unavailable")),
+      "SIGNER_EMAIL_UNAVAILABLE"
+    );
+    assert.equal(
+      putHeadSelfTestScript.classifyOfficialGetSignedUrlFailure(null, new Error("private_key missing: cannot sign data")),
+      "NO_PRIVATE_KEY_OR_SIGNER"
+    );
+    assert.equal(
+      putHeadSelfTestScript.classifyOfficialGetSignedUrlFailure(null, new Error("storage.objects.create permission denied")),
+      "STORAGE_OBJECT_CREATE_PERMISSION_MISSING"
+    );
+    assert.equal(
+      putHeadSelfTestScript.classifyOfficialGetSignedUrlFailure(null, new Error("invalid expires config for getSignedUrl action")),
+      "OFFICIAL_GET_SIGNED_URL_CONFIG_INVALID"
+    );
   });
 
   it("uses official GCS getSignedUrl for PUT even when an explicit signer is configured", async () => {
