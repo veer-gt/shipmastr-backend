@@ -151,6 +151,7 @@ function makeGcsAdapter(options: {
   getFiles?: (options: any) => Promise<[any[]]>;
   getSignedUrl?: (config: any) => Promise<[string]>;
   getMetadata?: () => Promise<[any]>;
+  metadataRequest?: (input: any) => Promise<{ ok: boolean; status: number; metadata?: any }>;
   mediaUploadRequest?: (input: any) => Promise<{ ok: boolean; status: number; metadata?: any }>;
   save?: (data: Buffer | Uint8Array, options: any) => Promise<unknown>;
   iamSignBlobRequest?: (input: any) => Promise<any>;
@@ -166,10 +167,48 @@ function makeGcsAdapter(options: {
     signingServiceAccount: options.signingServiceAccount,
     signedGetTtlMs: 300000,
     maxImageBytes: options.maxImageBytes ?? 10 * 1024 * 1024,
-    accessTokenProvider: options.accessTokenProvider,
+    accessTokenProvider: options.accessTokenProvider ?? (async () => "test-access-token"),
     authClient: options.authClient,
     diagnostics: options.diagnostics,
     iamSignBlobRequest: options.iamSignBlobRequest,
+    metadataRequest: async (input: any) => {
+      calls.push({
+        method: "getMetadata",
+        objectKey: input.objectKey,
+        hasUrl: Boolean(input.url),
+        hasAccessToken: Boolean(input.accessToken)
+      });
+      if (options.metadataRequest) return options.metadataRequest(input);
+      if (options.getMetadata) {
+        try {
+          const [metadata] = await options.getMetadata();
+          return {
+            ok: true,
+            status: 200,
+            metadata: {
+              name: input.objectKey,
+              ...metadata
+            }
+          };
+        } catch (error) {
+          const candidate = error as { code?: string | number };
+          if (candidate.code === 404 || candidate.code === "404") {
+            return { ok: false, status: 404, metadata: null };
+          }
+          throw error;
+        }
+      }
+      return {
+        ok: true,
+        status: 200,
+        metadata: {
+          name: input.objectKey,
+          size: "2048",
+          contentType: "image/jpeg",
+          updated: "2026-06-22T10:05:00.000Z"
+        }
+      };
+    },
     mediaUploadRequest: async (input: any) => {
       calls.push({
         method: "mediaUpload",

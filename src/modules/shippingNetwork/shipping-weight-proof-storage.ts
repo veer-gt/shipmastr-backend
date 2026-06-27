@@ -177,6 +177,21 @@ export type GcsMediaUploadRequest = (input: {
     timeCreated?: string | Date | undefined;
   } | null | undefined;
 }>;
+export type GcsMetadataRequest = (input: {
+  url: string;
+  accessToken: string;
+  objectKey: string;
+}) => Promise<{
+  ok: boolean;
+  status: number;
+  metadata?: {
+    name?: string | undefined;
+    size?: string | number | undefined;
+    contentType?: string | undefined;
+    updated?: string | Date | undefined;
+    timeCreated?: string | Date | undefined;
+  } | null | undefined;
+}>;
 export type GcsIamSignBlobRequest = (input: {
   url: string;
   accessToken: string;
@@ -221,6 +236,7 @@ export type GcsWeightProofStorageConfig = {
   bucketClient?: GcsWeightProofBucket | undefined;
   diagnostics?: GcsWeightProofDiagnosticsReporter | undefined;
   iamSignBlobRequest?: GcsIamSignBlobRequest | undefined;
+  metadataRequest?: GcsMetadataRequest | undefined;
   mediaUploadRequest?: GcsMediaUploadRequest | undefined;
   runtimeSigner?: GcsRuntimeSigner | undefined;
   serviceAccountEmailResolver?: GcsServiceAccountEmailResolver | undefined;
@@ -733,6 +749,24 @@ async function defaultGcsMediaUploadRequest(input: Parameters<GcsMediaUploadRequ
   };
 }
 
+async function defaultGcsMetadataRequest(input: Parameters<GcsMetadataRequest>[0]) {
+  if (typeof fetch !== "function") {
+    throw new Error("GCS_METADATA_FETCH_UNAVAILABLE");
+  }
+  const response = await fetch(input.url, {
+    method: "GET",
+    headers: {
+      Authorization: `Bearer ${input.accessToken}`
+    }
+  });
+  const metadata = await response.json().catch(() => null);
+  return {
+    ok: response.ok,
+    status: response.status,
+    metadata
+  };
+}
+
 function headObjectFromGcsMetadata(metadata: Awaited<ReturnType<GcsMediaUploadRequest>>["metadata"], expectedObjectKey: string): HeadObjectResult | null {
   if (!metadata || (metadata.name && metadata.name !== expectedObjectKey)) return null;
   const updatedAt = metadata.updated ?? metadata.timeCreated;
@@ -864,6 +898,7 @@ export class GcsWeightProofStorageAdapter implements WeightProofStorageAdapter {
   private readonly authClient?: GcsWeightProofAuthClient | undefined;
   private readonly accessTokenProvider?: GcsAccessTokenProvider | undefined;
   private readonly iamSignBlobRequest: GcsIamSignBlobRequest;
+  private readonly metadataRequest: GcsMetadataRequest;
   private readonly mediaUploadRequest: GcsMediaUploadRequest;
   private readonly runtimeSigner?: GcsRuntimeSigner | undefined;
   private readonly serviceAccountEmailResolver: GcsServiceAccountEmailResolver;
@@ -882,6 +917,7 @@ export class GcsWeightProofStorageAdapter implements WeightProofStorageAdapter {
     this.authClient = config.authClient ?? (storage as unknown as { authClient?: GcsWeightProofAuthClient }).authClient;
     this.accessTokenProvider = config.accessTokenProvider;
     this.iamSignBlobRequest = config.iamSignBlobRequest ?? defaultIamCredentialsSignBlobRequest;
+    this.metadataRequest = config.metadataRequest ?? defaultGcsMetadataRequest;
     this.mediaUploadRequest = config.mediaUploadRequest ?? defaultGcsMediaUploadRequest;
     this.runtimeSigner = config.runtimeSigner;
     this.serviceAccountEmailResolver = config.serviceAccountEmailResolver ?? resolveCloudRunServiceAccountEmail;
@@ -1084,6 +1120,12 @@ export class GcsWeightProofStorageAdapter implements WeightProofStorageAdapter {
     return url.toString();
   }
 
+  private buildAuthenticatedMetadataUrl(objectKey: string) {
+    const url = new URL(`https://storage.googleapis.com/storage/v1/b/${encodeURIComponent(this.bucketName)}/o/${encodeURIComponent(objectKey)}`);
+    url.searchParams.set("fields", "name,size,contentType,updated,timeCreated");
+    return url.toString();
+  }
+
   async createPresignedPutUrl(input: CreatePresignedPutUrlInput): Promise<CreatePresignedPutUrlResult> {
     const objectKey = validateWeightProofStorageObjectKey(input.objectKey);
     const contentType = normalizeWeightProofContentType(input.contentType);
@@ -1105,14 +1147,20 @@ export class GcsWeightProofStorageAdapter implements WeightProofStorageAdapter {
   async headObject(input: HeadObjectInput): Promise<HeadObjectResult> {
     const objectKey = validateWeightProofStorageObjectKey(input.objectKey);
     try {
-      const [metadata] = await this.bucket.file(objectKey).getMetadata();
-      const updatedAt = metadata.updated ?? metadata.timeCreated;
-      return {
-        exists: true,
-        contentLength: metadata.size === undefined ? null : Number(metadata.size),
-        contentType: metadata.contentType ?? null,
-        updatedAt: updatedAt ? new Date(updatedAt) : null
-      };
+      const accessToken = await this.resolveRuntimeAccessToken();
+      const result = await this.metadataRequest({
+        url: this.buildAuthenticatedMetadataUrl(objectKey),
+        accessToken,
+        objectKey
+      });
+      if (result.status === 404) return { exists: false };
+      if (!result.ok) {
+        throw Object.assign(new Error(`GCS_METADATA_STATUS_${result.status}`), {
+          code: result.status
+        });
+      }
+      const object = headObjectFromGcsMetadata(result.metadata, objectKey);
+      return object?.exists ? object : { exists: false };
     } catch (error) {
       if (gcsObjectNotFound(error)) return { exists: false };
       throw new HttpError(503, "WEIGHT_GUARD_OBJECT_HEAD_FAILED");
