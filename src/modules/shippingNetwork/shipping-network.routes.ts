@@ -275,15 +275,27 @@ export function serializeInitWeightProofRouteResult(result: Awaited<ReturnType<t
 
   const upload = result.upload;
   const isBackendMediated = upload?.uploadMode === "BACKEND_MEDIATED";
-  return {
+  const base = {
     status: result.created ? "CAPTURE_SESSION_CREATED" : "CAPTURE_SESSION_REUSED",
     captureSessionId: result.capture?.capture_session_id ?? null,
     awbNumber: result.capture?.awb_number ?? null,
-    uploadMode: upload?.uploadMode ?? null,
-    uploadEndpoint: upload && isBackendMediated && "uploadEndpoint" in upload ? upload.uploadEndpoint : null,
+    uploadMode: upload?.uploadMode ?? null
+  };
+
+  if (isBackendMediated) {
+    return {
+      ...base,
+      uploadEndpoint: upload && "uploadEndpoint" in upload ? upload.uploadEndpoint : null,
+      requiredHeaders: {}
+    };
+  }
+
+  return {
+    ...base,
+    uploadEndpoint: null,
     uploadUrl: upload && "uploadUrl" in upload ? upload.uploadUrl : null,
     expiresAt: upload?.expiresAt ?? null,
-    requiredHeaders: isBackendMediated ? {} : serializeWeightProofUploadHeaders(upload?.headers)
+    requiredHeaders: serializeWeightProofUploadHeaders(upload?.headers)
   };
 }
 

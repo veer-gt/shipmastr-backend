@@ -897,7 +897,7 @@ describe("shipping weight proof foundation", () => {
       contentType: "image/png",
       expectedByteSize: 100
     }, createWeightProofRouteContext(request));
-    const routeResponse = serializeInitWeightProofRouteResult(result);
+    const routeResponse: any = serializeInitWeightProofRouteResult(result);
 
     assert.equal(routeResponse.status, "CAPTURE_SESSION_CREATED");
     assert.equal(routeResponse.captureSessionId, "route_capture");
@@ -914,15 +914,16 @@ describe("shipping weight proof foundation", () => {
       contentType: "image/png",
       expectedByteSize: 100
     }, makeContext(client, new InMemoryWeightProofStorageAdapter(), { uploadMode: "BACKEND_MEDIATED" }));
-    const routeResponse = serializeInitWeightProofRouteResult(result);
+    const routeResponse: any = serializeInitWeightProofRouteResult(result);
     const text = JSON.stringify(routeResponse);
 
     assert.equal(routeResponse.status, "CAPTURE_SESSION_CREATED");
     assert.equal(routeResponse.uploadMode, "BACKEND_MEDIATED");
     assert.equal(routeResponse.uploadEndpoint, "/api/v1/shipping/weight-proofs/upload");
-    assert.equal(routeResponse.uploadUrl, null);
+    assert.equal(Object.prototype.hasOwnProperty.call(routeResponse, "uploadUrl"), false);
+    assert.equal(Object.prototype.hasOwnProperty.call(routeResponse, "expiresAt"), false);
     assert.deepEqual(routeResponse.requiredHeaders, {});
-    assert.doesNotMatch(text, /weight-proofs\/seller_123|imageObjectKey|image_object_key|private-weight-proofs|storage[.]googleapis|signed/i);
+    assert.doesNotMatch(text, /weight-proofs\/seller_123|imageObjectKey|image_object_key|uploadUrl|upload_url|private-weight-proofs|storage[.]googleapis|signed/i);
   });
 
   it("finalizes through route shape without exposing storage fields", async () => {
