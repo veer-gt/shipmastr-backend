@@ -176,7 +176,7 @@ async function runSelfTest(options = {}) {
       signedUrlGenerated: Boolean(result.uploadUrl),
       requiredHeadersPresent: result.method === "PUT"
         && result.headers?.["content-type"] === "image/png"
-        && result.headers?.["x-goog-content-sha256"] === "UNSIGNED-PAYLOAD",
+        && (!result.headers?.["x-goog-content-sha256"] || result.headers?.["x-goog-content-sha256"] === "UNSIGNED-PAYLOAD"),
       diagnostic: null,
       error: null
     });

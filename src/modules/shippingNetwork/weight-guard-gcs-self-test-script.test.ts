@@ -88,8 +88,7 @@ test("Weight Guard GCS self-test success output never prints signed URL or objec
         uploadUrl: "https://storage.googleapis.com/private-diagnostic-bucket/weight-proofs/diagnostic/2026/06/WGDIAG001/selftest_123.png?X-Goog-Signature=secret",
         method: "PUT",
         headers: {
-          "content-type": "image/png",
-          "x-goog-content-sha256": "UNSIGNED-PAYLOAD"
+          "content-type": "image/png"
         },
         expiresAt: new Date("2026-06-26T12:10:00.000Z")
       })

@@ -25,7 +25,7 @@ weight-proofs/{sellerOrMerchantId}/{yyyy}/{mm}/{awbNumber}/{captureSessionId}.jp
 
 PNG proofs use the same path shape with a `.png` suffix.
 
-GCS object keys are stored raw internally. Signed URL paths must encode each path segment separately and must preserve `/` separators; do not encode the full object key in a way that turns separators into `%2F`.
+GCS object keys are stored raw internally. Runtime upload URLs are generated through the official Google Cloud Storage client by calling `bucket.file(rawObjectKey).getSignedUrl({ version: "v4", action: "write", ... })`. Do not manually construct runtime signed `PUT` URL paths or expose the raw object key to sellers.
 
 ## Service Account Permissions
 
@@ -39,12 +39,15 @@ Minimum expected role:
 
 - Storage Object User on the staging Weight Guard bucket.
 
-For Cloud Run staging and production, set the explicit signing service account env var and grant only the narrow IAM permission required for that service account to call IAM Credentials `signBlob`. Do not grant broad owner/editor roles.
+For Cloud Run staging and production, use the runtime service account and bucket-scoped storage permissions required by the official Google Cloud Storage client. Do not grant broad owner/editor roles.
 
-The backend signs V4 URLs by using:
+The backend generates write V4 URLs by using:
 
-- `WEIGHT_GUARD_GCS_SIGNING_SERVICE_ACCOUNT` as the signer email.
-- Google-managed application default credentials or runtime metadata only to obtain an OAuth token for the IAM Credentials `signBlob` call.
+- `bucket.file(rawObjectKey)` as the object reference.
+- Official Storage client `getSignedUrl` with `version: "v4"` and `action: "write"`.
+- Minimal upload headers from the backend response, normally only `Content-Type`.
+
+Metadata verification uses the same raw object key with `bucket.file(rawObjectKey).getMetadata()` through the authenticated backend client.
 
 No downloaded service account JSON key, private key, or credential file is required.
 
@@ -65,7 +68,7 @@ WEIGHT_GUARD_MAX_IMAGE_BYTES=10485760
 
 Do not set Cloudflare R2 credentials for the GCS path.
 
-`WEIGHT_GUARD_GCS_SIGNING_SERVICE_ACCOUNT` is recommended for Cloud Run staging and production. When it is set, the backend uses that email directly for IAM Credentials `signBlob` and does not need the metadata service account email lookup. The runtime still needs Google-managed ADC/metadata access to obtain an OAuth token for the `signBlob` request.
+`WEIGHT_GUARD_GCS_SIGNING_SERVICE_ACCOUNT` may remain configured for internal signed-read fallback paths, but runtime upload signing uses the official Storage client write URL path. The runtime still needs Google-managed ADC/metadata access compatible with the Storage client and any internal read fallback.
 
 Do not log, copy, screenshot, or store signed URLs, object keys, bucket names, OAuth tokens, private keys, or service account JSON credentials.
 

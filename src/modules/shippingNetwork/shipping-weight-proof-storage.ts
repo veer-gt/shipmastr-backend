@@ -516,8 +516,6 @@ function gcsObjectNotFound(error: unknown) {
     || /not\s*found/i.test(candidate.message ?? "");
 }
 
-const GCS_UNSIGNED_PAYLOAD_HEADER = "x-goog-content-sha256";
-const GCS_UNSIGNED_PAYLOAD_VALUE = "UNSIGNED-PAYLOAD";
 const GCS_METADATA_SERVICE_ACCOUNT_EMAIL_URL = "http://metadata.google.internal/computeMetadata/v1/instance/service-accounts/default/email";
 const GCS_METADATA_ACCESS_TOKEN_URL = "http://metadata.google.internal/computeMetadata/v1/instance/service-accounts/default/token";
 const GCS_SERVICE_ACCOUNT_EMAIL_SHAPE = /^[^\s@]+@[^\s@]+\.[^\s@]+$/;
@@ -789,19 +787,17 @@ export class GcsWeightProofStorageAdapter implements WeightProofStorageAdapter {
     expiresAt: Date;
     contentType?: string | undefined;
   }): Promise<GcsSignedUrlResult> {
+    if (input.action === "write") {
+      throw new Error("GCS_RUNTIME_SIGNED_PUT_DISABLED");
+    }
     const requestDate = new Date();
     const dateTime = gcsTimestamp(requestDate);
     const dateStamp = gcsDateStamp(requestDate);
-    const method = input.action === "write" ? "PUT" : "GET";
+    const method = "GET";
     const host = ["storage", "googleapis", "com"].join(".");
     const canonicalUri = buildGcsXmlPathStyleCanonicalUri(this.bucketName, input.objectKey);
     const headers: Record<string, string> = { host };
     const requiredHeaders: Record<string, string> = {};
-    if (input.action === "write") {
-      if (input.contentType) headers["content-type"] = input.contentType;
-      headers[GCS_UNSIGNED_PAYLOAD_HEADER] = GCS_UNSIGNED_PAYLOAD_VALUE;
-      requiredHeaders[GCS_UNSIGNED_PAYLOAD_HEADER] = GCS_UNSIGNED_PAYLOAD_VALUE;
-    }
     const signedHeaders = Object.keys(headers).sort().join(";");
     const canonicalHeaders = Object.keys(headers).sort().map((key) => `${key}:${headers[key]!.trim()}\n`).join("");
     const serviceAccountEmail = await this.resolveSigningServiceAccount();
@@ -836,37 +832,46 @@ export class GcsWeightProofStorageAdapter implements WeightProofStorageAdapter {
     };
   }
 
+  private async createOfficialGcsSignedUrl(input: {
+    objectKey: string;
+    action: GcsSignedUrlAction;
+    expiresAt: Date;
+    contentType?: string | undefined;
+  }): Promise<GcsSignedUrlResult> {
+    const [signedUrl] = await this.bucket.file(input.objectKey).getSignedUrl({
+      version: "v4",
+      action: input.action,
+      expires: input.expiresAt,
+      ...(input.contentType ? { contentType: input.contentType } : {})
+    });
+    return {
+      signedUrl,
+      requiredHeaders: {}
+    };
+  }
+
   private async createGcsSignedUrl(input: {
     objectKey: string;
     action: GcsSignedUrlAction;
     expiresAt: Date;
     contentType?: string | undefined;
   }): Promise<GcsSignedUrlResult> {
-    if (this.signingServiceAccount) {
+    if (input.action === "write") {
       try {
-        return await this.createRuntimeSignedUrl(input);
-      } catch (runtimeError) {
-        this.logSignedUrlFailure(input.action === "write" ? "signed_put" : "signed_get", runtimeError, Boolean(input.contentType));
+        return await this.createOfficialGcsSignedUrl(input);
+      } catch (error) {
+        this.logSignedUrlFailure("signed_put", error, Boolean(input.contentType));
         throw new HttpError(503, "WEIGHT_GUARD_GCS_SIGNED_URL_FAILED");
       }
     }
 
     try {
-      const [signedUrl] = await this.bucket.file(input.objectKey).getSignedUrl({
-        version: "v4",
-        action: input.action,
-        expires: input.expiresAt,
-        ...(input.contentType ? { contentType: input.contentType } : {})
-      });
-      return {
-        signedUrl,
-        requiredHeaders: {}
-      };
+      return await this.createOfficialGcsSignedUrl(input);
     } catch {
       try {
         return await this.createRuntimeSignedUrl(input);
       } catch (runtimeError) {
-        this.logSignedUrlFailure(input.action === "write" ? "signed_put" : "signed_get", runtimeError, Boolean(input.contentType));
+        this.logSignedUrlFailure("signed_get", runtimeError, Boolean(input.contentType));
         throw new HttpError(503, "WEIGHT_GUARD_GCS_SIGNED_URL_FAILED");
       }
     }

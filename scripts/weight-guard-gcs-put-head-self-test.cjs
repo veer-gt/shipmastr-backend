@@ -361,7 +361,8 @@ async function runPutHeadSelfTest(options = {}) {
     const headers = safeUploadHeaders(result.headers);
     requiredHeadersUsed = result.method === "PUT"
       && headers["Content-Type"] === "image/png"
-      && headers["x-goog-content-sha256"] === "UNSIGNED-PAYLOAD"
+      && (!headers["x-goog-content-sha256"] || headers["x-goog-content-sha256"] === "UNSIGNED-PAYLOAD")
+      && !Object.prototype.hasOwnProperty.call(headers, "Authorization")
       && Object.keys(headers).every((header) => ["Content-Type", "x-goog-content-sha256"].includes(header));
     const response = await fetch(result.uploadUrl, {
       method: "PUT",
