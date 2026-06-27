@@ -247,7 +247,7 @@ function mintSellerToken({ merchantId, source = process.env }) {
   });
 }
 
-async function parseJsonResponse(response) {
+async function parseJsonResponse(response, failureCategory = "STAGING_API_HTTP_FAILED") {
   const text = await response.text();
   let json = null;
   try {
@@ -258,6 +258,7 @@ async function parseJsonResponse(response) {
   if (!response.ok) {
     const error = new Error(`HTTP_${response.status}`);
     error.status = response.status;
+    error.category = `${failureCategory}_HTTP_${response.status}`;
     error.safeBodyHash = hashIdentity(text);
     throw error;
   }
@@ -273,7 +274,7 @@ function dataFromEnvelope(value) {
   return value?.data ?? value;
 }
 
-async function authenticatedJson({ apiBaseUrl, path, token, body }) {
+async function authenticatedJson({ apiBaseUrl, path, token, body, failureCategory }) {
   const response = await fetch(`${apiBaseUrl}${path}`, {
     method: "POST",
     headers: {
@@ -282,17 +283,17 @@ async function authenticatedJson({ apiBaseUrl, path, token, body }) {
     },
     body: JSON.stringify(body)
   });
-  return parseJsonResponse(response);
+  return parseJsonResponse(response, failureCategory);
 }
 
-async function authenticatedGet({ apiBaseUrl, path, token }) {
+async function authenticatedGet({ apiBaseUrl, path, token, failureCategory }) {
   const response = await fetch(`${apiBaseUrl}${path}`, {
     method: "GET",
     headers: {
       Authorization: `Bearer ${token}`
     }
   });
-  return parseJsonResponse(response);
+  return parseJsonResponse(response, failureCategory);
 }
 
 async function authenticatedUpload({ apiBaseUrl, token, captureSessionId, awbNumber }) {
@@ -308,7 +309,7 @@ async function authenticatedUpload({ apiBaseUrl, token, captureSessionId, awbNum
     },
     body: form
   });
-  return parseJsonResponse(response);
+  return parseJsonResponse(response, "BACKEND_UPLOAD");
 }
 
 function buildSafeOutput(overrides = {}) {
@@ -339,10 +340,12 @@ async function runBackendMediatedUploadSelfTest(options = {}) {
   const prisma = options.prisma ?? new PrismaClient();
   const ownsPrisma = !options.prisma;
   const apiBaseUrl = resolveApiBaseUrl(source);
+  let safeAwbNumber = null;
 
   try {
     const fixture = options.fixture ?? await createOrReuseFixture(prisma);
     const token = options.token ?? mintSellerToken({ merchantId: fixture.sellerId, source });
+    safeAwbNumber = fixture.awbNumber;
 
     const initEnvelope = await authenticatedJson({
       apiBaseUrl,
@@ -354,7 +357,8 @@ async function runBackendMediatedUploadSelfTest(options = {}) {
         content_type: "image/png",
         expected_byte_size: SAFE_PNG.length,
         device_id: "weight_guard_backend_mediated_self_test"
-      }
+      },
+      failureCategory: "INIT"
     });
     const init = dataFromEnvelope(initEnvelope);
     const uploadMode = init?.uploadMode ?? null;
@@ -393,7 +397,8 @@ async function runBackendMediatedUploadSelfTest(options = {}) {
         height_cm: 12,
         device_id: "weight_guard_backend_mediated_self_test",
         captured_at: new Date().toISOString()
-      }
+      },
+      failureCategory: "FINALIZE"
     });
     const finalize = dataFromEnvelope(finalizeEnvelope);
     const finalizeSucceeded = finalize?.status === "PROOF_LOGGED" || finalize?.proofStatus === "READY_FOR_DISPUTE";
@@ -404,7 +409,8 @@ async function runBackendMediatedUploadSelfTest(options = {}) {
     const proofEnvelope = await authenticatedGet({
       apiBaseUrl,
       path: `/v1/shipping/weight-proofs/${encodeURIComponent(fixture.awbNumber)}`,
-      token
+      token,
+      failureCategory: "GET_PROOF"
     });
     const proof = dataFromEnvelope(proofEnvelope);
     const getProofSellerSafe = Boolean(proof?.proof_status === "captured" || proof?.status === "available") && assertSellerSafe(proof);
@@ -429,6 +435,7 @@ async function runBackendMediatedUploadSelfTest(options = {}) {
     return output;
   } catch (error) {
     const output = buildSafeOutput({
+      testAwb: safeAwbNumber,
       errorCategory: safeErrorCategory(error),
       dbMutationScope: "staging_test_session_only"
     });
