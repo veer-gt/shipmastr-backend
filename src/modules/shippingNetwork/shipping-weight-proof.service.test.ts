@@ -879,6 +879,7 @@ describe("shipping weight proof foundation", () => {
         },
         storageModule: {
           buildWeightGuardDiagnosticObjectKey,
+          buildGcsXmlPathStyleObjectPath,
           getGcsSignedUrlObjectPathDiagnostics,
           getWeightProofObjectKeyPrefix,
           getWeightProofObjectKeyDiagnostics,
@@ -899,6 +900,7 @@ describe("shipping weight proof foundation", () => {
           },
           headObject: async (input: any) => {
             objectKeys.push(input.objectKey);
+            if (input.objectKey !== objectKeys[0]) return { exists: false };
             return {
               exists: true,
               contentLength: 68,
@@ -919,13 +921,20 @@ describe("shipping weight proof foundation", () => {
       assert.equal(output.signedUrlGenerated, true);
       assert.equal(output.putStatus, 200);
       assert.equal(output.putOk, true);
+      assert.equal(output.xGoogGenerationPresent, false);
+      assert.equal(output.xGoogHashPresent, false);
+      assert.equal(output.xGoogStoredContentLengthPresent, false);
+      assert.equal(output.contentLengthResponseHeaderPresent, false);
       assert.equal(output.headVerified, true);
       assert.equal(output.metadataVerified, true);
       assert.equal(output.listFoundMatchingHash, true);
       assert.equal(output.sameObjectKeyHash, true);
       assert.equal(output.requiredHeadersUsed, true);
-      assert.equal(output.errorCategory, "none");
-      assert.equal(objectKeys.length, 2);
+      assert.equal(output.errorCategory, "PUT_200_WITHOUT_GCS_OBJECT_GENERATION");
+      assert.equal(output.classification, "PUT_200_WITHOUT_GCS_OBJECT_GENERATION");
+      assert.equal(output.metadataCandidateResults.some((candidate: any) => candidate.candidateName === "raw" && candidate.metadataFound), true);
+      assert.equal(output.metadataCandidateResults.every((candidate: any) => /^[a-f0-9]{16}$/.test(String(candidate.candidateHash))), true);
+      assert.ok(objectKeys.length >= 3);
       assert.equal(objectKeys[0], objectKeys[1]);
       const text = writes.join("\n");
       assert.doesNotMatch(text, /signed\.example|weight-guard-diagnostics\/|weight-proofs\/|private-weight-proofs|shipmastr-core-prod|X-Goog-Signature/i);
@@ -954,6 +963,7 @@ describe("shipping weight proof foundation", () => {
         },
         storageModule: {
           buildWeightGuardDiagnosticObjectKey,
+          buildGcsXmlPathStyleObjectPath,
           getGcsSignedUrlObjectPathDiagnostics,
           getWeightProofObjectKeyPrefix,
           getWeightProofObjectKeyDiagnostics,
@@ -990,10 +1000,82 @@ describe("shipping weight proof foundation", () => {
       assert.equal(output.metadataVerified, false);
       assert.equal(output.listFoundMatchingHash, true);
       assert.equal(output.sameObjectKeyHash, true);
-      assert.equal(objectKeys.length, 4);
-      assert.equal(new Set(objectKeys).size, 1);
+      assert.equal(output.classification, "PUT_200_WITHOUT_GCS_OBJECT_GENERATION");
+      assert.ok(objectKeys.length >= 4);
       const text = writes.join("\n");
       assert.doesNotMatch(text, /signed\.example|weight-guard-diagnostics\/|weight-proofs\/|private-weight-proofs|shipmastr-core-prod|X-Goog-Signature/i);
+    } finally {
+      globalThis.fetch = originalFetch;
+    }
+  });
+
+  it("records safe GCS PUT response headers and hash-only metadata candidates", async () => {
+    const writes: string[] = [];
+    const objectKeys: string[] = [];
+    const originalFetch = globalThis.fetch;
+    globalThis.fetch = (async (_url: string | URL | Request, init?: RequestInit) => {
+      assert.equal(init?.method, "PUT");
+      return {
+        status: 200,
+        headers: new Headers({
+          "x-goog-generation": "1780000000000000",
+          "x-goog-hash": "crc32c=abc",
+          "x-goog-stored-content-length": "68",
+          "content-length": "0"
+        })
+      } as Response;
+    }) as typeof fetch;
+    try {
+      const output = await putHeadSelfTestScript.runPutHeadSelfTest({
+        source: {
+          WEIGHT_GUARD_GCS_PUT_HEAD_SELF_TEST: putHeadSelfTestScript.APPROVAL_FLAG,
+          WEIGHT_GUARD_PROOF_STORAGE_ENABLED: "true",
+          WEIGHT_GUARD_STORAGE_PROVIDER: "gcs",
+          WEIGHT_GUARD_GCS_BUCKET: "private-weight-proofs",
+          WEIGHT_GUARD_GCS_PROJECT_ID: "shipmastr-core-prod",
+          APP_ENV: "staging"
+        },
+        storageModule: {
+          buildWeightGuardDiagnosticObjectKey,
+          buildGcsXmlPathStyleObjectPath,
+          getGcsSignedUrlObjectPathDiagnostics,
+          getWeightProofObjectKeyPrefix,
+          getWeightProofObjectKeyDiagnostics,
+          resolveGcsWeightProofStorageConfig
+        },
+        adapter: {
+          createPresignedPutUrl: async (input: any) => {
+            objectKeys.push(input.objectKey);
+            return {
+              uploadUrl: `https://storage.googleapis.com/private-weight-proofs/${input.objectKey}?X-Goog-Signature=unsafe`,
+              method: "PUT" as const,
+              headers: {
+                "content-type": "image/png",
+                "x-goog-content-sha256": "UNSIGNED-PAYLOAD"
+              },
+              expiresAt: input.expiresAt
+            };
+          },
+          headObject: async (input: any) => {
+            objectKeys.push(input.objectKey);
+            return { exists: input.objectKey === objectKeys[0] };
+          },
+          listObjectKeyDiagnosticsByPrefix: async () => []
+        },
+        now: new Date("2026-06-22T10:06:00.000Z"),
+        write: (line: string) => writes.push(line)
+      });
+
+      assert.equal(output.xGoogGenerationPresent, true);
+      assert.equal(output.xGoogHashPresent, true);
+      assert.equal(output.xGoogStoredContentLengthPresent, true);
+      assert.equal(output.contentLengthResponseHeaderPresent, true);
+      assert.equal(output.classification, "GCS_OBJECT_KEY_VARIANT_IDENTIFIED");
+      assert.equal(output.errorCategory, "none");
+      assert.equal(output.metadataCandidateResults.some((candidate: any) => candidate.candidateName === "raw" && candidate.metadataFound), true);
+      assert.equal(output.metadataCandidateResults.every((candidate: any) => Object.prototype.hasOwnProperty.call(candidate, "candidateHash")), true);
+      const text = writes.join("\n");
+      assert.doesNotMatch(text, /1780000000000000|crc32c=abc|signed\.example|weight-guard-diagnostics\/|weight-proofs\/|private-weight-proofs|shipmastr-core-prod|X-Goog-Signature/i);
     } finally {
       globalThis.fetch = originalFetch;
     }

@@ -104,12 +104,24 @@ function buildSafeOutput(input = {}) {
     signedUrlGenerated: Boolean(input.signedUrlGenerated),
     putStatus: input.putStatus ?? null,
     putOk: Boolean(input.putOk),
+    xGoogGenerationPresent: Boolean(input.xGoogGenerationPresent),
+    xGoogHashPresent: Boolean(input.xGoogHashPresent),
+    xGoogStoredContentLengthPresent: Boolean(input.xGoogStoredContentLengthPresent),
+    contentLengthResponseHeaderPresent: Boolean(input.contentLengthResponseHeaderPresent),
     headVerified: Boolean(input.headVerified),
     metadataVerified: Boolean(input.metadataVerified),
     listFoundMatchingHash: Boolean(input.listFoundMatchingHash),
+    metadataCandidateResults: Array.isArray(input.metadataCandidateResults)
+      ? input.metadataCandidateResults.map((candidate) => ({
+        candidateName: String(candidate?.candidateName ?? "unknown"),
+        candidateHash: candidate?.candidateHash ?? null,
+        metadataFound: Boolean(candidate?.metadataFound)
+      }))
+      : [],
     sameObjectKeyHash: Boolean(input.sameObjectKeyHash),
     requiredHeadersUsed: Boolean(input.requiredHeadersUsed),
-    errorCategory: input.errorCategory || "none"
+    errorCategory: input.errorCategory || "none",
+    classification: input.classification || input.errorCategory || "none"
   };
 }
 
@@ -190,6 +202,103 @@ async function listDiagnosticMatchingHash(adapter, objectKey, storageModule) {
   return listed.some((diagnostic) => diagnostic?.objectKeyHash === expectedHash);
 }
 
+function safeResponseHeaderPresence(response) {
+  const headers = response?.headers;
+  const hasHeader = (name) => {
+    if (!headers || typeof headers.get !== "function") return false;
+    return headers.get(name) !== null;
+  };
+  return {
+    xGoogGenerationPresent: hasHeader("x-goog-generation"),
+    xGoogHashPresent: hasHeader("x-goog-hash"),
+    xGoogStoredContentLengthPresent: hasHeader("x-goog-stored-content-length"),
+    contentLengthResponseHeaderPresent: hasHeader("content-length") || hasHeader("content-range")
+  };
+}
+
+function uniqueCandidateList(candidates) {
+  const seen = new Set();
+  return candidates.filter((candidate) => {
+    const value = String(candidate?.objectKey ?? "");
+    const cacheKey = `${candidate?.candidateName}:${value}`;
+    if (!value || seen.has(cacheKey)) return false;
+    seen.add(cacheKey);
+    return true;
+  });
+}
+
+function buildMetadataCandidateKeys({ objectKey, signedUrl, bucketName, storageModule }) {
+  const raw = String(objectKey ?? "");
+  let signedPathCandidate = "";
+  try {
+    const url = new URL(String(signedUrl ?? ""));
+    const pathSegments = url.pathname.replace(/^\/+/, "").split("/");
+    const bucketSegment = pathSegments.shift();
+    if (bucketSegment && decodeURIComponent(bucketSegment) === String(bucketName ?? "") && pathSegments.length > 0) {
+      signedPathCandidate = pathSegments.map((segment) => decodeURIComponent(segment)).join("/");
+    }
+  } catch {
+    signedPathCandidate = "";
+  }
+
+  let slashPreservedDecodedRaw = raw;
+  try {
+    if (typeof storageModule.buildGcsXmlPathStyleObjectPath === "function") {
+      slashPreservedDecodedRaw = storageModule.buildGcsXmlPathStyleObjectPath(raw).split("/").map((segment) => decodeURIComponent(segment)).join("/");
+    }
+  } catch {
+    slashPreservedDecodedRaw = raw;
+  }
+
+  return uniqueCandidateList([
+    { candidateName: "raw", objectKey: raw },
+    { candidateName: "slash_preserved_decoded_raw", objectKey: slashPreservedDecodedRaw },
+    { candidateName: "whole_key_encoded", objectKey: encodeURIComponent(raw) },
+    { candidateName: "leading_slash", objectKey: `/${raw}` },
+    { candidateName: "accidental_bucket_prefixed", objectKey: `${bucketName}/${raw}` },
+    { candidateName: "accidental_double_prefix_diagnostic", objectKey: `weight-guard-diagnostics/${raw}` },
+    { candidateName: "signed_path_decoded", objectKey: signedPathCandidate }
+  ]);
+}
+
+async function inspectMetadataCandidateKeys(adapter, candidates, storageModule) {
+  const results = [];
+  for (const candidate of candidates) {
+    const candidateDiagnostics = storageModule.getWeightProofObjectKeyDiagnostics(candidate.objectKey);
+    let metadataFound = false;
+    try {
+      const head = await adapter.headObject({ objectKey: candidate.objectKey });
+      metadataFound = Boolean(head?.exists);
+    } catch {
+      metadataFound = false;
+    }
+    results.push({
+      candidateName: candidate.candidateName,
+      candidateHash: candidateDiagnostics.objectKeyHash,
+      metadataFound
+    });
+  }
+  return results;
+}
+
+function classifyPutHeadDiagnostic({
+  putOk,
+  putResponseFacts,
+  metadataCandidateResults,
+  signedPathDiagnostics,
+  headVerified,
+  fallbackErrorCategory
+}) {
+  if (signedPathDiagnostics?.signedPathKeyHash && !signedPathDiagnostics.sameObjectKeyHash) {
+    return "GCS_OBJECT_PATH_ENCODING_MISMATCH";
+  }
+  if (!putOk) return fallbackErrorCategory || "SIGNED_PUT_NOT_OK";
+  if (!putResponseFacts?.xGoogGenerationPresent) return "PUT_200_WITHOUT_GCS_OBJECT_GENERATION";
+  if (metadataCandidateResults?.some((candidate) => candidate.metadataFound)) return "GCS_OBJECT_KEY_VARIANT_IDENTIFIED";
+  if (headVerified) return "GCS_OBJECT_KEY_VARIANT_IDENTIFIED";
+  return "PUT_CREATED_UNKNOWN_OBJECT_IDENTITY";
+}
+
 async function runPutHeadSelfTest(options = {}) {
   const source = options.source ?? process.env;
   const write = options.write ?? ((text) => console.log(text));
@@ -227,7 +336,14 @@ async function runPutHeadSelfTest(options = {}) {
   let headVerified = false;
   let metadataVerified = false;
   let listFoundMatchingHash = false;
+  let metadataCandidateResults = [];
   let requiredHeadersUsed = false;
+  let putResponseFacts = {
+    xGoogGenerationPresent: false,
+    xGoogHashPresent: false,
+    xGoogStoredContentLengthPresent: false,
+    contentLengthResponseHeaderPresent: false
+  };
 
   try {
     const result = await adapter.createPresignedPutUrl({
@@ -254,35 +370,53 @@ async function runPutHeadSelfTest(options = {}) {
     });
     putStatus = response.status;
     putOk = [200, 201, 204].includes(response.status);
+    putResponseFacts = safeResponseHeaderPresence(response);
     if (putOk) {
       headObjectDiagnostics = storageModule.getWeightProofObjectKeyDiagnostics(objectKey);
-      const verification = await verifyHeadWithRetry(adapter, objectKey, storageModule);
-      headObjectDiagnostics = verification.headObjectDiagnostics;
-      headVerified = verification.headVerified;
-      metadataVerified = verification.metadataVerified;
-      listFoundMatchingHash = await listDiagnosticMatchingHash(adapter, objectKey, storageModule);
+      try {
+        const verification = await verifyHeadWithRetry(adapter, objectKey, storageModule);
+        headObjectDiagnostics = verification.headObjectDiagnostics;
+        headVerified = verification.headVerified;
+        metadataVerified = verification.metadataVerified;
+      } catch {
+        headVerified = false;
+        metadataVerified = false;
+      }
+      metadataCandidateResults = await inspectMetadataCandidateKeys(adapter, buildMetadataCandidateKeys({
+        objectKey,
+        signedUrl: result.uploadUrl,
+        bucketName: config.bucket,
+        storageModule
+      }), storageModule);
+      listFoundMatchingHash = metadataCandidateResults.some((candidate) => candidate.metadataFound)
+        || await listDiagnosticMatchingHash(adapter, objectKey, storageModule);
     }
     const sameObjectKeyHash = Boolean(
       rawObjectDiagnostics.objectKeyHash
         && rawObjectDiagnostics.objectKeyHash === signedPathDiagnostics.signedPathKeyHash
         && rawObjectDiagnostics.objectKeyHash === headObjectDiagnostics.objectKeyHash
     );
+    const classification = classifyPutHeadDiagnostic({
+      putOk,
+      putResponseFacts,
+      metadataCandidateResults,
+      signedPathDiagnostics,
+      headVerified,
+      fallbackErrorCategory: putOk ? "WEIGHT_GUARD_UPLOAD_NOT_VERIFIED" : "SIGNED_PUT_NOT_OK"
+    });
     const output = buildSafeOutput({
       signedUrlGenerated,
       putStatus,
       putOk,
+      ...putResponseFacts,
       headVerified,
       metadataVerified,
       listFoundMatchingHash,
+      metadataCandidateResults,
       sameObjectKeyHash,
       requiredHeadersUsed,
-      errorCategory: !signedPathDiagnostics.sameObjectKeyHash
-        ? "GCS_OBJECT_PATH_ENCODING_MISMATCH"
-        : headVerified
-          ? "none"
-          : putOk
-            ? "WEIGHT_GUARD_UPLOAD_NOT_VERIFIED"
-            : "SIGNED_PUT_NOT_OK"
+      errorCategory: classification === "GCS_OBJECT_KEY_VARIANT_IDENTIFIED" ? "none" : classification,
+      classification
     });
     write(JSON.stringify(output, null, 2));
     return output;
@@ -295,18 +429,27 @@ async function runPutHeadSelfTest(options = {}) {
         && rawObjectDiagnostics.objectKeyHash === signedPathDiagnostics.signedPathKeyHash
         && rawObjectDiagnostics.objectKeyHash === headObjectDiagnostics.objectKeyHash
     );
+    const classification = classifyPutHeadDiagnostic({
+      putOk,
+      putResponseFacts,
+      metadataCandidateResults,
+      signedPathDiagnostics,
+      headVerified,
+      fallbackErrorCategory: safeErrorCategory(diagnostics.at(-1) ?? error)
+    });
     const output = buildSafeOutput({
       signedUrlGenerated,
       putStatus,
       putOk,
+      ...putResponseFacts,
       headVerified,
       metadataVerified,
       listFoundMatchingHash,
+      metadataCandidateResults,
       sameObjectKeyHash,
       requiredHeadersUsed,
-      errorCategory: signedPathDiagnostics.signedPathKeyHash && !signedPathDiagnostics.sameObjectKeyHash
-        ? "GCS_OBJECT_PATH_ENCODING_MISMATCH"
-        : safeErrorCategory(diagnostics.at(-1) ?? error)
+      errorCategory: classification === "GCS_OBJECT_KEY_VARIANT_IDENTIFIED" ? "none" : classification,
+      classification
     });
     write(JSON.stringify(output, null, 2));
     if (options.throwOnFailure) throw new Error(redactSelfTestText(error?.message ?? error, source));
