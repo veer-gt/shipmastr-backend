@@ -775,9 +775,16 @@ export class R2WeightProofStorageAdapter implements WeightProofStorageAdapter {
         ContentType: contentType,
         ContentLength: input.sizeBytes
       }));
-      return this.headObject({ objectKey });
     } catch {
-      throw new HttpError(503, "WEIGHT_GUARD_UPLOAD_NOT_VERIFIED");
+      throw new HttpError(503, "BACKEND_UPLOAD_STORAGE_PUT_FAILED");
+    }
+
+    try {
+      const object = await this.headObject({ objectKey });
+      if (!object.exists) throw new HttpError(503, "BACKEND_UPLOAD_METADATA_VERIFY_FAILED");
+      return object;
+    } catch {
+      throw new HttpError(503, "BACKEND_UPLOAD_METADATA_VERIFY_FAILED");
     }
   }
 
@@ -1061,9 +1068,16 @@ export class GcsWeightProofStorageAdapter implements WeightProofStorageAdapter {
         contentType,
         metadata: { contentType }
       });
-      return this.headObject({ objectKey });
     } catch {
-      throw new HttpError(503, "WEIGHT_GUARD_UPLOAD_NOT_VERIFIED");
+      throw new HttpError(503, "BACKEND_UPLOAD_STORAGE_PUT_FAILED");
+    }
+
+    try {
+      const object = await this.headObject({ objectKey });
+      if (!object.exists) throw new HttpError(503, "BACKEND_UPLOAD_METADATA_VERIFY_FAILED");
+      return object;
+    } catch {
+      throw new HttpError(503, "BACKEND_UPLOAD_METADATA_VERIFY_FAILED");
     }
   }
 

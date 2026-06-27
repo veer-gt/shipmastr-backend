@@ -219,6 +219,16 @@ function uploadVerificationErrorDetails(category: string, objectKey: string) {
   };
 }
 
+function isBackendUploadFailureCategory(value: string): value is "BACKEND_UPLOAD_STORAGE_PUT_FAILED" | "BACKEND_UPLOAD_METADATA_VERIFY_FAILED" {
+  return value === "BACKEND_UPLOAD_STORAGE_PUT_FAILED"
+    || value === "BACKEND_UPLOAD_METADATA_VERIFY_FAILED";
+}
+
+function throwBackendUploadFailure(category: "BACKEND_UPLOAD_STORAGE_PUT_FAILED" | "BACKEND_UPLOAD_METADATA_VERIFY_FAILED", objectKey: string): never {
+  logUploadVerificationFailure(category, 503, objectKey);
+  throw new HttpError(503, category, uploadVerificationErrorDetails(category, objectKey));
+}
+
 async function verifyUploadedObject(context: WeightProofServiceContext, objectKey: string) {
   const retryDelays = context.headObjectRetryDelaysMs ?? DEFAULT_HEAD_OBJECT_RETRY_DELAYS_MS;
   const attempts = retryDelays.length + 1;
@@ -393,14 +403,21 @@ export async function uploadWeightProofImage(input: UploadWeightProofImageInput,
   const contentType = validateUploadImageContentType(input.file.contentType ?? session.contentType);
   if (session.contentType !== contentType) throw new HttpError(400, "WEIGHT_GUARD_UNSUPPORTED_IMAGE_TYPE");
   const sizeBytes = validateUploadImageSize(input.file.sizeBytes, context);
-  await context.storage.putObject({
-    objectKey: session.imageObjectKey,
-    body: input.file.buffer,
-    contentType,
-    sizeBytes
-  });
-  const object = await verifyUploadedObject(context, session.imageObjectKey);
-  if (!object.exists) throw new HttpError(503, "WEIGHT_GUARD_UPLOAD_NOT_VERIFIED");
+  let object;
+  try {
+    object = await context.storage.putObject({
+      objectKey: session.imageObjectKey,
+      body: input.file.buffer,
+      contentType,
+      sizeBytes
+    });
+  } catch (error) {
+    if (error instanceof HttpError && isBackendUploadFailureCategory(error.message)) {
+      throwBackendUploadFailure(error.message, session.imageObjectKey);
+    }
+    throw error;
+  }
+  if (!object.exists) throwBackendUploadFailure("BACKEND_UPLOAD_METADATA_VERIFY_FAILED", session.imageObjectKey);
   return {
     uploadVerified: true,
     proofStatus: "UPLOAD_VERIFIED",

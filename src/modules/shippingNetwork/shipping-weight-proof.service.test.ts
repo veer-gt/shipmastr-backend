@@ -541,7 +541,68 @@ describe("shipping weight proof foundation", () => {
     }
   });
 
-  it("fails backend upload safely when metadata verification does not confirm the object", async () => {
+  it("keeps backend-mediated self-test upload 503 categories safe and specific", async () => {
+    const originalFetch = globalThis.fetch;
+    globalThis.fetch = (async (input: RequestInfo | URL) => {
+      const url = String(input);
+      if (url.endsWith("/v1/shipping/weight-proofs/init")) {
+        return new Response(JSON.stringify({
+          success: true,
+          data: {
+            status: "CAPTURE_SESSION_CREATED",
+            captureSessionId: "capture_self_test",
+            awbNumber: "WGSTAGEUI999",
+            uploadMode: "BACKEND_MEDIATED",
+            uploadEndpoint: "/api/v1/shipping/weight-proofs/upload",
+            requiredHeaders: {}
+          }
+        }), { status: 201, headers: { "Content-Type": "application/json" } });
+      }
+      if (url.endsWith("/v1/shipping/weight-proofs/upload")) {
+        return new Response(JSON.stringify({
+          error: "BACKEND_UPLOAD_METADATA_VERIFY_FAILED",
+          details: {
+            category: "BACKEND_UPLOAD_METADATA_VERIFY_FAILED",
+            objectKeyPresent: true,
+            objectKeyHash: "f".repeat(16),
+            objectKeyPrefixCategory: "weight-proofs"
+          }
+        }), { status: 503, headers: { "Content-Type": "application/json" } });
+      }
+      return new Response("not found", { status: 404 });
+    }) as typeof fetch;
+
+    try {
+      const writes: string[] = [];
+      const output = await backendMediatedSelfTestScript.runBackendMediatedUploadSelfTest({
+        source: {
+          APP_ENV: "staging",
+          NODE_ENV: "production",
+          DATABASE_URL: "postgresql://redacted@cloudsql/staging",
+          JWT_SECRET: "test-jwt-secret",
+          WEIGHT_GUARD_BACKEND_UPLOAD_SELF_TEST: backendMediatedSelfTestScript.APPROVAL_FLAG,
+          WEIGHT_GUARD_PROOF_STORAGE_ENABLED: "true",
+          WEIGHT_GUARD_STORAGE_PROVIDER: "gcs",
+          SHIPMASTR_STAGING_API_BASE_URL: "https://shipmastr-api-staging-jscfc5kumq-el.a.run.app"
+        },
+        prisma: { $disconnect: async () => undefined },
+        fixture: {
+          id: "wg_stage_backend_mediated_shipment_wgstageui999",
+          sellerId: "wg_stage_backend_mediated_merchant",
+          awbNumber: "WGSTAGEUI999"
+        },
+        token: "redacted-test-token",
+        write: (text: string) => writes.push(text)
+      });
+
+      assert.equal(output.errorCategory, "BACKEND_UPLOAD_METADATA_VERIFY_FAILED");
+      assert.doesNotMatch(writes.join("\n"), /redacted-test-token|Authorization|Bearer|imageObjectKey|objectKey|bucket|storage[.]googleapis|signedUrl|signed_url|X-Goog|weight-proofs\//i);
+    } finally {
+      globalThis.fetch = originalFetch;
+    }
+  });
+
+  it("fails backend upload safely when storage put fails", async () => {
     const client = makeClient();
     const storage = {
       createPresignedPutUrl: async () => ({
@@ -550,8 +611,10 @@ describe("shipping weight proof foundation", () => {
         headers: { "content-type": "image/jpeg" },
         expiresAt: new Date("2026-06-22T10:15:00.000Z")
       }),
-      putObject: async () => ({ exists: true }),
-      headObject: async () => ({ exists: false }),
+      putObject: async () => {
+        throw new HttpError(503, "BACKEND_UPLOAD_STORAGE_PUT_FAILED");
+      },
+      headObject: async () => ({ exists: true }),
       createPresignedGetUrl: async () => ({
         downloadUrl: "mock://weight-proof-get/backend-upload",
         expiresAt: new Date("2026-06-22T10:15:00.000Z")
@@ -571,7 +634,46 @@ describe("shipping weight proof foundation", () => {
     }, context), (error) => {
       assert.ok(error instanceof HttpError);
       assert.equal(error.status, 503);
-      assert.equal(error.message, "WEIGHT_GUARD_UPLOAD_NOT_VERIFIED");
+      assert.equal(error.message, "BACKEND_UPLOAD_STORAGE_PUT_FAILED");
+      assert.equal((error as any).details?.category, "BACKEND_UPLOAD_STORAGE_PUT_FAILED");
+      const text = JSON.stringify(error);
+      assert.doesNotMatch(text, /weight-proofs\/seller_123|imageObjectKey|image_object_key|private-weight-proofs|storage[.]googleapis|signed/i);
+      return true;
+    });
+  });
+
+  it("fails backend upload safely when metadata verification does not confirm the object", async () => {
+    const client = makeClient();
+    const storage = {
+      createPresignedPutUrl: async () => ({
+        uploadUrl: "mock://weight-proof-put/backend-upload",
+        method: "PUT" as const,
+        headers: { "content-type": "image/jpeg" },
+        expiresAt: new Date("2026-06-22T10:15:00.000Z")
+      }),
+      putObject: async () => ({ exists: false }),
+      headObject: async () => ({ exists: true }),
+      createPresignedGetUrl: async () => ({
+        downloadUrl: "mock://weight-proof-get/backend-upload",
+        expiresAt: new Date("2026-06-22T10:15:00.000Z")
+      })
+    };
+    const context = makeContext(client, storage, { uploadMode: "BACKEND_MEDIATED" });
+    await initWeightProofCapture({ awbNumber: "AWB_123" }, context);
+
+    await assert.rejects(() => uploadWeightProofImage({
+      captureSessionId: "capture_123",
+      awbNumber: "AWB_123",
+      file: {
+        buffer: Buffer.from("safe-test-image"),
+        contentType: "image/jpeg",
+        sizeBytes: Buffer.byteLength("safe-test-image")
+      }
+    }, context), (error) => {
+      assert.ok(error instanceof HttpError);
+      assert.equal(error.status, 503);
+      assert.equal(error.message, "BACKEND_UPLOAD_METADATA_VERIFY_FAILED");
+      assert.equal((error as any).details?.category, "BACKEND_UPLOAD_METADATA_VERIFY_FAILED");
       const text = JSON.stringify(error);
       assert.doesNotMatch(text, /weight-proofs\/seller_123|imageObjectKey|image_object_key|private-weight-proofs|storage[.]googleapis|signed/i);
       return true;
@@ -1907,6 +2009,38 @@ describe("shipping weight proof foundation", () => {
     await assert.rejects(
       () => failed.adapter.headObject({ objectKey: r2ObjectKey }),
       (error) => error instanceof HttpError && error.message === "WEIGHT_GUARD_OBJECT_HEAD_FAILED"
+    );
+  });
+
+  it("classifies GCS backend-mediated put and metadata failures without leaking config", async () => {
+    const putFailed = makeGcsAdapter({
+      save: async () => {
+        throw new Error("write failed for internal object");
+      }
+    });
+    await assert.rejects(
+      () => putFailed.adapter.putObject({
+        objectKey: r2ObjectKey,
+        body: Buffer.from("safe-test-image"),
+        contentType: "image/jpeg",
+        sizeBytes: Buffer.byteLength("safe-test-image")
+      }),
+      (error) => error instanceof HttpError && error.message === "BACKEND_UPLOAD_STORAGE_PUT_FAILED"
+    );
+
+    const metadataFailed = makeGcsAdapter({
+      getMetadata: async () => {
+        throw Object.assign(new Error("not found"), { code: 404 });
+      }
+    });
+    await assert.rejects(
+      () => metadataFailed.adapter.putObject({
+        objectKey: r2ObjectKey,
+        body: Buffer.from("safe-test-image"),
+        contentType: "image/jpeg",
+        sizeBytes: Buffer.byteLength("safe-test-image")
+      }),
+      (error) => error instanceof HttpError && error.message === "BACKEND_UPLOAD_METADATA_VERIFY_FAILED"
     );
   });
 

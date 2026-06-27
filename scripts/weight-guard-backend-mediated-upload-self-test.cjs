@@ -50,6 +50,34 @@ function safeErrorCategory(error) {
   return "BACKEND_MEDIATED_SELF_TEST_FAILED";
 }
 
+const SAFE_API_ERROR_CATEGORIES = new Set([
+  "BACKEND_UPLOAD_MULTIPART_PARSE_FAILED",
+  "BACKEND_UPLOAD_FILE_MISSING",
+  "BACKEND_UPLOAD_FILE_BUFFER_MISSING",
+  "BACKEND_UPLOAD_UNSUPPORTED_CONTENT_TYPE",
+  "BACKEND_UPLOAD_SIZE_INVALID",
+  "BACKEND_UPLOAD_SESSION_NOT_READY",
+  "BACKEND_UPLOAD_STORAGE_PUT_FAILED",
+  "BACKEND_UPLOAD_METADATA_VERIFY_FAILED",
+  "BACKEND_UPLOAD_ROUTE_CONTRACT_MISMATCH",
+  "BACKEND_UPLOAD_UNKNOWN_FAILURE",
+  "WEIGHT_GUARD_UPLOAD_NOT_VERIFIED",
+  "WEIGHT_GUARD_UPLOAD_SESSION_INVALID",
+  "WEIGHT_GUARD_UNSUPPORTED_IMAGE_TYPE",
+  "WEIGHT_GUARD_UPLOAD_TOO_LARGE"
+]);
+
+function safeApiErrorCategoryFromBody(json, fallbackCategory) {
+  const candidates = [
+    json?.details?.category,
+    json?.error
+  ].map(stringValue).filter(Boolean);
+  for (const candidate of candidates) {
+    if (SAFE_API_ERROR_CATEGORIES.has(candidate)) return candidate;
+  }
+  return fallbackCategory;
+}
+
 function redactText(value, source = process.env) {
   const redactedValues = [
     source.JWT_SECRET,
@@ -258,7 +286,7 @@ async function parseJsonResponse(response, failureCategory = "STAGING_API_HTTP_F
   if (!response.ok) {
     const error = new Error(`HTTP_${response.status}`);
     error.status = response.status;
-    error.category = `${failureCategory}_HTTP_${response.status}`;
+    error.category = safeApiErrorCategoryFromBody(json, `${failureCategory}_HTTP_${response.status}`);
     error.safeBodyHash = hashIdentity(text);
     throw error;
   }
