@@ -151,6 +151,7 @@ function makeGcsAdapter(options: {
   getFiles?: (options: any) => Promise<[any[]]>;
   getSignedUrl?: (config: any) => Promise<[string]>;
   getMetadata?: () => Promise<[any]>;
+  mediaUploadRequest?: (input: any) => Promise<{ ok: boolean; status: number }>;
   save?: (data: Buffer | Uint8Array, options: any) => Promise<unknown>;
   iamSignBlobRequest?: (input: any) => Promise<any>;
   maxImageBytes?: number;
@@ -169,6 +170,17 @@ function makeGcsAdapter(options: {
     authClient: options.authClient,
     diagnostics: options.diagnostics,
     iamSignBlobRequest: options.iamSignBlobRequest,
+    mediaUploadRequest: async (input: any) => {
+      calls.push({
+        method: "mediaUpload",
+        hasUrl: Boolean(input.url),
+        hasAccessToken: Boolean(input.accessToken),
+        contentType: input.contentType,
+        sizeBytes: input.sizeBytes
+      });
+      if (options.mediaUploadRequest) return options.mediaUploadRequest(input);
+      return { ok: true, status: 200 };
+    },
     runtimeSigner: options.runtimeSigner,
     serviceAccountEmailResolver: options.serviceAccountEmailResolver,
     bucketClient: {
@@ -2013,10 +2025,26 @@ describe("shipping weight proof foundation", () => {
   });
 
   it("classifies GCS backend-mediated put and metadata failures without leaking config", async () => {
+    const success = makeGcsAdapter({
+      accessTokenProvider: async () => "test-access-token",
+      getMetadata: async () => [{
+        size: "15",
+        contentType: "image/jpeg",
+        updated: "2026-06-22T10:06:00.000Z"
+      }]
+    });
+    const uploaded = await success.adapter.putObject({
+      objectKey: r2ObjectKey,
+      body: Buffer.from("safe-test-image"),
+      contentType: "image/jpeg",
+      sizeBytes: Buffer.byteLength("safe-test-image")
+    });
+    assert.equal(uploaded.exists, true);
+    assert.deepEqual(success.calls.map((call) => call.method), ["mediaUpload", "getMetadata"]);
+
     const putFailed = makeGcsAdapter({
-      save: async () => {
-        throw new Error("write failed for internal object");
-      }
+      accessTokenProvider: async () => "test-access-token",
+      mediaUploadRequest: async () => ({ ok: false, status: 403 })
     });
     await assert.rejects(
       () => putFailed.adapter.putObject({
@@ -2029,6 +2057,7 @@ describe("shipping weight proof foundation", () => {
     );
 
     const metadataFailed = makeGcsAdapter({
+      accessTokenProvider: async () => "test-access-token",
       getMetadata: async () => {
         throw Object.assign(new Error("not found"), { code: 404 });
       }

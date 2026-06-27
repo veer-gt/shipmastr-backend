@@ -160,6 +160,13 @@ export type GcsRuntimeSignInput = {
 export type GcsRuntimeSigner = (input: GcsRuntimeSignInput) => Promise<string>;
 export type GcsServiceAccountEmailResolver = () => Promise<string | null | undefined>;
 export type GcsAccessTokenProvider = () => Promise<string | { token?: string | null | undefined } | null | undefined>;
+export type GcsMediaUploadRequest = (input: {
+  url: string;
+  accessToken: string;
+  body: Buffer;
+  contentType: string;
+  sizeBytes: number;
+}) => Promise<{ ok: boolean; status: number }>;
 export type GcsIamSignBlobRequest = (input: {
   url: string;
   accessToken: string;
@@ -204,6 +211,7 @@ export type GcsWeightProofStorageConfig = {
   bucketClient?: GcsWeightProofBucket | undefined;
   diagnostics?: GcsWeightProofDiagnosticsReporter | undefined;
   iamSignBlobRequest?: GcsIamSignBlobRequest | undefined;
+  mediaUploadRequest?: GcsMediaUploadRequest | undefined;
   runtimeSigner?: GcsRuntimeSigner | undefined;
   serviceAccountEmailResolver?: GcsServiceAccountEmailResolver | undefined;
   storage?: Storage | undefined;
@@ -691,6 +699,28 @@ async function defaultIamCredentialsSignBlobRequest(input: {
   return { signedBlob: data.signedBlob };
 }
 
+async function defaultGcsMediaUploadRequest(input: Parameters<GcsMediaUploadRequest>[0]) {
+  if (typeof fetch !== "function") {
+    throw new Error("GCS_MEDIA_UPLOAD_FETCH_UNAVAILABLE");
+  }
+  const uploadBody = input.body.buffer.slice(
+    input.body.byteOffset,
+    input.body.byteOffset + input.body.byteLength
+  ) as ArrayBuffer;
+  const response = await fetch(input.url, {
+    method: "POST",
+    headers: {
+      Authorization: `Bearer ${input.accessToken}`,
+      "Content-Type": input.contentType
+    },
+    body: uploadBody
+  });
+  return {
+    ok: response.ok,
+    status: response.status
+  };
+}
+
 type GcsSignedUrlResult = {
   signedUrl: string;
   requiredHeaders: Record<string, string>;
@@ -811,6 +841,7 @@ export class GcsWeightProofStorageAdapter implements WeightProofStorageAdapter {
   private readonly authClient?: GcsWeightProofAuthClient | undefined;
   private readonly accessTokenProvider?: GcsAccessTokenProvider | undefined;
   private readonly iamSignBlobRequest: GcsIamSignBlobRequest;
+  private readonly mediaUploadRequest: GcsMediaUploadRequest;
   private readonly runtimeSigner?: GcsRuntimeSigner | undefined;
   private readonly serviceAccountEmailResolver: GcsServiceAccountEmailResolver;
   private readonly diagnostics: GcsWeightProofDiagnosticsReporter;
@@ -828,6 +859,7 @@ export class GcsWeightProofStorageAdapter implements WeightProofStorageAdapter {
     this.authClient = config.authClient ?? (storage as unknown as { authClient?: GcsWeightProofAuthClient }).authClient;
     this.accessTokenProvider = config.accessTokenProvider;
     this.iamSignBlobRequest = config.iamSignBlobRequest ?? defaultIamCredentialsSignBlobRequest;
+    this.mediaUploadRequest = config.mediaUploadRequest ?? defaultGcsMediaUploadRequest;
     this.runtimeSigner = config.runtimeSigner;
     this.serviceAccountEmailResolver = config.serviceAccountEmailResolver ?? resolveCloudRunServiceAccountEmail;
     this.diagnostics = config.diagnostics ?? ((diagnostic) => {
@@ -1022,6 +1054,13 @@ export class GcsWeightProofStorageAdapter implements WeightProofStorageAdapter {
     }
   }
 
+  private buildAuthenticatedMediaUploadUrl(objectKey: string) {
+    const url = new URL(`https://storage.googleapis.com/upload/storage/v1/b/${encodeURIComponent(this.bucketName)}/o`);
+    url.searchParams.set("uploadType", "media");
+    url.searchParams.set("name", objectKey);
+    return url.toString();
+  }
+
   async createPresignedPutUrl(input: CreatePresignedPutUrlInput): Promise<CreatePresignedPutUrlResult> {
     const objectKey = validateWeightProofStorageObjectKey(input.objectKey);
     const contentType = normalizeWeightProofContentType(input.contentType);
@@ -1063,11 +1102,15 @@ export class GcsWeightProofStorageAdapter implements WeightProofStorageAdapter {
     const body = normalizeBackendUploadBody(input.body);
     validateBackendUploadSizeForStorage(input.sizeBytes, this.maxImageBytes);
     try {
-      await this.bucket.file(objectKey).save(body, {
-        resumable: false,
+      const accessToken = await this.resolveRuntimeAccessToken();
+      const result = await this.mediaUploadRequest({
+        url: this.buildAuthenticatedMediaUploadUrl(objectKey),
+        accessToken,
+        body,
         contentType,
-        metadata: { contentType }
+        sizeBytes: input.sizeBytes
       });
+      if (!result.ok) throw new Error(`GCS_MEDIA_UPLOAD_STATUS_${result.status}`);
     } catch {
       throw new HttpError(503, "BACKEND_UPLOAD_STORAGE_PUT_FAILED");
     }
