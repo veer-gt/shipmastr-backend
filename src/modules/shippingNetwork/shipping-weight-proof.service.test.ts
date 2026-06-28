@@ -13,9 +13,11 @@ import { listShippingShipments } from "./shipping-list.service.js";
 import {
   calculateChargeableWeightGrams,
   calculateVolumetricWeightGrams,
+  deleteWeightProofImageAfterAwbPaid,
   finalizeWeightProofCapture,
   initWeightProofCapture,
   uploadWeightProofImage,
+  analyzeWeightProofImageQuality,
   validateWeightProofAwbNumber
 } from "./shipping-weight-proof.service.js";
 import {
@@ -44,6 +46,7 @@ function makeClient() {
   const shipments: any[] = [];
   const sessions: any[] = [];
   const proofs: any[] = [];
+  const weightDiscrepancyCases: any[] = [];
   const client = {
     shipment: {
       findMany: async ({ where }: any = {}) => shipments
@@ -107,14 +110,43 @@ function makeClient() {
         const row = {
           id: `proof-${proofs.length + 1}`,
           ...data,
+          imageRetentionStatus: data.imageRetentionStatus ?? "ACTIVE",
+          imageDeletedAt: data.imageDeletedAt ?? null,
+          imageDeletionReason: data.imageDeletionReason ?? null,
+          deletedAfterSettlementRef: data.deletedAfterSettlementRef ?? null,
+          imageQualityReasonCodes: data.imageQualityReasonCodes ?? [],
           createdAt: data.createdAt ?? new Date("2026-06-22T10:05:00.000Z")
         };
         proofs.push(row);
         return row;
+      },
+      update: async ({ where, data }: any) => {
+        const row = proofs.find((proof) => proof.id === where.id);
+        if (!row) throw new Error("proof not found");
+        Object.assign(row, data);
+        return row;
+      }
+    },
+    weightDiscrepancyCase: {
+      findFirst: async ({ where }: any) => weightDiscrepancyCases.find((caseRow) => {
+        if (where.merchantId && caseRow.merchantId !== where.merchantId) return false;
+        if (where.shipmentId && caseRow.shipmentId !== where.shipmentId) return false;
+        if (where.status?.in && !where.status.in.includes(caseRow.status)) return false;
+        if (where.status && !where.status.in && caseRow.status !== where.status) return false;
+        return true;
+      }) ?? null,
+      create: async ({ data }: any) => {
+        const row = {
+          id: `weight-case-${weightDiscrepancyCases.length + 1}`,
+          ...data,
+          createdAt: data.createdAt ?? new Date("2026-06-22T10:05:00.000Z")
+        };
+        weightDiscrepancyCases.push(row);
+        return row;
       }
     },
     $transaction: async (operation: any) => operation(client),
-    __state: { shipments, sessions, proofs }
+    __state: { shipments, sessions, proofs, weightDiscrepancyCases }
   };
   return client;
 }
@@ -190,7 +222,7 @@ function makeR2Adapter(options: {
     accessKeyId: "test",
     secretAccessKey: "test",
     signedGetTtlMs: 300000,
-    maxImageBytes: options.maxImageBytes ?? 10 * 1024 * 1024,
+    maxImageBytes: options.maxImageBytes ?? 5 * 1024 * 1024,
     client: {
       send: options.send ?? (async () => ({}))
     } as any,
@@ -222,7 +254,7 @@ function makeGcsAdapter(options: {
     projectId: "shipmastr-core-prod",
     signingServiceAccount: options.signingServiceAccount,
     signedGetTtlMs: 300000,
-    maxImageBytes: options.maxImageBytes ?? 10 * 1024 * 1024,
+    maxImageBytes: options.maxImageBytes ?? 5 * 1024 * 1024,
     accessTokenProvider: options.accessTokenProvider ?? (async () => "test-access-token"),
     authClient: options.authClient,
     diagnostics: options.diagnostics,
@@ -321,6 +353,16 @@ function makeGcsAdapter(options: {
 
 function fakeBase64Signature(value = "shipmastr-runtime-signature") {
   return Buffer.from(value, "utf8").toString("base64");
+}
+
+function makePngBuffer(width = 800, height = 600) {
+  const buffer = Buffer.alloc(24);
+  Buffer.from("89504e470d0a1a0a", "hex").copy(buffer, 0);
+  buffer.writeUInt32BE(13, 8);
+  buffer.write("IHDR", 12, "ascii");
+  buffer.writeUInt32BE(width, 16);
+  buffer.writeUInt32BE(height, 20);
+  return buffer;
 }
 
 describe("shipping weight proof foundation", () => {
@@ -499,13 +541,14 @@ describe("shipping weight proof foundation", () => {
     const context = makeContext(client, storage, { uploadMode: "BACKEND_MEDIATED" });
     await initWeightProofCapture({ awbNumber: "AWB_123", contentType: "image/png" }, context);
 
+    const image = makePngBuffer();
     const upload = await uploadWeightProofImage({
       captureSessionId: "capture_123",
       awbNumber: "AWB_123",
       file: {
-        buffer: Buffer.from("safe-test-image"),
+        buffer: image,
         contentType: "image/png",
-        sizeBytes: Buffer.byteLength("safe-test-image")
+        sizeBytes: image.byteLength
       }
     }, context);
 
@@ -527,15 +570,16 @@ describe("shipping weight proof foundation", () => {
   it("rejects backend upload attempts outside the owning seller scope", async () => {
     const client = makeClient();
     const context = makeContext(client, new InMemoryWeightProofStorageAdapter(), { uploadMode: "BACKEND_MEDIATED" });
-    await initWeightProofCapture({ awbNumber: "AWB_123" }, context);
+    await initWeightProofCapture({ awbNumber: "AWB_123", contentType: "image/png" }, context);
 
+    const image = makePngBuffer();
     await assert.rejects(() => uploadWeightProofImage({
       captureSessionId: "capture_123",
       awbNumber: "AWB_123",
       file: {
-        buffer: Buffer.from("safe-test-image"),
-        contentType: "image/jpeg",
-        sizeBytes: Buffer.byteLength("safe-test-image")
+        buffer: image,
+        contentType: "image/png",
+        sizeBytes: image.byteLength
       }
     }, { ...context, merchantId: "seller_other" }), (error) => {
       assert.ok(error instanceof HttpError);
@@ -553,45 +597,251 @@ describe("shipping weight proof foundation", () => {
     });
     await initWeightProofCapture({ awbNumber: "AWB_123", contentType: "image/jpeg" }, context);
 
+    const invalidImage = Buffer.from("safe");
     await assert.rejects(() => uploadWeightProofImage({
       captureSessionId: "capture_123",
       awbNumber: "AWB_123",
       file: {
-        buffer: Buffer.from("safe"),
+        buffer: invalidImage,
         contentType: "application/pdf",
-        sizeBytes: 4
+        sizeBytes: invalidImage.byteLength
       }
     }, context), /WEIGHT_GUARD_UNSUPPORTED_IMAGE_TYPE/);
 
+    const tooLargeImage = makePngBuffer();
     await assert.rejects(() => uploadWeightProofImage({
       captureSessionId: "capture_123",
       awbNumber: "AWB_123",
       file: {
-        buffer: Buffer.from("too-large"),
+        buffer: tooLargeImage,
         contentType: "image/jpeg",
         sizeBytes: 9
       }
     }, context), /WEIGHT_GUARD_UPLOAD_TOO_LARGE/);
   });
 
+  it("checks backend image quality dimensions without external vision services", () => {
+    const good = analyzeWeightProofImageQuality({
+      buffer: makePngBuffer(800, 600),
+      contentType: "image/png",
+      sizeBytes: 24
+    });
+    assert.equal(good.status, "PASS");
+    assert.deepEqual(good.reasonCodes, []);
+
+    const tiny = analyzeWeightProofImageQuality({
+      buffer: makePngBuffer(120, 80),
+      contentType: "image/png",
+      sizeBytes: 24
+    });
+    assert.equal(tiny.status, "FAIL");
+    assert.ok(tiny.reasonCodes.includes("IMAGE_TOO_SMALL"));
+
+    const unusable = analyzeWeightProofImageQuality({
+      buffer: Buffer.from("not-an-image"),
+      contentType: "image/png",
+      sizeBytes: 12
+    });
+    assert.equal(unusable.status, "FAIL");
+    assert.ok(unusable.reasonCodes.includes("SCALE_OR_LABEL_NOT_CLEAR_ENOUGH"));
+  });
+
+  it("rejects backend upload when the image is too small to be useful", async () => {
+    const client = makeClient();
+    const context = makeContext(client, new InMemoryWeightProofStorageAdapter(), { uploadMode: "BACKEND_MEDIATED" });
+    await initWeightProofCapture({ awbNumber: "AWB_123", contentType: "image/png" }, context);
+    const tiny = makePngBuffer(120, 80);
+
+    await assert.rejects(() => uploadWeightProofImage({
+      captureSessionId: "capture_123",
+      awbNumber: "AWB_123",
+      file: {
+        buffer: tiny,
+        contentType: "image/png",
+        sizeBytes: tiny.byteLength
+      }
+    }, context), /IMAGE_TOO_SMALL/);
+  });
+
   it("keeps backend upload responses seller-safe", async () => {
     const client = makeClient();
     const storage = new InMemoryWeightProofStorageAdapter();
     const context = makeContext(client, storage, { uploadMode: "BACKEND_MEDIATED" });
-    await initWeightProofCapture({ awbNumber: "AWB_123" }, context);
+    await initWeightProofCapture({ awbNumber: "AWB_123", contentType: "image/png" }, context);
 
+    const image = makePngBuffer();
     const upload = await uploadWeightProofImage({
       captureSessionId: "capture_123",
       awbNumber: "AWB_123",
       file: {
-        buffer: Buffer.from("safe-test-image"),
-        contentType: "image/jpeg",
-        sizeBytes: Buffer.byteLength("safe-test-image")
+        buffer: image,
+        contentType: "image/png",
+        sizeBytes: image.byteLength
       }
     }, context);
 
     const text = JSON.stringify(upload);
     assert.doesNotMatch(text, /weight-proofs\/seller_123|imageObjectKey|image_object_key|objectKey|private-weight-proofs|storage[.]googleapis|signed/i);
+  });
+
+  it("deletes proof images after AWB financial closure and preserves safe metadata", async () => {
+    const client = makeClient();
+    client.__state.shipments.push(makeVisibleShipment());
+    const storage = new InMemoryWeightProofStorageAdapter();
+    const context = makeContext(client, storage, { uploadMode: "BACKEND_MEDIATED" });
+    await initWeightProofCapture({
+      awbNumber: "AWB_VISIBLE_1",
+      shipmentId: "shipment_visible_1",
+      contentType: "image/png"
+    }, context);
+    const image = makePngBuffer();
+    await uploadWeightProofImage({
+      captureSessionId: "capture_123",
+      awbNumber: "AWB_VISIBLE_1",
+      file: {
+        buffer: image,
+        contentType: "image/png",
+        sizeBytes: image.byteLength
+      }
+    }, context);
+    await finalizeWeightProofCapture({
+      captureSessionId: "capture_123",
+      awbNumber: "AWB_VISIBLE_1",
+      declaredWeightGrams: 1000,
+      dimensions: { lengthCm: 10, widthCm: 20, heightCm: 30 }
+    }, context);
+    const objectKey = client.__state.proofs[0].imageObjectKey;
+
+    const deleted = await deleteWeightProofImageAfterAwbPaid({
+      awbNumber: "AWB_VISIBLE_1",
+      paidEntityType: "SELLER",
+      settlementRef: "settlement_test_1"
+    }, context);
+
+    assert.equal(deleted.deleted, true);
+    assert.equal(deleted.reason, "AWB_FINANCIALLY_CLOSED");
+    assert.deepEqual(await storage.headObject({ objectKey }), { exists: false });
+    assert.equal(client.__state.proofs[0].imageRetentionStatus, "DELETED_AFTER_PAYOUT");
+    assert.equal(client.__state.proofs[0].imageDeletionReason, "AWB_FINANCIALLY_CLOSED");
+    assert.equal(client.__state.proofs[0].deletedAfterSettlementRef, "settlement_test_1");
+    assert.equal(client.__state.proofs[0].imageSizeBytes, image.byteLength);
+    assert.match(String(client.__state.proofs[0].imageChecksum), /^[a-f0-9]{64}$/);
+    assert.equal((deleted as any).proof.proof_status, "archived_after_payout");
+    assert.equal((deleted as any).proof.image_retention_status, "DELETED_AFTER_PAYOUT");
+    assert.doesNotMatch(JSON.stringify(deleted), /imageObjectKey|image_object_key|objectKey|weight-proofs\/seller_123|private-weight-proofs|storage[.]googleapis|signed/i);
+  });
+
+  it("treats already-missing proof images as idempotent deletion success", async () => {
+    const client = makeClient();
+    const storage = new InMemoryWeightProofStorageAdapter();
+    const context = makeContext(client, storage, { uploadMode: "BACKEND_MEDIATED" });
+    await initWeightProofCapture({ awbNumber: "AWB_123", contentType: "image/png" }, context);
+    const image = makePngBuffer();
+    await uploadWeightProofImage({
+      captureSessionId: "capture_123",
+      awbNumber: "AWB_123",
+      file: {
+        buffer: image,
+        contentType: "image/png",
+        sizeBytes: image.byteLength
+      }
+    }, context);
+    await finalizeWeightProofCapture({
+      captureSessionId: "capture_123",
+      awbNumber: "AWB_123",
+      declaredWeightGrams: 1000,
+      dimensions: { lengthCm: 10, widthCm: 20, heightCm: 30 }
+    }, context);
+    await storage.deleteObject({ objectKey: client.__state.proofs[0].imageObjectKey });
+
+    const deleted = await deleteWeightProofImageAfterAwbPaid({
+      awbNumber: "AWB_123",
+      paidEntityType: "MERCHANT",
+      settlementRef: "settlement_test_2"
+    }, context);
+
+    assert.equal(deleted.deleted, true);
+    assert.equal((deleted as any).proof.proof_status, "archived_after_payout");
+  });
+
+  it("does not delete proof images until AWB financial closure is confirmed", async () => {
+    const client = makeClient();
+    const storage = new InMemoryWeightProofStorageAdapter();
+    const context = makeContext(client, storage, { uploadMode: "BACKEND_MEDIATED" });
+    await initWeightProofCapture({ awbNumber: "AWB_123", contentType: "image/png" }, context);
+    const image = makePngBuffer();
+    await uploadWeightProofImage({
+      captureSessionId: "capture_123",
+      awbNumber: "AWB_123",
+      file: {
+        buffer: image,
+        contentType: "image/png",
+        sizeBytes: image.byteLength
+      }
+    }, context);
+    await finalizeWeightProofCapture({
+      captureSessionId: "capture_123",
+      awbNumber: "AWB_123",
+      declaredWeightGrams: 1000,
+      dimensions: { lengthCm: 10, widthCm: 20, heightCm: 30 }
+    }, context);
+    const objectKey = client.__state.proofs[0].imageObjectKey;
+
+    const skipped = await deleteWeightProofImageAfterAwbPaid({
+      awbNumber: "AWB_123",
+      paidEntityType: "SELLER",
+      settlementRef: ""
+    }, context);
+
+    assert.equal(skipped.skipped, true);
+    assert.equal(skipped.reason, "AWB_NOT_FINANCIALLY_CLOSED");
+    assert.equal((await storage.headObject({ objectKey })).exists, true);
+  });
+
+  it("does not delete proof images while a weight dispute is still open", async () => {
+    const client = makeClient();
+    client.__state.shipments.push(makeVisibleShipment());
+    const storage = new InMemoryWeightProofStorageAdapter();
+    const context = makeContext(client, storage, { uploadMode: "BACKEND_MEDIATED" });
+    await initWeightProofCapture({
+      awbNumber: "AWB_VISIBLE_1",
+      shipmentId: "shipment_visible_1",
+      contentType: "image/png"
+    }, context);
+    const image = makePngBuffer();
+    await uploadWeightProofImage({
+      captureSessionId: "capture_123",
+      awbNumber: "AWB_VISIBLE_1",
+      file: {
+        buffer: image,
+        contentType: "image/png",
+        sizeBytes: image.byteLength
+      }
+    }, context);
+    await finalizeWeightProofCapture({
+      captureSessionId: "capture_123",
+      awbNumber: "AWB_VISIBLE_1",
+      declaredWeightGrams: 1000,
+      dimensions: { lengthCm: 10, widthCm: 20, heightCm: 30 }
+    }, context);
+    client.__state.weightDiscrepancyCases.push({
+      id: "weight_case_open",
+      merchantId: "seller_123",
+      shipmentId: "shipment_visible_1",
+      status: "submitted"
+    });
+    const objectKey = client.__state.proofs[0].imageObjectKey;
+
+    const skipped = await deleteWeightProofImageAfterAwbPaid({
+      awbNumber: "AWB_VISIBLE_1",
+      paidEntityType: "SELLER",
+      settlementRef: "settlement_test_3"
+    }, context);
+
+    assert.equal(skipped.skipped, true);
+    assert.equal(skipped.reason, "WEIGHT_DISPUTE_OPEN");
+    assert.equal((await storage.headObject({ objectKey })).exists, true);
+    assert.equal(client.__state.proofs[0].imageRetentionStatus, "ACTIVE");
   });
 
   it("guards the backend-mediated staging self-test runner behind explicit approval", () => {
@@ -824,15 +1074,16 @@ describe("shipping weight proof foundation", () => {
       })
     };
     const context = makeContext(client, storage, { uploadMode: "BACKEND_MEDIATED" });
-    await initWeightProofCapture({ awbNumber: "AWB_123" }, context);
+    await initWeightProofCapture({ awbNumber: "AWB_123", contentType: "image/png" }, context);
 
+    const image = makePngBuffer();
     await assert.rejects(() => uploadWeightProofImage({
       captureSessionId: "capture_123",
       awbNumber: "AWB_123",
       file: {
-        buffer: Buffer.from("safe-test-image"),
-        contentType: "image/jpeg",
-        sizeBytes: Buffer.byteLength("safe-test-image")
+        buffer: image,
+        contentType: "image/png",
+        sizeBytes: image.byteLength
       }
     }, context), (error) => {
       assert.ok(error instanceof HttpError);
@@ -862,15 +1113,16 @@ describe("shipping weight proof foundation", () => {
       })
     };
     const context = makeContext(client, storage, { uploadMode: "BACKEND_MEDIATED" });
-    await initWeightProofCapture({ awbNumber: "AWB_123" }, context);
+    await initWeightProofCapture({ awbNumber: "AWB_123", contentType: "image/png" }, context);
 
+    const image = makePngBuffer();
     await assert.rejects(() => uploadWeightProofImage({
       captureSessionId: "capture_123",
       awbNumber: "AWB_123",
       file: {
-        buffer: Buffer.from("safe-test-image"),
-        contentType: "image/jpeg",
-        sizeBytes: Buffer.byteLength("safe-test-image")
+        buffer: image,
+        contentType: "image/png",
+        sizeBytes: image.byteLength
       }
     }, context), (error) => {
       assert.ok(error instanceof HttpError);
@@ -1436,7 +1688,7 @@ describe("shipping weight proof foundation", () => {
     assert.equal(config.projectId, "shipmastr-core-prod");
     assert.equal(config.signingServiceAccount, "shipmastr-runner@example.iam.gserviceaccount.com");
     assert.equal(config.signedGetTtlMs, 300000);
-    assert.equal(config.maxImageBytes, 10 * 1024 * 1024);
+    assert.equal(config.maxImageBytes, 5 * 1024 * 1024);
   });
 
   it("creates GCS signed PUT URLs through an injected bucket only", async () => {

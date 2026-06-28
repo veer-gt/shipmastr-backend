@@ -1,5 +1,6 @@
 import { createHash } from "node:crypto";
 import {
+  DeleteObjectCommand,
   GetObjectCommand,
   HeadObjectCommand,
   PutObjectCommand,
@@ -14,6 +15,7 @@ const SAFE_SEGMENT = /^[A-Za-z0-9_-]+$/;
 const MAX_AWB_LENGTH = 64;
 const MAX_SEGMENT_LENGTH = 160;
 const ALLOWED_IMAGE_CONTENT_TYPES = new Set(["image/jpeg", "image/png"]);
+export const DEFAULT_WEIGHT_GUARD_MAX_IMAGE_BYTES = 5 * 1024 * 1024;
 const OFFICIAL_GCS_FALLBACK_UPLOAD_CONTENT_TYPE = "application/octet-stream";
 const SUPPORTED_OFFICIAL_GCS_WRITE_SIGNED_URL_OPTION_KEYS = new Set(["version", "action", "expires", "contentType"]);
 export const WEIGHT_GUARD_DIAGNOSTIC_OBJECT_PREFIX = "weight-guard-diagnostics";
@@ -60,6 +62,15 @@ export type PutObjectInput = {
   sizeBytes: number;
 };
 
+export type DeleteObjectInput = {
+  objectKey: string;
+};
+
+export type DeleteObjectResult = {
+  deleted: boolean;
+  missing?: boolean | undefined;
+};
+
 export type BuildWeightProofObjectKeyInput = {
   sellerOrMerchantId: string;
   awbNumber: string;
@@ -72,6 +83,7 @@ export interface WeightProofStorageAdapter {
   createPresignedPutUrl(input: CreatePresignedPutUrlInput): Promise<CreatePresignedPutUrlResult>;
   putObject(input: PutObjectInput): Promise<HeadObjectResult>;
   headObject(input: HeadObjectInput): Promise<HeadObjectResult>;
+  deleteObject(input: DeleteObjectInput): Promise<DeleteObjectResult>;
   createPresignedGetUrl(input: CreatePresignedGetUrlInput): Promise<CreatePresignedGetUrlResult>;
 }
 
@@ -137,6 +149,7 @@ export type GcsWeightProofFile = {
     updated?: string | Date | undefined;
     timeCreated?: string | Date | undefined;
   }]>;
+  delete?(options?: { ignoreNotFound?: boolean | undefined }): Promise<unknown>;
 };
 
 export type GcsWeightProofListedFile = {
@@ -609,6 +622,15 @@ export class InMemoryWeightProofStorageAdapter implements WeightProofStorageAdap
     };
   }
 
+  async deleteObject(input: DeleteObjectInput): Promise<DeleteObjectResult> {
+    const objectKey = validateWeightProofStorageObjectKey(input.objectKey);
+    const deleted = this.objects.delete(objectKey);
+    return {
+      deleted,
+      missing: !deleted
+    };
+  }
+
 }
 
 export class DisabledWeightProofStorageAdapter implements WeightProofStorageAdapter {
@@ -621,6 +643,10 @@ export class DisabledWeightProofStorageAdapter implements WeightProofStorageAdap
   }
 
   async putObject(): Promise<HeadObjectResult> {
+    throw new HttpError(503, "WEIGHT_GUARD_STORAGE_DISABLED");
+  }
+
+  async deleteObject(): Promise<DeleteObjectResult> {
     throw new HttpError(503, "WEIGHT_GUARD_STORAGE_DISABLED");
   }
 
@@ -872,6 +898,20 @@ export class R2WeightProofStorageAdapter implements WeightProofStorageAdapter {
       return object;
     } catch {
       throw new HttpError(503, "BACKEND_UPLOAD_METADATA_VERIFY_FAILED");
+    }
+  }
+
+  async deleteObject(input: DeleteObjectInput): Promise<DeleteObjectResult> {
+    const objectKey = validateWeightProofStorageObjectKey(input.objectKey);
+    try {
+      await this.client.send(new DeleteObjectCommand({
+        Bucket: this.bucket,
+        Key: objectKey
+      }));
+      return { deleted: true };
+    } catch (error) {
+      if (objectNotFound(error)) return { deleted: false, missing: true };
+      throw new HttpError(503, "WEIGHT_GUARD_OBJECT_DELETE_FAILED");
     }
   }
 
@@ -1199,6 +1239,23 @@ export class GcsWeightProofStorageAdapter implements WeightProofStorageAdapter {
     }
   }
 
+  async deleteObject(input: DeleteObjectInput): Promise<DeleteObjectResult> {
+    const objectKey = validateWeightProofStorageObjectKey(input.objectKey);
+    try {
+      const file = this.bucket.file(objectKey) as GcsWeightProofFile & {
+        delete?: (options?: { ignoreNotFound?: boolean | undefined }) => Promise<unknown>;
+      };
+      if (typeof file.delete !== "function") {
+        throw new Error("GCS_DELETE_UNAVAILABLE");
+      }
+      await file.delete({ ignoreNotFound: true });
+      return { deleted: true };
+    } catch (error) {
+      if (gcsObjectNotFound(error)) return { deleted: false, missing: true };
+      throw new HttpError(503, "WEIGHT_GUARD_OBJECT_DELETE_FAILED");
+    }
+  }
+
   async listObjectKeyDiagnosticsByPrefix(input: { prefix: string; maxResults?: number | undefined }) {
     const prefix = validateWeightGuardDiagnosticObjectPrefix(input.prefix);
     if (!this.bucket.getFiles) return [];
@@ -1282,7 +1339,7 @@ export function resolveR2WeightProofStorageConfig(source: WeightProofStorageEnvS
     accessKeyId,
     secretAccessKey,
     signedGetTtlMs: numberInRange(source.WEIGHT_GUARD_SIGNED_GET_TTL_SECONDS, 300, 30, 3600) * 1000,
-    maxImageBytes: numberInRange(source.WEIGHT_GUARD_MAX_IMAGE_BYTES, 10 * 1024 * 1024, 1, 50 * 1024 * 1024)
+    maxImageBytes: numberInRange(source.WEIGHT_GUARD_MAX_IMAGE_BYTES, DEFAULT_WEIGHT_GUARD_MAX_IMAGE_BYTES, 1, 50 * 1024 * 1024)
   };
 }
 
@@ -1294,7 +1351,7 @@ export function resolveGcsWeightProofStorageConfig(source: WeightProofStorageEnv
     projectId: stringValue(source.WEIGHT_GUARD_GCS_PROJECT_ID) ?? "shipmastr-core-prod",
     signingServiceAccount: stringValue(source.WEIGHT_GUARD_GCS_SIGNING_SERVICE_ACCOUNT),
     signedGetTtlMs: numberInRange(source.WEIGHT_GUARD_SIGNED_GET_TTL_SECONDS, 300, 30, 3600) * 1000,
-    maxImageBytes: numberInRange(source.WEIGHT_GUARD_MAX_IMAGE_BYTES, 10 * 1024 * 1024, 1, 50 * 1024 * 1024)
+    maxImageBytes: numberInRange(source.WEIGHT_GUARD_MAX_IMAGE_BYTES, DEFAULT_WEIGHT_GUARD_MAX_IMAGE_BYTES, 1, 50 * 1024 * 1024)
   };
 }
 
@@ -1307,7 +1364,7 @@ export function createWeightProofStorageRuntime(source: WeightProofStorageEnvSou
   const selectedProvider = enabled ? provider(source.WEIGHT_GUARD_STORAGE_PROVIDER) : "disabled";
   const uploadTtlMs = numberInRange(source.WEIGHT_GUARD_UPLOAD_TTL_SECONDS, 600, 60, 3600) * 1000;
   const signedGetTtlMs = numberInRange(source.WEIGHT_GUARD_SIGNED_GET_TTL_SECONDS, 300, 30, 3600) * 1000;
-  const maxImageBytes = numberInRange(source.WEIGHT_GUARD_MAX_IMAGE_BYTES, 10 * 1024 * 1024, 1, 50 * 1024 * 1024);
+  const maxImageBytes = numberInRange(source.WEIGHT_GUARD_MAX_IMAGE_BYTES, DEFAULT_WEIGHT_GUARD_MAX_IMAGE_BYTES, 1, 50 * 1024 * 1024);
   const storage = selectedProvider === "mock"
     ? routeMockStorage
     : selectedProvider === "r2"

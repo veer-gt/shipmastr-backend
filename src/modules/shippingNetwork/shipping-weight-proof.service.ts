@@ -1,10 +1,11 @@
-import { randomUUID } from "node:crypto";
+import { createHash, randomUUID } from "node:crypto";
 import { WeightProofCaptureStatus, type Prisma } from "@prisma/client";
 import { HttpError } from "../../lib/httpError.js";
 import { logger } from "../../lib/logger.js";
 import { prisma } from "../../lib/prisma.js";
 import {
   buildWeightProofObjectKey,
+  DEFAULT_WEIGHT_GUARD_MAX_IMAGE_BYTES,
   getWeightProofObjectKeyDiagnostics,
   normalizeWeightProofContentType,
   type WeightProofStorageAdapter
@@ -49,6 +50,30 @@ export type UploadWeightProofImageInput = {
   };
 };
 
+export type WeightProofQualityStatus = "PASS" | "WARN" | "FAIL";
+export type WeightProofQualityReasonCode =
+  | "IMAGE_TOO_LARGE"
+  | "IMAGE_UNSUPPORTED_TYPE"
+  | "IMAGE_TOO_BLURRY"
+  | "IMAGE_TOO_DARK"
+  | "IMAGE_LOW_CONTRAST"
+  | "IMAGE_TOO_SMALL"
+  | "SCALE_OR_LABEL_NOT_CLEAR_ENOUGH"
+  | "QUALITY_CHECK_UNAVAILABLE";
+
+export type WeightProofImageQualityResult = {
+  status: WeightProofQualityStatus;
+  reasonCodes: WeightProofQualityReasonCode[];
+  width?: number | null | undefined;
+  height?: number | null | undefined;
+};
+
+export type DeleteWeightProofImageAfterAwbPaidInput = {
+  awbNumber: string;
+  paidEntityType: "SELLER" | "MERCHANT" | string;
+  settlementRef?: string | null | undefined;
+};
+
 export type WeightProofUploadMode = "DIRECT_SIGNED_URL" | "BACKEND_MEDIATED";
 
 export type WeightProofServiceContext = {
@@ -66,6 +91,12 @@ export type WeightProofServiceContext = {
 const SAFE_AWB = /^[A-Za-z0-9_-]{1,64}$/;
 const DEFAULT_UPLOAD_TTL_MS = 15 * 60 * 1000;
 const DEFAULT_HEAD_OBJECT_RETRY_DELAYS_MS = [150, 350];
+const MIN_QUALITY_WIDTH = 640;
+const MIN_QUALITY_HEIGHT = 480;
+const OPEN_WEIGHT_DISPUTE_STATUSES = ["detected", "evidence_needed", "dispute_ready", "submitted"];
+const RETENTION_STATUS_ACTIVE = "ACTIVE";
+const RETENTION_STATUS_DELETED_AFTER_PAYOUT = "DELETED_AFTER_PAYOUT";
+const RETENTION_DELETION_REASON_FINANCIALLY_CLOSED = "AWB_FINANCIALLY_CLOSED";
 
 function db(context: WeightProofServiceContext): Db {
   return context.client ?? prisma;
@@ -113,9 +144,90 @@ function validateExpectedByteSize(value: number | null | undefined) {
 function validateUploadImageSize(value: number, context: WeightProofServiceContext) {
   const sizeBytes = Number(value);
   if (!Number.isInteger(sizeBytes) || sizeBytes <= 0) throw new HttpError(400, "WEIGHT_GUARD_UPLOAD_SESSION_INVALID");
-  const maxImageBytes = context.maxImageBytes ?? 10 * 1024 * 1024;
+  const maxImageBytes = context.maxImageBytes ?? DEFAULT_WEIGHT_GUARD_MAX_IMAGE_BYTES;
   if (sizeBytes > maxImageBytes) throw new HttpError(413, "WEIGHT_GUARD_UPLOAD_TOO_LARGE");
   return sizeBytes;
+}
+
+function sha256Hex(buffer: Buffer) {
+  return createHash("sha256").update(buffer).digest("hex");
+}
+
+function readPngDimensions(buffer: Buffer) {
+  if (buffer.length < 24) return null;
+  const signature = buffer.subarray(0, 8).toString("hex");
+  if (signature !== "89504e470d0a1a0a") return null;
+  if (buffer.subarray(12, 16).toString("ascii") !== "IHDR") return null;
+  const width = buffer.readUInt32BE(16);
+  const height = buffer.readUInt32BE(20);
+  return width > 0 && height > 0 ? { width, height } : null;
+}
+
+function readJpegDimensions(buffer: Buffer) {
+  if (buffer.length < 4 || buffer[0] !== 0xff || buffer[1] !== 0xd8) return null;
+  let offset = 2;
+  while (offset + 9 < buffer.length) {
+    if (buffer[offset] !== 0xff) return null;
+    const marker = buffer[offset + 1] ?? 0;
+    offset += 2;
+    if (marker === 0xd9 || marker === 0xda) return null;
+    if (offset + 2 > buffer.length) return null;
+    const length = buffer.readUInt16BE(offset);
+    if (length < 2 || offset + length > buffer.length) return null;
+    const isStartOfFrame = (
+      (marker >= 0xc0 && marker <= 0xc3)
+      || (marker >= 0xc5 && marker <= 0xc7)
+      || (marker >= 0xc9 && marker <= 0xcb)
+      || (marker >= 0xcd && marker <= 0xcf)
+    );
+    if (isStartOfFrame && length >= 7) {
+      const height = buffer.readUInt16BE(offset + 3);
+      const width = buffer.readUInt16BE(offset + 5);
+      return width > 0 && height > 0 ? { width, height } : null;
+    }
+    offset += length;
+  }
+  return null;
+}
+
+export function analyzeWeightProofImageQuality(input: {
+  buffer: Buffer;
+  contentType: string;
+  sizeBytes: number;
+  maxImageBytes?: number | undefined;
+}): WeightProofImageQualityResult {
+  const maxImageBytes = input.maxImageBytes ?? DEFAULT_WEIGHT_GUARD_MAX_IMAGE_BYTES;
+  if (input.sizeBytes > maxImageBytes) {
+    return { status: "FAIL", reasonCodes: ["IMAGE_TOO_LARGE"] };
+  }
+  const contentType = validateUploadImageContentType(input.contentType);
+  const dimensions = contentType === "image/png"
+    ? readPngDimensions(input.buffer)
+    : readJpegDimensions(input.buffer);
+  if (!dimensions) {
+    return { status: "FAIL", reasonCodes: ["SCALE_OR_LABEL_NOT_CLEAR_ENOUGH"] };
+  }
+  if (dimensions.width < MIN_QUALITY_WIDTH || dimensions.height < MIN_QUALITY_HEIGHT) {
+    return {
+      status: "FAIL",
+      reasonCodes: ["IMAGE_TOO_SMALL", "SCALE_OR_LABEL_NOT_CLEAR_ENOUGH"],
+      width: dimensions.width,
+      height: dimensions.height
+    };
+  }
+  return {
+    status: "PASS",
+    reasonCodes: [],
+    width: dimensions.width,
+    height: dimensions.height
+  };
+}
+
+function assertWeightProofImageQuality(result: WeightProofImageQualityResult) {
+  if (result.status === "FAIL") {
+    const primary = result.reasonCodes[0] ?? "SCALE_OR_LABEL_NOT_CLEAR_ENOUGH";
+    throw new HttpError(400, primary);
+  }
 }
 
 export function validateWeightProofAwbNumber(awbNumber: string) {
@@ -428,11 +540,20 @@ export async function uploadWeightProofImage(input: UploadWeightProofImageInput,
   const contentType = validateUploadImageContentType(input.file.contentType ?? session.contentType);
   if (session.contentType !== contentType) throw new HttpError(400, "WEIGHT_GUARD_UNSUPPORTED_IMAGE_TYPE");
   const sizeBytes = validateUploadImageSize(input.file.sizeBytes, context);
+  const body = Buffer.isBuffer(input.file.buffer) ? input.file.buffer : Buffer.from(input.file.buffer);
+  const quality = analyzeWeightProofImageQuality({
+    buffer: body,
+    contentType,
+    sizeBytes,
+    maxImageBytes: context.maxImageBytes
+  });
+  assertWeightProofImageQuality(quality);
+  const imageChecksum = sha256Hex(body);
   let object;
   try {
     object = await context.storage.putObject({
       objectKey: session.imageObjectKey,
-      body: input.file.buffer,
+      body,
       contentType,
       sizeBytes
     });
@@ -443,10 +564,20 @@ export async function uploadWeightProofImage(input: UploadWeightProofImageInput,
     throw error;
   }
   if (!object.exists) throwBackendUploadFailure("BACKEND_UPLOAD_METADATA_VERIFY_FAILED", session.imageObjectKey);
+  await client.shippingWeightProofCaptureSession.update({
+    where: { id: session.id },
+    data: {
+      imageChecksum,
+      imageSizeBytes: sizeBytes,
+      qualityStatus: quality.status,
+      qualityReasonCodes: quality.reasonCodes
+    }
+  });
   return {
     uploadVerified: true,
     proofStatus: "UPLOAD_VERIFIED",
-    nextAction: "FINALIZE"
+    nextAction: "FINALIZE",
+    quality
   };
 }
 
@@ -510,6 +641,11 @@ export async function finalizeWeightProofCapture(input: FinalizeWeightProofCaptu
         chargeableWeightGrams,
         imageObjectKey: session.imageObjectKey,
         contentType: object.contentType ?? session.contentType,
+        imageChecksum: session.imageChecksum ?? null,
+        imageSizeBytes: session.imageSizeBytes ?? object.contentLength ?? null,
+        imageQualityStatus: session.qualityStatus ?? null,
+        imageQualityReasonCodes: session.qualityReasonCodes ?? [],
+        imageRetentionStatus: RETENTION_STATUS_ACTIVE,
         deviceId: nullable(input.deviceId) ?? session.deviceId ?? null,
         capturedAt
       }
@@ -543,4 +679,106 @@ export async function getWeightProofByAwb(input: { awbNumber: string }, context:
   });
   if (!proof) throw new HttpError(404, "WEIGHT_PROOF_NOT_FOUND");
   return serializeWeightProofSellerSafe(proof);
+}
+
+function normalizePaidEntityType(value: string) {
+  const normalized = String(value ?? "").trim().toUpperCase();
+  if (normalized !== "SELLER" && normalized !== "MERCHANT") {
+    throw new HttpError(400, "WEIGHT_GUARD_PAID_ENTITY_INVALID");
+  }
+  return normalized;
+}
+
+function normalizeSettlementRef(value: string | null | undefined) {
+  const trimmed = String(value ?? "").trim();
+  return trimmed || null;
+}
+
+async function hasOpenWeightDispute(client: Db, proof: { merchantId: string; shipmentId?: string | null }) {
+  if (!proof.shipmentId) return false;
+  const openCase = await client.weightDiscrepancyCase.findFirst({
+    where: {
+      merchantId: proof.merchantId,
+      shipmentId: proof.shipmentId,
+      status: { in: OPEN_WEIGHT_DISPUTE_STATUSES }
+    }
+  });
+  return Boolean(openCase);
+}
+
+export async function deleteWeightProofImageAfterAwbPaid(
+  input: DeleteWeightProofImageAfterAwbPaidInput,
+  context: WeightProofServiceContext
+) {
+  const client = db(context);
+  const merchantId = requireMerchantId(context.merchantId);
+  const awbNumber = validateWeightProofAwbNumber(input.awbNumber);
+  const paidEntityType = normalizePaidEntityType(input.paidEntityType);
+  const settlementRef = normalizeSettlementRef(input.settlementRef);
+  if (!settlementRef) {
+    return {
+      deleted: false,
+      skipped: true,
+      reason: "AWB_NOT_FINANCIALLY_CLOSED" as const,
+      awbNumber,
+      paidEntityType
+    };
+  }
+
+  const proof = await client.shippingWeightProof.findFirst({
+    where: {
+      merchantId,
+      awbNumber
+    }
+  });
+  if (!proof) {
+    return {
+      deleted: false,
+      skipped: true,
+      reason: "WEIGHT_PROOF_NOT_FOUND" as const,
+      awbNumber,
+      paidEntityType,
+      settlementRef
+    };
+  }
+
+  if (proof.imageRetentionStatus === RETENTION_STATUS_DELETED_AFTER_PAYOUT || proof.imageDeletedAt) {
+    return {
+      deleted: false,
+      idempotent: true,
+      reason: RETENTION_DELETION_REASON_FINANCIALLY_CLOSED,
+      proof: serializeWeightProofSellerSafe(proof)
+    };
+  }
+
+  if (await hasOpenWeightDispute(client, proof)) {
+    return {
+      deleted: false,
+      skipped: true,
+      reason: "WEIGHT_DISPUTE_OPEN" as const,
+      proof: serializeWeightProofSellerSafe(proof)
+    };
+  }
+
+  await context.storage.deleteObject({ objectKey: proof.imageObjectKey });
+  const deletedAt = now(context);
+  const updated = await client.shippingWeightProof.update({
+    where: { id: proof.id },
+    data: {
+      imageDeletedAt: deletedAt,
+      imageDeletionReason: RETENTION_DELETION_REASON_FINANCIALLY_CLOSED,
+      imageRetentionStatus: RETENTION_STATUS_DELETED_AFTER_PAYOUT,
+      deletedAfterSettlementRef: settlementRef,
+      imageSizeBytes: proof.imageSizeBytes ?? null,
+      imageChecksum: proof.imageChecksum ?? null
+    }
+  });
+
+  return {
+    deleted: true,
+    idempotent: false,
+    reason: RETENTION_DELETION_REASON_FINANCIALLY_CLOSED,
+    paidEntityType,
+    proof: serializeWeightProofSellerSafe(updated)
+  };
 }

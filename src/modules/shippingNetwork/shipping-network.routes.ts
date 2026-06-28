@@ -91,6 +91,7 @@ import {
 import {
   assertWeightProofStorageEnabled,
   createWeightProofStorageRuntime,
+  DEFAULT_WEIGHT_GUARD_MAX_IMAGE_BYTES,
   type WeightProofStorageRuntime
 } from "./shipping-weight-proof-storage.js";
 import {
@@ -166,7 +167,7 @@ const weightProofImageUpload = multer({
   storage: multer.memoryStorage(),
   limits: {
     files: 1,
-    fileSize: 10 * 1024 * 1024
+    fileSize: DEFAULT_WEIGHT_GUARD_MAX_IMAGE_BYTES
   }
 });
 
@@ -304,7 +305,8 @@ export function serializeWeightProofUploadRouteResult(result: Awaited<ReturnType
     status: "UPLOAD_VERIFIED",
     uploadVerified: result.uploadVerified,
     proofStatus: result.proofStatus,
-    nextAction: result.nextAction
+    nextAction: result.nextAction,
+    quality: result.quality
   };
 }
 

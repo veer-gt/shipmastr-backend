@@ -30,18 +30,26 @@ export function serializeWeightProofSellerSafe(proof: {
   declaredWeightGrams: number;
   volumetricWeightGrams: number;
   chargeableWeightGrams: number;
+  imageRetentionStatus?: string | null;
+  imageDeletedAt?: Date | string | null;
+  imageDeletionReason?: string | null;
+  imageSizeBytes?: number | null;
+  imageQualityStatus?: string | null;
+  imageQualityReasonCodes?: string[] | null;
   lengthCm?: unknown;
   widthCm?: unknown;
   heightCm?: unknown;
   capturedAt?: Date | string | null;
   createdAt?: Date | string | null;
 }) {
+  const retentionStatus = String(proof.imageRetentionStatus ?? "ACTIVE").trim().toUpperCase() || "ACTIVE";
+  const archivedAfterPayout = retentionStatus === "DELETED_AFTER_PAYOUT" || Boolean(proof.imageDeletedAt);
   return {
-    status: "available",
+    status: archivedAfterPayout ? "archived" : "available",
     proof_id: proof.id,
     capture_session_id: proof.captureSessionId,
     awb_number: proof.awbNumber,
-    proof_status: "captured",
+    proof_status: archivedAfterPayout ? "archived_after_payout" : "captured",
     declared_weight_grams: proof.declaredWeightGrams,
     volumetric_weight_grams: proof.volumetricWeightGrams,
     chargeable_weight_grams: proof.chargeableWeightGrams,
@@ -50,6 +58,12 @@ export function serializeWeightProofSellerSafe(proof: {
       width_cm: decimalToNumber(proof.widthCm) ?? 0,
       height_cm: decimalToNumber(proof.heightCm) ?? 0
     },
+    image_retention_status: retentionStatus,
+    image_deleted_at: timestamp(proof.imageDeletedAt),
+    image_deletion_reason: proof.imageDeletionReason ?? null,
+    image_size_bytes: proof.imageSizeBytes ?? null,
+    image_quality_status: proof.imageQualityStatus ?? null,
+    image_quality_reason_codes: proof.imageQualityReasonCodes ?? [],
     captured_at: timestamp(proof.capturedAt),
     created_at: timestamp(proof.createdAt)
   };
