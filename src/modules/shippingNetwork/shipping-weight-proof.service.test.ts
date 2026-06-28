@@ -241,6 +241,7 @@ function makeGcsAdapter(options: {
   getMetadata?: () => Promise<[any]>;
   metadataRequest?: (input: any) => Promise<{ ok: boolean; status: number; metadata?: any }>;
   mediaUploadRequest?: (input: any) => Promise<{ ok: boolean; status: number; metadata?: any }>;
+  deleteRequest?: (input: any) => Promise<{ ok: boolean; status: number }>;
   save?: (data: Buffer | Uint8Array, options: any) => Promise<unknown>;
   iamSignBlobRequest?: (input: any) => Promise<any>;
   maxImageBytes?: number;
@@ -315,6 +316,19 @@ function makeGcsAdapter(options: {
           contentType: input.contentType,
           updated: "2026-06-22T10:06:00.000Z"
         }
+      };
+    },
+    deleteRequest: async (input: any) => {
+      calls.push({
+        method: "deleteObject",
+        objectKey: input.objectKey,
+        hasUrl: Boolean(input.url),
+        hasAccessToken: Boolean(input.accessToken)
+      });
+      if (options.deleteRequest) return options.deleteRequest(input);
+      return {
+        ok: true,
+        status: 204
       };
     },
     runtimeSigner: options.runtimeSigner,
@@ -2464,6 +2478,45 @@ describe("shipping weight proof foundation", () => {
     await assert.rejects(
       () => failed.adapter.headObject({ objectKey: r2ObjectKey }),
       (error) => error instanceof HttpError && error.message === "WEIGHT_GUARD_OBJECT_HEAD_FAILED"
+    );
+  });
+
+  it("deletes GCS proof objects through the authenticated backend client with the raw object key", async () => {
+    const { adapter, calls } = makeGcsAdapter({
+      accessTokenProvider: async () => "test-access-token"
+    });
+
+    const deleted = await adapter.deleteObject({ objectKey: r2ObjectKey });
+
+    assert.deepEqual(deleted, { deleted: true });
+    assert.deepEqual(calls, [{
+      method: "deleteObject",
+      objectKey: r2ObjectKey,
+      hasUrl: true,
+      hasAccessToken: true
+    }]);
+    assert.doesNotMatch(JSON.stringify(deleted), /imageObjectKey|image_object_key|objectKey|private-weight-proofs|storage[.]googleapis|signed|access-token/i);
+  });
+
+  it("treats missing GCS proof objects as idempotent retention deletion success", async () => {
+    const { adapter } = makeGcsAdapter({
+      deleteRequest: async () => ({ ok: false, status: 404 })
+    });
+
+    assert.deepEqual(await adapter.deleteObject({ objectKey: r2ObjectKey }), {
+      deleted: false,
+      missing: true
+    });
+  });
+
+  it("maps GCS delete permission and storage failures to a safe category", async () => {
+    const { adapter } = makeGcsAdapter({
+      deleteRequest: async () => ({ ok: false, status: 403 })
+    });
+
+    await assert.rejects(
+      () => adapter.deleteObject({ objectKey: r2ObjectKey }),
+      (error) => error instanceof HttpError && error.message === "WEIGHT_GUARD_OBJECT_DELETE_FAILED"
     );
   });
 

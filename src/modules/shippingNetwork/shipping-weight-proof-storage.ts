@@ -205,6 +205,14 @@ export type GcsMetadataRequest = (input: {
     timeCreated?: string | Date | undefined;
   } | null | undefined;
 }>;
+export type GcsDeleteRequest = (input: {
+  url: string;
+  accessToken: string;
+  objectKey: string;
+}) => Promise<{
+  ok: boolean;
+  status: number;
+}>;
 export type GcsIamSignBlobRequest = (input: {
   url: string;
   accessToken: string;
@@ -251,6 +259,7 @@ export type GcsWeightProofStorageConfig = {
   iamSignBlobRequest?: GcsIamSignBlobRequest | undefined;
   metadataRequest?: GcsMetadataRequest | undefined;
   mediaUploadRequest?: GcsMediaUploadRequest | undefined;
+  deleteRequest?: GcsDeleteRequest | undefined;
   runtimeSigner?: GcsRuntimeSigner | undefined;
   serviceAccountEmailResolver?: GcsServiceAccountEmailResolver | undefined;
   storage?: Storage | undefined;
@@ -793,6 +802,22 @@ async function defaultGcsMetadataRequest(input: Parameters<GcsMetadataRequest>[0
   };
 }
 
+async function defaultGcsDeleteRequest(input: Parameters<GcsDeleteRequest>[0]) {
+  if (typeof fetch !== "function") {
+    throw new Error("GCS_DELETE_FETCH_UNAVAILABLE");
+  }
+  const response = await fetch(input.url, {
+    method: "DELETE",
+    headers: {
+      Authorization: `Bearer ${input.accessToken}`
+    }
+  });
+  return {
+    ok: response.ok,
+    status: response.status
+  };
+}
+
 function headObjectFromGcsMetadata(metadata: Awaited<ReturnType<GcsMediaUploadRequest>>["metadata"], expectedObjectKey: string): HeadObjectResult | null {
   if (!metadata || (metadata.name && metadata.name !== expectedObjectKey)) return null;
   const updatedAt = metadata.updated ?? metadata.timeCreated;
@@ -940,6 +965,7 @@ export class GcsWeightProofStorageAdapter implements WeightProofStorageAdapter {
   private readonly iamSignBlobRequest: GcsIamSignBlobRequest;
   private readonly metadataRequest: GcsMetadataRequest;
   private readonly mediaUploadRequest: GcsMediaUploadRequest;
+  private readonly deleteRequest: GcsDeleteRequest;
   private readonly runtimeSigner?: GcsRuntimeSigner | undefined;
   private readonly serviceAccountEmailResolver: GcsServiceAccountEmailResolver;
   private readonly diagnostics: GcsWeightProofDiagnosticsReporter;
@@ -959,6 +985,7 @@ export class GcsWeightProofStorageAdapter implements WeightProofStorageAdapter {
     this.iamSignBlobRequest = config.iamSignBlobRequest ?? defaultIamCredentialsSignBlobRequest;
     this.metadataRequest = config.metadataRequest ?? defaultGcsMetadataRequest;
     this.mediaUploadRequest = config.mediaUploadRequest ?? defaultGcsMediaUploadRequest;
+    this.deleteRequest = config.deleteRequest ?? defaultGcsDeleteRequest;
     this.runtimeSigner = config.runtimeSigner;
     this.serviceAccountEmailResolver = config.serviceAccountEmailResolver ?? resolveCloudRunServiceAccountEmail;
     this.diagnostics = config.diagnostics ?? ((diagnostic) => {
@@ -1166,6 +1193,10 @@ export class GcsWeightProofStorageAdapter implements WeightProofStorageAdapter {
     return url.toString();
   }
 
+  private buildAuthenticatedDeleteUrl(objectKey: string) {
+    return `https://storage.googleapis.com/storage/v1/b/${encodeURIComponent(this.bucketName)}/o/${encodeURIComponent(objectKey)}`;
+  }
+
   async createPresignedPutUrl(input: CreatePresignedPutUrlInput): Promise<CreatePresignedPutUrlResult> {
     const objectKey = validateWeightProofStorageObjectKey(input.objectKey);
     const contentType = normalizeWeightProofContentType(input.contentType);
@@ -1242,13 +1273,14 @@ export class GcsWeightProofStorageAdapter implements WeightProofStorageAdapter {
   async deleteObject(input: DeleteObjectInput): Promise<DeleteObjectResult> {
     const objectKey = validateWeightProofStorageObjectKey(input.objectKey);
     try {
-      const file = this.bucket.file(objectKey) as GcsWeightProofFile & {
-        delete?: (options?: { ignoreNotFound?: boolean | undefined }) => Promise<unknown>;
-      };
-      if (typeof file.delete !== "function") {
-        throw new Error("GCS_DELETE_UNAVAILABLE");
-      }
-      await file.delete({ ignoreNotFound: true });
+      const accessToken = await this.resolveRuntimeAccessToken();
+      const result = await this.deleteRequest({
+        url: this.buildAuthenticatedDeleteUrl(objectKey),
+        accessToken,
+        objectKey
+      });
+      if (result.status === 404) return { deleted: false, missing: true };
+      if (!result.ok) throw Object.assign(new Error(`GCS_DELETE_STATUS_${result.status}`), { code: result.status });
       return { deleted: true };
     } catch (error) {
       if (gcsObjectNotFound(error)) return { deleted: false, missing: true };
