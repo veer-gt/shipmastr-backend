@@ -24,6 +24,9 @@
     "domains:resellerclub-registration-preflight": "node scripts/domains-resellerclub-registration-preflight.mjs",
     "smoke:production-readiness": "node scripts/smoke/production-readiness-smoke.mjs",
     "smoke:pilot-live-flow": "node scripts/smoke/pilot-live-flow-smoke.mjs",
+    "smoke:weight-guard:local-mock": "node scripts/weight-guard-local-mock-smoke.cjs",
+    "self-test:weight-guard:gcs-signed-url": "node scripts/weight-guard-gcs-signed-url-self-test.cjs",
+    "self-test:weight-guard:gcs-put-head": "node scripts/weight-guard-gcs-put-head-self-test.cjs",
     "seed:local-admin": "node scripts/seed-local-admin.mjs",
     "seed:storefront-demo": "node scripts/seed-storefront-demo.mjs"
   },
@@ -32,6 +35,9 @@
   "license": "ISC",
   "type": "module",
   "dependencies": {
+    "@aws-sdk/client-s3": "^3.1073.0",
+    "@aws-sdk/s3-request-presigner": "^3.1073.0",
+    "@google-cloud/storage": "^7.21.0",
     "@prisma/client": "^6.15.0",
     "@types/multer": "^2.1.0",
     "@types/nodemailer": "^8.0.0",

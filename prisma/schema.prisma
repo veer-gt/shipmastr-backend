@@ -57,6 +57,14 @@ enum ShipmentStatus {
   exception
 }
 
+enum WeightProofCaptureStatus {
+  CREATED
+  FINALIZED
+  EXPIRED
+  CANCELLED
+  FAILED
+}
+
 enum ShipmentSegment {
   domestic_b2c
   domestic_b2b
@@ -1276,6 +1284,8 @@ model Shipment {
   providerRefs ShipmentProviderRef[]
   rates ShipmentRate[]
   trackingEvents ShipmentTrackingEvent[]
+  weightProofCaptureSessions ShippingWeightProofCaptureSession[]
+  weightProofs ShippingWeightProof[]
 
   @@index([sellerId])
   @@index([orderId])
@@ -1618,6 +1628,70 @@ model WeightDiscrepancyCase {
   @@index([shipmentId])
   @@index([merchantId, createdAt])
   @@map("weight_discrepancy_cases")
+}
+
+model ShippingWeightProofCaptureSession {
+  id               String                   @id @default(cuid())
+  merchantId       String                   @map("merchant_id")
+  shipmentId       String?                  @map("shipment_id")
+  awbNumber        String                   @map("awb_number")
+  imageObjectKey   String                   @map("image_object_key")
+  contentType      String                   @map("content_type")
+  expectedByteSize Int?                     @map("expected_byte_size")
+  imageChecksum    String?                  @map("image_checksum")
+  imageSizeBytes   Int?                     @map("image_size_bytes")
+  qualityStatus    String?                  @map("quality_status")
+  qualityReasonCodes String[]               @default([]) @map("quality_reason_codes")
+  deviceId         String?                  @map("device_id")
+  status           WeightProofCaptureStatus @default(CREATED)
+  expiresAt        DateTime                 @map("expires_at")
+  finalizedAt      DateTime?                @map("finalized_at")
+  createdAt        DateTime                 @default(now()) @map("created_at")
+  updatedAt        DateTime                 @default(now()) @updatedAt @map("updated_at")
+
+  shipment Shipment? @relation(fields: [shipmentId], references: [id], onDelete: SetNull)
+  proof ShippingWeightProof?
+
+  @@index([merchantId, awbNumber])
+  @@index([shipmentId])
+  @@index([status, expiresAt])
+  @@map("shipping_weight_proof_capture_sessions")
+}
+
+model ShippingWeightProof {
+  id                     String   @id @default(cuid())
+  captureSessionId       String   @unique @map("capture_session_id")
+  merchantId             String   @map("merchant_id")
+  shipmentId             String?  @map("shipment_id")
+  awbNumber              String   @map("awb_number")
+  declaredWeightGrams    Int      @map("declared_weight_grams")
+  lengthCm               Decimal  @map("length_cm") @db.Decimal(10, 2)
+  widthCm                Decimal  @map("width_cm") @db.Decimal(10, 2)
+  heightCm               Decimal  @map("height_cm") @db.Decimal(10, 2)
+  volumetricWeightGrams  Int      @map("volumetric_weight_grams")
+  chargeableWeightGrams  Int      @map("chargeable_weight_grams")
+  imageObjectKey         String   @map("image_object_key")
+  contentType            String   @map("content_type")
+  imageChecksum          String?  @map("image_checksum")
+  imageSizeBytes         Int?     @map("image_size_bytes")
+  imageQualityStatus     String?  @map("image_quality_status")
+  imageQualityReasonCodes String[] @default([]) @map("image_quality_reason_codes")
+  imageRetentionStatus   String   @default("ACTIVE") @map("image_retention_status")
+  imageDeletedAt         DateTime? @map("image_deleted_at")
+  imageDeletionReason    String?  @map("image_deletion_reason")
+  deletedAfterSettlementRef String? @map("deleted_after_settlement_ref")
+  deviceId               String?  @map("device_id")
+  capturedAt             DateTime @map("captured_at")
+  createdAt              DateTime @default(now()) @map("created_at")
+
+  captureSession ShippingWeightProofCaptureSession @relation(fields: [captureSessionId], references: [id], onDelete: Cascade)
+  shipment Shipment? @relation(fields: [shipmentId], references: [id], onDelete: SetNull)
+
+  @@unique([merchantId, awbNumber])
+  @@index([shipmentId])
+  @@index([imageRetentionStatus])
+  @@index([createdAt])
+  @@map("shipping_weight_proofs")
 }
 
 model SellerApiKey {

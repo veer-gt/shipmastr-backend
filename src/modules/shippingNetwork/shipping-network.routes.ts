@@ -1,5 +1,6 @@
-import { Router, type Response } from "express";
+import { Router, type Request, type Response } from "express";
 import multer from "multer";
+import { HttpError } from "../../lib/httpError.js";
 import {
   autopilotPreferenceSchema,
   autopilotRecommendSchema,
@@ -81,6 +82,25 @@ import {
   updateWeightDisputeEvidence
 } from "./shipping-weight-dispute.service.js";
 import {
+  finalizeWeightProofCapture,
+  getWeightProofByAwb,
+  initWeightProofCapture,
+  uploadWeightProofImage,
+  type WeightProofServiceContext
+} from "./shipping-weight-proof.service.js";
+import {
+  assertWeightProofStorageEnabled,
+  createWeightProofStorageRuntime,
+  DEFAULT_WEIGHT_GUARD_MAX_IMAGE_BYTES,
+  type WeightProofStorageRuntime
+} from "./shipping-weight-proof-storage.js";
+import {
+  finalizeWeightProofCaptureRouteSchema,
+  initWeightProofCaptureRouteSchema,
+  uploadWeightProofCaptureRouteSchema,
+  weightProofAwbRouteParamSchema
+} from "./shipping-weight-proof.validation.js";
+import {
   cancelShippingOrder,
   createShippingOrder,
   getShippingOrder,
@@ -143,6 +163,13 @@ const csvUpload = multer({
   storage: multer.memoryStorage(),
   limits: { fileSize: 2 * 1024 * 1024 }
 });
+const weightProofImageUpload = multer({
+  storage: multer.memoryStorage(),
+  limits: {
+    files: 1,
+    fileSize: DEFAULT_WEIGHT_GUARD_MAX_IMAGE_BYTES
+  }
+});
 
 function sendValidationError(res: Response, error: ShippingValidationError) {
   return res.status(400).json({
@@ -167,6 +194,131 @@ function sellerApiEnvelope(message: string, data: unknown) {
 
 function routeParam(value: string | string[] | undefined) {
   return Array.isArray(value) ? value[0] ?? "" : value ?? "";
+}
+
+export function getWeightProofStorageRuntimeForRequest(req: Request): WeightProofStorageRuntime {
+  return req.app.locals.weightProofStorageRuntime as WeightProofStorageRuntime | undefined
+    ?? createWeightProofStorageRuntime();
+}
+
+export function createWeightProofRouteContext(req: Request, options: { requireStorage?: boolean } = {}): WeightProofServiceContext {
+  const runtime = getWeightProofStorageRuntimeForRequest(req);
+  const activeRuntime = options.requireStorage === false ? runtime : assertWeightProofStorageEnabled(runtime);
+  const context: WeightProofServiceContext = {
+    merchantId: req.auth!.merchantId,
+    storage: activeRuntime.storage,
+    uploadTtlMs: activeRuntime.uploadTtlMs,
+    maxImageBytes: activeRuntime.maxImageBytes,
+    uploadMode: activeRuntime.provider === "gcs" ? "BACKEND_MEDIATED" : "DIRECT_SIGNED_URL"
+  };
+  const client = req.app.locals.weightProofClient;
+  if (client) context.client = client;
+  const now = req.app.locals.weightProofNow;
+  if (now) context.now = now;
+  const idFactory = req.app.locals.weightProofIdFactory;
+  if (idFactory) context.idFactory = idFactory;
+  return context;
+}
+
+function serializeWeightProofUploadHeaders(headers: Record<string, string> | undefined) {
+  const serialized: Record<string, string> = {};
+  for (const [key, value] of Object.entries(headers ?? {})) {
+    const headerName = String(key || "").trim().toLowerCase();
+    const headerValue = String(value ?? "").trim();
+    if (!headerName || !headerValue) continue;
+    if (headerName === "content-type") serialized["Content-Type"] = headerValue;
+    if (headerName === "x-goog-content-sha256") serialized["x-goog-content-sha256"] = headerValue;
+  }
+  if (!serialized["Content-Type"]) serialized["Content-Type"] = "image/jpeg";
+  return serialized;
+}
+
+function assertWeightProofImageSize(expectedByteSize: number | undefined, runtime: WeightProofStorageRuntime) {
+  if (expectedByteSize !== undefined && expectedByteSize > runtime.maxImageBytes) {
+    throw new ShippingValidationError("Weight proof image is larger than the configured limit.", [{
+      field: "expected_byte_size",
+      message: "Expected image byte size exceeds the configured Weight Guard limit."
+    }]);
+  }
+}
+
+function runWeightProofImageUpload(req: Request, res: Response) {
+  return new Promise<void>((resolve, reject) => {
+    weightProofImageUpload.single("file")(req, res, (error) => {
+      if (!error) {
+        resolve();
+        return;
+      }
+      const code = typeof error === "object" && error !== null && "code" in error
+        ? String((error as { code?: unknown }).code ?? "")
+        : "";
+      if (code === "LIMIT_FILE_SIZE") {
+        reject(new HttpError(413, "WEIGHT_GUARD_UPLOAD_TOO_LARGE"));
+        return;
+      }
+      reject(error);
+    });
+  });
+}
+
+export function serializeInitWeightProofRouteResult(result: Awaited<ReturnType<typeof initWeightProofCapture>>) {
+  if (result.proof) {
+    return {
+      status: "PROOF_ALREADY_LOGGED",
+      captureSessionId: result.proof.capture_session_id,
+      awbNumber: result.proof.awb_number,
+      declaredWeightGrams: result.proof.declared_weight_grams,
+      volumetricWeightGrams: result.proof.volumetric_weight_grams,
+      chargeableWeightGrams: result.proof.chargeable_weight_grams,
+      proofStatus: "READY_FOR_DISPUTE"
+    };
+  }
+
+  const upload = result.upload;
+  const isBackendMediated = upload?.uploadMode === "BACKEND_MEDIATED";
+  const base = {
+    status: result.created ? "CAPTURE_SESSION_CREATED" : "CAPTURE_SESSION_REUSED",
+    captureSessionId: result.capture?.capture_session_id ?? null,
+    awbNumber: result.capture?.awb_number ?? null,
+    uploadMode: upload?.uploadMode ?? null
+  };
+
+  if (isBackendMediated) {
+    return {
+      ...base,
+      uploadEndpoint: upload && "uploadEndpoint" in upload ? upload.uploadEndpoint : null,
+      requiredHeaders: {}
+    };
+  }
+
+  return {
+    ...base,
+    uploadEndpoint: null,
+    uploadUrl: upload && "uploadUrl" in upload ? upload.uploadUrl : null,
+    expiresAt: upload?.expiresAt ?? null,
+    requiredHeaders: serializeWeightProofUploadHeaders(upload?.headers)
+  };
+}
+
+export function serializeWeightProofUploadRouteResult(result: Awaited<ReturnType<typeof uploadWeightProofImage>>) {
+  return {
+    status: "UPLOAD_VERIFIED",
+    uploadVerified: result.uploadVerified,
+    proofStatus: result.proofStatus,
+    nextAction: result.nextAction,
+    quality: result.quality
+  };
+}
+
+export function serializeFinalizeWeightProofRouteResult(result: Awaited<ReturnType<typeof finalizeWeightProofCapture>>) {
+  return {
+    status: result.finalized ? "PROOF_LOGGED" : "PROOF_ALREADY_LOGGED",
+    awbNumber: result.proof.awb_number,
+    declaredWeightGrams: result.proof.declared_weight_grams,
+    volumetricWeightGrams: result.proof.volumetric_weight_grams,
+    chargeableWeightGrams: result.proof.chargeable_weight_grams,
+    proofStatus: "READY_FOR_DISPUTE"
+  };
 }
 
 shippingNetworkRouter.use("/", platformIntegrationsRouter);
@@ -470,6 +622,74 @@ shippingNetworkRouter.put("/weight-disputes/:caseId/close", async (req, res) => 
   const data = await closeWeightDispute(req.auth!.merchantId, req.params.caseId, body);
   await enqueueWebhookEvent(req.auth!.merchantId, "weight.dispute.closed", data);
   return res.json(successEnvelope("Weight dispute closed successfully.", data));
+});
+
+shippingNetworkRouter.post("/weight-proofs/init", async (req, res) => {
+  const body = initWeightProofCaptureRouteSchema.parse(req.body);
+  const runtime = getWeightProofStorageRuntimeForRequest(req);
+  assertWeightProofImageSize(body.expected_byte_size, runtime);
+  const context = createWeightProofRouteContext(req);
+  const result = await initWeightProofCapture({
+    awbNumber: body.awb_number,
+    ...(body.shipment_id ? { shipmentId: body.shipment_id } : {}),
+    contentType: body.content_type,
+    ...(body.expected_byte_size === undefined ? {} : { expectedByteSize: body.expected_byte_size }),
+    ...(body.device_id ? { deviceId: body.device_id } : {})
+  }, context);
+  return res.status(result.created ? 201 : 200).json(successEnvelope(
+    result.created ? "Weight proof capture session created successfully." : "Weight proof capture session fetched successfully.",
+    serializeInitWeightProofRouteResult(result)
+  ));
+});
+
+shippingNetworkRouter.post("/weight-proofs/upload", async (req, res) => {
+  await runWeightProofImageUpload(req, res);
+  const body = uploadWeightProofCaptureRouteSchema.parse({
+    capture_session_id: req.body?.capture_session_id ?? req.body?.captureSessionId ?? req.body?.session_id ?? req.body?.sessionId,
+    awb_number: req.body?.awb_number ?? req.body?.awbNumber
+  });
+  if (!req.file?.buffer) throw new HttpError(400, "WEIGHT_GUARD_UPLOAD_SESSION_INVALID");
+  const context = createWeightProofRouteContext(req);
+  const result = await uploadWeightProofImage({
+    captureSessionId: body.capture_session_id,
+    ...(body.awb_number ? { awbNumber: body.awb_number } : {}),
+    file: {
+      buffer: req.file.buffer,
+      contentType: req.file.mimetype,
+      sizeBytes: req.file.size
+    }
+  }, context);
+  return res.status(201).json(successEnvelope(
+    "Weight proof image uploaded successfully.",
+    serializeWeightProofUploadRouteResult(result)
+  ));
+});
+
+shippingNetworkRouter.post("/weight-proofs/finalize", async (req, res) => {
+  const body = finalizeWeightProofCaptureRouteSchema.parse(req.body);
+  const context = createWeightProofRouteContext(req);
+  const result = await finalizeWeightProofCapture({
+    captureSessionId: body.capture_session_id,
+    declaredWeightGrams: body.declared_weight_grams,
+    dimensions: {
+      lengthCm: body.length_cm,
+      widthCm: body.width_cm,
+      heightCm: body.height_cm
+    },
+    ...(body.device_id ? { deviceId: body.device_id } : {}),
+    ...(body.captured_at ? { capturedAt: body.captured_at } : {})
+  }, context);
+  return res.status(result.finalized ? 201 : 200).json(successEnvelope(
+    result.finalized ? "Weight proof logged successfully." : "Weight proof already logged.",
+    serializeFinalizeWeightProofRouteResult(result)
+  ));
+});
+
+shippingNetworkRouter.get("/weight-proofs/:awbNumber", async (req, res) => {
+  const params = weightProofAwbRouteParamSchema.parse({ awbNumber: routeParam(req.params.awbNumber) });
+  const context = createWeightProofRouteContext(req, { requireStorage: false });
+  const data = await getWeightProofByAwb({ awbNumber: params.awbNumber }, context);
+  return res.json(successEnvelope("Weight proof fetched successfully.", data));
 });
 
 shippingNetworkRouter.post("/orders", async (req, res) => {
