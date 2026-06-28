@@ -3,7 +3,6 @@ import { WeightProofCaptureStatus, type Prisma } from "@prisma/client";
 import { HttpError } from "../../lib/httpError.js";
 import { logger } from "../../lib/logger.js";
 import { prisma } from "../../lib/prisma.js";
-import { getSellerShipment } from "./shipping-shipments.service.js";
 import {
   buildWeightProofObjectKey,
   getWeightProofObjectKeyDiagnostics,
@@ -171,15 +170,41 @@ async function shipmentForAwb(client: Db, merchantId: string, awbNumber: string)
   });
 }
 
+async function shipmentForId(client: Db, merchantId: string, shipmentId: string) {
+  return client.shipment.findFirst({
+    where: {
+      id: shipmentId,
+      sellerId: merchantId
+    }
+  });
+}
+
 async function resolveShipment(client: Db, merchantId: string, shipmentId: string | undefined, awbNumber: string) {
-  if (shipmentId) {
-    const shipment = await getSellerShipment(merchantId, shipmentId, client);
-    if (shipment.awbNumber && shipment.awbNumber !== awbNumber) {
+  const normalizedShipmentId = nullable(shipmentId);
+  const shipmentById = normalizedShipmentId
+    ? await shipmentForId(client, merchantId, normalizedShipmentId)
+    : null;
+
+  if (shipmentById?.awbNumber === awbNumber) {
+    return shipmentById;
+  }
+
+  const shipmentByAwb = await shipmentForAwb(client, merchantId, awbNumber);
+  if (shipmentByAwb) {
+    if (shipmentById && shipmentById.id !== shipmentByAwb.id) {
       throw new HttpError(409, "WEIGHT_PROOF_AWB_SHIPMENT_MISMATCH");
     }
-    return shipment;
+    return shipmentByAwb;
   }
-  return shipmentForAwb(client, merchantId, awbNumber);
+
+  if (shipmentById) {
+    throw new HttpError(409, "WEIGHT_PROOF_AWB_SHIPMENT_MISMATCH");
+  }
+  if (normalizedShipmentId) {
+    throw new HttpError(404, "SHIPMENT_NOT_FOUND");
+  }
+
+  return null;
 }
 
 async function runInTransaction<T>(client: Db, operation: (tx: Db) => Promise<T>) {

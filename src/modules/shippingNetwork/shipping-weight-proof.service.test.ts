@@ -9,6 +9,7 @@ import {
   serializeFinalizeWeightProofRouteResult,
   serializeInitWeightProofRouteResult
 } from "./shipping-network.routes.js";
+import { listShippingShipments } from "./shipping-list.service.js";
 import {
   calculateChargeableWeightGrams,
   calculateVolumetricWeightGrams,
@@ -45,6 +46,19 @@ function makeClient() {
   const proofs: any[] = [];
   const client = {
     shipment: {
+      findMany: async ({ where }: any = {}) => shipments
+        .filter((shipment) => {
+          if (where?.id && shipment.id !== where.id) return false;
+          if (where?.sellerId && shipment.sellerId !== where.sellerId) return false;
+          if (where?.awbNumber && shipment.awbNumber !== where.awbNumber) return false;
+          if (where?.status && shipment.status !== where.status) return false;
+          return true;
+        })
+        .sort((left, right) => {
+          const rightTime = right.createdAt instanceof Date ? right.createdAt.getTime() : 0;
+          const leftTime = left.createdAt instanceof Date ? left.createdAt.getTime() : 0;
+          return rightTime - leftTime;
+        }),
       findFirst: async ({ where }: any) => shipments.find((shipment) => {
         if (where.id && shipment.id !== where.id) return false;
         if (where.sellerId && shipment.sellerId !== where.sellerId) return false;
@@ -103,6 +117,48 @@ function makeClient() {
     __state: { shipments, sessions, proofs }
   };
   return client;
+}
+
+function makeVisibleShipment(overrides: Record<string, unknown> = {}) {
+  return {
+    id: "shipment_visible_1",
+    sellerId: "seller_123",
+    externalOrderId: "order_visible_1",
+    orderId: "order_visible_1",
+    status: "manifested",
+    segment: "b2c",
+    paymentMode: "prepaid",
+    pickupLocationId: "pickup_1",
+    codAmountPaise: 0,
+    declaredValuePaise: 10000,
+    deadWeightKg: 1,
+    lengthCm: 22,
+    breadthCm: 18,
+    heightCm: 12,
+    volumetricDivisor: 5000,
+    volumetricWeightKg: 0.95,
+    chargeableWeightKg: 1,
+    awbNumber: "AWB_VISIBLE_1",
+    serviceLevel: "smart",
+    metadata: {
+      buyer: {
+        name: "Test Buyer",
+        phone: "9999999999",
+        address: {
+          pincode: "400001",
+          city: "Mumbai",
+          state: "MH"
+        }
+      },
+      invoice: {
+        invoice_amount: 100
+      },
+      phase6: {}
+    },
+    createdAt: new Date("2026-06-22T10:00:00.000Z"),
+    updatedAt: new Date("2026-06-22T10:00:00.000Z"),
+    ...overrides
+  };
 }
 
 function makeContext(client: any, storage: any = new InMemoryWeightProofStorageAdapter(), options: {
@@ -348,6 +404,93 @@ describe("shipping weight proof foundation", () => {
     assert.equal(result.upload && "uploadUrl" in result.upload ? result.upload.uploadUrl : undefined, undefined);
     assert.deepEqual(result.upload?.headers, {});
     assert.doesNotMatch(JSON.stringify(result.upload), /signed|uploadUrl|objectKey|imageObjectKey|storage[.]googleapis|private-weight-proofs/i);
+  });
+
+  it("initializes proof capture for a shipment visible in the seller shipment list", async () => {
+    const client = makeClient();
+    client.__state.shipments.push(makeVisibleShipment());
+    const listed = await listShippingShipments("seller_123", { page: 1, per_page: 20 }, client as any);
+    const row = listed.shipments.find((shipment) => shipment.awb === "AWB_VISIBLE_1");
+
+    assert.ok(row);
+    assert.equal(row.shipment_id, "shipment_visible_1");
+
+    const result = await initWeightProofCapture({
+      awbNumber: row.awb ?? "",
+      shipmentId: row.shipment_id,
+      contentType: "image/png",
+      expectedByteSize: 1024
+    }, makeContext(client, new InMemoryWeightProofStorageAdapter(), { uploadMode: "BACKEND_MEDIATED" }));
+    const routeResponse: any = serializeInitWeightProofRouteResult(result);
+
+    assert.equal(result.created, true);
+    assert.equal(client.__state.sessions[0].shipmentId, "shipment_visible_1");
+    assert.equal(routeResponse.uploadMode, "BACKEND_MEDIATED");
+    assert.equal(routeResponse.uploadEndpoint, "/api/v1/shipping/weight-proofs/upload");
+    assert.equal(Object.prototype.hasOwnProperty.call(routeResponse, "uploadUrl"), false);
+    assert.doesNotMatch(JSON.stringify(routeResponse), /weight-proofs\/seller_123|imageObjectKey|image_object_key|uploadUrl|private-weight-proofs|storage[.]googleapis|signed/i);
+  });
+
+  it("resolves an AWB-backed seller fixture when the optional UI shipment identifier is not primary", async () => {
+    const client = makeClient();
+    client.__state.shipments.push(makeVisibleShipment({
+      id: "wg_stage_ui_fixture_primary_id",
+      externalOrderId: "wg_stage_ui_fixture_display_id",
+      awbNumber: "WGSTAGEUI003"
+    }));
+    const listed = await listShippingShipments("seller_123", { page: 1, per_page: 20, search: "WGSTAGEUI003" }, client as any);
+
+    assert.equal(listed.shipments.length, 1);
+    assert.equal(listed.shipments[0]?.awb, "WGSTAGEUI003");
+
+    const result = await initWeightProofCapture({
+      awbNumber: "WGSTAGEUI003",
+      shipmentId: "wg_stage_ui_fixture_display_id",
+      contentType: "image/png",
+      expectedByteSize: 1024
+    }, makeContext(client, new InMemoryWeightProofStorageAdapter(), { uploadMode: "BACKEND_MEDIATED" }));
+
+    assert.equal(result.created, true);
+    assert.equal(client.__state.sessions[0].shipmentId, "wg_stage_ui_fixture_primary_id");
+    assert.equal(result.upload?.uploadMode, "BACKEND_MEDIATED");
+    assert.equal(result.upload && "uploadEndpoint" in result.upload ? result.upload.uploadEndpoint : "", "/api/v1/shipping/weight-proofs/upload");
+    assert.doesNotMatch(JSON.stringify(result), /uploadUrl|imageObjectKey|image_object_key|private-weight-proofs|storage[.]googleapis|signed/i);
+  });
+
+  it("rejects proof init for not-owned or genuinely missing shipments", async () => {
+    const client = makeClient();
+    client.__state.shipments.push(makeVisibleShipment({
+      id: "shipment_other_seller",
+      sellerId: "seller_other",
+      awbNumber: "AWB_OTHER_SELLER"
+    }));
+
+    await assert.rejects(() => initWeightProofCapture({
+      awbNumber: "AWB_OTHER_SELLER",
+      shipmentId: "shipment_other_seller"
+    }, makeContext(client)), /SHIPMENT_NOT_FOUND/);
+
+    await assert.rejects(() => initWeightProofCapture({
+      awbNumber: "AWB_MISSING",
+      shipmentId: "shipment_missing"
+    }, makeContext(client)), /SHIPMENT_NOT_FOUND/);
+  });
+
+  it("rejects proof init when seller-owned shipment ID and AWB point to different shipments", async () => {
+    const client = makeClient();
+    client.__state.shipments.push(makeVisibleShipment({
+      id: "shipment_one",
+      awbNumber: "AWB_ONE"
+    }));
+    client.__state.shipments.push(makeVisibleShipment({
+      id: "shipment_two",
+      awbNumber: "AWB_TWO"
+    }));
+
+    await assert.rejects(() => initWeightProofCapture({
+      awbNumber: "AWB_TWO",
+      shipmentId: "shipment_one"
+    }, makeContext(client)), /WEIGHT_PROOF_AWB_SHIPMENT_MISMATCH/);
   });
 
   it("uploads proof images through the backend and then finalizes", async () => {
