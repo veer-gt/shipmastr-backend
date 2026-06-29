@@ -97,6 +97,17 @@ function pushAction(actions: any[], input: {
   });
 }
 
+function queueItem(key: string, label: string, count: number, route: string, status: string, detail: string) {
+  return {
+    key,
+    label,
+    count,
+    route,
+    status,
+    detail
+  };
+}
+
 function leakSafeResponse(value: unknown) {
   const serialized = JSON.stringify(value);
   return !/(courierPartner|provider|imageObjectKey|objectKey|bucket|storage\.googleapis\.com|signedUrl|uploadUrl|Bearer|DATABASE_URL|secret|token)/i.test(serialized);
@@ -219,6 +230,37 @@ export async function buildSellerAccountCommandCenter(merchantId: string, client
       priority: 50
     });
   }
+  if (!pickupLocations) {
+    pushAction(nextActions, {
+      key: "pickup-setup",
+      label: "Complete pickup or warehouse setup",
+      detail: "Add at least one active pickup or warehouse location before operating at scale.",
+      route: "/seller/pickups",
+      priority: 60,
+      severity: "warning"
+    });
+  }
+  if (walletLedger?.balanceAfter !== null && walletLedger?.balanceAfter !== undefined && numberValue(walletLedger.balanceAfter) < 500) {
+    pushAction(nextActions, {
+      key: "wallet-review",
+      label: "Review wallet balance",
+      detail: "Wallet balance is low. Review the audit-safe passbook before shipping volume increases.",
+      route: "/seller/wallet",
+      priority: 70,
+      severity: "warning"
+    });
+  }
+  const proofMissing = activeShipments > 0 && proofCaptured === 0 ? activeShipments : 0;
+  if (proofMissing) {
+    pushAction(nextActions, {
+      key: "weight-guard-proof-missing",
+      label: "Capture Weight Guard proof",
+      detail: "Active shipments do not yet show private Weight Guard evidence metadata.",
+      route: "/seller/weight-management",
+      priority: 80,
+      severity: "info"
+    });
+  }
   if (!nextActions.length) {
     pushAction(nextActions, {
       key: "all-clear",
@@ -239,6 +281,21 @@ export async function buildSellerAccountCommandCenter(merchantId: string, client
     setupScore: score,
     readinessChecklist,
     nextActions: nextActions.sort((left, right) => left.priority - right.priority),
+    unifiedQueues: [
+      queueItem("unfulfilled-orders", "Unfulfilled", unfulfilledOrders, "/seller/orders", unfulfilledOrders ? "needs_review" : "clear", "Orders waiting for seller review."),
+      queueItem("ready-to-ship", "Ready to Ship", readyToShipOrders + readyToShipShipments, "/seller/shipping", readyToShipOrders + readyToShipShipments ? "ready" : "clear", "Orders or shipment drafts ready for guarded shipping review."),
+      queueItem("needs-attention", "Needs Attention", orderNeedsAttention + exceptionShipments, "/seller/shipping", orderNeedsAttention + exceptionShipments ? "needs_attention" : "clear", "Orders and shipments that need review before movement."),
+      queueItem("in-transit", "In Transit", inTransitShipments, "/seller/shipping", inTransitShipments ? "active" : "clear", "Shipments currently moving through the Shipmastr lifecycle."),
+      queueItem("delivered", "Delivered", deliveredShipments, "/seller/shipping", deliveredShipments ? "complete" : "clear", "Delivered shipment count."),
+      queueItem("returns-rto", "Returns/RTO", returnShipments + returnsOpen, "/seller/returns", returnShipments + returnsOpen ? "needs_attention" : "clear", "Return and RTO work stays separate from forward movement."),
+      queueItem("ndr", "NDR", ndrOpen, "/seller/ndr", ndrOpen ? "needs_attention" : "clear", "NDR cases requiring seller review."),
+      queueItem("wallet", "Wallet", walletLedger?.balanceAfter !== null && walletLedger?.balanceAfter !== undefined && numberValue(walletLedger.balanceAfter) < 500 ? 1 : 0, "/seller/wallet", walletLedger ? "available" : "no_activity", "Audit-safe wallet and passbook visibility."),
+      queueItem("cod", "COD Shield", codPending + codReceived, "/seller/cod", codPending ? "needs_review" : codReceived ? "available" : "no_activity", "COD pending and received states remain finance-reviewed."),
+      queueItem("billing", "Billing", 0, "/seller/billing", "read_only", "Billing due amounts are not fabricated by this read model."),
+      queueItem("weight-guard-missing", "Weight Guard Missing", proofMissing, "/seller/weight-management", proofMissing ? "needs_review" : "clear", "Private proof capture is missing for active shipment activity."),
+      queueItem("weight-guard-captured", "Weight Guard Captured", proofCaptured + proofArchived, "/seller/weight-management", proofCaptured + proofArchived ? "available" : "no_activity", "Private proof metadata is available without storage details."),
+      queueItem("pickup-warehouse", "Pickup/Warehouse", pickupLocations, "/seller/pickups", pickupLocations ? "ready" : "needs_setup", "Pickup and warehouse readiness for daily operations.")
+    ],
     orderSummary: {
       total: orderTotal,
       unfulfilled: unfulfilledOrders,

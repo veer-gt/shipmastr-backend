@@ -91,6 +91,9 @@ describe("seller account command center", () => {
     assert.equal(result.seller.id, "seller_1");
     assert.equal(result.orderSummary.total, 8);
     assert.equal(result.orderSummary.readyToShip, 2);
+    assert.equal(result.unifiedQueues.find((queue: any) => queue.key === "ready-to-ship")?.count, 4);
+    assert.equal(result.unifiedQueues.find((queue: any) => queue.key === "needs-attention")?.count, 2);
+    assert.equal(result.unifiedQueues.find((queue: any) => queue.key === "weight-guard-captured")?.count, 2);
     assert.equal(result.shipmentSummary.inTransit, 1);
     assert.equal(result.ndrSummary.open, 1);
     assert.equal(result.returnsSummary.open, 1);
@@ -107,6 +110,38 @@ describe("seller account command center", () => {
     assert.equal(serialized.includes("signedUrl"), false);
     assert.equal(serialized.includes("Bearer"), false);
     assert.equal(serialized.includes("secret"), false);
+  });
+
+  it("orders setup, operations, wallet, and Weight Guard next actions deterministically", async () => {
+    const result = await buildSellerAccountCommandCenter("seller_1", makeClient({
+      sellerWalletLedger: {
+        count: async () => 1,
+        findFirst: async () => ({
+          balanceAfter: 100,
+          currency: "INR",
+          status: "POSTED",
+          postedAt: new Date("2026-06-29T09:00:00.000Z"),
+          createdAt: new Date("2026-06-29T08:00:00.000Z")
+        })
+      },
+      shippingWeightProof: {
+        count: countFrom({
+          ACTIVE: 0,
+          OR: 0
+        })
+      }
+    }) as any);
+
+    assert.deepEqual(result.nextActions.map((action: any) => action.key).slice(0, 4), [
+      "setup-kyc",
+      "needs-attention",
+      "ready-to-ship",
+      "exceptions"
+    ]);
+    assert.ok(result.nextActions.some((action: any) => action.key === "wallet-review"));
+    assert.ok(result.nextActions.some((action: any) => action.key === "weight-guard-proof-missing"));
+    assert.equal(result.unifiedQueues.find((queue: any) => queue.key === "wallet")?.count, 1);
+    assert.equal(result.unifiedQueues.find((queue: any) => queue.key === "weight-guard-missing")?.count, 5);
   });
 
   it("degrades safely when optional modules are missing", async () => {
