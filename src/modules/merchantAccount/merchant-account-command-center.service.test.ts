@@ -50,7 +50,7 @@ function makeClient(overrides: Record<string, any> = {}) {
         "delivery_failed|lost|damaged|exception": 1
       })
     },
-    pickupLocation: { count: async () => 1 },
+    merchantPickupPoint: { count: async () => 1 },
     ndrCase: { count: async () => 1 },
     rtoCase: { count: async () => 1 },
     codLedgerEntry: {
@@ -75,7 +75,7 @@ function makeClient(overrides: Record<string, any> = {}) {
         OR: 1
       })
     },
-    customer: { count: async () => 4 },
+    merchantCustomer: { count: async () => 4 },
     ...overrides
   };
 }

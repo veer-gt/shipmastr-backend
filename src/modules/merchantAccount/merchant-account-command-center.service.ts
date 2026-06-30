@@ -151,7 +151,7 @@ export async function buildMerchantAccountCommandCenter(merchantId: string, clie
     safeCount((client as any).shipment, { where: { sellerId: merchantId, status: "delivered" } }),
     safeCount((client as any).shipment, { where: { sellerId: merchantId, status: { in: ["rto_initiated", "rto_in_transit", "rto_delivered", "cancelled"] } } }),
     safeCount((client as any).shipment, { where: { sellerId: merchantId, status: { in: ["delivery_failed", "lost", "damaged", "exception"] } } }),
-    safeCount((client as any).pickupLocation, { where: { sellerId: merchantId, status: "active" } }),
+    safeCount((client as any).merchantPickupPoint, { where: { merchantId } }),
     safeCount((client as any).ndrCase, { where: { merchantId, status: { in: OPEN_NDR_STATUSES } } }),
     safeCount((client as any).rtoCase, { where: { merchantId, status: { in: OPEN_RTO_STATUSES } } }),
     safeCount((client as any).codLedgerEntry, { where: { merchantId, status: { in: ["pending", "due", "delayed"] } } }),
@@ -160,7 +160,7 @@ export async function buildMerchantAccountCommandCenter(merchantId: string, clie
     latestWalletLedger(client, merchantId),
     safeCount((client as any).shippingWeightProof, { where: { merchantId, imageRetentionStatus: "ACTIVE" } }),
     safeCount((client as any).shippingWeightProof, { where: { merchantId, OR: [{ imageRetentionStatus: "DELETED_AFTER_PAYOUT" }, { imageDeletedAt: { not: null } }] } }),
-    safeCount((client as any).customer, { where: { merchantId } })
+    safeCount((client as any).merchantCustomer, { where: { merchantId, isActive: true } })
   ]);
 
   const readinessChecklist = [
