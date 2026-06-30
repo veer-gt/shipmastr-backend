@@ -962,6 +962,8 @@ model Merchant {
   auditLogs AuditLog[]
   gstinRecords MerchantGstinRecord[]
   pickupPoints MerchantPickupPoint[]
+  warehouses MerchantWarehouse[]
+  customers MerchantCustomer[]
   domains MerchantDomain[]
   storefronts Storefront[]
   domainProvisioningEvents DomainProvisioningEvent[]
@@ -2395,6 +2397,56 @@ model MerchantPickupPoint {
   @@index([status])
   @@index([merchantId, state, status])
   @@index([merchantId, isDefault])
+}
+
+model MerchantWarehouse {
+  id           String   @id @default(cuid())
+  merchantId   String
+  name         String
+  contactName  String
+  phone        String
+  addressLine1 String
+  addressLine2 String?
+  city         String
+  state        String
+  pincode      String
+  country      String   @default("IN")
+  notes        String?
+  isPrimary    Boolean  @default(false)
+  isActive     Boolean  @default(true)
+  createdAt    DateTime @default(now())
+  updatedAt    DateTime @updatedAt
+
+  merchant Merchant @relation(fields: [merchantId], references: [id], onDelete: Cascade)
+
+  @@index([merchantId])
+  @@index([merchantId, isPrimary])
+  @@index([merchantId, isActive])
+  @@index([merchantId, pincode])
+}
+
+model MerchantCustomer {
+  id           String   @id @default(cuid())
+  merchantId   String
+  name         String
+  phone        String
+  email        String?
+  addressLine1 String
+  addressLine2 String?
+  city         String
+  state        String
+  pincode      String
+  country      String   @default("IN")
+  isActive     Boolean  @default(true)
+  createdAt    DateTime @default(now())
+  updatedAt    DateTime @updatedAt
+
+  merchant Merchant @relation(fields: [merchantId], references: [id], onDelete: Cascade)
+
+  @@index([merchantId])
+  @@index([merchantId, isActive])
+  @@index([merchantId, phone])
+  @@index([merchantId, pincode])
 }
 
 model CourierGstinRecord {

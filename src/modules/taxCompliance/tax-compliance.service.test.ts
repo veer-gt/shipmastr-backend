@@ -231,6 +231,7 @@ const pickupInput = {
   label: "Mumbai warehouse",
   contactName: "QA Ops",
   phone: "9876543210",
+  email: "pickup@example.test",
   addressLine1: "QA Industrial Estate",
   city: "Mumbai",
   state: "Maharashtra",
@@ -262,6 +263,7 @@ describe("pickup-state GSTIN tax compliance", () => {
     assert.equal(pickup.linkedGstinId, gstin.id);
     assert.equal(pickup.state, "MAHARASHTRA");
     assert.equal(pickup.pincode, "560001");
+    assert.equal(state.merchantPickups[0].email, null);
     assert.equal(state.auditLogs.some((log) => log.action === "MERCHANT_PICKUP_CREATED"), true);
   });
 

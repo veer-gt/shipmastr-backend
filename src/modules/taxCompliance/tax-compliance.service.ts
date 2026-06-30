@@ -581,7 +581,15 @@ export async function createMerchantPickupPoint(input: {
     data: {
       merchantId: input.merchantId,
       linkedGstinId: verified?.id || null,
-      ...pickup,
+      label: pickup.label,
+      contactName: pickup.contactName,
+      phone: pickup.phone,
+      addressLine1: pickup.addressLine1,
+      addressLine2: pickup.addressLine2,
+      city: pickup.city,
+      state: pickup.state,
+      pincode: pickup.pincode,
+      isDefault: pickup.isDefault,
       status,
       blockerReason
     },
