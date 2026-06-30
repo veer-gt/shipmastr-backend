@@ -129,6 +129,12 @@ describe("merchant account workspaces", () => {
     assert.match(routes, /apiRouter\.use\("\/merchant", requireJwtAuth, merchantWorkspaceRouter\);/);
   });
 
+  it("keeps customer masters separate from pickup contact validation", () => {
+    const routes = readFileSync("src/modules/merchantAccount/merchant-account.routes.ts", "utf8");
+    assert.match(routes, /const customerSchema = baseAddressSchema\.extend/);
+    assert.match(routes, /const baseLocationSchema = baseAddressSchema\.extend\(\{\s*contactName:/);
+  });
+
   it("keeps workspace routes merchant-only", async () => {
     await assert.rejects(
       () => requireMerchantCommandCenterActor({

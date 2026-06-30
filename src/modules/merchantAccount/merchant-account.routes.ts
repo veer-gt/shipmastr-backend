@@ -23,8 +23,7 @@ import {
 export const merchantAccountRouter = Router();
 export const merchantWorkspaceRouter = Router();
 
-const baseLocationSchema = z.object({
-  contactName: z.string().trim().min(2).max(160),
+const baseAddressSchema = z.object({
   phone: z.string().trim().min(8).max(20),
   addressLine1: z.string().trim().min(4).max(500),
   addressLine2: z.string().trim().max(500).optional().nullable().or(z.literal("")),
@@ -32,6 +31,10 @@ const baseLocationSchema = z.object({
   state: z.string().trim().min(2).max(120),
   pincode: z.string().trim().regex(/^\d{6}$/),
   country: z.string().trim().max(20).optional().nullable().or(z.literal(""))
+});
+
+const baseLocationSchema = baseAddressSchema.extend({
+  contactName: z.string().trim().min(2).max(160)
 });
 
 const pickupSchema = baseLocationSchema.extend({
@@ -54,7 +57,7 @@ const warehousePatchSchema = warehouseSchema.partial().refine((body) => Object.k
   message: "At least one warehouse field is required"
 });
 
-const customerSchema = baseLocationSchema.extend({
+const customerSchema = baseAddressSchema.extend({
   name: z.string().trim().min(2).max(160),
   email: z.string().trim().email().optional().nullable().or(z.literal("")),
   isActive: z.boolean().optional()
