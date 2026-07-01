@@ -1,6 +1,6 @@
 import assert from "node:assert/strict";
 import { describe, it } from "node:test";
-import { AccountGstinVerificationStatus, PickupPointStatus } from "@prisma/client";
+import { AccountGstinVerificationStatus, AddressGeocodeStatus, PickupPointStatus } from "@prisma/client";
 import {
   approveMerchantPickupPoint,
   createCourierGstinRecord,
@@ -8,6 +8,7 @@ import {
   createMerchantGstinRecord,
   createMerchantPickupPoint,
   getCourierActivationReadiness,
+  listMerchantTaxProfile,
   rejectMerchantGstinRecord,
   updateCourierOperationalLocation,
   verifyCourierGstinRecord,
@@ -283,6 +284,40 @@ describe("pickup-state GSTIN tax compliance", () => {
     assert.equal(pickup.linkedGstinId, null);
     assert.match(pickup.blockerReason || "", /verified GSTIN registered in the same state/);
     assert.equal(state.auditLogs.some((log) => log.action === "MERCHANT_PICKUP_STATE_GSTIN_MISMATCH"), true);
+  });
+
+  it("returns merchant pickup geocode metadata for workspace lists", async () => {
+    const { client, state } = makeTaxClient();
+
+    await createMerchantPickupPoint({
+      merchantId: "merchant_1",
+      actorId: "seller_1",
+      pickup: {
+        ...pickupInput,
+        label: "LOW_CONFIDENCE pickup"
+      }
+    }, client);
+
+    Object.assign(state.merchantPickups[0], {
+      latitude: 19.076,
+      longitude: 72.8777,
+      googleGeocodePlaceId: "place_low_confidence",
+      googleFormattedAddress: "QA Industrial Estate, Mumbai, Maharashtra, India",
+      geocodeProvider: "GOOGLE_GEOCODING",
+      geocodeStatus: AddressGeocodeStatus.LOW_CONFIDENCE,
+      geocodeLocationType: "APPROXIMATE",
+      geocodePartialMatch: true,
+      geocodeErrorCode: "GOOGLE_GEOCODE_LOW_CONFIDENCE",
+      geocodedAt: now,
+      addressFingerprint: "fingerprint_low_confidence"
+    });
+
+    const profile = await listMerchantTaxProfile("merchant_1", client);
+    assert.equal(profile.pickupPoints[0]?.geocodeStatus, AddressGeocodeStatus.LOW_CONFIDENCE);
+    assert.equal(profile.pickupPoints[0]?.geocodeErrorCode, "GOOGLE_GEOCODE_LOW_CONFIDENCE");
+    assert.equal(profile.pickupPoints[0]?.geocodePartialMatch, true);
+    assert.equal(profile.pickupPoints[0]?.latitude, 19.076);
+    assert.equal(profile.pickupPoints[0]?.addressFingerprint, "fingerprint_low_confidence");
   });
 
   it("does not allow activation from an unverified seller GSTIN and blocks admin approval", async () => {
