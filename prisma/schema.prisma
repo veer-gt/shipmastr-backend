@@ -65,6 +65,14 @@ enum WeightProofCaptureStatus {
   FAILED
 }
 
+enum AddressGeocodeStatus {
+  PENDING
+  GEOCODED
+  LOW_CONFIDENCE
+  FAILED
+  SKIPPED
+}
+
 enum ShipmentSegment {
   domestic_b2c
   domestic_b2b
@@ -2385,6 +2393,17 @@ model MerchantPickupPoint {
   rejectedAt    DateTime?
   rejectedBy    String?
   rejectionReason String?
+  latitude      Decimal?          @db.Decimal(10, 7)
+  longitude     Decimal?          @db.Decimal(10, 7)
+  googleGeocodePlaceId String?
+  googleFormattedAddress String?
+  geocodeProvider String?
+  geocodeStatus AddressGeocodeStatus @default(SKIPPED)
+  geocodeLocationType String?
+  geocodePartialMatch Boolean?
+  geocodeErrorCode String?
+  geocodedAt    DateTime?
+  addressFingerprint String?
   createdAt     DateTime          @default(now())
   updatedAt     DateTime          @updatedAt
 
@@ -2397,6 +2416,8 @@ model MerchantPickupPoint {
   @@index([status])
   @@index([merchantId, state, status])
   @@index([merchantId, isDefault])
+  @@index([merchantId, geocodeStatus])
+  @@index([addressFingerprint])
 }
 
 model MerchantWarehouse {
@@ -2414,6 +2435,17 @@ model MerchantWarehouse {
   notes        String?
   isPrimary    Boolean  @default(false)
   isActive     Boolean  @default(true)
+  latitude      Decimal?          @db.Decimal(10, 7)
+  longitude     Decimal?          @db.Decimal(10, 7)
+  googleGeocodePlaceId String?
+  googleFormattedAddress String?
+  geocodeProvider String?
+  geocodeStatus AddressGeocodeStatus @default(SKIPPED)
+  geocodeLocationType String?
+  geocodePartialMatch Boolean?
+  geocodeErrorCode String?
+  geocodedAt    DateTime?
+  addressFingerprint String?
   createdAt    DateTime @default(now())
   updatedAt    DateTime @updatedAt
 
@@ -2423,6 +2455,41 @@ model MerchantWarehouse {
   @@index([merchantId, isPrimary])
   @@index([merchantId, isActive])
   @@index([merchantId, pincode])
+  @@index([merchantId, geocodeStatus])
+  @@index([addressFingerprint])
+}
+
+model AddressGeocodeTask {
+  id                 String               @id @default(cuid())
+  entityType         String
+  entityId           String
+  merchantId          String
+  addressFingerprint String
+  status             AddressGeocodeStatus @default(PENDING)
+  attempts           Int                  @default(0)
+  lastErrorCode      String?
+  runAfter           DateTime             @default(now())
+  completedAt        DateTime?
+  createdAt          DateTime             @default(now())
+  updatedAt          DateTime             @updatedAt
+
+  @@unique([entityType, entityId, addressFingerprint])
+  @@index([status, runAfter])
+  @@index([merchantId])
+}
+
+model GoogleMapsUsageCounter {
+  id        String   @id @default(cuid())
+  service   String
+  yearMonth String
+  count     Int      @default(0)
+  softLimit Int
+  hardLimit Int
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+
+  @@unique([service, yearMonth])
+  @@index([yearMonth])
 }
 
 model MerchantCustomer {

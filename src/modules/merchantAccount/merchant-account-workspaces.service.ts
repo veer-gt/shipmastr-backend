@@ -1,5 +1,6 @@
 import { prisma } from "../../lib/prisma.js";
 import { HttpError } from "../../lib/httpError.js";
+import { markAddressForGeocoding } from "../addressGeocoding/address-geocoding.service.js";
 import { listMerchantTaxProfile } from "../taxCompliance/tax-compliance.service.js";
 
 type DbClient = typeof prisma | Record<string, any>;
@@ -17,6 +18,7 @@ type WarehouseInput = {
   notes?: string | null | undefined;
   isPrimary?: boolean | undefined;
   isActive?: boolean | undefined;
+  googlePlaceId?: string | null | undefined;
 };
 
 type CustomerInput = {
@@ -84,7 +86,8 @@ function cleanWarehouse(input: WarehouseInput) {
     country: cleanCountry(input.country),
     notes: cleanOptionalText(input.notes, 800),
     isPrimary: Boolean(input.isPrimary),
-    isActive: input.isActive !== undefined ? Boolean(input.isActive) : true
+    isActive: input.isActive !== undefined ? Boolean(input.isActive) : true,
+    googlePlaceId: cleanOptionalText(input.googlePlaceId, 240)
   };
 }
 
@@ -118,6 +121,17 @@ function warehouseResponse(record: any) {
     notes: record.notes,
     isPrimary: record.isPrimary,
     isActive: record.isActive,
+    latitude: record.latitude ?? null,
+    longitude: record.longitude ?? null,
+    googleGeocodePlaceId: record.googleGeocodePlaceId ?? null,
+    googleFormattedAddress: record.googleFormattedAddress ?? null,
+    geocodeProvider: record.geocodeProvider ?? null,
+    geocodeStatus: record.geocodeStatus ?? "SKIPPED",
+    geocodeLocationType: record.geocodeLocationType ?? null,
+    geocodePartialMatch: record.geocodePartialMatch ?? null,
+    geocodeErrorCode: record.geocodeErrorCode ?? null,
+    geocodedAt: record.geocodedAt ?? null,
+    addressFingerprint: record.addressFingerprint ?? null,
     createdAt: record.createdAt,
     updatedAt: record.updatedAt
   };
@@ -151,6 +165,7 @@ export async function listMerchantWarehouses(merchantId: string, client: DbClien
 
 export async function createMerchantWarehouse(merchantId: string, input: WarehouseInput, client: DbClient = prisma) {
   const data = cleanWarehouse(input);
+  const { googlePlaceId, ...warehouseData } = data;
   if (data.isPrimary) {
     await (client as any).merchantWarehouse.updateMany({
       where: { merchantId },
@@ -158,9 +173,28 @@ export async function createMerchantWarehouse(merchantId: string, input: Warehou
     });
   }
   const row = await (client as any).merchantWarehouse.create({
-    data: { merchantId, ...data }
+    data: { merchantId, ...warehouseData, googleGeocodePlaceId: googlePlaceId }
   });
-  return warehouseResponse(row);
+  const geocodeState = await markAddressForGeocoding({
+    entityType: "MERCHANT_WAREHOUSE",
+    entityId: row.id,
+    merchantId,
+    address: {
+      addressLine1: row.addressLine1,
+      addressLine2: row.addressLine2,
+      city: row.city,
+      state: row.state,
+      pincode: row.pincode,
+      country: row.country,
+      googlePlaceId
+    },
+    previousAddressFingerprint: null
+  }, client);
+  return warehouseResponse({
+    ...row,
+    geocodeStatus: geocodeState.status,
+    addressFingerprint: geocodeState.addressFingerprint
+  });
 }
 
 export async function updateMerchantWarehouse(merchantId: string, warehouseId: string, input: WarehousePatch, client: DbClient = prisma) {
@@ -181,8 +215,10 @@ export async function updateMerchantWarehouse(merchantId: string, warehouseId: s
     country: input.country ?? existing.country,
     notes: input.notes !== undefined ? input.notes : existing.notes,
     isPrimary: input.isPrimary !== undefined ? Boolean(input.isPrimary) : existing.isPrimary,
-    isActive: input.isActive !== undefined ? Boolean(input.isActive) : existing.isActive
+    isActive: input.isActive !== undefined ? Boolean(input.isActive) : existing.isActive,
+    googlePlaceId: input.googlePlaceId !== undefined ? input.googlePlaceId as string | null | undefined : existing.googleGeocodePlaceId
   } as WarehouseInput);
+  const { googlePlaceId, ...warehouseData } = data;
 
   if (data.isPrimary) {
     await (client as any).merchantWarehouse.updateMany({
@@ -192,9 +228,28 @@ export async function updateMerchantWarehouse(merchantId: string, warehouseId: s
   }
   const row = await (client as any).merchantWarehouse.update({
     where: { id: existing.id },
-    data
+    data: { ...warehouseData, googleGeocodePlaceId: googlePlaceId }
   });
-  return warehouseResponse(row);
+  const geocodeState = await markAddressForGeocoding({
+    entityType: "MERCHANT_WAREHOUSE",
+    entityId: row.id,
+    merchantId,
+    address: {
+      addressLine1: row.addressLine1,
+      addressLine2: row.addressLine2,
+      city: row.city,
+      state: row.state,
+      pincode: row.pincode,
+      country: row.country,
+      googlePlaceId
+    },
+    previousAddressFingerprint: existing.addressFingerprint
+  }, client);
+  return warehouseResponse({
+    ...row,
+    geocodeStatus: geocodeState.status,
+    addressFingerprint: geocodeState.addressFingerprint
+  });
 }
 
 export async function listMerchantCustomers(merchantId: string, client: DbClient = prisma) {
