@@ -1,5 +1,7 @@
 import { AddressGeocodeStatus } from "@prisma/client";
 import { env } from "../../config/env.js";
+import { createAddressGeocodeCloudTask } from "../../lib/cloudTasks.js";
+import { logger } from "../../lib/logger.js";
 import { prisma } from "../../lib/prisma.js";
 import { addressFingerprint } from "./address-fingerprint.js";
 import {
@@ -14,12 +16,27 @@ import { reserveGoogleGeocodeQuota } from "./google-maps-quota.service.js";
 
 type DbClient = typeof prisma | Record<string, any>;
 
+type AddressGeocodeLogger = {
+  info(payload: unknown, message: string): void;
+  warn(payload: unknown, message: string): void;
+};
+
+type AddressGeocodeDispatchResult = {
+  ok: boolean;
+  status: "created" | "already_exists" | "enqueue_failed";
+};
+
 export type MarkAddressForGeocodingInput = {
   entityType: AddressGeocodeEntityType;
   entityId: string;
   merchantId: string;
   address: AddressFields;
   previousAddressFingerprint?: string | null | undefined;
+};
+
+type MarkAddressForGeocodingDeps = {
+  enqueueAddressGeocodeTask?: (taskId: string) => Promise<unknown>;
+  log?: AddressGeocodeLogger;
 };
 
 function envBoolean(name: string, fallback: boolean) {
@@ -37,6 +54,24 @@ function geocodingEnabled() {
 
 function geocodingApiKey() {
   return process.env.GOOGLE_GEOCODING_API_KEY?.trim() || env.GOOGLE_GEOCODING_API_KEY?.trim() || "";
+}
+
+function safeErrorMessage(err: unknown) {
+  return err instanceof Error ? err.message.slice(0, 160) : "UNKNOWN_ADDRESS_GEOCODE_DISPATCH_ERROR";
+}
+
+export async function enqueueAddressGeocodeTask(taskId: string) {
+  return createAddressGeocodeCloudTask({
+    taskId: `address-geocode-${taskId}`,
+    payload: { taskId }
+  });
+}
+
+function taskStatusFromEnqueueResult(result: unknown) {
+  if (typeof result === "object" && result && "status" in result) {
+    return String((result as { status?: unknown }).status);
+  }
+  return "created";
 }
 
 function geocodePatch(input: {
@@ -92,7 +127,11 @@ function addressFromEntity(entity: Record<string, unknown>): AddressFields {
   };
 }
 
-export async function markAddressForGeocoding(input: MarkAddressForGeocodingInput, client: DbClient = prisma) {
+export async function markAddressForGeocoding(
+  input: MarkAddressForGeocodingInput,
+  client: DbClient = prisma,
+  deps: MarkAddressForGeocodingDeps = {}
+) {
   const fingerprint = addressFingerprint(input.address);
   if (input.previousAddressFingerprint === fingerprint) {
     return {
@@ -143,10 +182,59 @@ export async function markAddressForGeocoding(input: MarkAddressForGeocodingInpu
     }
   }) as AddressGeocodeTaskRecord;
 
+  const log = deps.log ?? logger;
+  const dispatch = deps.enqueueAddressGeocodeTask ?? enqueueAddressGeocodeTask;
+  let dispatchResult: AddressGeocodeDispatchResult = {
+    ok: true,
+    status: "created"
+  };
+
+  log.info({
+    message: "address_geocode_task_enqueue_attempted",
+    addressGeocode: {
+      taskId: task.id,
+      entityType: input.entityType,
+      entityId: input.entityId
+    }
+  }, "address_geocode_task_enqueue_attempted");
+
+  try {
+    const result = await dispatch(task.id);
+    dispatchResult = {
+      ok: true,
+      status: taskStatusFromEnqueueResult(result) === "already_exists" ? "already_exists" : "created"
+    };
+    log.info({
+      message: "address_geocode_task_enqueued",
+      addressGeocode: {
+        taskId: task.id,
+        entityType: input.entityType,
+        entityId: input.entityId,
+        status: dispatchResult.status
+      }
+    }, "address_geocode_task_enqueued");
+  } catch (err) {
+    dispatchResult = {
+      ok: false,
+      status: "enqueue_failed"
+    };
+    log.warn({
+      message: "address_geocode_task_enqueue_failed",
+      addressGeocode: {
+        taskId: task.id,
+        entityType: input.entityType,
+        entityId: input.entityId,
+        status: dispatchResult.status,
+        error: safeErrorMessage(err)
+      }
+    }, "address_geocode_task_enqueue_failed");
+  }
+
   return {
     status: AddressGeocodeStatus.PENDING,
     addressFingerprint: fingerprint,
-    taskId: task.id
+    taskId: task.id,
+    dispatch: dispatchResult
   };
 }
 
@@ -155,6 +243,13 @@ export async function processAddressGeocodeTask(taskId: string, client: DbClient
 } = {}) {
   const task = await (client as any).addressGeocodeTask.findUnique({ where: { id: taskId } }) as AddressGeocodeTaskRecord | null;
   if (!task) return { status: "not_found" as const };
+
+  if (task.status && task.status !== AddressGeocodeStatus.PENDING) {
+    return {
+      status: "already_processed" as const,
+      taskStatus: task.status
+    };
+  }
 
   if (!geocodingEnabled()) {
     await (client as any).addressGeocodeTask.update({

@@ -38,5 +38,6 @@ export type AddressGeocodeTaskRecord = {
   entityId: string;
   merchantId: string;
   addressFingerprint: string;
+  status?: GeocodeStatus | string;
   attempts: number;
 };

@@ -161,6 +161,8 @@ const schema = z.object({
   GOOGLE_GEOCODING_API_KEY: z.string().optional(),
   GOOGLE_GEOCODING_MONTHLY_SOFT_CAP: z.coerce.number().int().min(0).default(5000),
   GOOGLE_GEOCODING_MONTHLY_HARD_CAP: z.coerce.number().int().min(0).default(7000),
+  ADDRESS_GEOCODE_QUEUE_NAME: z.string().default("shipmastr-address-geocode-queue"),
+  ADDRESS_GEOCODE_TASK_HANDLER_URL: z.string().url().optional(),
   GROWTH_NETWORK_ENABLED: envBoolean(false),
   GROWTH_NETWORK_AUDIENCE: z.enum(["MERCHANT_SELLER_ONLY"]).default("MERCHANT_SELLER_ONLY"),
   GROWTH_NETWORK_EXTERNAL_ADS_ENABLED: envBoolean(false),
