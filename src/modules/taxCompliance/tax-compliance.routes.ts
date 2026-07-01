@@ -43,14 +43,27 @@ const locationSchema = z.object({
   city: z.string().trim().min(2).max(160),
   state: z.string().trim().min(2).max(120),
   pincode: z.string().trim().regex(/^\d{6}$/),
-  isDefault: z.boolean().optional()
+  isDefault: z.boolean().optional(),
+  latitude: z.never().optional(),
+  longitude: z.never().optional()
+});
+
+const sellerPickupLocationSchema = locationSchema.extend({
+  googlePlaceId: z.string().trim().max(240).optional().nullable().or(z.literal(""))
+});
+
+const sellerPickupLocationPatchSchema = sellerPickupLocationSchema.partial().extend({
+  status: z.nativeEnum(PickupPointStatus).optional(),
+  rejectionReason: z.string().trim().max(800).optional().nullable().or(z.literal(""))
+}).refine((body) => Object.keys(body).length > 0, {
+  message: "At least one pickup field is required"
 });
 
 const locationPatchSchema = locationSchema.partial().extend({
   status: z.nativeEnum(PickupPointStatus).optional(),
   rejectionReason: z.string().trim().max(800).optional().nullable().or(z.literal(""))
 }).refine((body) => Object.keys(body).length > 0, {
-  message: "At least one pickup field is required"
+  message: "At least one location field is required"
 });
 
 const reasonSchema = z.object({
@@ -73,7 +86,7 @@ sellerTaxComplianceRouter.post("/gstins", async (req, res) => {
 });
 
 sellerTaxComplianceRouter.post("/pickup-points", async (req, res) => {
-  const body = locationSchema.parse(req.body);
+  const body = sellerPickupLocationSchema.parse(req.body);
   const result = await createMerchantPickupPoint({
     merchantId: req.auth!.merchantId!,
     actorId: req.auth!.userId,
@@ -84,7 +97,7 @@ sellerTaxComplianceRouter.post("/pickup-points", async (req, res) => {
 });
 
 sellerTaxComplianceRouter.patch("/pickup-points/:pickupPointId", async (req, res) => {
-  const body = locationPatchSchema.parse(req.body);
+  const body = sellerPickupLocationPatchSchema.parse(req.body);
   const result = await updateMerchantPickupPoint({
     merchantId: req.auth!.merchantId!,
     actorId: req.auth!.userId,
@@ -171,7 +184,7 @@ adminTaxComplianceRouter.post("/sellers/:merchantId/gstins/:gstinRecordId/reject
 });
 
 adminTaxComplianceRouter.post("/sellers/:merchantId/pickup-points", async (req, res) => {
-  const body = locationSchema.parse(req.body);
+  const body = sellerPickupLocationSchema.parse(req.body);
   const result = await createMerchantPickupPoint({
     merchantId: req.params.merchantId,
     actorId: req.auth!.userId,
@@ -182,7 +195,7 @@ adminTaxComplianceRouter.post("/sellers/:merchantId/pickup-points", async (req, 
 });
 
 adminTaxComplianceRouter.patch("/sellers/:merchantId/pickup-points/:pickupPointId", async (req, res) => {
-  const body = locationPatchSchema.parse(req.body);
+  const body = sellerPickupLocationPatchSchema.parse(req.body);
   const result = await updateMerchantPickupPoint({
     merchantId: req.params.merchantId,
     pickupPointId: req.params.pickupPointId,

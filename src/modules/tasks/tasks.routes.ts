@@ -1,6 +1,7 @@
 import { Router } from "express";
 import { z } from "zod";
 import { requireInternalSecret } from "../../middleware/internal.js";
+import { processAddressGeocodeTask } from "../addressGeocoding/address-geocoding.service.js";
 import { processLeadNotificationTask } from "./email-task.service.js";
 
 export const tasksRouter = Router();
@@ -9,6 +10,10 @@ tasksRouter.use(requireInternalSecret);
 
 const leadNotificationTaskSchema = z.object({
   leadId: z.string().trim().min(1)
+});
+
+const addressGeocodeTaskSchema = z.object({
+  taskId: z.string().trim().min(1)
 });
 
 tasksRouter.post(
@@ -21,6 +26,15 @@ tasksRouter.post(
       return res.status(500).json(result);
     }
 
+    res.json(result);
+  }
+);
+
+tasksRouter.post(
+  "/address-geocode",
+  async (req, res) => {
+    const body = addressGeocodeTaskSchema.parse(req.body);
+    const result = await processAddressGeocodeTask(body.taskId);
     res.json(result);
   }
 );

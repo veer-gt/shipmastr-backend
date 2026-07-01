@@ -30,14 +30,21 @@ const baseAddressSchema = z.object({
   city: z.string().trim().min(2).max(160),
   state: z.string().trim().min(2).max(120),
   pincode: z.string().trim().regex(/^\d{6}$/),
-  country: z.string().trim().max(20).optional().nullable().or(z.literal(""))
+  country: z.string().trim().max(20).optional().nullable().or(z.literal("")),
+  latitude: z.never().optional(),
+  longitude: z.never().optional()
 });
+
+const googlePlaceIdSchema = {
+  googlePlaceId: z.string().trim().max(240).optional().nullable().or(z.literal(""))
+};
 
 const baseLocationSchema = baseAddressSchema.extend({
   contactName: z.string().trim().min(2).max(160)
 });
 
 const pickupSchema = baseLocationSchema.extend({
+  ...googlePlaceIdSchema,
   label: z.string().trim().min(2).max(160),
   isDefault: z.boolean().optional()
 });
@@ -47,6 +54,7 @@ const pickupPatchSchema = pickupSchema.partial().refine((body) => Object.keys(bo
 });
 
 const warehouseSchema = baseLocationSchema.extend({
+  ...googlePlaceIdSchema,
   name: z.string().trim().min(2).max(160),
   notes: z.string().trim().max(800).optional().nullable().or(z.literal("")),
   isPrimary: z.boolean().optional(),
