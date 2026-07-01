@@ -2404,6 +2404,12 @@ model MerchantPickupPoint {
   geocodeErrorCode String?
   geocodedAt    DateTime?
   addressFingerprint String?
+  pinLatitude   Decimal?          @db.Decimal(10, 7)
+  pinLongitude  Decimal?          @db.Decimal(10, 7)
+  pinConfirmedAt DateTime?
+  pinSource     String?
+  pinLabel      String?
+  pinUpdatedAt  DateTime?
   createdAt     DateTime          @default(now())
   updatedAt     DateTime          @updatedAt
 
@@ -2446,6 +2452,12 @@ model MerchantWarehouse {
   geocodeErrorCode String?
   geocodedAt    DateTime?
   addressFingerprint String?
+  pinLatitude   Decimal?          @db.Decimal(10, 7)
+  pinLongitude  Decimal?          @db.Decimal(10, 7)
+  pinConfirmedAt DateTime?
+  pinSource     String?
+  pinLabel      String?
+  pinUpdatedAt  DateTime?
   createdAt    DateTime @default(now())
   updatedAt    DateTime @updatedAt
 

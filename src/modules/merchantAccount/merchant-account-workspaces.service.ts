@@ -1,6 +1,7 @@
 import { prisma } from "../../lib/prisma.js";
 import { HttpError } from "../../lib/httpError.js";
 import { markAddressForGeocoding } from "../addressGeocoding/address-geocoding.service.js";
+import { cleanPinConfirmation, pinMetadataResponse, type PinConfirmationInput } from "../addressGeocoding/pin-confirmation.js";
 import { listMerchantTaxProfile } from "../taxCompliance/tax-compliance.service.js";
 
 type DbClient = typeof prisma | Record<string, any>;
@@ -19,7 +20,7 @@ type WarehouseInput = {
   isPrimary?: boolean | undefined;
   isActive?: boolean | undefined;
   googlePlaceId?: string | null | undefined;
-};
+} & PinConfirmationInput;
 
 type CustomerInput = {
   name: string;
@@ -87,8 +88,21 @@ function cleanWarehouse(input: WarehouseInput) {
     notes: cleanOptionalText(input.notes, 800),
     isPrimary: Boolean(input.isPrimary),
     isActive: input.isActive !== undefined ? Boolean(input.isActive) : true,
-    googlePlaceId: cleanOptionalText(input.googlePlaceId, 240)
+    googlePlaceId: cleanOptionalText(input.googlePlaceId, 240),
+    ...cleanPinConfirmation(input)
   };
+}
+
+function warehouseAddressChanged(existing: any, next: { addressLine1: string; addressLine2: string | null; city: string; state: string; pincode: string; country: string; googlePlaceId?: string | null }) {
+  return [
+    existing.addressLine1 !== next.addressLine1,
+    (existing.addressLine2 ?? null) !== (next.addressLine2 ?? null),
+    existing.city !== next.city,
+    existing.state !== next.state,
+    existing.pincode !== next.pincode,
+    (existing.country ?? "IN") !== next.country,
+    (existing.googleGeocodePlaceId ?? null) !== (next.googlePlaceId ?? null)
+  ].some(Boolean);
 }
 
 function cleanCustomer(input: CustomerInput) {
@@ -132,6 +146,7 @@ function warehouseResponse(record: any) {
     geocodeErrorCode: record.geocodeErrorCode ?? null,
     geocodedAt: record.geocodedAt ?? null,
     addressFingerprint: record.addressFingerprint ?? null,
+    ...pinMetadataResponse(record),
     createdAt: record.createdAt,
     updatedAt: record.updatedAt
   };
@@ -216,7 +231,11 @@ export async function updateMerchantWarehouse(merchantId: string, warehouseId: s
     notes: input.notes !== undefined ? input.notes : existing.notes,
     isPrimary: input.isPrimary !== undefined ? Boolean(input.isPrimary) : existing.isPrimary,
     isActive: input.isActive !== undefined ? Boolean(input.isActive) : existing.isActive,
-    googlePlaceId: input.googlePlaceId !== undefined ? input.googlePlaceId as string | null | undefined : existing.googleGeocodePlaceId
+    googlePlaceId: input.googlePlaceId !== undefined ? input.googlePlaceId as string | null | undefined : existing.googleGeocodePlaceId,
+    pinLatitude: input.pinLatitude !== undefined ? input.pinLatitude : existing.pinLatitude,
+    pinLongitude: input.pinLongitude !== undefined ? input.pinLongitude : existing.pinLongitude,
+    pinSource: input.pinSource !== undefined ? input.pinSource : existing.pinSource,
+    pinLabel: input.pinLabel !== undefined ? input.pinLabel : existing.pinLabel
   } as WarehouseInput);
   const { googlePlaceId, ...warehouseData } = data;
 
@@ -230,6 +249,9 @@ export async function updateMerchantWarehouse(merchantId: string, warehouseId: s
     where: { id: existing.id },
     data: { ...warehouseData, googleGeocodePlaceId: googlePlaceId }
   });
+  if (!warehouseAddressChanged(existing, data)) {
+    return warehouseResponse(row);
+  }
   const geocodeState = await markAddressForGeocoding({
     entityType: "MERCHANT_WAREHOUSE",
     entityId: row.id,

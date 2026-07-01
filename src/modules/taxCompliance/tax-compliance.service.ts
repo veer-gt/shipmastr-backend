@@ -8,6 +8,7 @@ import { HttpError } from "../../lib/httpError.js";
 import { prisma } from "../../lib/prisma.js";
 import { normalizeOptionalText, normalizePincode, normalizeState } from "../../lib/state.js";
 import { markAddressForGeocoding } from "../addressGeocoding/address-geocoding.service.js";
+import { cleanPinConfirmation, pinMetadataResponse, type PinConfirmationInput } from "../addressGeocoding/pin-confirmation.js";
 import { audit } from "../audit/audit.service.js";
 
 type Db = Prisma.TransactionClient | typeof prisma;
@@ -36,7 +37,7 @@ export type LocationInput = {
   pincode: string;
   isDefault?: boolean | undefined;
   googlePlaceId?: string | null | undefined;
-};
+} & PinConfirmationInput;
 
 export type LocationPatchInput = {
   label?: string | undefined;
@@ -50,6 +51,10 @@ export type LocationPatchInput = {
   pincode?: string | undefined;
   isDefault?: boolean | undefined;
   googlePlaceId?: string | null | undefined;
+  pinLatitude?: unknown;
+  pinLongitude?: unknown;
+  pinSource?: unknown;
+  pinLabel?: unknown;
   status?: PickupPointStatus | undefined;
   rejectionReason?: string | null | undefined;
 };
@@ -112,8 +117,20 @@ function cleanLocationInput(input: LocationInput) {
     state: normalizeState(input.state),
     pincode: normalizePincode(input.pincode),
     isDefault: Boolean(input.isDefault),
-    googlePlaceId: normalizeOptionalText(input.googlePlaceId)
+    googlePlaceId: normalizeOptionalText(input.googlePlaceId),
+    ...cleanPinConfirmation(input)
   };
+}
+
+function pickupAddressChanged(existing: any, next: { addressLine1: string; addressLine2: string | null; city: string; state: string; pincode: string; googlePlaceId?: string | null }) {
+  return [
+    existing.addressLine1 !== next.addressLine1,
+    (existing.addressLine2 ?? null) !== (next.addressLine2 ?? null),
+    existing.city !== next.city,
+    existing.state !== next.state,
+    existing.pincode !== next.pincode,
+    (existing.googleGeocodePlaceId ?? null) !== (next.googlePlaceId ?? null)
+  ].some(Boolean);
 }
 
 function gstinResponse(record: {
@@ -209,6 +226,12 @@ function locationResponse<T extends {
   geocodeErrorCode?: string | null;
   geocodedAt?: Date | null;
   addressFingerprint?: string | null;
+  pinLatitude?: unknown;
+  pinLongitude?: unknown;
+  pinConfirmedAt?: Date | null;
+  pinSource?: string | null;
+  pinLabel?: string | null;
+  pinUpdatedAt?: Date | null;
   createdAt: Date;
   updatedAt: Date;
   linkedGstin?: { gstin: string; registeredState: string; verificationStatus: AccountGstinVerificationStatus } | null;
@@ -221,6 +244,14 @@ function locationResponse<T extends {
     "googleGeocodePlaceId",
     "googleFormattedAddress",
     "geocodeErrorCode"
+  ].some((key) => key in record);
+  const includesPinMetadata = [
+    "pinLatitude",
+    "pinLongitude",
+    "pinConfirmedAt",
+    "pinSource",
+    "pinLabel",
+    "pinUpdatedAt"
   ].some((key) => key in record);
 
   return {
@@ -261,6 +292,7 @@ function locationResponse<T extends {
       geocodedAt: record.geocodedAt ?? null,
       addressFingerprint: record.addressFingerprint ?? null
     } : {}),
+    ...(includesPinMetadata || includesGeocodeMetadata ? pinMetadataResponse(record as Record<string, unknown>) : {}),
     createdAt: record.createdAt,
     updatedAt: record.updatedAt,
     stateGstinMatched: Boolean(record.linkedGstinId)
@@ -650,6 +682,14 @@ export async function createMerchantPickupPoint(input: {
       state: pickup.state,
       pincode: pickup.pincode,
       googleGeocodePlaceId: pickup.googlePlaceId,
+      ...(pickup.pinLatitude !== undefined ? {
+        pinLatitude: pickup.pinLatitude,
+        pinLongitude: pickup.pinLongitude,
+        pinConfirmedAt: pickup.pinConfirmedAt,
+        pinSource: pickup.pinSource,
+        pinLabel: pickup.pinLabel,
+        pinUpdatedAt: pickup.pinUpdatedAt
+      } : {}),
       isDefault: pickup.isDefault,
       status,
       blockerReason
@@ -735,7 +775,8 @@ export async function updateMerchantPickupPoint(input: {
     state: input.patch.state !== undefined ? normalizeState(input.patch.state) : existing.state,
     pincode: input.patch.pincode !== undefined ? normalizePincode(input.patch.pincode) : existing.pincode,
     isDefault: input.patch.isDefault !== undefined ? Boolean(input.patch.isDefault) : existing.isDefault,
-    googlePlaceId: input.patch.googlePlaceId !== undefined ? normalizeOptionalText(input.patch.googlePlaceId) : existing.googleGeocodePlaceId
+    googlePlaceId: input.patch.googlePlaceId !== undefined ? normalizeOptionalText(input.patch.googlePlaceId) : existing.googleGeocodePlaceId,
+    ...cleanPinConfirmation(input.patch)
   };
 
   const verified = await findVerifiedMerchantGstin(input.merchantId, next.state, client);
@@ -824,6 +865,10 @@ export async function updateMerchantPickupPoint(input: {
         blockerReason
       }
     }, client);
+  }
+
+  if (!pickupAddressChanged(existing, next)) {
+    return locationResponse(record);
   }
 
   const geocodeState = await markAddressForGeocoding({

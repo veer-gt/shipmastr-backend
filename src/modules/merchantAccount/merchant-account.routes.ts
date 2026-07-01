@@ -39,12 +39,20 @@ const googlePlaceIdSchema = {
   googlePlaceId: z.string().trim().max(240).optional().nullable().or(z.literal(""))
 };
 
+const pinConfirmationSchema = {
+  pinLatitude: z.number().min(-90).max(90).optional().nullable(),
+  pinLongitude: z.number().min(-180).max(180).optional().nullable(),
+  pinSource: z.string().trim().max(80).optional().nullable().or(z.literal("")),
+  pinLabel: z.string().trim().max(120).optional().nullable().or(z.literal(""))
+};
+
 const baseLocationSchema = baseAddressSchema.extend({
   contactName: z.string().trim().min(2).max(160)
 });
 
 const pickupSchema = baseLocationSchema.extend({
   ...googlePlaceIdSchema,
+  ...pinConfirmationSchema,
   label: z.string().trim().min(2).max(160),
   isDefault: z.boolean().optional()
 });
@@ -55,6 +63,7 @@ const pickupPatchSchema = pickupSchema.partial().refine((body) => Object.keys(bo
 
 const warehouseSchema = baseLocationSchema.extend({
   ...googlePlaceIdSchema,
+  ...pinConfirmationSchema,
   name: z.string().trim().min(2).max(160),
   notes: z.string().trim().max(800).optional().nullable().or(z.literal("")),
   isPrimary: z.boolean().optional(),

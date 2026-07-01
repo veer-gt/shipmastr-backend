@@ -154,6 +154,7 @@ const schema = z.object({
   GOOGLE_ADDRESS_AUTOCOMPLETE_ENABLED: envBoolean(false),
   GOOGLE_PICKUP_GEOCODING_ENABLED: envBoolean(false),
   GOOGLE_MAP_UI_ENABLED: envBoolean(false),
+  GOOGLE_PICKUP_PIN_CONFIRMATION_ENABLED: envBoolean(false),
   GOOGLE_PLACE_DETAILS_ENABLED: envBoolean(false),
   GOOGLE_ADDRESS_VALIDATION_ENABLED: envBoolean(false),
   GOOGLE_ROUTES_ENABLED: envBoolean(false),
