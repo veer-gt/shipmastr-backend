@@ -198,10 +198,31 @@ function locationResponse<T extends {
   rejectedAt: Date | null;
   rejectedBy: string | null;
   rejectionReason: string | null;
+  latitude?: unknown;
+  longitude?: unknown;
+  googleGeocodePlaceId?: string | null;
+  googleFormattedAddress?: string | null;
+  geocodeProvider?: string | null;
+  geocodeStatus?: string | null;
+  geocodeLocationType?: string | null;
+  geocodePartialMatch?: boolean | null;
+  geocodeErrorCode?: string | null;
+  geocodedAt?: Date | null;
+  addressFingerprint?: string | null;
   createdAt: Date;
   updatedAt: Date;
   linkedGstin?: { gstin: string; registeredState: string; verificationStatus: AccountGstinVerificationStatus } | null;
 }>(record: T) {
+  const includesGeocodeMetadata = [
+    "geocodeStatus",
+    "addressFingerprint",
+    "latitude",
+    "longitude",
+    "googleGeocodePlaceId",
+    "googleFormattedAddress",
+    "geocodeErrorCode"
+  ].some((key) => key in record);
+
   return {
     id: record.id,
     linkedGstinId: record.linkedGstinId,
@@ -227,6 +248,19 @@ function locationResponse<T extends {
     rejectedAt: record.rejectedAt,
     rejectedBy: record.rejectedBy,
     rejectionReason: record.rejectionReason,
+    ...(includesGeocodeMetadata ? {
+      latitude: record.latitude ?? null,
+      longitude: record.longitude ?? null,
+      googleGeocodePlaceId: record.googleGeocodePlaceId ?? null,
+      googleFormattedAddress: record.googleFormattedAddress ?? null,
+      geocodeProvider: record.geocodeProvider ?? null,
+      geocodeStatus: record.geocodeStatus ?? "SKIPPED",
+      geocodeLocationType: record.geocodeLocationType ?? null,
+      geocodePartialMatch: record.geocodePartialMatch ?? null,
+      geocodeErrorCode: record.geocodeErrorCode ?? null,
+      geocodedAt: record.geocodedAt ?? null,
+      addressFingerprint: record.addressFingerprint ?? null
+    } : {}),
     createdAt: record.createdAt,
     updatedAt: record.updatedAt,
     stateGstinMatched: Boolean(record.linkedGstinId)
