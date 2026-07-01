@@ -16,6 +16,12 @@ type CreateCloudTaskInput = {
   payload: Record<string, unknown>;
 };
 
+type CloudTaskTarget = {
+  queueName: string | undefined;
+  handlerUrl: string | undefined;
+  configLabel: string;
+};
+
 type CreateCloudTaskDeps = {
   fetch?: FetchLike;
   getAccessToken?: () => Promise<string>;
@@ -25,18 +31,19 @@ function configured(value: unknown) {
   return typeof value === "string" && value.trim().length > 0;
 }
 
-function getCloudTaskConfig(): CloudTaskConfig {
+function getCloudTaskConfig(target: CloudTaskTarget): CloudTaskConfig {
   const projectId = env.GCP_PROJECT_ID?.trim();
   const location = env.CLOUD_TASKS_LOCATION.trim();
-  const queueName = env.EMAIL_QUEUE_NAME.trim();
-  const handlerUrl = env.TASK_HANDLER_URL?.trim();
+  const queueName = target.queueName?.trim();
+  const handlerUrl = target.handlerUrl?.trim();
   const taskSecret = env.WEBHOOK_SECRET.trim();
 
   if (!projectId || !location || !queueName || !handlerUrl || !taskSecret) {
     throw new HttpError(503, "CLOUD_TASKS_NOT_CONFIGURED", {
+      target: target.configLabel,
       gcpProjectConfigured: configured(projectId),
       cloudTasksLocationConfigured: configured(location),
-      emailQueueNameConfigured: configured(queueName),
+      queueNameConfigured: configured(queueName),
       taskHandlerUrlConfigured: configured(handlerUrl),
       taskSecretConfigured: configured(taskSecret)
     });
@@ -77,8 +84,8 @@ async function getMetadataAccessToken(fetchImpl: FetchLike = fetch) {
   return body.access_token;
 }
 
-export async function createEmailCloudTask(input: CreateCloudTaskInput, deps: CreateCloudTaskDeps = {}) {
-  const config = getCloudTaskConfig();
+async function createHttpCloudTask(target: CloudTaskTarget, input: CreateCloudTaskInput, deps: CreateCloudTaskDeps = {}) {
+  const config = getCloudTaskConfig(target);
   const fetchImpl = deps.fetch ?? fetch;
   const accessToken = deps.getAccessToken ? await deps.getAccessToken() : await getMetadataAccessToken(fetchImpl);
   const parent = `projects/${config.projectId}/locations/${config.location}/queues/${config.queueName}`;
@@ -129,4 +136,20 @@ export async function createEmailCloudTask(input: CreateCloudTaskInput, deps: Cr
     status: "created" as const,
     taskName: body.name || taskName
   };
+}
+
+export async function createEmailCloudTask(input: CreateCloudTaskInput, deps: CreateCloudTaskDeps = {}) {
+  return createHttpCloudTask({
+    queueName: env.EMAIL_QUEUE_NAME,
+    handlerUrl: env.TASK_HANDLER_URL,
+    configLabel: "email"
+  }, input, deps);
+}
+
+export async function createAddressGeocodeCloudTask(input: CreateCloudTaskInput, deps: CreateCloudTaskDeps = {}) {
+  return createHttpCloudTask({
+    queueName: env.ADDRESS_GEOCODE_QUEUE_NAME,
+    handlerUrl: env.ADDRESS_GEOCODE_TASK_HANDLER_URL,
+    configLabel: "address_geocode"
+  }, input, deps);
 }

@@ -116,6 +116,29 @@ function makeClient() {
   return { state, client: client as any };
 }
 
+function makeLogSink() {
+  const events: string[] = [];
+  const payloads: any[] = [];
+  return {
+    events,
+    payloads,
+    log: {
+      info: (payload: any, message: string) => {
+        events.push(message);
+        payloads.push(payload);
+      },
+      warn: (payload: any, message: string) => {
+        events.push(message);
+        payloads.push(payload);
+      }
+    }
+  };
+}
+
+function noopDispatch() {
+  return async () => ({ status: "created" });
+}
+
 describe("address geocoding service", () => {
   it("marks an address pending and stores successful geocode metadata", async () => {
     resetEnv();
@@ -126,7 +149,7 @@ describe("address geocoding service", () => {
       entityId: "warehouse_1",
       merchantId: "merchant_1",
       address
-    }, client);
+    }, client, { enqueueAddressGeocodeTask: noopDispatch() });
 
     assert.equal(marked.status, AddressGeocodeStatus.PENDING);
     assert.equal(state.tasks.length, 1);
@@ -159,7 +182,7 @@ describe("address geocoding service", () => {
       entityId: "warehouse_1",
       merchantId: "merchant_1",
       address
-    }, client);
+    }, client, { enqueueAddressGeocodeTask: noopDispatch() });
     await processAddressGeocodeTask(marked.taskId!, client, {
       geocode: async () => ({
         status: "LOW_CONFIDENCE",
@@ -184,7 +207,7 @@ describe("address geocoding service", () => {
       entityId: "warehouse_1",
       merchantId: "merchant_1",
       address
-    }, client);
+    }, client, { enqueueAddressGeocodeTask: noopDispatch() });
     await processAddressGeocodeTask(marked.taskId!, client, {
       geocode: async () => ({
         status: "FAILED",
@@ -207,7 +230,7 @@ describe("address geocoding service", () => {
       merchantId: "merchant_1",
       address,
       previousAddressFingerprint: fingerprint
-    }, client);
+    }, client, { enqueueAddressGeocodeTask: noopDispatch() });
     assert.equal(marked.status, AddressGeocodeStatus.SKIPPED);
     assert.equal(state.tasks.length, 0);
     resetEnv();
@@ -223,7 +246,7 @@ describe("address geocoding service", () => {
       entityId: "warehouse_1",
       merchantId: "merchant_1",
       address
-    }, client);
+    }, client, { enqueueAddressGeocodeTask: noopDispatch() });
     assert.equal(marked.status, AddressGeocodeStatus.SKIPPED);
     assert.equal(state.warehouses[0].geocodeErrorCode, "GOOGLE_GEOCODING_DISABLED");
     resetEnv();
@@ -240,7 +263,7 @@ describe("address geocoding service", () => {
       entityId: "warehouse_1",
       merchantId: "merchant_1",
       address
-    }, client);
+    }, client, { enqueueAddressGeocodeTask: noopDispatch() });
     let called = false;
     const processed = await processAddressGeocodeTask(marked.taskId!, client, {
       geocode: async () => {
@@ -265,7 +288,7 @@ describe("address geocoding service", () => {
       entityId: "warehouse_1",
       merchantId: "merchant_1",
       address
-    }, client);
+    }, client, { enqueueAddressGeocodeTask: noopDispatch() });
     let called = false;
     const processed = await processAddressGeocodeTask(marked.taskId!, client, {
       geocode: async () => {
@@ -276,6 +299,158 @@ describe("address geocoding service", () => {
     assert.equal(called, false);
     assert.equal(processed.status, AddressGeocodeStatus.SKIPPED);
     assert.equal(state.warehouses[0].geocodeErrorCode, "GOOGLE_GEOCODE_QUOTA_SOFT_LIMIT");
+    resetEnv();
+  });
+
+  it("enqueues a dispatchable address geocode task after address save", async () => {
+    resetEnv();
+    setEnabled();
+    const { state, client } = makeClient();
+    const enqueued: string[] = [];
+    const { events, payloads, log } = makeLogSink();
+    const marked = await markAddressForGeocoding({
+      entityType: "MERCHANT_WAREHOUSE",
+      entityId: "warehouse_1",
+      merchantId: "merchant_1",
+      address
+    }, client, {
+      enqueueAddressGeocodeTask: async (taskId) => {
+        enqueued.push(taskId);
+        return { status: "created" };
+      },
+      log
+    });
+
+    assert.equal(marked.status, AddressGeocodeStatus.PENDING);
+    assert.equal(marked.dispatch?.ok, true);
+    assert.equal(marked.dispatch?.status, "created");
+    assert.deepEqual(enqueued, ["task_1"]);
+    assert.deepEqual(events, [
+      "address_geocode_task_enqueue_attempted",
+      "address_geocode_task_enqueued"
+    ]);
+    assert.equal(payloads[0]?.addressGeocode?.taskId, "task_1");
+    assert.equal(payloads[1]?.addressGeocode?.status, "created");
+    assert.equal(state.tasks.length, 1);
+    resetEnv();
+  });
+
+  it("keeps address save pending when address geocode enqueue fails", async () => {
+    resetEnv();
+    setEnabled();
+    const { state, client } = makeClient();
+    const { events, payloads, log } = makeLogSink();
+    const marked = await markAddressForGeocoding({
+      entityType: "MERCHANT_WAREHOUSE",
+      entityId: "warehouse_1",
+      merchantId: "merchant_1",
+      address
+    }, client, {
+      enqueueAddressGeocodeTask: async () => {
+        throw new Error("CLOUD_TASKS_ENQUEUE_FAILED");
+      },
+      log
+    });
+
+    assert.equal(marked.status, AddressGeocodeStatus.PENDING);
+    assert.equal(marked.dispatch?.ok, false);
+    assert.equal(marked.dispatch?.status, "enqueue_failed");
+    assert.equal(state.tasks.length, 1);
+    assert.equal(state.tasks[0].status, AddressGeocodeStatus.PENDING);
+    assert.deepEqual(events, [
+      "address_geocode_task_enqueue_attempted",
+      "address_geocode_task_enqueue_failed"
+    ]);
+    assert.equal(payloads[1]?.addressGeocode?.error, "CLOUD_TASKS_ENQUEUE_FAILED");
+    resetEnv();
+  });
+
+  it("does not enqueue or geocode again when the address fingerprint is unchanged", async () => {
+    resetEnv();
+    setEnabled();
+    const { state, client } = makeClient();
+    const fingerprint = addressFingerprint(address);
+    let enqueued = false;
+    const marked = await markAddressForGeocoding({
+      entityType: "MERCHANT_WAREHOUSE",
+      entityId: "warehouse_1",
+      merchantId: "merchant_1",
+      address,
+      previousAddressFingerprint: fingerprint
+    }, client, {
+      enqueueAddressGeocodeTask: async () => {
+        enqueued = true;
+        return { status: "created" };
+      }
+    });
+
+    assert.equal(marked.status, AddressGeocodeStatus.SKIPPED);
+    assert.equal(enqueued, false);
+    assert.equal(state.tasks.length, 0);
+    resetEnv();
+  });
+
+  it("processes an existing pending task without courier payment or messaging side effects", async () => {
+    resetEnv();
+    setEnabled();
+    const { state, client } = makeClient();
+    const marked = await markAddressForGeocoding({
+      entityType: "MERCHANT_WAREHOUSE",
+      entityId: "warehouse_1",
+      merchantId: "merchant_1",
+      address
+    }, client, { enqueueAddressGeocodeTask: noopDispatch() });
+
+    const forbiddenSideEffects = {
+      courier: false,
+      payment: false,
+      email: false,
+      shipment: false
+    };
+    const processed = await processAddressGeocodeTask(marked.taskId!, client, {
+      geocode: async () => ({
+        status: "LOW_CONFIDENCE",
+        latitude: 19,
+        longitude: 72,
+        geocodePartialMatch: true,
+        geocodeLocationType: "APPROXIMATE",
+        geocodeErrorCode: "GOOGLE_GEOCODE_LOW_CONFIDENCE"
+      })
+    });
+
+    assert.equal(processed.status, AddressGeocodeStatus.LOW_CONFIDENCE);
+    assert.equal(state.tasks[0].attempts, 1);
+    assert.deepEqual(forbiddenSideEffects, {
+      courier: false,
+      payment: false,
+      email: false,
+      shipment: false
+    });
+    resetEnv();
+  });
+
+  it("does not call Google again for an already completed task", async () => {
+    resetEnv();
+    setEnabled();
+    const { state, client } = makeClient();
+    const marked = await markAddressForGeocoding({
+      entityType: "MERCHANT_WAREHOUSE",
+      entityId: "warehouse_1",
+      merchantId: "merchant_1",
+      address
+    }, client, { enqueueAddressGeocodeTask: noopDispatch() });
+    state.tasks[0].status = AddressGeocodeStatus.GEOCODED;
+    let called = false;
+    const processed = await processAddressGeocodeTask(marked.taskId!, client, {
+      geocode: async () => {
+        called = true;
+        return { status: "GEOCODED" };
+      }
+    });
+
+    assert.equal(called, false);
+    assert.equal(processed.status, "already_processed");
+    assert.equal(processed.taskStatus, AddressGeocodeStatus.GEOCODED);
     resetEnv();
   });
 
