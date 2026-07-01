@@ -1,5 +1,5 @@
 import assert from "node:assert/strict";
-import { describe, it } from "node:test";
+import { afterEach, describe, it } from "node:test";
 import { AccountGstinVerificationStatus, AddressGeocodeStatus, PickupPointStatus } from "@prisma/client";
 import {
   approveMerchantPickupPoint,
@@ -10,6 +10,7 @@ import {
   getCourierActivationReadiness,
   listMerchantTaxProfile,
   rejectMerchantGstinRecord,
+  updateMerchantPickupPoint,
   updateCourierOperationalLocation,
   verifyCourierGstinRecord,
   verifyMerchantGstinRecord
@@ -240,6 +241,13 @@ const pickupInput = {
 };
 
 describe("pickup-state GSTIN tax compliance", () => {
+  const originalPinFlag = process.env.GOOGLE_PICKUP_PIN_CONFIRMATION_ENABLED;
+
+  afterEach(() => {
+    if (originalPinFlag === undefined) delete process.env.GOOGLE_PICKUP_PIN_CONFIRMATION_ENABLED;
+    else process.env.GOOGLE_PICKUP_PIN_CONFIRMATION_ENABLED = originalPinFlag;
+  });
+
   it("links same-state seller pickup to a verified GSTIN while allowing pincode mismatch", async () => {
     const { client, state } = makeTaxClient();
 
@@ -309,7 +317,13 @@ describe("pickup-state GSTIN tax compliance", () => {
       geocodePartialMatch: true,
       geocodeErrorCode: "GOOGLE_GEOCODE_LOW_CONFIDENCE",
       geocodedAt: now,
-      addressFingerprint: "fingerprint_low_confidence"
+      addressFingerprint: "fingerprint_low_confidence",
+      pinLatitude: 19.077,
+      pinLongitude: 72.878,
+      pinConfirmedAt: now,
+      pinSource: "GOOGLE_MAP_DRAG_PIN",
+      pinLabel: "Gate 1",
+      pinUpdatedAt: now
     });
 
     const profile = await listMerchantTaxProfile("merchant_1", client);
@@ -318,6 +332,81 @@ describe("pickup-state GSTIN tax compliance", () => {
     assert.equal(profile.pickupPoints[0]?.geocodePartialMatch, true);
     assert.equal(profile.pickupPoints[0]?.latitude, 19.076);
     assert.equal(profile.pickupPoints[0]?.addressFingerprint, "fingerprint_low_confidence");
+    assert.equal(profile.pickupPoints[0]?.pinLatitude, 19.077);
+    assert.equal(profile.pickupPoints[0]?.pinLongitude, 72.878);
+    assert.equal(profile.pickupPoints[0]?.effectiveLatitude, 19.077);
+    assert.equal(profile.pickupPoints[0]?.effectiveLongitude, 72.878);
+  });
+
+  it("accepts confirmed pickup pin coordinates", async () => {
+    process.env.GOOGLE_PICKUP_PIN_CONFIRMATION_ENABLED = "true";
+    const { client } = makeTaxClient();
+
+    const pickup = await createMerchantPickupPoint({
+      merchantId: "merchant_1",
+      actorId: "seller_1",
+      pickup: {
+        ...pickupInput,
+        pinLatitude: 28.6328,
+        pinLongitude: 77.2197,
+        pinSource: "GOOGLE_MAP_DRAG_PIN"
+      }
+    }, client);
+
+    assert.equal(pickup.pinLatitude, 28.6328);
+    assert.equal(pickup.pinLongitude, 77.2197);
+    assert.ok(pickup.pinConfirmedAt);
+    assert.equal(pickup.effectiveLatitude, 28.6328);
+  });
+
+  it("rejects invalid pickup pin coordinates", async () => {
+    process.env.GOOGLE_PICKUP_PIN_CONFIRMATION_ENABLED = "true";
+    const { client } = makeTaxClient();
+
+    await assert.rejects(
+      () => createMerchantPickupPoint({
+        merchantId: "merchant_1",
+        actorId: "seller_1",
+        pickup: {
+          ...pickupInput,
+          pinLatitude: 28.6328,
+          pinLongitude: 181
+        }
+      }, client),
+      /PICKUP_PIN_LONGITUDE_INVALID/
+    );
+  });
+
+  it("updates pickup pin without replacing existing geocode status or fingerprint", async () => {
+    process.env.GOOGLE_PICKUP_PIN_CONFIRMATION_ENABLED = "true";
+    const { client, state } = makeTaxClient();
+
+    const pickup = await createMerchantPickupPoint({
+      merchantId: "merchant_1",
+      actorId: "seller_1",
+      pickup: pickupInput
+    }, client);
+    Object.assign(state.merchantPickups[0], {
+      latitude: 19.076,
+      longitude: 72.8777,
+      geocodeStatus: AddressGeocodeStatus.LOW_CONFIDENCE,
+      addressFingerprint: "existing_fingerprint"
+    });
+
+    const edited = await updateMerchantPickupPoint({
+      merchantId: "merchant_1",
+      actorId: "seller_1",
+      pickupPointId: pickup.id,
+      patch: {
+        pinLatitude: 19.077,
+        pinLongitude: 72.878
+      }
+    }, client);
+
+    assert.equal(edited.geocodeStatus, AddressGeocodeStatus.LOW_CONFIDENCE);
+    assert.equal(edited.addressFingerprint, "existing_fingerprint");
+    assert.equal(edited.pinLatitude, 19.077);
+    assert.equal(edited.effectiveLatitude, 19.077);
   });
 
   it("does not allow activation from an unverified seller GSTIN and blocks admin approval", async () => {

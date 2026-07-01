@@ -49,7 +49,11 @@ const locationSchema = z.object({
 });
 
 const sellerPickupLocationSchema = locationSchema.extend({
-  googlePlaceId: z.string().trim().max(240).optional().nullable().or(z.literal(""))
+  googlePlaceId: z.string().trim().max(240).optional().nullable().or(z.literal("")),
+  pinLatitude: z.number().min(-90).max(90).optional().nullable(),
+  pinLongitude: z.number().min(-180).max(180).optional().nullable(),
+  pinSource: z.string().trim().max(80).optional().nullable().or(z.literal("")),
+  pinLabel: z.string().trim().max(120).optional().nullable().or(z.literal(""))
 });
 
 const sellerPickupLocationPatchSchema = sellerPickupLocationSchema.partial().extend({

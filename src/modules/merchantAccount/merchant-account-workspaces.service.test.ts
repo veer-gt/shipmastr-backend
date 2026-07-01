@@ -1,6 +1,6 @@
 import assert from "node:assert/strict";
 import { readFileSync } from "node:fs";
-import { describe, it } from "node:test";
+import { afterEach, describe, it } from "node:test";
 import {
   assertMerchantWorkspaceResponseSafe,
   buildMerchantSetupWorkspace,
@@ -124,6 +124,13 @@ const customerInput = {
 };
 
 describe("merchant account workspaces", () => {
+  const originalPinFlag = process.env.GOOGLE_PICKUP_PIN_CONFIRMATION_ENABLED;
+
+  afterEach(() => {
+    if (originalPinFlag === undefined) delete process.env.GOOGLE_PICKUP_PIN_CONFIRMATION_ENABLED;
+    else process.env.GOOGLE_PICKUP_PIN_CONFIRMATION_ENABLED = originalPinFlag;
+  });
+
   it("mounts merchant workspace routes behind JWT auth", () => {
     const routes = readFileSync("src/routes/index.ts", "utf8");
     assert.match(routes, /apiRouter\.use\("\/merchant", requireJwtAuth, merchantWorkspaceRouter\);/);
@@ -133,6 +140,7 @@ describe("merchant account workspaces", () => {
     const routes = readFileSync("src/modules/merchantAccount/merchant-account.routes.ts", "utf8");
     assert.match(routes, /const customerSchema = baseAddressSchema\.extend/);
     assert.match(routes, /const baseLocationSchema = baseAddressSchema\.extend\(\{\s*contactName:/);
+    assert.doesNotMatch(routes, /const customerSchema[\s\S]*pinLatitude/);
   });
 
   it("keeps workspace routes merchant-only", async () => {
@@ -170,6 +178,61 @@ describe("merchant account workspaces", () => {
     const rows = await listMerchantWarehouses("merchant_1", client as any);
     assert.equal(rows.length, 1);
     assert.equal(rows[0]?.id, created.id);
+  });
+
+  it("accepts confirmed warehouse pin coordinates and prefers them as effective coordinates", async () => {
+    process.env.GOOGLE_PICKUP_PIN_CONFIRMATION_ENABLED = "true";
+    const { client } = makeStore();
+    const created = await createMerchantWarehouse("merchant_1", {
+      ...warehouseInput,
+      pinLatitude: 28.6328,
+      pinLongitude: 77.2197,
+      pinSource: "GOOGLE_MAP_DRAG_PIN",
+      pinLabel: "Gate 1"
+    }, client as any);
+
+    assert.equal(created.pinLatitude, 28.6328);
+    assert.equal(created.pinLongitude, 77.2197);
+    assert.equal(created.pinSource, "GOOGLE_MAP_DRAG_PIN");
+    assert.equal(created.pinLabel, "Gate 1");
+    assert.ok(created.pinConfirmedAt);
+    assert.equal(created.effectiveLatitude, 28.6328);
+    assert.equal(created.effectiveLongitude, 77.2197);
+  });
+
+  it("rejects invalid warehouse pin coordinates", async () => {
+    process.env.GOOGLE_PICKUP_PIN_CONFIRMATION_ENABLED = "true";
+    const { client } = makeStore();
+    await assert.rejects(
+      () => createMerchantWarehouse("merchant_1", {
+        ...warehouseInput,
+        pinLatitude: 91,
+        pinLongitude: 77.2197
+      }, client as any),
+      /PICKUP_PIN_LATITUDE_INVALID/
+    );
+  });
+
+  it("updates a warehouse pin without re-marking an unchanged address", async () => {
+    process.env.GOOGLE_PICKUP_PIN_CONFIRMATION_ENABLED = "true";
+    const { client, warehouses } = makeStore();
+    const created = await createMerchantWarehouse("merchant_1", warehouseInput, client as any);
+    Object.assign(warehouses[0], {
+      latitude: 19.076,
+      longitude: 72.8777,
+      geocodeStatus: "LOW_CONFIDENCE",
+      addressFingerprint: "existing_fingerprint"
+    });
+
+    const edited = await updateMerchantWarehouse("merchant_1", created.id, {
+      pinLatitude: 19.077,
+      pinLongitude: 72.878
+    }, client as any);
+
+    assert.equal(edited.geocodeStatus, "LOW_CONFIDENCE");
+    assert.equal(edited.addressFingerprint, "existing_fingerprint");
+    assert.equal(edited.pinLatitude, 19.077);
+    assert.equal(edited.effectiveLatitude, 19.077);
   });
 
   it("denies cross-merchant warehouse edits", async () => {
