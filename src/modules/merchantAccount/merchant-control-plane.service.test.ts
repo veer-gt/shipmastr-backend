@@ -1,13 +1,17 @@
 import assert from "node:assert/strict";
 import { readFileSync } from "node:fs";
 import { describe, it } from "node:test";
-import { buildMerchantControlPlane } from "./merchant-control-plane.service.js";
+import {
+  buildMerchantControlPlane,
+  requestMerchantControlPlaneAction
+} from "./merchant-control-plane.service.js";
 
 function findManyFrom(rows: any[]) {
   return async () => rows;
 }
 
 function makeClient(overrides: Record<string, any> = {}) {
+  const auditLogs: any[] = [];
   return {
     platformConnection: {
       findMany: findManyFrom([
@@ -206,7 +210,17 @@ function makeClient(overrides: Record<string, any> = {}) {
           metadata: { apiKey: "should-not-leak" },
           createdAt: new Date("2026-07-01T09:00:00.000Z")
         }
-      ])
+      ]),
+      create: async ({ data }: any) => {
+        const record = {
+          id: `audit_${auditLogs.length + 1}`,
+          createdAt: new Date("2026-07-01T10:00:00.000Z"),
+          ...data
+        };
+        auditLogs.push(record);
+        return record;
+      },
+      records: auditLogs
     },
     ...overrides
   };
@@ -216,6 +230,7 @@ describe("merchant control plane read model", () => {
   it("mounts the control-plane route behind the merchant account router", () => {
     const routes = readFileSync("src/modules/merchantAccount/merchant-account.routes.ts", "utf8");
     assert.match(routes, /merchantAccountRouter\.get\("\/control-plane"/);
+    assert.match(routes, /merchantAccountRouter\.post\("\/control-plane\/actions"/);
     assert.match(routes, /requireMerchantCommandCenterActor/);
   });
 
@@ -255,5 +270,47 @@ describe("merchant control plane read model", () => {
     assert.equal(result.aiOps.signals.integrationWarnings, 0);
     assert.ok(result.nextActions.some((item: any) => item.key === "connect-store"));
     assert.ok(result.nextActions.some((item: any) => item.key === "configure-webhooks"));
+  });
+
+  it("records guarded action requests without external side effects", async () => {
+    const client = makeClient();
+    const result = await requestMerchantControlPlaneAction({
+      merchantId: "merchant_1",
+      actorId: "user_1",
+      actionKey: "configure-webhook",
+      note: "Prepare test endpoint. token=should-not-leak"
+    }, client as any);
+
+    assert.equal(result.status, "queued_for_review");
+    assert.equal(result.route, "/merchant/webhooks");
+    assert.equal(result.safety.operatorReviewRequired, true);
+    assert.equal(result.safety.externalMutation, false);
+    assert.equal(result.safety.providerCall, false);
+    assert.equal(result.safety.messageSend, false);
+    assert.equal(result.safety.paymentAction, false);
+    assert.equal(result.safety.shipmentAction, false);
+
+    const auditRecord = (client.auditLog as any).records[0];
+    assert.equal(auditRecord.action, "MERCHANT_CONTROL_PLANE_ACTION_REQUESTED");
+    assert.equal(auditRecord.entityType, "merchant_control_plane_action");
+    assert.equal(auditRecord.entityId, "configure-webhook");
+    assert.equal(auditRecord.metadata.externalMutation, false);
+    assert.equal(auditRecord.metadata.note.includes("should-not-leak"), false);
+  });
+
+  it("keeps guarded action responses free of secret-bearing fields", async () => {
+    const client = makeClient();
+    const result = await requestMerchantControlPlaneAction({
+      merchantId: "merchant_1",
+      actorId: "user_1",
+      actionKey: "rotate-credential",
+      note: "password=should-not-leak"
+    }, client as any);
+    const serialized = JSON.stringify(result);
+
+    assert.equal(serialized.includes("should-not-leak"), false);
+    assert.equal(serialized.includes("password"), false);
+    assert.equal(result.safety.externalMutation, false);
+    assert.equal(result.safety.providerCall, false);
   });
 });

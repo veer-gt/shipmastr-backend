@@ -1,9 +1,39 @@
 import { prisma } from "../../lib/prisma.js";
+import { audit } from "../audit/audit.service.js";
 
 type DbClient = typeof prisma | Record<string, any>;
 
 const ATTENTION_STATUSES = new Set(["ERROR", "FAILED", "FAILING", "DEGRADED", "EXPIRED", "REVOKED"]);
 const ACTIVE_STATUSES = new Set(["ACTIVE", "HEALTHY", "PROCESSED", "DELIVERED", "COMPLETED"]);
+const GUARDED_ACTIONS = {
+  "connect-store": {
+    label: "Connect store",
+    route: "/merchant/integrations",
+    nextStep: "Open the integration workspace and prepare connector requirements before any external platform authorization."
+  },
+  "configure-webhook": {
+    label: "Configure webhook",
+    route: "/merchant/webhooks",
+    nextStep: "Open the webhook workspace and review endpoint, signing, and delivery requirements before enabling delivery."
+  },
+  "create-workflow": {
+    label: "Create workflow",
+    route: "/merchant/automation",
+    nextStep: "Open automation and draft the workflow rule for operator review before it can run."
+  },
+  "approve-automation": {
+    label: "Approve automation",
+    route: "/merchant/automation",
+    nextStep: "Review automation scope, quiet hours, templates, and safety gates before approval."
+  },
+  "rotate-credential": {
+    label: "Rotate credential",
+    route: "/merchant/integrations",
+    nextStep: "Open integrations and prepare a safe credential rotation plan before any credential value is accepted."
+  }
+} as const;
+
+export type MerchantControlPlaneActionKey = keyof typeof GUARDED_ACTIONS;
 
 function numberValue(value: unknown) {
   const numeric = Number(value);
@@ -57,6 +87,16 @@ function sum(rows: any[], key: string) {
 
 function action(key: string, label: string, route: string, severity: string, detail: string) {
   return { key, label, route, severity, detail };
+}
+
+function sanitizeOperatorNote(value: unknown) {
+  if (typeof value !== "string") return null;
+  const trimmed = value.trim();
+  if (!trimmed) return null;
+  return trimmed
+    .replace(/\bBearer\s+[A-Za-z0-9._~+/=-]+/gi, "[redacted]")
+    .replace(/\b(api[_\s-]?key|authorization|password|secret|token|webhook[_\s-]?secret)\b\s*[:=]\s*[^\s,;}]+/gi, "[redacted]")
+    .slice(0, 240);
 }
 
 function assertControlPlaneResponseSafe(value: unknown) {
@@ -491,14 +531,68 @@ export async function buildMerchantControlPlane(merchantId: string, client: DbCl
     },
     actions: {
       guarded: [
-        { key: "connect-store", label: "Connect store", route: "/merchant/integrations", status: "contract_required" },
-        { key: "configure-webhook", label: "Configure webhook", route: "/merchant/webhooks", status: "contract_required" },
-        { key: "create-workflow", label: "Create workflow", route: "/merchant/automation", status: "contract_required" },
-        { key: "approve-automation", label: "Approve automation", route: "/merchant/automation", status: "contract_required" },
-        { key: "rotate-credential", label: "Rotate credential", route: "/merchant/integrations", status: "contract_required" }
+        ...Object.entries(GUARDED_ACTIONS).map(([key, value]) => ({
+          key,
+          label: value.label,
+          route: value.route,
+          status: "contract_required",
+          nextStep: value.nextStep
+        }))
       ]
     },
     nextActions
+  };
+
+  assertControlPlaneResponseSafe(response);
+  return response;
+}
+
+export async function requestMerchantControlPlaneAction(input: {
+  merchantId: string;
+  actorId: string;
+  actionKey: MerchantControlPlaneActionKey;
+  note?: string | null;
+}, client: DbClient = prisma) {
+  const actionConfig = GUARDED_ACTIONS[input.actionKey];
+  if (!actionConfig) {
+    throw new Error("MERCHANT_CONTROL_PLANE_ACTION_UNSUPPORTED");
+  }
+
+  const note = sanitizeOperatorNote(input.note);
+  const record = await audit({
+    merchantId: input.merchantId,
+    actorId: input.actorId,
+    action: "MERCHANT_CONTROL_PLANE_ACTION_REQUESTED",
+    entityType: "merchant_control_plane_action",
+    entityId: input.actionKey,
+    metadata: {
+      actionKey: input.actionKey,
+      status: "queued",
+      operatorReviewRequired: true,
+      externalMutation: false,
+      providerCall: false,
+      messageSend: false,
+      paymentAction: false,
+      shipmentAction: false,
+      note
+    }
+  }, client as any);
+
+  const response = {
+    actionKey: input.actionKey,
+    label: actionConfig.label,
+    status: "queued_for_review",
+    route: actionConfig.route,
+    nextStep: actionConfig.nextStep,
+    auditId: record.id,
+    safety: {
+      operatorReviewRequired: true,
+      externalMutation: false,
+      providerCall: false,
+      messageSend: false,
+      paymentAction: false,
+      shipmentAction: false
+    }
   };
 
   assertControlPlaneResponseSafe(response);
