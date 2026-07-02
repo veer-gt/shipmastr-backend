@@ -9,6 +9,7 @@ import {
   updateMerchantPickupPoint
 } from "../taxCompliance/tax-compliance.service.js";
 import { buildMerchantAccountCommandCenter } from "./merchant-account-command-center.service.js";
+import { buildMerchantControlPlane } from "./merchant-control-plane.service.js";
 import {
   assertMerchantWorkspaceResponseSafe,
   buildMerchantSetupWorkspace,
@@ -128,6 +129,16 @@ merchantAccountRouter.get("/command-center", async (req, res) => {
 
   const commandCenter = await buildMerchantAccountCommandCenter(req.auth!.merchantId!);
   res.json({ data: commandCenter });
+});
+
+merchantAccountRouter.get("/control-plane", async (req, res) => {
+  await requireMerchantCommandCenterActor({
+    userId: req.auth!.userId,
+    merchantId: req.auth!.merchantId!
+  });
+
+  const controlPlane = await buildMerchantControlPlane(req.auth!.merchantId!);
+  res.json({ data: controlPlane });
 });
 
 async function requireMerchantWorkspace(req: any) {
