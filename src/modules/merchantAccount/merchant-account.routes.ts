@@ -9,7 +9,10 @@ import {
   updateMerchantPickupPoint
 } from "../taxCompliance/tax-compliance.service.js";
 import { buildMerchantAccountCommandCenter } from "./merchant-account-command-center.service.js";
-import { buildMerchantControlPlane } from "./merchant-control-plane.service.js";
+import {
+  buildMerchantControlPlane,
+  requestMerchantControlPlaneAction
+} from "./merchant-control-plane.service.js";
 import {
   assertMerchantWorkspaceResponseSafe,
   buildMerchantSetupWorkspace,
@@ -85,6 +88,17 @@ const customerPatchSchema = customerSchema.partial().refine((body) => Object.key
   message: "At least one customer field is required"
 });
 
+const merchantControlPlaneActionSchema = z.object({
+  actionKey: z.enum([
+    "connect-store",
+    "configure-webhook",
+    "create-workflow",
+    "approve-automation",
+    "rotate-credential"
+  ]),
+  note: z.string().trim().max(240).optional().nullable().or(z.literal(""))
+});
+
 export async function requireMerchantCommandCenterActor(input: {
   userId: string;
   merchantId: string;
@@ -139,6 +153,23 @@ merchantAccountRouter.get("/control-plane", async (req, res) => {
 
   const controlPlane = await buildMerchantControlPlane(req.auth!.merchantId!);
   res.json({ data: controlPlane });
+});
+
+merchantAccountRouter.post("/control-plane/actions", async (req, res) => {
+  await requireMerchantCommandCenterActor({
+    userId: req.auth!.userId,
+    merchantId: req.auth!.merchantId!
+  });
+
+  const body = merchantControlPlaneActionSchema.parse(req.body);
+  const actionInput: Parameters<typeof requestMerchantControlPlaneAction>[0] = {
+    merchantId: req.auth!.merchantId!,
+    actorId: req.auth!.userId,
+    actionKey: body.actionKey
+  };
+  if (body.note !== undefined) actionInput.note = body.note;
+  const actionRequest = await requestMerchantControlPlaneAction(actionInput);
+  res.status(202).json({ data: actionRequest });
 });
 
 async function requireMerchantWorkspace(req: any) {
