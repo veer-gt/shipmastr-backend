@@ -11,7 +11,8 @@ import {
 import { buildMerchantAccountCommandCenter } from "./merchant-account-command-center.service.js";
 import {
   buildMerchantControlPlane,
-  requestMerchantControlPlaneAction
+  requestMerchantControlPlaneAction,
+  requestMerchantControlPlaneWorkspaceAction
 } from "./merchant-control-plane.service.js";
 import {
   assertMerchantWorkspaceResponseSafe,
@@ -99,6 +100,18 @@ const merchantControlPlaneActionSchema = z.object({
   note: z.string().trim().max(240).optional().nullable().or(z.literal(""))
 });
 
+const merchantControlPlaneWorkspaceActionSchema = z.object({
+  actionKey: z.enum([
+    "webhook-retry-review",
+    "webhook-test-event-sandbox",
+    "automation-approval-review",
+    "ai-ops-summary-review",
+    "audit-event-detail-review",
+    "credential-rotation-review"
+  ]),
+  note: z.string().trim().max(240).optional().nullable().or(z.literal(""))
+});
+
 export async function requireMerchantCommandCenterActor(input: {
   userId: string;
   merchantId: string;
@@ -169,6 +182,23 @@ merchantAccountRouter.post("/control-plane/actions", async (req, res) => {
   };
   if (body.note !== undefined) actionInput.note = body.note;
   const actionRequest = await requestMerchantControlPlaneAction(actionInput);
+  res.status(202).json({ data: actionRequest });
+});
+
+merchantAccountRouter.post("/control-plane/workspace-actions", async (req, res) => {
+  await requireMerchantCommandCenterActor({
+    userId: req.auth!.userId,
+    merchantId: req.auth!.merchantId!
+  });
+
+  const body = merchantControlPlaneWorkspaceActionSchema.parse(req.body);
+  const actionInput: Parameters<typeof requestMerchantControlPlaneWorkspaceAction>[0] = {
+    merchantId: req.auth!.merchantId!,
+    actorId: req.auth!.userId,
+    actionKey: body.actionKey
+  };
+  if (body.note !== undefined) actionInput.note = body.note;
+  const actionRequest = await requestMerchantControlPlaneWorkspaceAction(actionInput);
   res.status(202).json({ data: actionRequest });
 });
 

@@ -35,6 +35,47 @@ const GUARDED_ACTIONS = {
 
 export type MerchantControlPlaneActionKey = keyof typeof GUARDED_ACTIONS;
 
+const WORKSPACE_ACTIONS = {
+  "webhook-retry-review": {
+    label: "Review webhook retry",
+    workspace: "webhooks",
+    route: "/merchant/webhooks",
+    nextStep: "Open delivery detail, inspect attempt history, and queue operator approval before any retry is dispatched."
+  },
+  "webhook-test-event-sandbox": {
+    label: "Prepare test event sandbox",
+    workspace: "webhooks",
+    route: "/merchant/webhooks",
+    nextStep: "Prepare a sandbox event preview that validates endpoint readiness without delivering an external event."
+  },
+  "automation-approval-review": {
+    label: "Review automation approval",
+    workspace: "automation",
+    route: "/merchant/automation",
+    nextStep: "Review workflow scope, quiet hours, template usage, and event limits before approval."
+  },
+  "ai-ops-summary-review": {
+    label: "Generate AI Ops summary",
+    workspace: "ai_ops",
+    route: "/merchant/ai-ops",
+    nextStep: "Queue a merchant-safe operations summary for operator review before any recommendation is applied."
+  },
+  "audit-event-detail-review": {
+    label: "Open event detail review",
+    workspace: "events",
+    route: "/merchant/events",
+    nextStep: "Review safe audit metadata and resolution notes without exposing protected values or raw event bodies."
+  },
+  "credential-rotation-review": {
+    label: "Review credential rotation",
+    workspace: "integrations",
+    route: "/merchant/integrations",
+    nextStep: "Prepare credential rotation requirements; no credential value is accepted or stored from this request."
+  }
+} as const;
+
+export type MerchantControlPlaneWorkspaceActionKey = keyof typeof WORKSPACE_ACTIONS;
+
 function numberValue(value: unknown) {
   const numeric = Number(value);
   return Number.isFinite(numeric) ? numeric : 0;
@@ -97,6 +138,27 @@ function sanitizeOperatorNote(value: unknown) {
     .replace(/\bBearer\s+[A-Za-z0-9._~+/=-]+/gi, "[redacted]")
     .replace(/\b(api[_\s-]?key|authorization|password|secret|token|webhook[_\s-]?secret)\b\s*[:=]\s*[^\s,;}]+/gi, "[redacted]")
     .slice(0, 240);
+}
+
+function workspaceAction(key: MerchantControlPlaneWorkspaceActionKey, status = "operator_review_required") {
+  const config = WORKSPACE_ACTIONS[key];
+  return {
+    key,
+    label: config.label,
+    workspace: config.workspace,
+    route: config.route,
+    status,
+    nextStep: config.nextStep,
+    safety: {
+      operatorReviewRequired: true,
+      externalMutation: false,
+      deliveryAttempt: false,
+      testEventDelivered: false,
+      automationExecuted: false,
+      aiActionApplied: false,
+      credentialChanged: false
+    }
+  };
 }
 
 function assertControlPlaneResponseSafe(value: unknown) {
@@ -520,6 +582,24 @@ export async function buildMerchantControlPlane(merchantId: string, client: DbCl
         webhookWarnings: webhookAttention,
         automationWarnings: automationAttention
       },
+      summaries: [
+        {
+          key: "ops-health",
+          title: "Operations health",
+          status: connectionAttention + webhookAttention + automationAttention ? "needs_review" : "clear",
+          detail: connectionAttention + webhookAttention + automationAttention
+            ? "Review integration, webhook, and automation warning counts before approving new workflows."
+            : "No high-priority control-plane warnings are present in the current read model."
+        },
+        {
+          key: "next-actions",
+          title: "Suggested next actions",
+          status: nextActions.length ? "available" : "clear",
+          detail: nextActions.length
+            ? "Next actions are generated from safe counters and require operator review before mutation."
+            : "No immediate merchant control-plane actions are suggested."
+        }
+      ],
       auditTrail: {
         total: auditLogs.length,
         recent: recentSafe(auditLogs, (row) => ({
@@ -538,7 +618,37 @@ export async function buildMerchantControlPlane(merchantId: string, client: DbCl
           status: "contract_required",
           nextStep: value.nextStep
         }))
+      ],
+      workspace: [
+        workspaceAction("webhook-retry-review", webhookAttention ? "needs_review" : "ready_for_review"),
+        workspaceAction("webhook-test-event-sandbox", webhookSubscriptions.length ? "ready_for_review" : "setup_required"),
+        workspaceAction("automation-approval-review", workflows.length || automationEvents.length ? "needs_review" : "setup_required"),
+        workspaceAction("ai-ops-summary-review", "ready_for_review"),
+        workspaceAction("audit-event-detail-review", auditLogs.length ? "ready_for_review" : "no_events"),
+        workspaceAction("credential-rotation-review", credentials.length ? "ready_for_review" : "setup_required")
       ]
+    },
+    operationalMaturity: {
+      webhooks: {
+        detailDrawer: webhookOutbox.length || webhookSubscriptions.length ? "available" : "empty",
+        retryPolicyVisibility: "available",
+        testEventSandbox: webhookSubscriptions.length ? "operator_review_required" : "setup_required",
+        signingDocs: "available"
+      },
+      automation: {
+        approvalGate: "operator_review_required",
+        workflowState: workflows.length ? "available" : "empty",
+        eventQueue: automationEvents.length ? "available" : "empty"
+      },
+      aiOps: {
+        summaries: "operator_review_required",
+        recommendations: "review_only",
+        autoApply: false
+      },
+      auditCenter: {
+        eventDetail: auditLogs.length ? "available" : "empty",
+        resolutionNotes: "operator_review_required"
+      }
     },
     nextActions
   };
@@ -588,6 +698,70 @@ export async function requestMerchantControlPlaneAction(input: {
     safety: {
       operatorReviewRequired: true,
       externalMutation: false,
+      providerCall: false,
+      messageSend: false,
+      paymentAction: false,
+      shipmentAction: false
+    }
+  };
+
+  assertControlPlaneResponseSafe(response);
+  return response;
+}
+
+export async function requestMerchantControlPlaneWorkspaceAction(input: {
+  merchantId: string;
+  actorId: string;
+  actionKey: MerchantControlPlaneWorkspaceActionKey;
+  note?: string | null;
+}, client: DbClient = prisma) {
+  const actionConfig = WORKSPACE_ACTIONS[input.actionKey];
+  if (!actionConfig) {
+    throw new Error("MERCHANT_CONTROL_PLANE_WORKSPACE_ACTION_UNSUPPORTED");
+  }
+
+  const note = sanitizeOperatorNote(input.note);
+  const record = await audit({
+    merchantId: input.merchantId,
+    actorId: input.actorId,
+    action: "MERCHANT_CONTROL_PLANE_WORKSPACE_ACTION_REQUESTED",
+    entityType: "merchant_control_plane_workspace_action",
+    entityId: input.actionKey,
+    metadata: {
+      actionKey: input.actionKey,
+      workspace: actionConfig.workspace,
+      status: "queued",
+      operatorReviewRequired: true,
+      externalMutation: false,
+      deliveryAttempt: false,
+      testEventDelivered: false,
+      automationExecuted: false,
+      aiActionApplied: false,
+      credentialChanged: false,
+      providerCall: false,
+      messageSend: false,
+      paymentAction: false,
+      shipmentAction: false,
+      note
+    }
+  }, client as any);
+
+  const response = {
+    actionKey: input.actionKey,
+    label: actionConfig.label,
+    workspace: actionConfig.workspace,
+    status: "queued_for_operator_review",
+    route: actionConfig.route,
+    nextStep: actionConfig.nextStep,
+    auditId: record.id,
+    safety: {
+      operatorReviewRequired: true,
+      externalMutation: false,
+      deliveryAttempt: false,
+      testEventDelivered: false,
+      automationExecuted: false,
+      aiActionApplied: false,
+      credentialChanged: false,
       providerCall: false,
       messageSend: false,
       paymentAction: false,
