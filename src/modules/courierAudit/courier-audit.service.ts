@@ -77,7 +77,8 @@ type NotifyLead = Pick<CourierAuditLeadRecord,
   | "source"
 >;
 
-type Notifier = (lead: NotifyLead) => Promise<void>;
+type NotificationResult = "sent" | "skipped_missing_webhook";
+type Notifier = (lead: NotifyLead) => Promise<NotificationResult | void>;
 
 const defaultClient = prisma as unknown as CourierAuditLeadClient;
 
@@ -123,7 +124,7 @@ export function sanitizedCourierAuditNotificationPayload(lead: NotifyLead) {
 
 export function makeN8nCourierAuditNotifier(webhookUrl = env.COURIER_AUDIT_N8N_WEBHOOK_URL): Notifier {
   return async (lead) => {
-    if (!webhookUrl) return;
+    if (!webhookUrl?.trim()) return "skipped_missing_webhook";
 
     const response = await fetch(webhookUrl, {
       method: "POST",
@@ -134,6 +135,8 @@ export function makeN8nCourierAuditNotifier(webhookUrl = env.COURIER_AUDIT_N8N_W
     if (!response.ok) {
       throw new Error("COURIER_AUDIT_N8N_NOTIFICATION_FAILED");
     }
+
+    return "sent";
   };
 }
 
@@ -174,14 +177,23 @@ export async function createCourierAuditLead(
   });
 
   try {
-    await notify(lead);
-    await client.courierAuditLead.update({
-      where: { id: lead.id },
-      data: {
-        n8nNotifiedAt: new Date(),
-        n8nNotificationStatus: "sent"
-      }
-    });
+    const notificationResult = await notify(lead);
+    if (notificationResult === "skipped_missing_webhook") {
+      await client.courierAuditLead.update({
+        where: { id: lead.id },
+        data: {
+          n8nNotificationStatus: "not_configured"
+        }
+      });
+    } else {
+      await client.courierAuditLead.update({
+        where: { id: lead.id },
+        data: {
+          n8nNotifiedAt: new Date(),
+          n8nNotificationStatus: "sent"
+        }
+      });
+    }
   } catch {
     logger.warn({
       message: "courier_audit_n8n_notification_failed",

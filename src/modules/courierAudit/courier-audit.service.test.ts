@@ -3,6 +3,7 @@ import { describe, it } from "node:test";
 
 import {
   createCourierAuditLead,
+  makeN8nCourierAuditNotifier,
   sanitizedCourierAuditNotificationPayload
 } from "./courier-audit.service.js";
 
@@ -105,5 +106,21 @@ describe("courier audit leads", () => {
     assert.equal(state.leads.length, 1);
     assert.equal(state.leads[0]?.n8nNotificationStatus, "failed");
     assert.equal(state.updates[0]?.data.n8nNotificationStatus, "failed");
+  });
+
+  it("marks missing n8n webhook config without pretending notification was sent", async () => {
+    const { client, state } = makeCourierAuditLeadClient();
+    const result = await createCourierAuditLead(
+      validInput(),
+      client,
+      makeN8nCourierAuditNotifier("")
+    );
+
+    assert.deepEqual(result, { ok: true, stored: true, id: "cal_1" });
+    assert.equal(state.leads.length, 1);
+    assert.equal(state.leads[0]?.n8nNotificationStatus, "not_configured");
+    assert.equal(state.leads[0]?.n8nNotifiedAt, null);
+    assert.equal(state.updates[0]?.data.n8nNotificationStatus, "not_configured");
+    assert.equal("n8nNotifiedAt" in state.updates[0]?.data, false);
   });
 });
