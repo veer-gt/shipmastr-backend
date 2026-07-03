@@ -16,6 +16,7 @@ import { adminProvisionalRateCardsRouter, adminRateCardGroupsRouter, adminRateCa
 import { courierPartnersRouter } from "../modules/courierPartners/courier-partners.routes.js";
 import { adminCourierPartnerRouter, courierOnboardingRouter } from "../modules/courierPartnerOnboarding/onboarding.routes.js";
 import { courierRouter } from "../modules/courier/courier.routes.js";
+import { courierAuditRouter } from "../modules/courierAudit/courier-audit.routes.js";
 import { courierInvoicesRouter } from "../modules/courierInvoices/courier-invoices.routes.js";
 import { adminDomainsRouter, domainStatusRouter, internalDomainProvisioningRouter, merchantDomainsRouter } from "../modules/domains/domains.routes.js";
 import { ordersRouter } from "../modules/orders/orders.routes.js";
@@ -58,6 +59,7 @@ apiRouter.use("/auth", authRouter);
 apiRouter.use("/courier-partner-applications", courierPartnerApplicationRouter);
 apiRouter.use("/courier-partners", courierPartnersRouter);
 apiRouter.use("/v1/courier-partners", courierPartnersRouter);
+apiRouter.use("/v1/public/courier-audit", courierAuditRouter);
 apiRouter.use("/admin/courier-partner-applications", requireAdminJwt, adminCourierPartnerApplicationRouter);
 apiRouter.use("/admin/courier-partners", requireAdminJwt, adminCourierPartnerRouter);
 apiRouter.use("/admin/courier-provider-lanes", requireAdminJwt, adminCourierProviderRegistryRouter);

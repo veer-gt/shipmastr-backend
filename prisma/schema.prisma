@@ -4410,6 +4410,39 @@ model Lead {
   @@index([createdAt])
 }
 
+model CourierAuditLead {
+  id                    String   @id @default(uuid())
+  createdAt             DateTime @default(now()) @map("created_at")
+  updatedAt             DateTime @default(now()) @updatedAt @map("updated_at")
+  brand                 String
+  name                  String
+  email                 String
+  whatsapp              String
+  monthlyShipments      Int      @map("monthly_shipments")
+  currentAggregator     String?  @map("current_aggregator")
+  estimatedLeak         Float?   @map("estimated_leak")
+  bumpRate              Float?   @map("bump_rate")
+  averageOvercharge     Float?   @map("average_overcharge")
+  utmSource             String?  @map("utm_source")
+  utmMedium             String?  @map("utm_medium")
+  utmCampaign           String?  @map("utm_campaign")
+  utmTerm               String?  @map("utm_term")
+  utmContent            String?  @map("utm_content")
+  landingPath           String?  @map("landing_path")
+  referrer              String?
+  status                String   @default("new")
+  source                String   @default("courier-audit")
+  n8nNotifiedAt         DateTime? @map("n8n_notified_at")
+  n8nNotificationStatus String?  @map("n8n_notification_status")
+  notes                 String?
+
+  @@index([email])
+  @@index([whatsapp])
+  @@index([status])
+  @@index([createdAt])
+  @@map("courier_audit_leads")
+}
+
 model MerchantMetrics {
   id               String   @id @default(uuid())
   merchantId       String   @unique
