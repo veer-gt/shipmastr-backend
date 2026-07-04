@@ -67,6 +67,78 @@ The script refuses cloud or production-like runtime. It never prints secrets and
 
 Use `--file <path>` for local CSV input. `--csv <path>` remains accepted as a backward-compatible alias. Both forms are read locally and then hashed server-side by W0D before parsing.
 
+## W0D-H3 Synthetic Fixture Rehearsal
+
+The committed synthetic fixture kit can seed and activate a local SAMPLE format pack for `courier_mis` / `BIGSHIP_SYNTHETIC`. This proves the W0 machinery only; it is not real courier hostility and must not be treated as real pilot evidence.
+
+Dry-run the seed first:
+
+```bash
+node scripts/wallet-w0-pilot.mjs seed-synthetic-pack \
+  --mis-file ./fixtures/pilot/synthetic/bigship-mis-2026-07.csv \
+  --orders-file ./fixtures/pilot/synthetic/shopify-orders-2026-07.csv \
+  --manifest ./fixtures/pilot/synthetic/traps-manifest.json \
+  --requested-by import_pipeline_w0 \
+  --approved-by usr_w0_synthetic_checker
+```
+
+Activate it locally only:
+
+```bash
+node scripts/wallet-w0-pilot.mjs seed-synthetic-pack \
+  --mis-file ./fixtures/pilot/synthetic/bigship-mis-2026-07.csv \
+  --orders-file ./fixtures/pilot/synthetic/shopify-orders-2026-07.csv \
+  --manifest ./fixtures/pilot/synthetic/traps-manifest.json \
+  --requested-by import_pipeline_w0 \
+  --approved-by usr_w0_synthetic_checker \
+  --execute
+```
+
+Then verify readiness and parse the synthetic MIS with the paired seller export:
+
+```bash
+node scripts/wallet-w0-pilot.mjs readiness \
+  --source courier_mis \
+  --counterparty BIGSHIP_SYNTHETIC
+
+node scripts/wallet-w0-pilot.mjs import-dry-run \
+  --source courier_mis \
+  --counterparty BIGSHIP_SYNTHETIC \
+  --brand-org-id 00000000-0000-4000-8000-000000000001 \
+  --period 2026-07 \
+  --file ./fixtures/pilot/synthetic/bigship-mis-2026-07.csv \
+  --orders-file ./fixtures/pilot/synthetic/shopify-orders-2026-07.csv \
+  --stated-total-minor 667470
+
+node scripts/wallet-w0-pilot.mjs e2e-dry-run \
+  --source courier_mis \
+  --counterparty BIGSHIP_SYNTHETIC \
+  --brand-org-id 00000000-0000-4000-8000-000000000001 \
+  --period 2026-07 \
+  --file ./fixtures/pilot/synthetic/bigship-mis-2026-07.csv \
+  --orders-file ./fixtures/pilot/synthetic/shopify-orders-2026-07.csv \
+  --stated-total-minor 667470
+```
+
+Synthetic data rules:
+
+- Synthetic proves machinery, not real courier hostility.
+- Real anonymized Bigship MIS remains required as the first true golden fixture.
+- Anonymize identity, preserve hostility.
+- Amounts stay real in real anonymized files.
+- Do not commit raw real courier files.
+- Raw AWB/order/phone/email/address/pincode-like fields belong only in raw or parsed staging quarantine, never journal fields or reports.
+
+Synthetic total semantics:
+
+- `rawFileTotalMinor` / `allRowsTotalMinor` is the file arithmetic total. It sums every non-skipped row with a valid amount, including rows that later become expected row exceptions.
+- `postableTotalMinor` is the ledger-eligible subtotal. It excludes exception and skipped rows.
+- `fileTies` compares `rawFileTotalMinor` to the CLI/manifest `statedTotalMinor`.
+- The normal synthetic fixture ties: `rawFileTotalMinor=667470`, `statedTotalMinor=667470`, `fileTies=true`.
+- Expected hostile traps such as `UNKNOWN_CHARGE_CODE` and `UNRESOLVED_SHIPMENT` remain visible and may keep the SAMPLE non-shippable through `IMPORT_ROW_EXCEPTIONS_PRESENT`.
+- Only the generated `--no-tie` variant is intended to produce `IMPORT_TOTAL_MISMATCH`.
+- Synthetic reports remain SAMPLE output and are not pilot evidence for real courier behavior.
+
 ## Format Pack Flow
 
 `runFormatPackValidationFlow` always runs fixtures and records a format-pack test run. This is an audit record, not a ledger mutation.
@@ -100,6 +172,10 @@ The stage summary includes:
 - `shippable`
 - `blockingIssues`
 - `metrics`
+- `rawFileTotalMinor` / `allRowsTotalMinor`
+- `postableTotalMinor`
+- `fileTies`
+- row status counts: `rowCount`, `skippedRowCount`, `parsedRowCount`, `exceptionRowCount`, `postableRowCount`, and `statusCounts`
 
 ## Shadow Ledger Posting
 

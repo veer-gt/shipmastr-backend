@@ -325,8 +325,13 @@ describe("W0B-4 format-pack fixtures and activation", () => {
       expectedSummary: validExpected({
         parsed_count: 0,
         exception_count: 1,
-        stated_total_minor: "0",
+        stated_total_minor: "11800",
         parsed_total_minor: "0",
+        raw_file_total_minor: "11800",
+        postable_total_minor: "0",
+        file_ties: true,
+        exception_row_count: 1,
+        postable_row_count: 0,
         event_class_counts: {}
       })
     });
@@ -569,7 +574,7 @@ describe("W0B-4 format-pack fixtures and activation", () => {
 
   it("keeps import pipeline source free of dynamic execution, money-float hazards, direct ledger writes, and public controllers", () => {
     const moduleDir = new URL(".", import.meta.url).pathname;
-    const files = readdirSync(moduleDir).filter((file) => file.endsWith(".js"));
+    const files = readdirSync(moduleDir).filter((file) => file.endsWith(".js") && !file.endsWith(".test.js"));
     const forbidden = [
       ["ev", "al("].join(""),
       ["new ", "Function"].join(""),

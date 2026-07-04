@@ -24,13 +24,25 @@ function parserResult(overrides: Record<string, unknown> = {}) {
   return {
     rowCount: 1,
     parsedCount: 1,
+    parsedRowCount: 1,
     resolvedCount: 1,
     exceptionCount: 0,
+    exceptionRowCount: 0,
+    fileExceptionCount: 0,
     skippedCount: 0,
+    skippedRowCount: 0,
+    postableRowCount: 1,
+    statusCounts: { resolved: 1 },
     parsedTotalMinor: "11800",
+    postableTotalMinor: "11800",
+    rawFileTotalMinor: "11800",
+    allRowsTotalMinor: "11800",
     statedTotalMinor: null,
+    fileTies: null,
     fileStatus: "parsed",
     fileExceptionCode: null,
+    rowExceptionCodes: [],
+    exceptionCodes: [],
     eventClassCounts: { freight_charged: 1 },
     rowResults: [],
     ...overrides
@@ -344,10 +356,12 @@ describe("W0D pilot ops wrapper", () => {
     const root = mkdtempSync(join(tmpdir(), "w0-cli-args-"));
     try {
       writeFileSync(join(root, "sample.csv"), "source,charge,amount\nref,FWD,118.00\n", "utf8");
+      writeFileSync(join(root, "orders.csv"), "Name\n#1001\n", "utf8");
       const fromFile = cliBaseImportInput(["import-dry-run", "--source", "courier_mis", "--file", "sample.csv"], root);
-      const fromCsv = cliBaseImportInput(["import-dry-run", "--source", "courier_mis", "--csv", "sample.csv"], root);
+      const fromCsv = cliBaseImportInput(["import-dry-run", "--source", "courier_mis", "--csv", "sample.csv", "--orders-file", "orders.csv"], root);
 
       assert.equal(fromFile.csvContent, fromCsv.csvContent);
+      assert.match(String(fromCsv.ordersCsvContent), /#1001/);
       assert.match(String(fromFile.csvContent), /ref,FWD,118\.00/);
     } finally {
       rmSync(root, { recursive: true, force: true });
@@ -514,13 +528,49 @@ describe("W0D pilot ops wrapper", () => {
     const { service } = makeHarness({
       parserOverrides: {
         parsedTotalMinor: "11800",
-        statedTotalMinor: "12000"
+        postableTotalMinor: "11800",
+        rawFileTotalMinor: "11800",
+        allRowsTotalMinor: "11800",
+        statedTotalMinor: "12000",
+        fileTies: false,
+        fileExceptionCode: "TOTAL_MISMATCH",
+        exceptionCount: 1,
+        fileExceptionCount: 1,
+        exceptionCodes: ["TOTAL_MISMATCH"]
       }
     });
     const result = await service.runImportDryRun(baseImportInput({ statedTotalMinor: "12000" }));
 
     assert.equal(result.shippable, false);
     assert.deepEqual(result.blockingIssues, ["IMPORT_TOTAL_MISMATCH"]);
+  });
+
+  it("keeps raw file ties separate from postable row exceptions", async () => {
+    const { service } = makeHarness({
+      parserOverrides: {
+        parsedCount: 1,
+        parsedRowCount: 1,
+        exceptionCount: 1,
+        exceptionRowCount: 1,
+        postableRowCount: 1,
+        parsedTotalMinor: "11800",
+        postableTotalMinor: "11800",
+        rawFileTotalMinor: "12000",
+        allRowsTotalMinor: "12000",
+        statedTotalMinor: "12000",
+        fileTies: true,
+        rowExceptionCodes: ["UNKNOWN_CHARGE_CODE"],
+        exceptionCodes: ["UNKNOWN_CHARGE_CODE"],
+        statusCounts: { resolved: 1, exception: 1 }
+      }
+    });
+    const result = await service.runImportDryRun(baseImportInput({ statedTotalMinor: "12000" }));
+
+    assert.equal(result.fileTies, true);
+    assert.equal(result.rawFileTotalMinor, "12000");
+    assert.equal(result.postableTotalMinor, "11800");
+    assert.equal(result.blockingIssues.includes("IMPORT_TOTAL_MISMATCH"), false);
+    assert.equal(result.blockingIssues.includes("IMPORT_ROW_EXCEPTIONS_PRESENT"), true);
   });
 
   it("does not expose raw readable refs from parser output", async () => {
@@ -621,7 +671,8 @@ describe("W0D pilot ops wrapper", () => {
     const normal = makeHarness({
       parserOverrides: {
         rowCount: 4,
-        exceptionCount: 1
+        exceptionCount: 1,
+        exceptionRowCount: 1
       },
       reportImportQuality: {
         stagedRowCount: 4,
@@ -639,7 +690,8 @@ describe("W0D pilot ops wrapper", () => {
     const zero = makeHarness({
       parserOverrides: {
         rowCount: 0,
-        exceptionCount: 0
+        exceptionCount: 0,
+        exceptionRowCount: 0
       },
       reportImportQuality: {
         stagedRowCount: 0,
@@ -738,7 +790,15 @@ describe("W0D pilot ops wrapper", () => {
     const { service } = makeHarness({
       parserOverrides: {
         parsedTotalMinor: "11800",
-        statedTotalMinor: "12000"
+        postableTotalMinor: "11800",
+        rawFileTotalMinor: "11800",
+        allRowsTotalMinor: "11800",
+        statedTotalMinor: "12000",
+        fileTies: false,
+        fileExceptionCode: "TOTAL_MISMATCH",
+        exceptionCount: 1,
+        fileExceptionCount: 1,
+        exceptionCodes: ["TOTAL_MISMATCH"]
       }
     });
     const result = await service.runEndToEndPilotDryRun(baseImportInput({ fileId: "file_1", statedTotalMinor: "12000" }));
@@ -779,6 +839,7 @@ describe("W0D pilot ops wrapper", () => {
     const files = [
       join(root, "src/modules/importPipeline/pilot-ops.service.ts"),
       join(root, "src/modules/importPipeline/pilot-ops-cli-runtime.ts"),
+      join(root, "src/modules/importPipeline/synthetic-bigship-format-pack.ts"),
       join(root, "src/modules/importPipeline/pilot-ops.types.ts"),
       join(root, "src/modules/importPipeline/import-pipeline.module.ts"),
       join(root, "scripts/wallet-w0-pilot.mjs")

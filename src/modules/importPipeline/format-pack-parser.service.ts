@@ -185,6 +185,7 @@ function shouldSkipRow(values: string[], headerResolution: HeaderResolution, def
   const joined = values.map((value) => normalizeHeader(value)).join(" ");
   if (filters.some((filter) => (typeof filter === "string" && filter === "subtotal_row")
     || (isObject(filter) && filter.type === "subtotal_row"))) {
+    if (values.some((value) => normalizeHeader(value) === "total")) return "SUBTOTAL_ROW";
     if (joined.includes("subtotal") || joined === "total" || joined.startsWith("total ")) return "SUBTOTAL_ROW";
   }
   return null;
@@ -221,6 +222,10 @@ function incrementCount(counts: Record<string, number>, key: string | undefined)
   counts[key] = (counts[key] ?? 0) + 1;
 }
 
+function incrementStatusCount(counts: Record<RowStatus, number>, key: RowStatus) {
+  counts[key] = (counts[key] ?? 0) + 1;
+}
+
 export class FormatPackParserService {
   constructor(
     private readonly client: ParserClient = defaultClient,
@@ -248,8 +253,10 @@ export class FormatPackParserService {
         continue;
       }
 
+      let parsedInternal: Record<string, unknown> | undefined;
+      let eventClass: string | undefined;
       try {
-        const parsedInternal: Record<string, unknown> = {};
+        parsedInternal = {};
         if (isObject(definition.columns)) {
           for (const [fieldKey, columnConfig] of Object.entries(definition.columns)) {
             if (!isObject(columnConfig) || typeof columnConfig.from !== "string") continue;
@@ -268,7 +275,7 @@ export class FormatPackParserService {
           : typeof parsedInternal.charge_code === "string" && ALLOWED_EVENT_CLASSES.has(parsedInternal.charge_code)
             ? parsedInternal.charge_code
             : null;
-        const eventClass = mappedEvent ?? classifyChargeCode(parsedInternal.charge_code, definition);
+        eventClass = mappedEvent ?? classifyChargeCode(parsedInternal.charge_code, definition);
         parsedInternal.event_class = eventClass;
         if (typeof parsedInternal.amount_minor === "bigint" && parsedInternal.amount_minor === 0n && eventClass !== "unknown") {
           throw new ImportPipelineRowError("ZERO_AMOUNT", { eventClass });
@@ -276,7 +283,10 @@ export class FormatPackParserService {
 
         let status: RowStatus = "validated";
         let shipmentId: string | undefined;
-        const externalRef = typeof parsedInternal.external_awb === "string" ? parsedInternal.external_awb : null;
+        const externalOrderRef = typeof parsedInternal.external_order_ref === "string" && parsedInternal.external_order_ref.trim()
+          ? parsedInternal.external_order_ref
+          : null;
+        const externalRef = externalOrderRef ?? (typeof parsedInternal.external_awb === "string" ? parsedInternal.external_awb : null);
         if (externalRef) {
           const resolved = await resolver.resolveShipmentRef({
             externalRef,
@@ -311,6 +321,8 @@ export class FormatPackParserService {
           rowNo,
           raw,
           status: "exception",
+          parsedInternal,
+          eventClass,
           exceptionCode: rowError.code,
           exceptionDetail: rowError.details
         });
@@ -318,26 +330,56 @@ export class FormatPackParserService {
     }
 
     this.applyDuplicateDetection(rowResults, definition);
-    const parsedTotalMinor = this.parsedTotal(rowResults);
+    const rawFileTotalMinor = this.rawFileTotal(rowResults);
+    const postableTotalMinor = this.postableTotal(rowResults);
     const expectedTotal = statedTotal(input.statedTotalMinor);
-    const fileException = expectedTotal !== null && parsedTotalMinor !== expectedTotal ? "TOTAL_MISMATCH" : null;
-    const exceptionCount = rowResults.filter((row) => row.status === "exception").length + (fileException ? 1 : 0);
+    const fileTies = expectedTotal !== null ? rawFileTotalMinor === expectedTotal : null;
+    const fileException = expectedTotal !== null && fileTies === false ? "TOTAL_MISMATCH" : null;
+    const statusCounts: Record<RowStatus, number> = {
+      parsed: 0,
+      resolved: 0,
+      validated: 0,
+      exception: 0,
+      skipped: 0
+    };
     const eventClassCounts: Record<string, number> = {};
     for (const row of rowResults) {
+      incrementStatusCount(statusCounts, row.status);
       if (row.status !== "exception" && row.status !== "skipped") incrementCount(eventClassCounts, row.eventClass);
     }
 
+    const rowExceptionCodes = rowResults
+      .filter((row) => row.status === "exception")
+      .map((row) => row.exceptionCode)
+      .filter((code): code is string => typeof code === "string");
+    const fileExceptionCount = fileException ? 1 : 0;
+    const exceptionRowCount = statusCounts.exception;
+    const exceptionCount = exceptionRowCount + fileExceptionCount;
     const fileStatus = exceptionCount > 0 ? "exception" : "validated";
+    const nonSkippedRowCount = rowResults.filter((row) => row.status !== "skipped").length;
+    const parsedRowCount = statusCounts.parsed + statusCounts.validated + statusCounts.resolved;
     const result = {
-      rowCount: dataRows.length,
-      parsedCount: rowResults.filter((row) => ["parsed", "validated", "resolved"].includes(row.status)).length,
-      resolvedCount: rowResults.filter((row) => row.status === "resolved").length,
+      rowCount: nonSkippedRowCount,
+      parsedCount: parsedRowCount,
+      parsedRowCount,
+      resolvedCount: statusCounts.resolved,
       exceptionCount,
-      skippedCount: rowResults.filter((row) => row.status === "skipped").length,
-      parsedTotalMinor: parsedTotalMinor.toString(),
+      exceptionRowCount,
+      fileExceptionCount,
+      skippedCount: statusCounts.skipped,
+      skippedRowCount: statusCounts.skipped,
+      postableRowCount: parsedRowCount,
+      statusCounts,
+      parsedTotalMinor: postableTotalMinor.toString(),
+      postableTotalMinor: postableTotalMinor.toString(),
+      rawFileTotalMinor: rawFileTotalMinor.toString(),
+      allRowsTotalMinor: rawFileTotalMinor.toString(),
       ...(expectedTotal !== null ? { statedTotalMinor: expectedTotal.toString() } : {}),
+      fileTies,
       fileStatus,
       ...(fileException ? { fileExceptionCode: fileException } : {}),
+      rowExceptionCodes,
+      exceptionCodes: [...rowExceptionCodes, ...(fileException ? [fileException] : [])],
       eventClassCounts,
       rowResults: rowResults.map((row) => serializeRow(row))
     };
@@ -393,7 +435,17 @@ export class FormatPackParserService {
     }
   }
 
-  private parsedTotal(rowResults: RowResultInternal[]) {
+  private rawFileTotal(rowResults: RowResultInternal[]) {
+    let total = 0n;
+    for (const row of rowResults) {
+      if (row.status === "skipped") continue;
+      const value = row.parsedInternal?.amount_minor;
+      if (typeof value === "bigint") total += value;
+    }
+    return total;
+  }
+
+  private postableTotal(rowResults: RowResultInternal[]) {
     let total = 0n;
     for (const row of rowResults) {
       if (row.status === "exception" || row.status === "skipped") continue;

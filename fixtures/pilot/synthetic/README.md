@@ -6,8 +6,8 @@ pipeline before a real courier file exists.
 ## What this proves and what it cannot
 
 Proves: the machinery — format-pack authoring loop, date/amount parsing, the
-AWB→shipment resolver, repeat-billing classification, the tie-out gate, e2e
-posting, and recovery-report rendering.
+AWB→shipment resolver, fixture gate, local dry-run wrapper, e2e dry-run, and
+recovery-report rendering.
 
 Cannot prove: that real hostility is handled. You cannot discover hostility you
 invented. The W0 definition of done still requires a real courier file as the
@@ -24,6 +24,22 @@ watermark it as such.
   resolver's Order Ref join has a target (plus 2 unbilled orders as findings)
 - `traps-manifest.json` — the answer key: every trap, its rows/AWBs, expected
   pipeline behavior, and computed vs stated totals in paise
+
+The normal fixture intentionally ties at the raw file level:
+
+- `computedTotalMinor = 667470`
+- `statedTotalMinor = 667470`
+- `ties = true`
+
+Parser output separates that raw tie from postable ledger completeness:
+
+- `rawFileTotalMinor` / `allRowsTotalMinor`: all non-skipped rows with valid amounts, including expected row exceptions
+- `postableTotalMinor`: rows eligible for ledger posting only
+- `fileTies`: raw file total equals stated total
+
+Only the generated `--no-tie` variant should produce `IMPORT_TOTAL_MISMATCH`.
+The normal fixture still surfaces expected hostile row exceptions as SAMPLE
+quality blockers.
 
 ## Usage
 

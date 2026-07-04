@@ -11,6 +11,10 @@ import { ImportCorrectionPlannerService } from "./import-correction-planner.serv
 import { ImportFileService, importFileService } from "./import-file.service.js";
 import { RecoveryReportService, recoveryReportService } from "./recovery-report.service.js";
 import { ShadowLedgerPostingService, shadowLedgerPostingService } from "./shadow-ledger-posting.service.js";
+import {
+  SyntheticBigshipFormatPackSeedService,
+  SyntheticOrderReferenceResolver
+} from "./synthetic-bigship-format-pack.js";
 import type {
   PilotOpsApplyCorrectionInput,
   PilotOpsApplyCorrectionResult,
@@ -34,6 +38,7 @@ import type {
   PilotOpsReadinessResult,
   PilotOpsRecoveryReportInput,
   PilotOpsRecoveryReportResult,
+  PilotOpsSeedSyntheticPackInput,
   PilotOpsWarning
 } from "./pilot-ops.types.js";
 
@@ -54,6 +59,7 @@ type RecoveryReportLike = Pick<RecoveryReportService, "generateRecoveryReport">;
 type CorrectionPlannerLike = Pick<ImportCorrectionPlannerService, "planCorrection">;
 type CorrectionApplyLike = Pick<ImportCorrectionApplyService, "approveCorrectionBatch" | "applyCorrectionBatch">;
 type ActivationLike = Pick<FormatPackActivationService, "validateVersion" | "markCanary" | "activateVersion">;
+type SyntheticSeedLike = Pick<SyntheticBigshipFormatPackSeedService, "seed">;
 
 export type PilotOpsDeps = {
   client?: PilotOpsClient | undefined;
@@ -66,6 +72,7 @@ export type PilotOpsDeps = {
   correctionPlanner?: CorrectionPlannerLike | undefined;
   correctionApply?: CorrectionApplyLike | undefined;
   activation?: ActivationLike | undefined;
+  syntheticSeed?: SyntheticSeedLike | undefined;
 };
 
 const defaultClient = prisma as unknown as PilotOpsClient;
@@ -129,10 +136,10 @@ function integerRatio(numerator: number, multiplier: number, denominator: number
   return parseInt(((BigInt(numerator) * BigInt(multiplier)) / BigInt(denominator)).toString(), 10);
 }
 
-function metricsFromImportSummary(summary: Pick<PilotOpsImportSummary, "rowCount" | "exceptionCount">): PilotOpsMetrics {
+function metricsFromImportSummary(summary: Pick<PilotOpsImportSummary, "rowCount" | "exceptionRowCount">): PilotOpsMetrics {
   return {
     autoPostRateBps: null,
-    humanTouchPerThousandRows: integerRatio(summary.exceptionCount, 1000, summary.rowCount)
+    humanTouchPerThousandRows: integerRatio(summary.exceptionRowCount, 1000, summary.rowCount)
   };
 }
 
@@ -152,8 +159,11 @@ function metricsFromReport(input: { stagedRowCount: number; postedRowCount: numb
 
 function importBlockingIssues(result: Awaited<ReturnType<ParserLike["dryRunParseCsv"]>>) {
   const issues: string[] = [];
-  if (result.statedTotalMinor && result.parsedTotalMinor !== result.statedTotalMinor) {
+  if (result.statedTotalMinor && result.fileTies === false) {
     issues.push("IMPORT_TOTAL_MISMATCH");
+  }
+  if (Array.isArray(result.rowExceptionCodes) && result.rowExceptionCodes.length > 0) {
+    issues.push("IMPORT_ROW_EXCEPTIONS_PRESENT");
   }
   return issues;
 }
@@ -174,19 +184,31 @@ function importSummary(fileHash: string, result: Awaited<ReturnType<ParserLike["
   const blockingIssues = importBlockingIssues(result);
   const base = {
     rowCount: result.rowCount,
-    exceptionCount: result.exceptionCount
+    exceptionRowCount: typeof result.exceptionRowCount === "number" ? result.exceptionRowCount : result.exceptionCount
   };
   return {
     fileHash,
     rowCount: result.rowCount,
     parsedCount: result.parsedCount,
+    parsedRowCount: typeof result.parsedRowCount === "number" ? result.parsedRowCount : result.parsedCount,
     resolvedCount: result.resolvedCount,
     exceptionCount: result.exceptionCount,
+    exceptionRowCount: typeof result.exceptionRowCount === "number" ? result.exceptionRowCount : result.exceptionCount,
+    fileExceptionCount: typeof result.fileExceptionCount === "number" ? result.fileExceptionCount : result.fileExceptionCode ? 1 : 0,
     skippedCount: result.skippedCount,
+    skippedRowCount: typeof result.skippedRowCount === "number" ? result.skippedRowCount : result.skippedCount,
+    postableRowCount: typeof result.postableRowCount === "number" ? result.postableRowCount : result.parsedCount,
+    statusCounts: cleanEventCounts(result.statusCounts),
     parsedTotalMinor: result.parsedTotalMinor,
+    postableTotalMinor: typeof result.postableTotalMinor === "string" ? result.postableTotalMinor : result.parsedTotalMinor,
+    rawFileTotalMinor: typeof result.rawFileTotalMinor === "string" ? result.rawFileTotalMinor : result.parsedTotalMinor,
+    allRowsTotalMinor: typeof result.allRowsTotalMinor === "string" ? result.allRowsTotalMinor : typeof result.rawFileTotalMinor === "string" ? result.rawFileTotalMinor : result.parsedTotalMinor,
     ...(result.statedTotalMinor ? { statedTotalMinor: result.statedTotalMinor } : {}),
+    fileTies: typeof result.fileTies === "boolean" ? result.fileTies : null,
     fileStatus: result.fileStatus,
     fileExceptionCode: result.fileExceptionCode ?? null,
+    rowExceptionCodes: Array.isArray(result.rowExceptionCodes) ? result.rowExceptionCodes.filter((code): code is string => typeof code === "string") : [],
+    exceptionCodes: Array.isArray(result.exceptionCodes) ? result.exceptionCodes.filter((code): code is string => typeof code === "string") : [],
     eventClassCounts: cleanEventCounts(result.eventClassCounts),
     shippable: blockingIssues.length === 0,
     blockingIssues,
@@ -214,6 +236,7 @@ export class PilotOpsService {
   private readonly correctionPlanner: CorrectionPlannerLike;
   private readonly correctionApply: CorrectionApplyLike;
   private readonly activation: ActivationLike;
+  private readonly syntheticSeed: SyntheticSeedLike;
 
   constructor(deps: PilotOpsDeps = {}) {
     this.client = deps.client ?? defaultClient;
@@ -226,6 +249,7 @@ export class PilotOpsService {
     this.correctionApply = deps.correctionApply ?? importCorrectionApplyService;
     this.activation = deps.activation ?? formatPackActivationService;
     this.fixtureRunner = deps.fixtureRunner ?? new FormatPackFixtureRunner(this.contentProvider);
+    this.syntheticSeed = deps.syntheticSeed ?? new SyntheticBigshipFormatPackSeedService(this.client as never, this.fixtureRunner as never, this.activation as never);
   }
 
   async checkW0Readiness(input: PilotOpsReadinessInput = {}): Promise<PilotOpsReadinessResult> {
@@ -349,9 +373,14 @@ export class PilotOpsService {
       source: cleanText(input.source, "IMPORT_FILE_SOURCE_REQUIRED"),
       counterparty: optionalText(input.counterparty),
       brandOrgId: optionalText(input.brandOrgId),
+      resolver: this.syntheticResolver(input),
       persistStagingRows: false
     });
     return importSummary(fileHash, parsed, [localOnlyWarning()]);
+  }
+
+  async seedSyntheticFormatPack(input: PilotOpsSeedSyntheticPackInput) {
+    return this.syntheticSeed.seed(input);
   }
 
   async runImportAndStage(input: PilotOpsImportStageInput): Promise<PilotOpsImportStageResult> {
@@ -389,6 +418,7 @@ export class PilotOpsService {
       source: cleanText(input.source, "IMPORT_FILE_SOURCE_REQUIRED"),
       counterparty: optionalText(input.counterparty),
       brandOrgId: optionalText(input.brandOrgId),
+      resolver: this.syntheticResolver(input),
       persistStagingRows: true
     });
     const summary = importSummary(fileHash, parsed, []);
@@ -661,6 +691,12 @@ export class PilotOpsService {
       throw new ImportPipelineError("FILE_HASH_MISMATCH", "FILE_HASH_MISMATCH", { expectedFileHash, actualFileHash: fileHash });
     }
     return { csvContent, fileHash };
+  }
+
+  private syntheticResolver(input: Pick<PilotOpsImportDryRunInput, "ordersCsvContent">) {
+    return typeof input.ordersCsvContent === "string" && input.ordersCsvContent.trim()
+      ? SyntheticOrderReferenceResolver.fromOrdersCsv(input.ordersCsvContent)
+      : undefined;
   }
 
 }

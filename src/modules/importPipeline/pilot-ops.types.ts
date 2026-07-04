@@ -56,6 +56,7 @@ export type PilotOpsFormatPackValidationResult = {
 
 export type PilotOpsImportDryRunInput = {
   csvContent?: string | undefined;
+  ordersCsvContent?: string | undefined;
   storagePath?: string | undefined;
   fileHash?: string | undefined;
   expectedFileHash?: string | undefined;
@@ -68,17 +69,39 @@ export type PilotOpsImportDryRunInput = {
   createdBy: string;
 };
 
+export type PilotOpsSeedSyntheticPackInput = {
+  misContent: string;
+  ordersContent?: string | undefined;
+  manifestContent?: string | undefined;
+  misStoragePath: string;
+  requestedBy?: string | undefined;
+  approvedBy?: string | undefined;
+  execute?: boolean | undefined;
+};
+
 export type PilotOpsImportSummary = {
   fileHash: string;
   rowCount: number;
   parsedCount: number;
+  parsedRowCount: number;
   resolvedCount: number;
   exceptionCount: number;
+  exceptionRowCount: number;
+  fileExceptionCount: number;
   skippedCount: number;
+  skippedRowCount: number;
+  postableRowCount: number;
+  statusCounts: Record<string, number>;
   parsedTotalMinor: string;
+  postableTotalMinor: string;
+  rawFileTotalMinor: string;
+  allRowsTotalMinor: string;
   statedTotalMinor?: string | undefined;
+  fileTies: boolean | null;
   fileStatus: string;
   fileExceptionCode?: string | null | undefined;
+  rowExceptionCodes: string[];
+  exceptionCodes: string[];
   eventClassCounts: Record<string, number>;
   shippable: boolean;
   blockingIssues: string[];

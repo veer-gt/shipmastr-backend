@@ -12,6 +12,7 @@ W0 is the local shadow-ledger and import-pipeline foundation:
 - W0C-3B-H1: done, single-reversal and stale correction hardening
 - W0D: done, local pilot ops wrapper and runbook
 - W0D-H1: done, final pilot ops hardening
+- W0D-H3: local synthetic format-pack seed and activation support for SAMPLE fixture rehearsal
 
 The authoritative import schema remains:
 
@@ -106,6 +107,17 @@ W0D-H1 safeguards:
 - operational summaries include `autoPostRateBps` and `humanTouchPerThousandRows`.
 
 `humanTouchPerThousandRows` is currently a proxy metric: `(exceptionRowCount * 1000) / totalRows`. During pilots, ops must record actual operator minutes per import file in pilot notes until a later metrics patch replaces the proxy with actual minutes.
+
+W0D-H3 adds local-only synthetic rehearsal support:
+
+- seeds `bigship_synthetic_courier_mis`
+- activates the `BIGSHIP_SYNTHETIC` / `courier_mis` sample format pack through fixture gate and maker-checker
+- reads paired seller-export rows through `--orders-file` for deterministic local resolver IDs
+- keeps the synthetic fixture marked SAMPLE only
+- separates raw file arithmetic tie from postable ledger subtotal: the normal synthetic fixture ties on `rawFileTotalMinor=667470` and `statedTotalMinor=667470`, while expected hostile row exceptions remain visible separately
+- reserves `IMPORT_TOTAL_MISMATCH` for true file tie failures such as the generated `--no-tie` variant
+
+Synthetic rehearsal proves W0 machinery, not real courier hostility. Real anonymized Bigship MIS remains required as the first true golden fixture. Anonymize identity, preserve hostility, keep amounts real, and never commit raw real courier files.
 
 ## Final W0 Preservation Status
 

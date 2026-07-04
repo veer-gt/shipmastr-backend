@@ -166,7 +166,7 @@ describe("format pack definition validator", () => {
 
   it("does not contain dynamic execution escape hatches in import pipeline source", () => {
     const moduleDir = new URL(".", import.meta.url).pathname;
-    const files = readdirSync(moduleDir).filter((file) => file.endsWith(".js"));
+    const files = readdirSync(moduleDir).filter((file) => file.endsWith(".js") && !file.endsWith(".test.js"));
     const forbidden = [
       ["ev", "al("].join(""),
       ["new ", "Function"].join(""),
