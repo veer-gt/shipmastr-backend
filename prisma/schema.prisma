@@ -3143,6 +3143,540 @@ model SellerWalletLedger {
   @@unique([merchantId, idempotencyKey])
 }
 
+enum WalletOwnerType {
+  seller
+  courier
+  platform
+  gateway
+
+  @@map("owner_type")
+}
+
+enum WalletAccountClass {
+  asset
+  liability
+  revenue
+  expense
+
+  @@map("account_class")
+}
+
+enum WalletAccountType {
+  shipping_balance
+  cod_receivable
+  dispute_hold
+  seller_shortfall
+  checkout_balance
+  courier_payable
+  courier_cod_due
+  courier_suspense
+  platform_escrow
+  gateway_clearing
+  platform_revenue
+  fee_expense
+  tax_payable
+  courier_leakage
+
+  @@map("account_type")
+}
+
+enum WalletAccountStatus {
+  active
+  preview
+  locked
+  frozen
+  closed
+
+  @@map("account_status")
+}
+
+enum LedgerScope {
+  custodial
+  shadow
+
+  @@map("ledger_scope")
+}
+
+enum WalletEntryType {
+  topup
+  topup_refund
+  gateway_settlement
+  shipment_charge
+  shipment_refund
+  rto_freight_charge
+  return_freight_charge
+  weight_dispute_hold
+  weight_dispute_release
+  weight_dispute_capture
+  cod_collected
+  cod_remittance_in
+  cod_payout
+  courier_net_settlement
+  checkout_capture
+  checkout_split_settlement
+  success_fee
+  platform_fee
+  adjustment
+  suspense_recovery
+  suspense_writeoff
+  closure_refund_to_source
+  closure_bank_settlement
+
+  @@map("entry_type")
+}
+
+enum PostingDirection {
+  debit
+  credit
+
+  @@map("posting_direction")
+}
+
+enum WalletHoldStatus {
+  active
+  released
+  captured
+  expired
+
+  @@map("hold_status")
+}
+
+model WalletOwner {
+  id           String          @id @default(cuid())
+  ownerType    WalletOwnerType @map("owner_type")
+  externalId   String?         @map("external_id")
+  displayName  String?         @map("display_name")
+  metadata     Json?
+  createdAt    DateTime        @default(now()) @map("created_at")
+  updatedAt    DateTime        @default(now()) @updatedAt @map("updated_at")
+
+  accounts WalletAccount[]
+
+  @@unique([ownerType, externalId])
+  @@index([ownerType])
+  @@map("wallet_owners")
+}
+
+model WalletAccount {
+  id            String              @id @default(cuid())
+  ownerId       String              @map("owner_id")
+  ownerType     WalletOwnerType     @map("owner_type")
+  accountType   WalletAccountType   @map("account_type")
+  accountClass  WalletAccountClass  @map("account_class")
+  status        WalletAccountStatus @default(active)
+  ledgerScope   LedgerScope         @map("ledger_scope")
+  currency      String              @default("INR")
+  label         String?
+  metadata      Json?
+  createdAt     DateTime            @default(now()) @map("created_at")
+  updatedAt     DateTime            @default(now()) @updatedAt @map("updated_at")
+
+  owner    WalletOwner    @relation(fields: [ownerId], references: [id], onDelete: Restrict)
+  balance  AccountBalance?
+  postings JournalPosting[]
+  holds    WalletHold[]
+
+  @@index([ownerId])
+  @@index([ownerType])
+  @@index([accountType])
+  @@index([ledgerScope])
+  @@index([status])
+  @@unique([ownerId, accountType, ledgerScope, currency])
+  @@map("wallet_accounts")
+}
+
+model AccountTypeConfig {
+  accountType         WalletAccountType  @id @map("account_type")
+  accountClass        WalletAccountClass @map("account_class")
+  normalSide          PostingDirection   @map("normal_side")
+  allowedOwnerTypes   WalletOwnerType[]  @map("allowed_owner_types")
+  allowedLedgerScopes LedgerScope[]      @map("allowed_ledger_scopes")
+  createdAt           DateTime           @default(now()) @map("created_at")
+  updatedAt           DateTime           @default(now()) @updatedAt @map("updated_at")
+
+  @@map("account_type_config")
+}
+
+model JournalEntry {
+  id          String          @id @default(cuid())
+  entryRef    String          @map("entry_ref")
+  commandHash String          @map("command_hash")
+  entryType   WalletEntryType @map("entry_type")
+  ledgerScope LedgerScope     @map("ledger_scope")
+  currency    String          @default("INR")
+  sourceType  String          @map("source_type")
+  sourceRef   String          @map("source_ref")
+  reversalOf  String?         @map("reversal_of")
+  narrative   String?
+  createdBy   String?         @map("created_by")
+  metadata    Json?
+  createdAt   DateTime        @default(now()) @map("created_at")
+
+  postings          JournalPosting[]
+  reversedEntry     JournalEntry?  @relation("JournalEntryReversal", fields: [reversalOf], references: [id], onDelete: Restrict)
+  reversalEntries   JournalEntry[] @relation("JournalEntryReversal")
+
+  @@unique([entryRef])
+  @@index([entryType])
+  @@index([ledgerScope])
+  @@index([reversalOf])
+  @@index([sourceType, sourceRef])
+  @@index([createdAt])
+  @@map("journal_entries")
+}
+
+model JournalPosting {
+  id          String           @id @default(cuid())
+  entryId     String           @map("entry_id")
+  accountId   String           @map("account_id")
+  direction   PostingDirection
+  amountPaise BigInt           @map("amount_paise")
+  currency    String           @default("INR")
+  createdAt   DateTime         @default(now()) @map("created_at")
+
+  entry   JournalEntry  @relation(fields: [entryId], references: [id], onDelete: Restrict)
+  account WalletAccount @relation(fields: [accountId], references: [id], onDelete: Restrict)
+
+  @@index([entryId])
+  @@index([accountId])
+  @@index([currency])
+  @@map("journal_postings")
+}
+
+model AccountBalance {
+  accountId          String      @id @map("account_id")
+  ledgerScope        LedgerScope @map("ledger_scope")
+  currency           String      @default("INR")
+  balancePaise       BigInt      @default(0) @map("balance_paise")
+  lastJournalEntryId String?     @map("last_journal_entry_id")
+  updatedAt          DateTime    @default(now()) @updatedAt @map("updated_at")
+
+  account WalletAccount @relation(fields: [accountId], references: [id], onDelete: Restrict)
+
+  @@index([ledgerScope])
+  @@index([currency])
+  @@map("account_balances")
+}
+
+model WalletHold {
+  id               String           @id @default(cuid())
+  accountId        String           @map("account_id")
+  entryId          String           @map("entry_id")
+  holdRef          String           @map("hold_ref")
+  amountPaise      BigInt           @map("amount_paise")
+  currency         String           @default("INR")
+  status           WalletHoldStatus @default(active)
+  sourceType       String           @map("source_type")
+  sourceRef        String           @map("source_ref")
+  releasedByEntryId String?         @map("released_by_entry_id")
+  expiresAt        DateTime?        @map("expires_at")
+  createdAt        DateTime         @default(now()) @map("created_at")
+  updatedAt        DateTime         @default(now()) @updatedAt @map("updated_at")
+
+  account WalletAccount @relation(fields: [accountId], references: [id], onDelete: Restrict)
+
+  @@unique([holdRef])
+  @@index([accountId])
+  @@index([entryId])
+  @@index([status])
+  @@index([sourceType, sourceRef])
+  @@map("wallet_holds")
+}
+
+model SettlementBatch {
+  id           String      @id @default(cuid())
+  batchRef     String      @unique @map("batch_ref")
+  ledgerScope  LedgerScope @map("ledger_scope")
+  currency     String      @default("INR")
+  status       String      @default("draft")
+  batchType    String      @map("batch_type")
+  totalPaise   BigInt      @default(0) @map("total_paise")
+  metadata     Json?
+  createdAt    DateTime    @default(now()) @map("created_at")
+  updatedAt    DateTime    @default(now()) @updatedAt @map("updated_at")
+
+  items SettlementBatchItem[]
+
+  @@index([ledgerScope])
+  @@index([status])
+  @@index([createdAt])
+  @@map("settlement_batches")
+}
+
+model SettlementBatchItem {
+  id              String   @id @default(cuid())
+  batchId         String   @map("batch_id")
+  ownerId         String?  @map("owner_id")
+  accountId       String?  @map("account_id")
+  amountPaise     BigInt   @map("amount_paise")
+  currency        String   @default("INR")
+  sourceType      String   @map("source_type")
+  sourceRef       String   @map("source_ref")
+  status          String   @default("pending")
+  journalEntryId  String?  @map("journal_entry_id")
+  metadata        Json?
+  createdAt       DateTime @default(now()) @map("created_at")
+  updatedAt       DateTime @default(now()) @updatedAt @map("updated_at")
+
+  batch SettlementBatch @relation(fields: [batchId], references: [id], onDelete: Restrict)
+
+  @@index([batchId])
+  @@index([ownerId])
+  @@index([accountId])
+  @@index([sourceType, sourceRef])
+  @@index([status])
+  @@map("settlement_batch_items")
+}
+
+model ExternalTransaction {
+  id                  String    @id @default(cuid())
+  provider            String
+  transactionType     String    @map("transaction_type")
+  externalRef         String    @map("external_ref")
+  occurredAt          DateTime? @map("occurred_at")
+  amountPaise         BigInt    @map("amount_paise")
+  currency            String    @default("INR")
+  rawPayload          Json?     @map("raw_payload")
+  normalizedPayload   Json?     @map("normalized_payload")
+  createdAt           DateTime  @default(now()) @map("created_at")
+
+  matches ExternalTransactionMatch[]
+
+  @@unique([provider, externalRef])
+  @@index([transactionType])
+  @@index([occurredAt])
+  @@index([createdAt])
+  @@map("external_transactions")
+}
+
+model ExternalTransactionMatch {
+  id                    String   @id @default(cuid())
+  externalTransactionId String   @map("external_transaction_id")
+  journalEntryId        String?  @map("journal_entry_id")
+  matchStatus           String   @default("pending") @map("match_status")
+  confidence            String?
+  metadata              Json?
+  createdAt             DateTime @default(now()) @map("created_at")
+  updatedAt             DateTime @default(now()) @updatedAt @map("updated_at")
+
+  externalTransaction ExternalTransaction @relation(fields: [externalTransactionId], references: [id], onDelete: Restrict)
+
+  @@index([externalTransactionId])
+  @@index([journalEntryId])
+  @@index([matchStatus])
+  @@map("external_transaction_matches")
+}
+
+model ReconException {
+  id          String      @id @default(cuid())
+  scope       LedgerScope
+  sourceType  String      @map("source_type")
+  sourceRef   String      @map("source_ref")
+  severity    String      @default("medium")
+  status      String      @default("open")
+  reasonCode  String      @map("reason_code")
+  details     Json?
+  createdAt   DateTime    @default(now()) @map("created_at")
+  updatedAt   DateTime    @default(now()) @updatedAt @map("updated_at")
+
+  @@index([scope])
+  @@index([sourceType, sourceRef])
+  @@index([status])
+  @@index([createdAt])
+  @@map("recon_exceptions")
+}
+
+model WalletEventsOutbox {
+  id             String    @id @default(cuid())
+  eventType      String    @map("event_type")
+  aggregateType  String    @map("aggregate_type")
+  aggregateId    String    @map("aggregate_id")
+  payload        Json
+  status         String    @default("pending")
+  createdAt      DateTime  @default(now()) @map("created_at")
+  publishedAt    DateTime? @map("published_at")
+
+  @@index([eventType])
+  @@index([aggregateType, aggregateId])
+  @@index([status, createdAt])
+  @@map("wallet_events_outbox")
+}
+
+model ImportFile {
+  id                  String   @id @default(uuid())
+  fileHash            String   @unique @map("file_hash")
+  source              String
+  counterparty        String?
+  brandOrgId          String?  @map("brand_org_id")
+  period              String?
+  storagePath         String   @map("storage_path")
+  formatPackId        String?  @map("format_pack_id")
+  formatPackVersionId String?  @map("format_pack_version_id")
+  statedTotalMinor    BigInt?  @map("stated_total_minor")
+  status              String   @default("landed")
+  createdAt           DateTime @default(now()) @map("created_at")
+  updatedAt           DateTime @default(now()) @updatedAt @map("updated_at")
+
+  formatPack        FormatPack?        @relation(fields: [formatPackId], references: [id], onDelete: SetNull)
+  formatPackVersion FormatPackVersion? @relation(fields: [formatPackVersionId], references: [id], onDelete: SetNull)
+  stagingRows       StagingRow[]
+  correctionBatches ImportCorrectionBatch[] @relation("ImportCorrectionBatchFile")
+
+  @@index([fileHash])
+  @@index([status])
+  @@index([source, counterparty, period])
+  @@index([formatPackId])
+  @@index([formatPackVersionId])
+  @@map("import_files")
+}
+
+model StagingRow {
+  id              BigInt   @id @default(autoincrement())
+  fileId          String   @map("file_id")
+  rowNo           Int      @map("row_no")
+  raw             Json
+  parsed          Json?
+  eventClass      String?  @map("event_class")
+  shipmentId      String?  @map("shipment_id")
+  status          String   @default("staged")
+  exceptionCode   String?  @map("exception_code")
+  exceptionDetail Json?    @map("exception_detail")
+  postedEntryRef  String?  @map("posted_entry_ref")
+
+  file ImportFile @relation(fields: [fileId], references: [id], onDelete: Restrict)
+  correctionItems ImportCorrectionItem[]
+
+  @@unique([fileId, rowNo])
+  @@index([fileId, status])
+  @@index([fileId, rowNo])
+  @@map("staging_rows")
+}
+
+model FormatPack {
+  id          String   @id @default(uuid())
+  packKey     String   @unique @map("pack_key")
+  courierCode String?  @map("courier_code")
+  source      String
+  description String?
+  createdAt   DateTime @default(now()) @map("created_at")
+
+  versions    FormatPackVersion[]
+  importFiles ImportFile[]
+
+  @@map("format_packs")
+}
+
+model FormatPackVersion {
+  id               String    @id @default(uuid())
+  packId           String    @map("pack_id")
+  version          String
+  definition       Json
+  definitionHash   String    @map("definition_hash")
+  minEngineVersion String    @map("min_engine_version")
+  status           String    @default("draft")
+  createdBy        String    @map("created_by")
+  approvedBy       String?   @map("approved_by")
+  activatedAt      DateTime? @map("activated_at")
+  retiredAt        DateTime? @map("retired_at")
+  createdAt        DateTime  @default(now()) @map("created_at")
+
+  pack        FormatPack              @relation(fields: [packId], references: [id], onDelete: Restrict)
+  fixtures    FormatPackFixture[]
+  testRuns    FormatPackTestRun[]
+  importFiles ImportFile[]
+  oldCorrectionBatches ImportCorrectionBatch[] @relation("OldCorrectionFormatPackVersion")
+  newCorrectionBatches ImportCorrectionBatch[] @relation("NewCorrectionFormatPackVersion")
+
+  @@unique([packId, version])
+  @@index([packId, status])
+  @@index([definitionHash])
+  @@map("format_pack_versions")
+}
+
+model ImportCorrectionBatch {
+  id                     String    @id @default(uuid())
+  importFileId           String    @map("import_file_id")
+  oldFormatPackVersionId String?   @map("old_format_pack_version_id")
+  newFormatPackVersionId String    @map("new_format_pack_version_id")
+  reason                 String
+  status                 String    @default("planned")
+  dryRunResult           Json      @map("dry_run_result")
+  createdBy              String    @map("created_by")
+  approvedBy             String?   @map("approved_by")
+  appliedBy              String?   @map("applied_by")
+  createdAt              DateTime  @default(now()) @map("created_at")
+  approvedAt             DateTime? @map("approved_at")
+  appliedAt              DateTime? @map("applied_at")
+  cancelledAt            DateTime? @map("cancelled_at")
+
+  importFile ImportFile @relation("ImportCorrectionBatchFile", fields: [importFileId], references: [id], onDelete: Restrict)
+  oldFormatPackVersion FormatPackVersion? @relation("OldCorrectionFormatPackVersion", fields: [oldFormatPackVersionId], references: [id], onDelete: SetNull)
+  newFormatPackVersion FormatPackVersion @relation("NewCorrectionFormatPackVersion", fields: [newFormatPackVersionId], references: [id], onDelete: Restrict)
+  items ImportCorrectionItem[]
+
+  @@index([importFileId, status])
+  @@index([newFormatPackVersionId])
+  @@index([oldFormatPackVersionId])
+  @@index([createdAt])
+  @@map("import_correction_batches")
+}
+
+model ImportCorrectionItem {
+  id                 String   @id @default(uuid())
+  batchId            String   @map("batch_id")
+  oldStagingRowId    BigInt?  @map("old_staging_row_id")
+  proposedRowNo      Int?     @map("proposed_row_no")
+  oldPostedEntryRef  String?  @map("old_posted_entry_ref")
+  action             String
+  status             String   @default("planned")
+  oldFingerprint     String?  @map("old_fingerprint")
+  newFingerprint     String?  @map("new_fingerprint")
+  diff               Json
+  errorCode          String?  @map("error_code")
+  errorDetail        Json?    @map("error_detail")
+  reversalEntryRef   String?  @map("reversal_entry_ref")
+  correctedEntryRef  String?  @map("corrected_entry_ref")
+  createdAt          DateTime @default(now()) @map("created_at")
+
+  batch ImportCorrectionBatch @relation(fields: [batchId], references: [id], onDelete: Cascade)
+  oldStagingRow StagingRow? @relation(fields: [oldStagingRowId], references: [id], onDelete: SetNull)
+
+  @@index([batchId, action])
+  @@index([oldStagingRowId])
+  @@index([oldPostedEntryRef])
+  @@map("import_correction_items")
+}
+
+model FormatPackFixture {
+  id               String   @id @default(uuid())
+  packVersionId    String   @map("pack_version_id")
+  fixtureName      String   @map("fixture_name")
+  storagePath      String   @map("storage_path")
+  expectedSummary  Json     @map("expected_summary")
+  expectedRowsPath String?  @map("expected_rows_path")
+  createdAt        DateTime @default(now()) @map("created_at")
+
+  packVersion FormatPackVersion @relation(fields: [packVersionId], references: [id], onDelete: Restrict)
+
+  @@index([packVersionId])
+  @@map("format_pack_fixtures")
+}
+
+model FormatPackTestRun {
+  id            String   @id @default(uuid())
+  packVersionId String   @map("pack_version_id")
+  runnerVersion String   @map("runner_version")
+  status        String
+  result        Json
+  createdBy     String   @map("created_by")
+  createdAt     DateTime @default(now()) @map("created_at")
+
+  packVersion FormatPackVersion @relation(fields: [packVersionId], references: [id], onDelete: Restrict)
+
+  @@index([packVersionId])
+  @@map("format_pack_test_runs")
+}
+
 model SellerSettlement {
   id                     String                 @id @default(uuid())
   merchantId             String
