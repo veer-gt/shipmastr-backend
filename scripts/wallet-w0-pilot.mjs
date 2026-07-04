@@ -11,6 +11,7 @@ import {
   hasArg,
   optionalArg,
   principal,
+  requiredLocalFileContent,
   requiredArg,
   requireExecute
 } from "../dist/modules/importPipeline/pilot-ops-cli-runtime.js";
@@ -59,6 +60,20 @@ export async function runWalletW0PilotCli(argv = process.argv.slice(2), service)
 
   if (command === "import-dry-run") {
     json(await pilotService.runImportDryRun(baseImportInput(argv)));
+    return;
+  }
+
+  if (command === "seed-synthetic-pack") {
+    const misFile = requiredArg(argv, "--mis-file");
+    json(await pilotService.seedSyntheticFormatPack({
+      misContent: requiredLocalFileContent(argv, "--mis-file"),
+      ordersContent: optionalArg(argv, "--orders-file") ? requiredLocalFileContent(argv, "--orders-file") : undefined,
+      manifestContent: requiredLocalFileContent(argv, "--manifest"),
+      misStoragePath: misFile,
+      requestedBy: principal(argv, "--requested-by"),
+      approvedBy: optionalArg(argv, "--approved-by"),
+      execute: hasArg(argv, "--execute")
+    }));
     return;
   }
 

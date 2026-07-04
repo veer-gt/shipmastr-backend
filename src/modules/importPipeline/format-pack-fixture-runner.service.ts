@@ -89,6 +89,12 @@ function actualSummary(parseResult: Record<string, unknown>): ExpectedFixtureSum
     exception_count: typeof parseResult.exceptionCount === "number" ? parseResult.exceptionCount : 0,
     stated_total_minor: typeof parseResult.statedTotalMinor === "string" ? parseResult.statedTotalMinor : null,
     parsed_total_minor: typeof parseResult.parsedTotalMinor === "string" ? parseResult.parsedTotalMinor : "0",
+    raw_file_total_minor: typeof parseResult.rawFileTotalMinor === "string" ? parseResult.rawFileTotalMinor : undefined,
+    all_rows_total_minor: typeof parseResult.allRowsTotalMinor === "string" ? parseResult.allRowsTotalMinor : undefined,
+    postable_total_minor: typeof parseResult.postableTotalMinor === "string" ? parseResult.postableTotalMinor : undefined,
+    file_ties: typeof parseResult.fileTies === "boolean" || parseResult.fileTies === null ? parseResult.fileTies : undefined,
+    exception_row_count: typeof parseResult.exceptionRowCount === "number" ? parseResult.exceptionRowCount : undefined,
+    postable_row_count: typeof parseResult.postableRowCount === "number" ? parseResult.postableRowCount : undefined,
     event_class_counts: Object.fromEntries(Object.entries(
       typeof parseResult.eventClassCounts === "object" && parseResult.eventClassCounts !== null && !Array.isArray(parseResult.eventClassCounts)
         ? parseResult.eventClassCounts as Record<string, unknown>
@@ -101,6 +107,11 @@ function compareSummaries(expected: ExpectedFixtureSummary, actual: ExpectedFixt
   const diffs: SummaryDiff[] = [];
   for (const field of ["row_count", "parsed_count", "exception_count", "stated_total_minor", "parsed_total_minor"] as const) {
     if (expected[field] !== actual[field]) diffs.push({ field, expected: expected[field], actual: actual[field] });
+  }
+  for (const field of ["raw_file_total_minor", "all_rows_total_minor", "postable_total_minor", "file_ties", "exception_row_count", "postable_row_count"] as const) {
+    if (typeof expected[field] !== "undefined" && expected[field] !== actual[field]) {
+      diffs.push({ field, expected: expected[field], actual: actual[field] });
+    }
   }
 
   const { normalizedExpected, normalizedActual } = normalizedEventCounts(expected.event_class_counts, actual.event_class_counts);
@@ -200,7 +211,10 @@ export class FormatPackFixtureRunner {
           unknownChargeCodes: unknownChargeCodes(errors),
           totals: {
             statedTotalMinor: actual.stated_total_minor,
-            parsedTotalMinor: actual.parsed_total_minor
+            parsedTotalMinor: actual.parsed_total_minor,
+            rawFileTotalMinor: actual.raw_file_total_minor,
+            postableTotalMinor: actual.postable_total_minor,
+            fileTies: actual.file_ties
           },
           durationMs: Date.now() - startedAt
         });

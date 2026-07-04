@@ -85,7 +85,7 @@ function parseDecimalScaled(value: string, scale: bigint, errorCode: string) {
 
 export function parseGrams(input: unknown): number {
   const raw = String(input ?? "").trim();
-  if (!raw) throw new ImportPipelineRowError("BAD_WEIGHT", { value: input });
+  if (!raw) return 0;
   const normalized = raw.toLowerCase().replace(/\s+/g, "");
   if (normalized.endsWith("kg")) {
     const grams = parseDecimalScaled(normalized.slice(0, -2), 1000n, "BAD_WEIGHT");
@@ -95,14 +95,40 @@ export function parseGrams(input: unknown): number {
     const grams = parseDecimalScaled(normalized.slice(0, -1), 1n, "BAD_WEIGHT");
     return +grams.toString();
   }
+  if (normalized.includes(".")) {
+    const grams = parseDecimalScaled(normalized, 1000n, "BAD_WEIGHT");
+    return +grams.toString();
+  }
   const grams = parseDecimalScaled(normalized, 1n, "BAD_WEIGHT");
   return +grams.toString();
 }
+
+const MONTH_NAME_TO_NUMBER: Record<string, string> = {
+  jan: "01",
+  feb: "02",
+  mar: "03",
+  apr: "04",
+  may: "05",
+  jun: "06",
+  jul: "07",
+  aug: "08",
+  sep: "09",
+  oct: "10",
+  nov: "11",
+  dec: "12"
+};
 
 function parseDateParts(raw: string, format: string) {
   if (format === "DD/MM/YYYY") {
     const match = /^(\d{2})\/(\d{2})\/(\d{4})$/.exec(raw);
     return match ? { day: match[1]!, month: match[2]!, year: match[3]! } : null;
+  }
+  if (format === "DD-MMM-YY") {
+    const match = /^(\d{2})-([A-Za-z]{3})-(\d{2})$/.exec(raw);
+    if (!match) return null;
+    const month = MONTH_NAME_TO_NUMBER[match[2]!.toLowerCase()];
+    if (!month) return null;
+    return { day: match[1]!, month, year: `20${match[3]!}` };
   }
   if (format === "YYYY-MM-DD") {
     const match = /^(\d{4})-(\d{2})-(\d{2})$/.exec(raw);

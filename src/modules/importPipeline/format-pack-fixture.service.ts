@@ -38,6 +38,12 @@ export type ExpectedFixtureSummary = {
   exception_count: number;
   stated_total_minor: string | null;
   parsed_total_minor: string;
+  raw_file_total_minor?: string | undefined;
+  all_rows_total_minor?: string | undefined;
+  postable_total_minor?: string | undefined;
+  file_ties?: boolean | null | undefined;
+  exception_row_count?: number | undefined;
+  postable_row_count?: number | undefined;
   event_class_counts: Record<string, number>;
 };
 
@@ -109,6 +115,12 @@ export function normalizeExpectedSummary(input: unknown): ExpectedFixtureSummary
   const exceptionCount = input.exception_count;
   const statedTotalMinor = input.stated_total_minor;
   const parsedTotalMinor = input.parsed_total_minor;
+  const rawFileTotalMinor = input.raw_file_total_minor;
+  const allRowsTotalMinor = input.all_rows_total_minor;
+  const postableTotalMinor = input.postable_total_minor;
+  const fileTies = input.file_ties;
+  const exceptionRowCount = input.exception_row_count;
+  const postableRowCount = input.postable_row_count;
   const eventClassCounts = input.event_class_counts;
 
   const normalizedRowCount = requireNonNegativeInteger(rowCount, "EXPECTED_SUMMARY_ROW_COUNT_INVALID");
@@ -127,7 +139,7 @@ export function normalizeExpectedSummary(input: unknown): ExpectedFixtureSummary
     normalizedCounts[eventClass] = requireNonNegativeInteger(value, "EXPECTED_SUMMARY_EVENT_COUNTS_INVALID");
   }
 
-  return {
+  const normalized: ExpectedFixtureSummary = {
     row_count: normalizedRowCount,
     parsed_count: normalizedParsedCount,
     exception_count: normalizedExceptionCount,
@@ -135,6 +147,26 @@ export function normalizeExpectedSummary(input: unknown): ExpectedFixtureSummary
     parsed_total_minor: normalizedParsedTotalMinor,
     event_class_counts: normalizedCounts
   };
+  if (typeof rawFileTotalMinor !== "undefined") {
+    normalized.raw_file_total_minor = requireIntegerString(rawFileTotalMinor, "EXPECTED_SUMMARY_RAW_TOTAL_INVALID");
+  }
+  if (typeof allRowsTotalMinor !== "undefined") {
+    normalized.all_rows_total_minor = requireIntegerString(allRowsTotalMinor, "EXPECTED_SUMMARY_ALL_ROWS_TOTAL_INVALID");
+  }
+  if (typeof postableTotalMinor !== "undefined") {
+    normalized.postable_total_minor = requireIntegerString(postableTotalMinor, "EXPECTED_SUMMARY_POSTABLE_TOTAL_INVALID");
+  }
+  if (typeof fileTies !== "undefined") {
+    if (fileTies !== null && typeof fileTies !== "boolean") throw new FormatPackFixtureServiceError("EXPECTED_SUMMARY_FILE_TIES_INVALID");
+    normalized.file_ties = fileTies;
+  }
+  if (typeof exceptionRowCount !== "undefined") {
+    normalized.exception_row_count = requireNonNegativeInteger(exceptionRowCount, "EXPECTED_SUMMARY_EXCEPTION_ROW_COUNT_INVALID");
+  }
+  if (typeof postableRowCount !== "undefined") {
+    normalized.postable_row_count = requireNonNegativeInteger(postableRowCount, "EXPECTED_SUMMARY_POSTABLE_ROW_COUNT_INVALID");
+  }
+  return normalized;
 }
 
 export class FormatPackFixtureService {

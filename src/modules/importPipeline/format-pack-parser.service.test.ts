@@ -108,6 +108,12 @@ describe("W0B-3 CSV dry-run parser", () => {
     assert.equal(result.parsedCount, 1);
     assert.equal(result.resolvedCount, 1);
     assert.equal(result.parsedTotalMinor, "11800");
+    assert.equal(result.postableTotalMinor, "11800");
+    assert.equal(result.rawFileTotalMinor, "11800");
+    assert.equal(result.allRowsTotalMinor, "11800");
+    assert.equal(result.fileTies, true);
+    assert.equal(result.postableRowCount, 1);
+    assert.equal(result.statusCounts.resolved, 1);
     assert.equal(result.rowResults[0]?.status, "resolved");
     assert.equal(result.rowResults[0]?.shipmentId, resolvedShipmentId);
     assert.equal(result.rowResults[0]?.parsed?.amount_minor, "11800");
@@ -313,6 +319,8 @@ describe("W0B-3 CSV dry-run parser", () => {
 
     assert.equal(result.fileStatus, "exception");
     assert.equal(result.fileExceptionCode, "TOTAL_MISMATCH");
+    assert.equal(result.fileTies, false);
+    assert.equal(result.rawFileTotalMinor, "11800");
   });
 
   it("marks unresolved shipment refs as row exceptions when a resolver is supplied", async () => {
@@ -320,11 +328,16 @@ describe("W0B-3 CSV dry-run parser", () => {
     const result = await service.dryRunParseCsv({
       csvContent: standardCsv("118.00", "FWD", "04/07/2026", "UNKNOWN"),
       formatPackVersionId: "version_1",
-      statedTotalMinor: "0",
+      statedTotalMinor: "11800",
       resolver: new FakeShipmentReferenceResolver()
     });
 
     assert.equal(result.rowResults[0]?.exceptionCode, "UNRESOLVED_SHIPMENT");
+    assert.equal(result.fileTies, true);
+    assert.equal(result.rawFileTotalMinor, "11800");
+    assert.equal(result.postableTotalMinor, "0");
+    assert.equal(result.fileExceptionCode, undefined);
+    assert.deepEqual(result.rowExceptionCodes, ["UNRESOLVED_SHIPMENT"]);
   });
 
   it("parses quoted comma CSV fields", async () => {
@@ -452,7 +465,7 @@ describe("W0B-3 CSV dry-run parser", () => {
 
   it("keeps import pipeline source free of dynamic execution markers and controllers", () => {
     const moduleDir = new URL(".", import.meta.url).pathname;
-    const files = readdirSync(moduleDir).filter((file) => file.endsWith(".js"));
+    const files = readdirSync(moduleDir).filter((file) => file.endsWith(".js") && !file.endsWith(".test.js"));
     const forbidden = [
       ["ev", "al("].join(""),
       ["new ", "Function"].join(""),

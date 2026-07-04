@@ -113,15 +113,23 @@ export function csvPath(argv: CliArgv) {
   return optionalArg(argv, "--file") || optionalArg(argv, "--csv");
 }
 
-export function csvContent(argv: CliArgv, cwd = process.cwd()) {
-  const localPath = csvPath(argv);
+export function localFileContent(localPath: string | undefined, cwd = process.cwd()) {
   if (!localPath) return undefined;
   return readFileSync(resolve(cwd, localPath), "utf8");
+}
+
+export function csvContent(argv: CliArgv, cwd = process.cwd()) {
+  return localFileContent(csvPath(argv), cwd);
+}
+
+export function requiredLocalFileContent(argv: CliArgv, name: string, cwd = process.cwd()) {
+  return readFileSync(resolve(cwd, requiredArg(argv, name)), "utf8");
 }
 
 export function baseImportInput(argv: CliArgv, cwd = process.cwd()) {
   return {
     csvContent: csvContent(argv, cwd),
+    ordersCsvContent: localFileContent(optionalArg(argv, "--orders-file"), cwd),
     storagePath: optionalArg(argv, "--storage-path"),
     expectedFileHash: optionalArg(argv, "--expected-file-hash") || optionalArg(argv, "--file-hash"),
     source: requiredArg(argv, "--source"),
