@@ -55,7 +55,7 @@ type CorrectionPlannerLike = Pick<ImportCorrectionPlannerService, "planCorrectio
 type CorrectionApplyLike = Pick<ImportCorrectionApplyService, "approveCorrectionBatch" | "applyCorrectionBatch">;
 type ActivationLike = Pick<FormatPackActivationService, "validateVersion" | "markCanary" | "activateVersion">;
 
-type PilotOpsDeps = {
+export type PilotOpsDeps = {
   client?: PilotOpsClient | undefined;
   contentProvider?: FixtureContentProvider | undefined;
   fixtureRunner?: FixtureRunnerLike | undefined;
@@ -96,6 +96,10 @@ export function cleanW0PilotPrincipal(value: unknown, code = "W0_PILOT_INTERNAL_
 
 function warning(code: string, message: string): PilotOpsWarning {
   return { code, message };
+}
+
+function isPrismaMissingTable(error: unknown) {
+  return Boolean(error && typeof error === "object" && "code" in error && (error as { code?: unknown }).code === "P2021");
 }
 
 function check(name: string, status: PilotOpsCheck["status"], message: string): PilotOpsCheck {
@@ -227,13 +231,21 @@ export class PilotOpsService {
   async checkW0Readiness(input: PilotOpsReadinessInput = {}): Promise<PilotOpsReadinessResult> {
     const checks: PilotOpsCheck[] = [];
     const warnings: PilotOpsWarning[] = [];
-    const configs = await this.client.accountTypeConfig.findMany();
     const requiredCount = defaultAccountTypeConfigs.length;
-    checks.push(check(
-      "account_type_config",
-      configs.length >= requiredCount ? "pass" : "fail",
-      configs.length >= requiredCount ? "ledger seed rows are present" : "ledger seed rows are incomplete"
-    ));
+    let schemaAvailable = true;
+    try {
+      const configs = await this.client.accountTypeConfig.findMany();
+      checks.push(check(
+        "account_type_config",
+        configs.length >= requiredCount ? "pass" : "fail",
+        configs.length >= requiredCount ? "ledger seed rows are present" : "ledger seed rows are incomplete"
+      ));
+    } catch (error) {
+      if (!isPrismaMissingTable(error)) throw error;
+      schemaAvailable = false;
+      warnings.push(warning("W0_SCHEMA_NOT_APPLIED", "W0 wallet/import tables are not present in the current local database."));
+      checks.push(check("account_type_config", "fail", "W0 schema is not applied in the current local database"));
+    }
     checks.push(check("ledger_service", "pass", "LedgerService is available through W0 services"));
     checks.push(check("import_pipeline_services", "pass", "W0B/W0C import pipeline services are available"));
     checks.push(check("custody_not_required", "pass", "W0 pilot flow does not require custodial accounts"));
@@ -252,6 +264,8 @@ export class PilotOpsService {
         warnings.push(activeWarning);
         checks.push(check("active_format_pack", "warn", activeWarning.message));
       }
+    } else if (!schemaAvailable) {
+      checks.push(check("active_format_pack", "warn", "active format-pack check skipped because W0 schema is unavailable"));
     }
 
     warnings.push(warning("W0B_ACTIVE_INDEX_DOCUMENTED", "W0B active-pack partial unique index is documented; runtime index inspection is not required for local readiness."));
@@ -631,6 +645,9 @@ export class PilotOpsService {
       where,
       include: { pack: true },
       orderBy: [{ activatedAt: "desc" }, { createdAt: "desc" }, { version: "desc" }]
+    }).catch((error: unknown) => {
+      if (isPrismaMissingTable(error)) return null;
+      throw error;
     });
   }
 

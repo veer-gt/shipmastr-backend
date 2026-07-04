@@ -1,11 +1,18 @@
 import assert from "node:assert/strict";
 import { createHash } from "node:crypto";
-import { readFileSync } from "node:fs";
+import { mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
+import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { describe, it } from "node:test";
 
 import { defaultAccountTypeConfigs } from "../walletLedger/ledger.service.js";
 import { ImportPipelineError } from "./import-pipeline.errors.js";
+import {
+  baseImportInput as cliBaseImportInput,
+  commandName as cliCommandName,
+  createPilotOpsServiceForCli,
+  requireExecute as cliRequireExecute
+} from "./pilot-ops-cli-runtime.js";
 import { cleanW0PilotPrincipal, PilotOpsService } from "./pilot-ops.service.js";
 import type { RecoveryReportTieOut } from "./recovery-report.types.js";
 
@@ -293,6 +300,127 @@ describe("W0D pilot ops wrapper", () => {
     assert.equal(result.ok, true);
     assert.equal(result.checks.some((item) => item.name === "active_format_pack" && item.status === "warn"), true);
     assert.equal(result.warnings.some((item) => item.code === "ACTIVE_FORMAT_PACK_NOT_FOUND"), true);
+  });
+
+  it("returns structured readiness output when local W0 tables are not applied", async () => {
+    const missingTableError = Object.assign(new Error("missing relation"), { code: "P2021" });
+    const service = new PilotOpsService({
+      client: {
+        accountTypeConfig: { findMany: async () => { throw missingTableError; } },
+        formatPackVersion: { findFirst: async () => { throw missingTableError; } }
+      }
+    } as never);
+    const result = await service.checkW0Readiness({ source: "courier_mis", counterparty: "courier_alpha" });
+
+    assert.equal(result.ok, false);
+    assert.equal(result.checks.some((item) => item.name === "account_type_config" && item.status === "fail"), true);
+    assert.equal(result.checks.some((item) => item.name === "active_format_pack" && item.status === "warn"), true);
+    assert.equal(result.warnings.some((item) => item.code === "W0_SCHEMA_NOT_APPLIED"), true);
+    assert.equal(result.warnings.some((item) => item.code === "ACTIVE_FORMAT_PACK_NOT_FOUND"), true);
+  });
+
+  it("creates CLI runtime service with a complete dependency graph", async () => {
+    const service = createPilotOpsServiceForCli({
+      client: {
+        accountTypeConfig: { findMany: async () => defaultAccountTypeConfigs.map((config) => ({ ...config })) },
+        formatPackVersion: { findFirst: async () => null }
+      }
+    });
+    const result = await service.checkW0Readiness({ source: "courier_mis", counterparty: "missing_pack" });
+
+    assert.equal(result.ok, true);
+    assert.equal(result.checks.some((item) => item.name === "active_format_pack" && item.status === "warn"), true);
+    assert.equal(result.warnings.some((item) => item.code === "ACTIVE_FORMAT_PACK_NOT_FOUND"), true);
+  });
+
+  it("rejects incomplete CLI runtime wiring before service execution", () => {
+    assert.throws(
+      () => createPilotOpsServiceForCli({ client: { formatPackVersion: { findFirst: async () => null } } }),
+      /W0_PILOT_CLI_ACCOUNT_TYPE_CONFIG_CLIENT_MISSING/
+    );
+  });
+
+  it("accepts --file and --csv as local CSV path aliases", () => {
+    const root = mkdtempSync(join(tmpdir(), "w0-cli-args-"));
+    try {
+      writeFileSync(join(root, "sample.csv"), "source,charge,amount\nref,FWD,118.00\n", "utf8");
+      const fromFile = cliBaseImportInput(["import-dry-run", "--source", "courier_mis", "--file", "sample.csv"], root);
+      const fromCsv = cliBaseImportInput(["import-dry-run", "--source", "courier_mis", "--csv", "sample.csv"], root);
+
+      assert.equal(fromFile.csvContent, fromCsv.csvContent);
+      assert.match(String(fromFile.csvContent), /ref,FWD,118\.00/);
+    } finally {
+      rmSync(root, { recursive: true, force: true });
+    }
+  });
+
+  it("computes server-side hash for import-dry-run input loaded through --file", async () => {
+    const root = mkdtempSync(join(tmpdir(), "w0-cli-hash-"));
+    try {
+      const csv = "source,charge,amount\nfile-ref,FWD,118.00\n";
+      writeFileSync(join(root, "sample.csv"), csv, "utf8");
+      const input = cliBaseImportInput([
+        "import-dry-run",
+        "--source",
+        "courier_mis",
+        "--counterparty",
+        "courier_alpha",
+        "--file",
+        "sample.csv"
+      ], root);
+      const { service } = makeHarness();
+      const result = await service.runImportDryRun(input);
+
+      assert.equal(result.fileHash, sha256(csv));
+      assert.equal(result.rowCount, 1);
+    } finally {
+      rmSync(root, { recursive: true, force: true });
+    }
+  });
+
+  it("returns a clean missing-pack error for CLI file dry-runs when no active pack exists", async () => {
+    const root = mkdtempSync(join(tmpdir(), "w0-cli-missing-pack-"));
+    try {
+      writeFileSync(join(root, "sample.csv"), "source,charge,amount\nref,FWD,118.00\n", "utf8");
+      const input = cliBaseImportInput(["import-dry-run", "--source", "courier_mis", "--file", "sample.csv"], root);
+      const { service } = makeHarness({ activePack: false });
+
+      await assert.rejects(
+        service.runImportDryRun(input),
+        (error) => error instanceof ImportPipelineError && error.code === "ACTIVE_FORMAT_PACK_NOT_FOUND"
+      );
+    } finally {
+      rmSync(root, { recursive: true, force: true });
+    }
+  });
+
+  it("maps missing local format-pack schema to a clean active-pack error", async () => {
+    const root = mkdtempSync(join(tmpdir(), "w0-cli-missing-schema-"));
+    try {
+      const missingTableError = Object.assign(new Error("missing relation"), { code: "P2021" });
+      writeFileSync(join(root, "sample.csv"), "source,charge,amount\nref,FWD,118.00\n", "utf8");
+      const input = cliBaseImportInput(["import-dry-run", "--source", "courier_mis", "--file", "sample.csv"], root);
+      const service = new PilotOpsService({
+        client: {
+          accountTypeConfig: { findMany: async () => defaultAccountTypeConfigs },
+          formatPackVersion: { findFirst: async () => { throw missingTableError; } }
+        }
+      } as never);
+
+      await assert.rejects(
+        service.runImportDryRun(input),
+        (error) => error instanceof ImportPipelineError && error.code === "ACTIVE_FORMAT_PACK_NOT_FOUND"
+      );
+    } finally {
+      rmSync(root, { recursive: true, force: true });
+    }
+  });
+
+  it("keeps CLI dry-run aliases and execute gate explicit", () => {
+    assert.equal(cliCommandName(["w0:readiness"]), "readiness");
+    assert.equal(cliCommandName(["readiness"]), "readiness");
+    assert.throws(() => cliRequireExecute([]), /--execute is required/);
+    assert.doesNotThrow(() => cliRequireExecute(["--execute"]));
   });
 
   it("runs format-pack validation as a dry-run by default", async () => {
@@ -650,6 +778,7 @@ describe("W0D pilot ops wrapper", () => {
     const root = process.cwd();
     const files = [
       join(root, "src/modules/importPipeline/pilot-ops.service.ts"),
+      join(root, "src/modules/importPipeline/pilot-ops-cli-runtime.ts"),
       join(root, "src/modules/importPipeline/pilot-ops.types.ts"),
       join(root, "src/modules/importPipeline/import-pipeline.module.ts"),
       join(root, "scripts/wallet-w0-pilot.mjs")
