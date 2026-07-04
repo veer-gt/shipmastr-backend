@@ -1,0 +1,130 @@
+{
+  "generator": "generate-courier-fixture.mjs",
+  "seed": 20260704,
+  "period": "2026-07",
+  "brand": "demo-brand",
+  "assumption": "Bigship-LIKE aggregator MIS shape; swap MIS_HEADERS + row writer when a real file lands",
+  "joinKey": "MIS \"Order Ref\" ↔ orders \"Name\" (#100x)",
+  "files": {
+    "mis": "/mnt/data/w0_synthetic_fixture_fixed/bigship-mis-2026-07.csv",
+    "orders": "/mnt/data/w0_synthetic_fixture_fixed/shopify-orders-2026-07.csv"
+  },
+  "shipmentRows": 60,
+  "misDataRows": 70,
+  "misDuplicateRows": 1,
+  "misUniqueEconomicRows": 69,
+  "computedTotalMinor": 667470,
+  "statedTotalMinor": 667470,
+  "ties": true,
+  "awbNote": "AWBs use fake BSHP00xxxxxxx namespace; re-key consistently when anonymizing real files",
+  "traps": [
+    {
+      "id": "T2_duplicate_row",
+      "awb": "BSHP007100106",
+      "csvRows": [
+        10,
+        11
+      ],
+      "expect": "resolver: idempotent skip of one copy (identical line, overlapping drop)"
+    },
+    {
+      "id": "T6_midfile_blank_and_header",
+      "csvRowApprox": 34,
+      "expect": "parser: skip blank + repeated header (concatenated export), not data rows"
+    },
+    {
+      "id": "T13_weight_dispute_debit",
+      "awb": "BSHP007100021",
+      "amountPaise": 5200,
+      "expect": "maps to weight_dispute_hold (pending until W0C-4 aging)"
+    },
+    {
+      "id": "T13_weight_dispute_debit",
+      "awb": "BSHP007100079",
+      "amountPaise": 2200,
+      "expect": "maps to weight_dispute_hold (pending until W0C-4 aging)"
+    },
+    {
+      "id": "T13_weight_dispute_debit",
+      "awb": "BSHP007100126",
+      "amountPaise": 1400,
+      "expect": "maps to weight_dispute_hold (pending until W0C-4 aging)"
+    },
+    {
+      "id": "T13_weight_dispute_debit",
+      "awb": "BSHP007100147",
+      "amountPaise": 1800,
+      "expect": "maps to weight_dispute_hold (pending until W0C-4 aging)"
+    },
+    {
+      "id": "T13_weight_dispute_credit",
+      "awb": "BSHP007100021",
+      "amountPaise": -2600,
+      "expect": "maps to weight_dispute_release (recovery)"
+    },
+    {
+      "id": "T14_rto_freight",
+      "awb": "BSHP007100332",
+      "amountPaise": 11520,
+      "expect": "maps to rto_freight_charge"
+    },
+    {
+      "id": "T14_rto_freight",
+      "awb": "BSHP007100411",
+      "amountPaise": 5200,
+      "expect": "maps to rto_freight_charge"
+    },
+    {
+      "id": "T3_same_awb_rebill",
+      "awb": "BSHP007100429",
+      "originalPaise": 18300,
+      "correctedPaise": 16900,
+      "expect": "resolver: reverse_and_repost candidate, not a duplicate exception"
+    },
+    {
+      "id": "T4_unknown_charge_head",
+      "awb": "BSHP007100614",
+      "head": "MISC ADJ",
+      "amountPaise": 2350,
+      "expect": "exception that grows the charge-code dictionary once"
+    },
+    {
+      "id": "T7_footer_total_row",
+      "expect": "parser: footer excluded from data rows; its amount is statedTotalMinor input"
+    },
+    {
+      "id": "T1_mixed_date_formats",
+      "expect": "DD/MM/YYYY and DD-Mon-YY interleaved in same columns; pack date rules must handle both"
+    },
+    {
+      "id": "T5_amount_hostility",
+      "expect": "Indian comma grouping (quoted) and one trailing-space amount (csv row 9); paise parsing must survive both"
+    },
+    {
+      "id": "T9_three_decimal_weights",
+      "expect": "weights carry 3 decimals; grams conversion must not float-drift"
+    },
+    {
+      "id": "T10_consignee_pii_columns",
+      "expect": "fake names/phones present; must exist ONLY in staging raw (I17), never in journal/report output"
+    },
+    {
+      "id": "T11_unresolvable_order_refs",
+      "awbs": [
+        "BSHP007100106",
+        "BSHP007100503"
+      ],
+      "expect": "resolver: unresolved-shipment exceptions (blank ref, mangled ref)"
+    },
+    {
+      "id": "T12_unbilled_order",
+      "orderRef": "#1061",
+      "expect": "audit finding (shipment never billed), not a pipeline exception"
+    },
+    {
+      "id": "T12_unbilled_order",
+      "orderRef": "#1062",
+      "expect": "audit finding (shipment never billed), not a pipeline exception"
+    }
+  ]
+}
