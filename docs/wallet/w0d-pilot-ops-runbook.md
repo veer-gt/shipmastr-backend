@@ -54,16 +54,18 @@ Then run the local command:
 
 ```bash
 node scripts/wallet-w0-pilot.mjs readiness --source courier_mis --counterparty courier_alpha
-node scripts/wallet-w0-pilot.mjs import-dry-run --source courier_mis --counterparty courier_alpha --format-pack-version-id fpv_local --csv ./tmp/local.csv
-node scripts/wallet-w0-pilot.mjs import-dry-run --source courier_mis --counterparty courier_alpha --format-pack-version-id fpv_local --csv ./tmp/local.csv --expected-file-hash <sha256>
-node scripts/wallet-w0-pilot.mjs stage-file --source courier_mis --counterparty courier_alpha --format-pack-version-id fpv_local --csv ./tmp/local.csv
-node scripts/wallet-w0-pilot.mjs stage-file --execute --source courier_mis --counterparty courier_alpha --format-pack-version-id fpv_local --csv ./tmp/local.csv
+node scripts/wallet-w0-pilot.mjs import-dry-run --source courier_mis --counterparty courier_alpha --format-pack-version-id fpv_local --file ./tmp/local.csv
+node scripts/wallet-w0-pilot.mjs import-dry-run --source courier_mis --counterparty courier_alpha --format-pack-version-id fpv_local --file ./tmp/local.csv --expected-file-hash <sha256>
+node scripts/wallet-w0-pilot.mjs stage-file --source courier_mis --counterparty courier_alpha --format-pack-version-id fpv_local --file ./tmp/local.csv
+node scripts/wallet-w0-pilot.mjs stage-file --execute --source courier_mis --counterparty courier_alpha --format-pack-version-id fpv_local --file ./tmp/local.csv
 node scripts/wallet-w0-pilot.mjs post-shadow --file-id file_local
 node scripts/wallet-w0-pilot.mjs post-shadow --execute --file-id file_local
 node scripts/wallet-w0-pilot.mjs report --brand-org-id seller_alpha --period 2026-07
 ```
 
 The script refuses cloud or production-like runtime. It never prints secrets and does not connect to external providers.
+
+Use `--file <path>` for local CSV input. `--csv <path>` remains accepted as a backward-compatible alias. Both forms are read locally and then hashed server-side by W0D before parsing.
 
 ## Format Pack Flow
 
