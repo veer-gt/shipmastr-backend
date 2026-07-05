@@ -155,3 +155,9 @@ W3C uses `(sellerOrgId, period, sourceRef)` as an idempotency key.
 ## Activation Boundary
 
 W3C is not activation. It is an internal preview for a future partner-review decision. Real credit, custody, settlement, payout, provider, and public seller action workflows remain blocked by future approvals.
+
+## W3D Activation Gate
+
+W3D adds a final activation gate/checklist only. It does not change W3C formulas, preview tables, statuses, export-preview behavior, CLI behavior, or local/test execution boundary.
+
+Current W3 mode remains preview-only. Checkout settlement is not live, payment capture is not implemented, payout execution is not implemented, early COD funding/lending is not implemented, partner API calls are not implemented, and live activation remains blocked until all required evidence and owner approval are documented.
