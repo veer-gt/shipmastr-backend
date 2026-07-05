@@ -73,6 +73,6 @@ W2C uses this export-preview surface in its local/internal smoke runner to prove
 
 ## Activation
 
-Live activation remains blocked by W1D and future W2 approvals. W2B is visibility and review support only.
+Live activation remains blocked by W1D, W2D, and future W2 approvals. W2B is visibility and review support only.
 
 W2B does not implement W3, lending, early COD funding, COD custody, seller payment execution, courier settlement execution, or live provider movement.
