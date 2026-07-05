@@ -26,6 +26,16 @@ type PaymentRecord = {
   capturedAt?: Date | null;
 };
 
+type AccountingEventRecord = {
+  id: string;
+  eventType: string;
+  sourceRef: string;
+  amountMinor?: bigint | null;
+  currency: string;
+  metadata?: unknown;
+  createdAt: Date;
+};
+
 type OrderRecord = {
   id: string;
   mode: string;
@@ -49,6 +59,12 @@ type OrderRecord = {
   advanceExpiresAt?: Date | null;
   createdAt: Date;
   timeline?: TimelineRecord[];
+  payments?: PaymentRecord[];
+  accountingEvents?: AccountingEventRecord[];
+  quote?: {
+    id: string;
+    riskNotes?: unknown;
+  } | null;
 };
 
 function serializeOption(option: CheckoutOption) {
@@ -82,6 +98,32 @@ export function serializeCheckoutQuote(quote: CheckoutQuoteResult) {
   };
 }
 
+export function checkoutRiskNotesFromJson(value: unknown): string[] {
+  if (!Array.isArray(value)) return [];
+  return value.filter((note): note is string => typeof note === "string" && note.trim().length > 0);
+}
+
+export function deserializePersistedCheckoutQuote(record: {
+  id: string;
+  expiresAt: Date;
+  currency: string;
+  itemsTotalMinor: bigint;
+  pincode: string;
+  optionsJson: unknown;
+  riskNotes?: unknown;
+}): CheckoutQuoteResult {
+  const options = quoteOptionsFromJson(record.optionsJson);
+  return {
+    quoteId: record.id,
+    expiresAt: record.expiresAt,
+    currency: record.currency,
+    itemsTotal: record.itemsTotalMinor,
+    pincode: record.pincode,
+    options,
+    riskNotes: checkoutRiskNotesFromJson(record.riskNotes)
+  };
+}
+
 export function serializePersistedCheckoutQuote(record: {
   id: string;
   expiresAt: Date;
@@ -89,17 +131,9 @@ export function serializePersistedCheckoutQuote(record: {
   itemsTotalMinor: bigint;
   pincode: string;
   optionsJson: unknown;
+  riskNotes?: unknown;
 }) {
-  const options = quoteOptionsFromJson(record.optionsJson);
-  return serializeCheckoutQuote({
-    quoteId: record.id,
-    expiresAt: record.expiresAt,
-    currency: record.currency,
-    itemsTotal: record.itemsTotalMinor,
-    pincode: record.pincode,
-    options,
-    riskNotes: []
-  });
+  return serializeCheckoutQuote(deserializePersistedCheckoutQuote(record));
 }
 
 function safeCustomerName(customerJson: unknown) {
@@ -158,6 +192,29 @@ export function serializeCheckoutPayment(payment: PaymentRecord) {
       paymentRef: payment.gatewayPaymentRef ?? null
     },
     capturedAt: payment.capturedAt?.toISOString() ?? null
+  };
+}
+
+function serializeCheckoutAccountingEvent(event: AccountingEventRecord) {
+  return {
+    id: event.id,
+    eventType: event.eventType,
+    sourceRef: event.sourceRef,
+    amount: event.amountMinor === null || event.amountMinor === undefined ? null : minorToJsonInteger(event.amountMinor),
+    currency: event.currency,
+    metadata: event.metadata ?? null,
+    createdAt: event.createdAt.toISOString()
+  };
+}
+
+export function serializeAdminCheckoutOrder(order: OrderRecord) {
+  return {
+    ...serializeBuyerOrder(order),
+    merchantId: (order as { merchantId?: string }).merchantId ?? null,
+    quoteId: (order as { quoteId?: string }).quoteId ?? null,
+    riskNotes: checkoutRiskNotesFromJson(order.quote?.riskNotes),
+    payments: (order.payments ?? []).map(serializeCheckoutPayment),
+    accountingEvents: (order.accountingEvents ?? []).map(serializeCheckoutAccountingEvent)
   };
 }
 

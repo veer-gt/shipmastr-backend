@@ -88,6 +88,8 @@ No live provider webhook route is added in C1.
 
 ## C2 - Admin Rules / Order Lifecycle / Audit APIs
 
+Status: implemented as backend/admin APIs only. C2 uses the C1 checkout tables and does not require a new migration.
+
 ### Scope
 
 - Add admin checkout rule management.
@@ -95,6 +97,7 @@ No live provider webhook route is added in C1.
 - Add admin order detail and lifecycle transition APIs.
 - Add COD collection recording on delivery.
 - Add refund_due review visibility.
+- Keep buyer serializers free of `riskNotes` while allowing admin order detail to read persisted quote risk notes.
 
 ### Files Likely Touched
 
@@ -106,18 +109,26 @@ No live provider webhook route is added in C1.
 
 ### Migrations Likely Required
 
-- checkout rule versions
-- checkout admin audit/lifecycle metadata if not covered by C1 tables
+C2 uses C1 tables:
+
+- `checkout_rules_versions`
+- `checkout_merchant_settings`
+- `checkout_order_timeline`
+- `checkout_accounting_events`
+- `checkout_audit_logs`
+
+No new C2 migration is required.
 
 ### Routes Likely Added
 
-- `GET /v1/admin/checkout/rules`
-- `PUT /v1/admin/checkout/rules`
-- `GET /v1/admin/checkout/rules/versions`
-- `POST /v1/admin/checkout/rules/rollback`
-- `GET /v1/admin/checkout/orders/:id`
-- `POST /v1/admin/checkout/orders/:id/transition`
-- `GET /v1/admin/checkout/audit`
+- `GET /api/admin/checkout/rules`
+- `POST /api/admin/checkout/rules`
+- `GET /api/admin/checkout/rules/versions`
+- `POST /api/admin/checkout/rules/rollback`
+- `GET /api/admin/checkout/orders`
+- `GET /api/admin/checkout/orders/:id`
+- `POST /api/admin/checkout/orders/:id/transition`
+- `GET /api/admin/checkout/audit`
 
 ### Tests Required
 
@@ -135,6 +146,9 @@ No live provider webhook route is added in C1.
 - no shipment booking
 - no wallet posting
 - no payout/cashout
+- no COD custody
+- no seller shipping balance credit
+- no frontend or buyer UI
 
 ### Acceptance Checklist
 
@@ -142,6 +156,8 @@ No live provider webhook route is added in C1.
 - audit trail present
 - COD collection captured without COD custody claim
 - no buyer-visible `riskNotes`
+- repeated same transition is idempotent and does not duplicate timeline/accounting/audit rows
+- live provider activation remains later C6 gate
 
 ## C3 - Buyer Checkout UI Integration Using Provided Components
 
