@@ -3383,6 +3383,28 @@ model WalletHold {
   @@map("wallet_holds")
 }
 
+model WalletTopupIntent {
+  id             String   @id @default(cuid())
+  topupRef       String   @unique @map("topup_ref")
+  sellerOrgId    String   @map("seller_org_id")
+  amountPaise    BigInt   @map("amount_paise")
+  currency       String   @default("INR")
+  status         String   @default("created")
+  sourceRefHash  String   @map("source_ref_hash")
+  createdBy      String?  @map("created_by")
+  confirmedBy    String?  @map("confirmed_by")
+  journalEntryId String?  @map("journal_entry_id")
+  metadata       Json?
+  confirmedAt    DateTime? @map("confirmed_at")
+  createdAt      DateTime @default(now()) @map("created_at")
+  updatedAt      DateTime @default(now()) @updatedAt @map("updated_at")
+
+  @@index([sellerOrgId])
+  @@index([status])
+  @@index([sourceRefHash])
+  @@map("wallet_topup_intents")
+}
+
 model SettlementBatch {
   id           String      @id @default(cuid())
   batchRef     String      @unique @map("batch_ref")
