@@ -974,6 +974,14 @@ model Merchant {
   customers MerchantCustomer[]
   domains MerchantDomain[]
   storefronts Storefront[]
+  checkoutRulesVersions CheckoutRulesVersion[]
+  checkoutSettings CheckoutMerchantSetting?
+  checkoutQuotes CheckoutQuote[]
+  checkoutOrders CheckoutOrder[]
+  checkoutPayments CheckoutPayment[]
+  checkoutAccountingEvents CheckoutAccountingEvent[]
+  checkoutIdempotencyKeys CheckoutIdempotencyKey[]
+  checkoutAuditLogs CheckoutAuditLog[]
   domainProvisioningEvents DomainProvisioningEvent[]
 
   @@index([adminStatus])
@@ -3726,6 +3734,226 @@ model CheckoutSettlementPreviewEvent {
   @@map("checkout_settlement_preview_events")
 }
 
+model CheckoutRulesVersion {
+  id          String   @id @default(cuid())
+  merchantId  String   @map("merchant_id")
+  version     String
+  status      String   @default("active")
+  rulesJson   Json     @map("rules_json")
+  createdBy   String?  @map("created_by")
+  activatedAt DateTime? @map("activated_at")
+  createdAt   DateTime @default(now()) @map("created_at")
+  updatedAt   DateTime @default(now()) @updatedAt @map("updated_at")
+
+  merchant Merchant @relation(fields: [merchantId], references: [id], onDelete: Cascade)
+  settings CheckoutMerchantSetting[]
+  quotes   CheckoutQuote[]
+
+  @@unique([merchantId, version])
+  @@index([merchantId, status])
+  @@index([createdAt])
+  @@map("checkout_rules_versions")
+}
+
+model CheckoutMerchantSetting {
+  id                   String   @id @default(cuid())
+  merchantId           String   @unique @map("merchant_id")
+  activeRulesVersionId String?  @map("active_rules_version_id")
+  quoteTtlSeconds      Int      @default(900) @map("quote_ttl_seconds")
+  mode                 String   @default("mock")
+  createdAt            DateTime @default(now()) @map("created_at")
+  updatedAt            DateTime @default(now()) @updatedAt @map("updated_at")
+
+  merchant           Merchant              @relation(fields: [merchantId], references: [id], onDelete: Cascade)
+  activeRulesVersion CheckoutRulesVersion? @relation(fields: [activeRulesVersionId], references: [id], onDelete: SetNull)
+
+  @@index([activeRulesVersionId])
+  @@map("checkout_merchant_settings")
+}
+
+model CheckoutQuote {
+  id             String   @id @default(cuid())
+  merchantId     String   @map("merchant_id")
+  rulesVersionId String?  @map("rules_version_id")
+  pincode        String
+  currency       String   @default("INR")
+  itemsJson      Json     @map("items_json")
+  itemsTotalMinor BigInt  @default(0) @map("items_total_minor")
+  optionsJson    Json     @map("options_json")
+  riskNotes      Json?    @map("risk_notes")
+  expiresAt      DateTime @map("expires_at")
+  createdAt      DateTime @default(now()) @map("created_at")
+
+  merchant     Merchant              @relation(fields: [merchantId], references: [id], onDelete: Cascade)
+  rulesVersion CheckoutRulesVersion? @relation(fields: [rulesVersionId], references: [id], onDelete: SetNull)
+  orders       CheckoutOrder[]
+
+  @@index([merchantId])
+  @@index([expiresAt])
+  @@index([createdAt])
+  @@map("checkout_quotes")
+}
+
+model CheckoutOrder {
+  id                      String   @id @default(cuid())
+  merchantId              String   @map("merchant_id")
+  quoteId                 String   @map("quote_id")
+  fulfillmentOrderId      String?  @map("fulfillment_order_id")
+  mode                    String
+  state                   String
+  currency                String   @default("INR")
+  pincode                 String
+  itemsJson               Json     @map("items_json")
+  customerJson            Json     @map("customer_json")
+  shippingAddressJson     Json?    @map("shipping_address_json")
+  itemsTotalMinor         BigInt   @default(0) @map("items_total_minor")
+  codFeeMinor             BigInt   @default(0) @map("cod_fee_minor")
+  discountMinor           BigInt   @default(0) @map("discount_minor")
+  grandTotalMinor         BigInt   @default(0) @map("grand_total_minor")
+  payNowMinor             BigInt   @default(0) @map("pay_now_minor")
+  payOnDeliveryMinor      BigInt   @default(0) @map("pay_on_delivery_minor")
+  advancePaidMinor        BigInt   @default(0) @map("advance_paid_minor")
+  codCollectionStatus     String   @default("none") @map("cod_collection_status")
+  codCollectionAmountMinor BigInt  @default(0) @map("cod_collection_amount_minor")
+  codCollectionMethod     String?  @map("cod_collection_method")
+  codCollectionReference  String?  @map("cod_collection_reference")
+  codCollectedAt          DateTime? @map("cod_collected_at")
+  orderTokenHash          String   @map("order_token_hash")
+  tokenIssuedAt           DateTime @default(now()) @map("token_issued_at")
+  advanceExpiresAt        DateTime? @map("advance_expires_at")
+  createdAt               DateTime @default(now()) @map("created_at")
+  updatedAt               DateTime @default(now()) @updatedAt @map("updated_at")
+
+  merchant         Merchant       @relation(fields: [merchantId], references: [id], onDelete: Cascade)
+  quote            CheckoutQuote  @relation(fields: [quoteId], references: [id], onDelete: Restrict)
+  fulfillmentOrder Order?         @relation(fields: [fulfillmentOrderId], references: [id], onDelete: SetNull)
+  timeline         CheckoutOrderTimeline[]
+  payments         CheckoutPayment[]
+  accountingEvents CheckoutAccountingEvent[]
+  auditLogs        CheckoutAuditLog[]
+
+  @@index([merchantId])
+  @@index([quoteId])
+  @@index([fulfillmentOrderId])
+  @@index([state])
+  @@index([mode])
+  @@index([createdAt])
+  @@map("checkout_orders")
+}
+
+model CheckoutOrderTimeline {
+  id         String   @id @default(cuid())
+  merchantId String   @map("merchant_id")
+  orderId    String   @map("order_id")
+  type       String
+  message    String
+  actor      String
+  createdAt  DateTime @default(now()) @map("created_at")
+
+  order CheckoutOrder @relation(fields: [orderId], references: [id], onDelete: Cascade)
+
+  @@index([merchantId])
+  @@index([orderId])
+  @@index([type])
+  @@index([createdAt])
+  @@map("checkout_order_timeline")
+}
+
+model CheckoutPayment {
+  id                String   @id @default(cuid())
+  merchantId        String   @map("merchant_id")
+  orderId           String   @map("order_id")
+  amountMinor       BigInt   @default(0) @map("amount_minor")
+  currency          String   @default("INR")
+  purpose           String
+  gateway           String   @default("mock")
+  state             String   @default("created")
+  gatewayIntentRef  String?  @map("gateway_intent_ref")
+  gatewayOrderRef   String?  @map("gateway_order_ref")
+  gatewayPaymentRef String?  @map("gateway_payment_ref")
+  capturedAt        DateTime? @map("captured_at")
+  createdAt         DateTime @default(now()) @map("created_at")
+  updatedAt         DateTime @default(now()) @updatedAt @map("updated_at")
+
+  merchant         Merchant @relation(fields: [merchantId], references: [id], onDelete: Cascade)
+  order            CheckoutOrder @relation(fields: [orderId], references: [id], onDelete: Cascade)
+  accountingEvents CheckoutAccountingEvent[]
+
+  @@index([merchantId])
+  @@index([orderId])
+  @@index([state])
+  @@index([gatewayOrderRef])
+  @@index([gatewayPaymentRef])
+  @@map("checkout_payments")
+}
+
+model CheckoutAccountingEvent {
+  id          String   @id @default(cuid())
+  merchantId  String   @map("merchant_id")
+  orderId     String?  @map("order_id")
+  paymentId   String?  @map("payment_id")
+  eventType   String   @map("event_type")
+  sourceRef   String   @map("source_ref")
+  amountMinor BigInt?  @map("amount_minor")
+  currency    String   @default("INR")
+  metadata    Json?
+  createdAt   DateTime @default(now()) @map("created_at")
+
+  merchant Merchant @relation(fields: [merchantId], references: [id], onDelete: Cascade)
+  order    CheckoutOrder? @relation(fields: [orderId], references: [id], onDelete: Cascade)
+  payment  CheckoutPayment? @relation(fields: [paymentId], references: [id], onDelete: SetNull)
+
+  @@index([merchantId])
+  @@index([orderId])
+  @@index([paymentId])
+  @@index([eventType])
+  @@index([sourceRef])
+  @@index([createdAt])
+  @@map("checkout_accounting_events")
+}
+
+model CheckoutIdempotencyKey {
+  id             String   @id @default(cuid())
+  merchantId     String   @map("merchant_id")
+  operation      String
+  idempotencyKey String   @map("idempotency_key")
+  requestHash    String   @map("request_hash")
+  responseJson   Json     @map("response_json")
+  statusCode     Int      @map("status_code")
+  expiresAt      DateTime? @map("expires_at")
+  createdAt      DateTime @default(now()) @map("created_at")
+  updatedAt      DateTime @default(now()) @updatedAt @map("updated_at")
+
+  merchant Merchant @relation(fields: [merchantId], references: [id], onDelete: Cascade)
+
+  @@unique([merchantId, operation, idempotencyKey])
+  @@index([merchantId])
+  @@index([operation])
+  @@index([expiresAt])
+  @@map("checkout_idempotency_keys")
+}
+
+model CheckoutAuditLog {
+  id         String   @id @default(cuid())
+  merchantId String   @map("merchant_id")
+  orderId    String?  @map("order_id")
+  action     String
+  entityType String   @map("entity_type")
+  entityId   String?  @map("entity_id")
+  actor      String   @default("checkout")
+  safeMeta   Json?    @map("safe_meta")
+  createdAt  DateTime @default(now()) @map("created_at")
+
+  merchant Merchant @relation(fields: [merchantId], references: [id], onDelete: Cascade)
+  order    CheckoutOrder? @relation(fields: [orderId], references: [id], onDelete: SetNull)
+
+  @@index([merchantId])
+  @@index([orderId])
+  @@index([action])
+  @@index([createdAt])
+  @@map("checkout_audit_logs")
+}
+
 model EarlyCodPrequalificationBatch {
   id                       String   @id @default(cuid())
   sellerOrgId              String   @map("seller_org_id")
@@ -4449,6 +4677,7 @@ model Order {
   autonomousActions AutonomousAction[]
   buyerCommunicationEvents BuyerCommunicationEvent[]
   actionOutcomes ActionOutcome[]
+  checkoutOrders CheckoutOrder[]
 
   @@unique([merchantId, externalOrderId])
   @@index([merchantId, buyerPhone])
