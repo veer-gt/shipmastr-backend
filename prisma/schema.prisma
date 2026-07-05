@@ -3613,6 +3613,119 @@ model CodNettingInstructionEvent {
   @@map("cod_netting_instruction_events")
 }
 
+model CheckoutSettlementPreviewBatch {
+  id                           String   @id @default(cuid())
+  sellerOrgId                  String   @map("seller_org_id")
+  period                       String
+  sourceRef                    String   @map("source_ref")
+  sourceHash                   String   @map("source_hash")
+  status                       String   @default("draft")
+  currency                     String   @default("INR")
+  grossAmountMinor             BigInt   @default(0) @map("gross_amount_minor")
+  paymentFeeMinor              BigInt   @default(0) @map("payment_fee_minor")
+  platformFeeMinor             BigInt   @default(0) @map("platform_fee_minor")
+  shippingChargeMinor          BigInt   @default(0) @map("shipping_charge_minor")
+  taxMinor                     BigInt   @default(0) @map("tax_minor")
+  discountMinor                BigInt   @default(0) @map("discount_minor")
+  refundMinor                  BigInt   @default(0) @map("refund_minor")
+  adjustmentMinor              BigInt   @default(0) @map("adjustment_minor")
+  sellerPreviewReceivableMinor BigInt   @default(0) @map("seller_preview_receivable_minor")
+  negativePreviewMinor         BigInt   @default(0) @map("negative_preview_minor")
+  reviewRequiredCount          Int      @default(0) @map("review_required_count")
+  metadata                     Json?
+  createdBy                    String?  @map("created_by")
+  createdAt                    DateTime @default(now()) @map("created_at")
+  updatedAt                    DateTime @default(now()) @updatedAt @map("updated_at")
+
+  items       CheckoutSettlementPreviewItem[]
+  allocations CheckoutSettlementPreviewAllocation[]
+  events      CheckoutSettlementPreviewEvent[]
+
+  @@unique([sellerOrgId, period, sourceRef])
+  @@index([sellerOrgId])
+  @@index([period])
+  @@index([status])
+  @@index([createdAt])
+  @@map("checkout_settlement_preview_batches")
+}
+
+model CheckoutSettlementPreviewItem {
+  id                           String   @id @default(cuid())
+  batchId                      String   @map("batch_id")
+  sellerOrgId                  String   @map("seller_org_id")
+  checkoutRef                  String?  @map("checkout_ref")
+  orderRef                     String?  @map("order_ref")
+  shipmentId                   String?  @map("shipment_id")
+  period                       String
+  currency                     String   @default("INR")
+  grossAmountMinor             BigInt   @default(0) @map("gross_amount_minor")
+  paymentFeeMinor              BigInt   @default(0) @map("payment_fee_minor")
+  platformFeeMinor             BigInt   @default(0) @map("platform_fee_minor")
+  shippingChargeMinor          BigInt   @default(0) @map("shipping_charge_minor")
+  taxMinor                     BigInt   @default(0) @map("tax_minor")
+  discountMinor                BigInt   @default(0) @map("discount_minor")
+  refundMinor                  BigInt   @default(0) @map("refund_minor")
+  adjustmentMinor              BigInt   @default(0) @map("adjustment_minor")
+  sellerPreviewReceivableMinor BigInt   @default(0) @map("seller_preview_receivable_minor")
+  status                       String   @default("draft")
+  reviewReasons                Json?    @map("review_reasons")
+  sourceRowHash                String   @map("source_row_hash")
+  metadata                     Json?
+  createdAt                    DateTime @default(now()) @map("created_at")
+  updatedAt                    DateTime @default(now()) @updatedAt @map("updated_at")
+
+  batch       CheckoutSettlementPreviewBatch        @relation(fields: [batchId], references: [id], onDelete: Restrict)
+  allocations CheckoutSettlementPreviewAllocation[]
+  events      CheckoutSettlementPreviewEvent[]
+
+  @@index([batchId])
+  @@index([sellerOrgId])
+  @@index([checkoutRef])
+  @@index([status])
+  @@map("checkout_settlement_preview_items")
+}
+
+model CheckoutSettlementPreviewAllocation {
+  id          String   @id @default(cuid())
+  batchId     String   @map("batch_id")
+  itemId      String?  @map("item_id")
+  bucket      String
+  amountMinor BigInt   @default(0) @map("amount_minor")
+  currency    String   @default("INR")
+  metadata    Json?
+  createdAt   DateTime @default(now()) @map("created_at")
+
+  batch CheckoutSettlementPreviewBatch @relation(fields: [batchId], references: [id], onDelete: Restrict)
+  item  CheckoutSettlementPreviewItem? @relation(fields: [itemId], references: [id], onDelete: Restrict)
+
+  @@index([batchId])
+  @@index([itemId])
+  @@index([bucket])
+  @@map("checkout_settlement_preview_allocations")
+}
+
+model CheckoutSettlementPreviewEvent {
+  id        String   @id @default(cuid())
+  batchId   String   @map("batch_id")
+  itemId    String?  @map("item_id")
+  eventType String   @map("event_type")
+  status    String
+  message   String?
+  metadata  Json?
+  createdBy String?  @map("created_by")
+  createdAt DateTime @default(now()) @map("created_at")
+
+  batch CheckoutSettlementPreviewBatch @relation(fields: [batchId], references: [id], onDelete: Restrict)
+  item  CheckoutSettlementPreviewItem? @relation(fields: [itemId], references: [id], onDelete: Restrict)
+
+  @@index([batchId])
+  @@index([itemId])
+  @@index([eventType])
+  @@index([status])
+  @@index([createdAt])
+  @@map("checkout_settlement_preview_events")
+}
+
 model ImportFile {
   id                  String   @id @default(uuid())
   fileHash            String   @unique @map("file_hash")
