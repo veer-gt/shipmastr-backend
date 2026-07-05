@@ -125,6 +125,12 @@ W0 is code-complete in local source for the shadow-only audit ledger foundation.
 
 W0 remains shadow-only and zero custody. There is no public wallet surface. The normalized W0B schema remains authoritative and replaces the older illustrative `format_packs(spec, version, fixture_refs)` sketch.
 
+## Post-W0 W1A Sandbox Foundation
+
+W1A has a separate internal-only foundation for sandbox closed-loop shipping wallet behavior. It adds guarded custodial shipping balance services, sandbox top-up intents, holds, charge capture, wallet refunds, read-only summaries, and cashout blockers.
+
+W1A does not change W0 behavior. It does not add public APIs, live payment movement, bank movement, checkout split settlement, COD custody, lending, live database work, or deployment automation.
+
 ## Not Implemented
 
 These are explicitly outside W0D:
