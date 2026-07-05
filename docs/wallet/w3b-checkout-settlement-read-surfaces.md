@@ -88,3 +88,9 @@ W3C early COD partner prequalification is separate from W3B checkout settlement 
 W3B continues to expose only W3A checkout preview reads and export-preview. W3C does not add W3B routes, mutate W3A preview batches, or convert checkout preview rows into payment execution.
 
 W3C remains instruction/pre-qualification preview only. It does not create loans, disburse funds, create repayment obligations, call partners, capture payments, pay sellers, settle couriers, create custody, or credit W1 shipping balance.
+
+## W3D Activation Gate
+
+W3D adds a final activation gate/checklist only. It does not change W3B routes, guards, serializers, export-preview behavior, or read-only scope.
+
+Current W3 mode remains preview-only. Checkout settlement is not live, payment capture is not implemented, payout execution is not implemented, early COD funding/lending is not implemented, partner API calls are not implemented, and live activation remains blocked until all required evidence and owner approval are documented.

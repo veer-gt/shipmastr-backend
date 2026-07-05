@@ -206,6 +206,14 @@ W3C does not implement lending, funding, disbursement, repayment, loan accounts 
 
 Shadow dispute aging is intentionally separate future work.
 
+## Post-W0 W3D Final Activation Gate
+
+W3D adds the final W3 activation gate/checklist only.
+
+Current W3 mode remains preview-only. Checkout settlement is not live, payment capture is not implemented, payout execution is not implemented, early COD funding/lending is not implemented, partner API calls are not implemented, and live activation remains blocked until all required legal, accounting, payment partner, lending partner, banking, operations, technical, post-activation control, and owner approval evidence is documented.
+
+W3D does not enable live W3, run migrations, write wallet rows, create custody, move money, credit seller shipping balance, or add public mutating seller APIs.
+
 Live activation remains blocked by W1D and future W2 approvals.
 
 ## Post-W0 W2C COD Reconciliation Smoke
