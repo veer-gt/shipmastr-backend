@@ -116,3 +116,16 @@ Every W3A read result includes:
 W3A is shadow/preview only. It does not capture payments, pay sellers, settle couriers, create custody, implement lending, or activate payment aggregator behavior.
 
 Live activation remains blocked by future W3D approvals.
+
+## W3B Read Surfaces
+
+W3B adds protected read and export-preview surfaces over W3A preview batches:
+
+- internal readiness read
+- admin preview list/detail reads
+- admin JSON/CSV export-preview
+- seller-scoped preview summary/list reads
+
+W3B does not change W3A planning or persistence behavior. Export-preview remains read-only: it does not change batch status, does not create events, and is not payment execution.
+
+W3B still does not move money, capture payments, create custody, pay sellers, settle couriers, implement lending or early COD funding, or activate payment aggregator behavior. Live activation remains blocked by future W3D approvals.
