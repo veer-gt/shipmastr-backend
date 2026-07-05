@@ -116,6 +116,8 @@ W1D keeps future work blocked:
 
 These items are intentionally separate future gates. W1D does not implement or approve them.
 
+W2A adds only non-custodial COD netting instructions for review/export. W2A does not create COD custody, move money, pay sellers, settle couriers, implement W3 checkout split settlement, or implement early COD/lending. Live W2/W3 activation remains blocked until future approvals are documented separately.
+
 ## Boundary
 
 Live W1 remains blocked until counsel, accountant, operations, and owner approvals are documented. W1D does not enable live wallet movement, cashout, payment, bank movement, COD custody, checkout settlement, or lending.

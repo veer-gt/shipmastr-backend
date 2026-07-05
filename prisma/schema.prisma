@@ -3524,6 +3524,95 @@ model WalletEventsOutbox {
   @@map("wallet_events_outbox")
 }
 
+model CodNettingBatch {
+  id                       String   @id @default(cuid())
+  sellerOrgId              String   @map("seller_org_id")
+  courierCode              String   @map("courier_code")
+  period                   String
+  sourceRef                String   @map("source_ref")
+  sourceHash               String   @map("source_hash")
+  status                   String   @default("draft")
+  currency                 String   @default("INR")
+  codCollectedMinor        BigInt   @default(0) @map("cod_collected_minor")
+  freightDeductionMinor    BigInt   @default(0) @map("freight_deduction_minor")
+  rtoDeductionMinor        BigInt   @default(0) @map("rto_deduction_minor")
+  adjustmentMinor          BigInt   @default(0) @map("adjustment_minor")
+  sellerNetReceivableMinor BigInt   @default(0) @map("seller_net_receivable_minor")
+  negativeNetMinor         BigInt   @default(0) @map("negative_net_minor")
+  reviewRequiredCount      Int      @default(0) @map("review_required_count")
+  metadata                 Json?
+  createdBy                String?  @map("created_by")
+  createdAt                DateTime @default(now()) @map("created_at")
+  updatedAt                DateTime @default(now()) @updatedAt @map("updated_at")
+
+  items  CodNettingItem[]
+  events CodNettingInstructionEvent[]
+
+  @@unique([sellerOrgId, courierCode, period, sourceRef])
+  @@index([sellerOrgId])
+  @@index([courierCode])
+  @@index([period])
+  @@index([status])
+  @@index([createdAt])
+  @@map("cod_netting_batches")
+}
+
+model CodNettingItem {
+  id                       String    @id @default(cuid())
+  batchId                  String    @map("batch_id")
+  sellerOrgId              String    @map("seller_org_id")
+  courierCode              String    @map("courier_code")
+  period                   String
+  shipmentId               String?   @map("shipment_id")
+  deliveredAt              DateTime? @map("delivered_at")
+  codCollectedMinor        BigInt    @default(0) @map("cod_collected_minor")
+  freightDeductionMinor    BigInt    @default(0) @map("freight_deduction_minor")
+  rtoDeductionMinor        BigInt    @default(0) @map("rto_deduction_minor")
+  adjustmentMinor          BigInt    @default(0) @map("adjustment_minor")
+  expectedRemittanceMinor  BigInt?   @map("expected_remittance_minor")
+  remittanceRef            String?   @map("remittance_ref")
+  sellerNetReceivableMinor BigInt    @default(0) @map("seller_net_receivable_minor")
+  instructionType          String    @map("instruction_type")
+  status                   String    @default("draft")
+  reviewReasons            Json?     @map("review_reasons")
+  sourceRowHash            String    @map("source_row_hash")
+  metadata                 Json?
+  createdAt                DateTime  @default(now()) @map("created_at")
+  updatedAt                DateTime  @default(now()) @updatedAt @map("updated_at")
+
+  batch  CodNettingBatch              @relation(fields: [batchId], references: [id], onDelete: Restrict)
+  events CodNettingInstructionEvent[]
+
+  @@index([batchId])
+  @@index([sellerOrgId])
+  @@index([courierCode])
+  @@index([shipmentId])
+  @@index([status])
+  @@map("cod_netting_items")
+}
+
+model CodNettingInstructionEvent {
+  id        String   @id @default(cuid())
+  batchId   String   @map("batch_id")
+  itemId    String?  @map("item_id")
+  eventType String   @map("event_type")
+  status    String
+  message   String?
+  metadata  Json?
+  createdBy String?  @map("created_by")
+  createdAt DateTime @default(now()) @map("created_at")
+
+  batch CodNettingBatch @relation(fields: [batchId], references: [id], onDelete: Restrict)
+  item  CodNettingItem? @relation(fields: [itemId], references: [id], onDelete: Restrict)
+
+  @@index([batchId])
+  @@index([itemId])
+  @@index([eventType])
+  @@index([status])
+  @@index([createdAt])
+  @@map("cod_netting_instruction_events")
+}
+
 model ImportFile {
   id                  String   @id @default(uuid())
   fileHash            String   @unique @map("file_hash")
