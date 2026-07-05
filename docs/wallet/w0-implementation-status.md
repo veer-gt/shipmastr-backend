@@ -222,6 +222,24 @@ W3A does not capture payments, pay sellers, settle couriers, create custody, cre
 
 Live activation remains blocked by future W3D approvals.
 
+## Post-W0 W3B Checkout Settlement Read Surfaces
+
+W3B exposes W3A checkout settlement previews through protected read and export-preview surfaces only:
+
+- internal readiness read
+- admin preview batch list
+- admin preview batch detail
+- admin JSON/CSV export-preview
+- seller-scoped preview summary/list reads
+
+Every W3B response keeps `previewOnly=true`, `movementExecuted=false`, `paymentCaptured=false`, `payoutExecuted=false`, `settlementExecuted=false`, and `custodyCreated=false`.
+
+W3B export-preview does not change batch status, does not create events, and is not payment execution.
+
+W3B does not move money, capture payments, pay sellers, settle couriers, create custody, credit W1 shipping balance, implement lending or early COD funding, create bank/cashout movement, or activate payment aggregator behavior.
+
+Live activation remains blocked by future W3D approvals.
+
 ## Not Implemented
 
 These remain explicitly outside W0D itself. Later local phases document their own guarded preview or sandbox surfaces separately:

@@ -348,6 +348,7 @@ describe("W3A checkout settlement shadow preview", () => {
 
   it("does not add W3 live payment, bank, or settlement routes", () => {
     const routes = readFileSync("src/routes/index.ts", "utf8");
+    const mountedRoutes = routes.split("\n").filter((line) => line.includes("apiRouter.use")).join("\n");
     const liveRoutePattern = new RegExp([
       "w3/.+execute",
       "checkout/.+capture",
@@ -356,13 +357,15 @@ describe("W3A checkout settlement shadow preview", () => {
     ].join("|"), "iu");
 
     assert.equal(liveRoutePattern.test(routes), false);
-    assert.doesNotMatch(routes, /checkout-settlement/u);
+    assert.doesNotMatch(mountedRoutes, /checkout-settlement/u);
   });
 
   it("does not add public mutating seller API", () => {
     const routes = readFileSync("src/routes/index.ts", "utf8");
+    const w3bReadRoutes = readFileSync("src/modules/wallet/w3-checkout-settlement-read.routes.ts", "utf8");
 
-    assert.doesNotMatch(routes, /\/seller\/wallet\/w3/u);
+    assert.doesNotMatch(routes, /apiRouter\.use\("\/wallet\/w3/u);
+    assert.equal(/\.(post|put|patch|delete)\(/u.test(w3bReadRoutes), false);
   });
 
   it("does not use completed money-movement status language in output", async () => {

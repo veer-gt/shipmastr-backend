@@ -47,6 +47,7 @@ import { trackingRouter } from "../modules/tracking/tracking.routes.js";
 import { adminWalletRouter, walletRouter } from "../modules/wallet/wallet.routes.js";
 import { adminW1WalletRouter, internalW1WalletRouter, sellerW1WalletRouter } from "../modules/wallet/w1-wallet-read.routes.js";
 import { adminW2CodNettingRouter, internalW2CodNettingRouter, sellerW2CodNettingRouter } from "../modules/wallet/w2-cod-netting-read.routes.js";
+import { adminW3CheckoutPreviewRouter, internalW3CheckoutPreviewRouter, sellerW3CheckoutPreviewRouter } from "../modules/wallet/w3-checkout-settlement-read.routes.js";
 
 export const apiRouter = Router();
 
@@ -75,6 +76,7 @@ apiRouter.use("/admin/domains", requireAdminJwt, adminDomainsRouter);
 apiRouter.use("/admin/storefronts", requireAdminJwt, adminStorefrontsRouter);
 apiRouter.use("/admin/wallets/w1", requireAdminJwt, adminW1WalletRouter);
 apiRouter.use("/admin/wallets/w2/cod", requireAdminJwt, adminW2CodNettingRouter);
+apiRouter.use("/admin/wallets/w3/checkout", requireAdminJwt, adminW3CheckoutPreviewRouter);
 apiRouter.use("/admin/wallets", requireAdminJwt, adminWalletRouter);
 apiRouter.use("/admin", requireAdminJwt, adminRouter);
 apiRouter.use("/audit", requireJwtAuth, auditRouter);
@@ -111,6 +113,7 @@ apiRouter.use("/reverse-logistics", requireJwtAuth, returnsRouter);
 apiRouter.use("/seller/account", requireJwtAuth, sellerAccountRouter);
 apiRouter.use("/seller/wallet/w1", requireJwtAuth, sellerW1WalletRouter);
 apiRouter.use("/seller/wallet/w2/cod", requireJwtAuth, sellerW2CodNettingRouter);
+apiRouter.use("/seller/wallet/w3/checkout", requireJwtAuth, sellerW3CheckoutPreviewRouter);
 apiRouter.use("/settings", requireJwtAuth, settingsRouter);
 apiRouter.use("/seller/settings", requireJwtAuth, settingsRouter);
 apiRouter.use("/shipping/seller-api", shippingSellerApiRouter);
@@ -127,5 +130,6 @@ apiRouter.use("/internal/automation", requireInternalSecret, internalAutomationR
 apiRouter.use("/internal/provisioning", requireInternalSecret, internalDomainProvisioningRouter);
 apiRouter.use("/internal/wallet/w1", requireInternalSecret, internalW1WalletRouter);
 apiRouter.use("/internal/wallet/w2/cod", requireInternalSecret, internalW2CodNettingRouter);
+apiRouter.use("/internal/wallet/w3/checkout", requireInternalSecret, internalW3CheckoutPreviewRouter);
 apiRouter.use("/internal/storefronts", storefrontsRouter);
 apiRouter.use("/internal/tasks", requireFirebaseAuth, tasksRouter);
