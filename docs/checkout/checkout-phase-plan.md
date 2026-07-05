@@ -4,6 +4,8 @@ C0 is complete when this plan, the integration audit, and the ledger decision me
 
 ## C1 - Backend Quote / Order / Payment Foundation, Mock/Sandbox Only
 
+Status: implemented as backend foundation in `20260705160000_checkout_partial_cod_foundation`. Live provider activation, settlement execution, COD custody, buyer UI, admin UI, and fulfillment handoff remain separate later phases.
+
 ### Scope
 
 - Add checkout quote engine.
@@ -40,12 +42,13 @@ Owner review is required before final schema.
 
 Mock/sandbox only, naming subject to owner review:
 
-- `POST /v1/checkout/quote`
-- `POST /v1/checkout/orders`
-- `GET /v1/checkout/orders/:id`
-- `POST /v1/checkout/payments/:id/initiate`
-- `POST /v1/checkout/payments/:id/mock-complete`
-- `POST /v1/webhooks/checkout/:provider` or equivalent provider-specific path
+- `POST /api/checkout/quote` and `/v1/checkout/quote`
+- `POST /api/checkout/orders` and `/v1/checkout/orders`
+- `GET /api/checkout/orders/:id` and `/v1/checkout/orders/:id`
+- `POST /api/checkout/payments/:id/initiate` and `/v1/checkout/payments/:id/initiate`
+- `POST /api/checkout/payments/:id/mock-complete` and `/v1/checkout/payments/:id/mock-complete`
+
+No live provider webhook route is added in C1.
 
 ### Tests Required
 
@@ -80,6 +83,8 @@ Mock/sandbox only, naming subject to owner review:
 - Postgres tests pass
 - no wallet behavior changed
 - no public buyer order access by ID alone
+- dedicated checkout idempotency records store request hashes and PII-safe replay pointers
+- late mock capture after cancelled/expired orders becomes `refund_due`
 
 ## C2 - Admin Rules / Order Lifecycle / Audit APIs
 
@@ -383,4 +388,3 @@ Prefer none for C6 unless an internal/admin read-only readiness route is explici
 - activation report is machine-readable
 - all live provider blockers explicit
 - owner review required before any live key/env/provider rollout
-

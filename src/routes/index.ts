@@ -10,6 +10,7 @@ import { auditRouter } from "../modules/audit/audit.routes.js";
 import { authRouter } from "../modules/auth/auth.routes.js";
 import { codRemittancesRouter } from "../modules/codRemittances/cod-remittances.routes.js";
 import { codDashboardRouter } from "../modules/codDashboard/cod-dashboard.routes.js";
+import { checkoutRouter } from "../modules/checkout/checkout.routes.js";
 import { adminCourierPartnerApplicationRouter, courierPartnerApplicationRouter } from "../modules/courierPartnerApplications/courier-partner-application.routes.js";
 import { adminCourierProviderRegistryRouter } from "../modules/courierPartners/providerRegistry/courier-provider-registry.routes.js";
 import { adminProvisionalRateCardsRouter, adminRateCardGroupsRouter, adminRateCardTiersRouter, sellerProvisionalRateCardQuotesRouter } from "../modules/courierPartners/provisionalRateCards/provisional-rate-card.routes.js";
@@ -85,6 +86,7 @@ apiRouter.use("/automation/communications", requireInternalSecret, automationCom
 apiRouter.use("/automation", requireJwtAuth, requireReadyMerchantAutopilotAccess, automationRouter);
 apiRouter.use("/cod", codDashboardRouter);
 apiRouter.use("/cod-remittances", requireJwtAuth, codRemittancesRouter);
+apiRouter.use("/checkout", checkoutRouter);
 apiRouter.use("/courier/onboarding", requireCourierJwt, courierOnboardingRouter);
 apiRouter.use("/courier/tax-compliance", requireCourierJwt, courierTaxComplianceRouter);
 apiRouter.use("/courier", courierRouter);
