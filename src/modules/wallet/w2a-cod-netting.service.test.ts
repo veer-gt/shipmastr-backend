@@ -336,7 +336,11 @@ describe("W2A COD instruction-only netting", () => {
       ["walletEventOutbox", "create"].join("\\.")
     ].join("|"));
 
-    assert.equal(/wallet\/w2/u.test(routes), false);
+    assert.match(routes, /apiRouter\.use\("\/internal\/wallet\/w2\/cod", requireInternalSecret, internalW2CodNettingRouter\);/);
+    assert.match(routes, /apiRouter\.use\("\/admin\/wallets\/w2\/cod", requireAdminJwt, adminW2CodNettingRouter\);/);
+    assert.match(routes, /apiRouter\.use\("\/seller\/wallet\/w2\/cod", requireJwtAuth, sellerW2CodNettingRouter\);/);
+    assert.doesNotMatch(routes, /apiRouter\.use\("\/wallet\/w2/u);
+    assert.equal(/\.(post|put|patch|delete)\(/u.test(readFileSync("src/modules/wallet/w2-cod-netting-read.routes.ts", "utf8")), false);
     assert.equal(directWritePattern.test(source), false);
   });
 
