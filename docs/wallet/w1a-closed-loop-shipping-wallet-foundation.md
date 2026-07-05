@@ -101,13 +101,21 @@ Capture marks the hold captured and releases any unused remainder by removing th
 
 `getWalletSummary()` returns string minor units:
 
+- `scope`
+- `sandboxOnly`
+- `enabled`
 - `postedMinor`
 - `heldMinor`
 - `availableMinor`
+- `disputeHeldMinor`
+- `accountStatus`
+- `lastLedgerAt`
 
 `getWalletStatement()` returns custodial wallet rows only. Shadow rows are excluded from spendable balance and statement output.
 
-Default statement output omits raw source refs and narratives. Internal refs use opaque W1A refs.
+Default statement output includes only opaque internal source refs and safe narratives. Unsafe refs or narratives are returned as `null`.
+
+W1B adds route-level read surfaces for these read models. W1B remains read-only and does not activate live wallet movement.
 
 ## Closure Policy
 

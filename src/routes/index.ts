@@ -45,6 +45,7 @@ import { webhooksRouter } from "../modules/webhooks/webhooks.routes.js";
 import { tasksRouter } from "../modules/tasks/tasks.routes.js";
 import { trackingRouter } from "../modules/tracking/tracking.routes.js";
 import { adminWalletRouter, walletRouter } from "../modules/wallet/wallet.routes.js";
+import { adminW1WalletRouter, internalW1WalletRouter, sellerW1WalletRouter } from "../modules/wallet/w1-wallet-read.routes.js";
 
 export const apiRouter = Router();
 
@@ -71,6 +72,7 @@ apiRouter.use("/admin/tax-compliance", requireAdminJwt, adminTaxComplianceRouter
 apiRouter.use("/admin/automation", requireAdminJwt, adminAutomationRouter);
 apiRouter.use("/admin/domains", requireAdminJwt, adminDomainsRouter);
 apiRouter.use("/admin/storefronts", requireAdminJwt, adminStorefrontsRouter);
+apiRouter.use("/admin/wallets/w1", requireAdminJwt, adminW1WalletRouter);
 apiRouter.use("/admin/wallets", requireAdminJwt, adminWalletRouter);
 apiRouter.use("/admin", requireAdminJwt, adminRouter);
 apiRouter.use("/audit", requireJwtAuth, auditRouter);
@@ -105,6 +107,7 @@ apiRouter.use("/reconciliation", requireJwtAuth, reconciliationRouter);
 apiRouter.use("/returns", requireJwtAuth, returnsRouter);
 apiRouter.use("/reverse-logistics", requireJwtAuth, returnsRouter);
 apiRouter.use("/seller/account", requireJwtAuth, sellerAccountRouter);
+apiRouter.use("/seller/wallet/w1", requireJwtAuth, sellerW1WalletRouter);
 apiRouter.use("/settings", requireJwtAuth, settingsRouter);
 apiRouter.use("/seller/settings", requireJwtAuth, settingsRouter);
 apiRouter.use("/shipping/seller-api", shippingSellerApiRouter);
@@ -119,5 +122,6 @@ apiRouter.use("/webhooks", webhooksRouter);
 apiRouter.use("/tasks", tasksRouter);
 apiRouter.use("/internal/automation", requireInternalSecret, internalAutomationRouter);
 apiRouter.use("/internal/provisioning", requireInternalSecret, internalDomainProvisioningRouter);
+apiRouter.use("/internal/wallet/w1", requireInternalSecret, internalW1WalletRouter);
 apiRouter.use("/internal/storefronts", storefrontsRouter);
 apiRouter.use("/internal/tasks", requireFirebaseAuth, tasksRouter);
