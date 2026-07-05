@@ -18,6 +18,7 @@ C2 adds backend admin operations for Shipmastr Checkout. It is an internal/admin
   - `refund_due`
 - COD collection capture during delivered transition.
 - Checkout audit log read API.
+- C5 hardening-parity smoke tests C2 together with C1 using the existing backend test harness convention. C5 is not a live-database end-to-end suite.
 
 ## Routes
 
@@ -94,3 +95,16 @@ C2 does not:
 - add n8n, GCP, Cloud Run, live DB, or deploy behavior
 
 Live provider activation remains a later C6 gate.
+
+## C5 Parity Notes
+
+C5 adds combined backend smoke coverage for:
+
+- rules-driven COD fee waiver behavior
+- admin lifecycle transitions
+- delivered COD collection validation
+- admin audit log visibility
+- buyer readback of collected COD status
+- admin-only risk-note visibility
+
+C5 does not change C2 scope. COD collection remains an order/accounting event only, not custody or settlement.

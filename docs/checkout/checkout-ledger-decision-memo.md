@@ -35,7 +35,7 @@ Possible table families in C1/C2:
 - Avoids accidental custodial interpretation of buyer payment events.
 - Preserves W3A/W3B as preview-only settlement/read surfaces.
 - Easier to match fixed reference semantics: quote, order, payment, webhook, `refund_due`, buyer token.
-- Lets Postgres E2E smoke prove checkout hardening before any wallet integration.
+- Lets backend hardening-parity smoke prove checkout behavior before any wallet integration.
 - Reduces blast radius on existing `LedgerService` and wallet account types.
 - Allows owner/accounting review of ledger mapping after real checkout domain semantics are visible.
 
@@ -157,4 +157,3 @@ Final decision: requires owner review before C1 schema is finalized.
 4. What state owns refund_due: checkout payment state, wallet ledger state, or both?
 5. What provider mode is allowed in C1: mock only, sandbox provider, or no provider adapter at all?
 6. What are the seller-visible terms for partial COD advance and full COD fee waiver?
-

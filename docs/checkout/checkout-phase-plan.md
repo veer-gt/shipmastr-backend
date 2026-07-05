@@ -80,7 +80,7 @@ No live provider webhook route is added in C1.
 - fixed reference hardening preserved
 - all money values are integer paise
 - lowercase modes and buyer contract preserved
-- Postgres tests pass
+- backend tests pass
 - no wallet behavior changed
 - no public buyer order access by ID alone
 - dedicated checkout idempotency records store request hashes and PII-safe replay pointers
@@ -309,18 +309,18 @@ None if backend C1/C2 schema is complete.
 - actions are guarded and backend-backed
 - no fake checkout success states
 
-## C5 - Postgres E2E Smoke And Hardening Parity
+## C5 - Backend Hardening-Parity Smoke
 
 ### Scope
 
-- Run real Postgres local/test E2E over C1-C4.
-- Prove parity with fixed reference smoke.
-- Harden edge cases before live-provider gate.
+- Port the fixed reference smoke and hardening guarantees into Shipmastr backend tests.
+- Follow the existing backend checkout test harness convention, which is mocked/in-memory for C1/C2.
+- Harden C1/C2 parity edges before the live-provider gate.
+- Do not present this phase as a live-database end-to-end suite.
 
 ### Files Likely Touched
 
 - `src/modules/checkout/*.test.ts`
-- scripts under `scripts/checkout-*` if local smoke CLI is needed
 - docs under `docs/checkout/*`
 
 ### Migrations Likely Required
@@ -337,25 +337,29 @@ None expected.
 - idempotent order create parity
 - token-gated buyer access
 - mock capture idempotency
-- webhook replay and payload mismatch
+- webhook cross-validation readiness fields on `CheckoutPayment`
 - late payment refund_due
-- expired advance
 - admin lifecycle and COD collection
 - buyer serializer excludes risk notes
 - no W3 settlement activation
 
 ### Safety Boundaries
 
-- local/test only
+- backend test/docs only
 - no live provider
-- no production DB
+- no frontend
+- no live DB or production DB
 - no deploy
+- no COD custody
+- no checkout settlement execution
+- no wallet money movement
 
 ### Acceptance Checklist
 
 - all fixed-reference hardening covered in tests
+- no false live-database end-to-end claim
 - no generated artifacts left in diff
-- docs updated with exact C6 blockers
+- docs updated with exact C6 blockers, including live webhook cross-validation
 
 ## C6 - Live Payment-Provider Activation Gate, Not Activation
 
