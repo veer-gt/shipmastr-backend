@@ -21,6 +21,7 @@ import {
   WalletTopupSandboxService,
   type W1RuntimeConfig
 } from "./w1-closed-loop-wallet.service.js";
+import { sellerOrgIdFromAuth } from "./w1-wallet-read.routes.js";
 
 const now = new Date("2026-07-05T06:30:00.000Z");
 const enabledConfig: W1RuntimeConfig = {
@@ -531,8 +532,8 @@ describe("W1A closed-loop shipping wallet foundation", () => {
     assert.equal(typeof summary.postedMinor, "string");
     assert.equal(ledgerStatement.entries.length, 1);
     assert.equal(ledgerStatement.entries[0]?.entryType, "topup");
-    assert.equal("sourceRef" in ledgerStatement.entries[0]!, false);
-    assert.equal("narrative" in ledgerStatement.entries[0]!, false);
+    assert.equal(String(ledgerStatement.entries[0]?.sourceRef).startsWith("W1TOP-"), true);
+    assert.equal(ledgerStatement.entries[0]?.narrative, "W1A sandbox topup");
     assert.equal(state.balances.some((balance) => balance.ledgerScope === "shadow" && balance.balancePaise === 9000n), true);
   });
 
@@ -618,6 +619,196 @@ describe("W1A closed-loop shipping wallet foundation", () => {
     assert.equal(directWritePattern.test(source), false);
     assert.equal(floatPattern.test(source), false);
     assert.equal(/router|Router\(|express\(/.test(source), false);
+    assert.equal(liveIntegrationPattern.test(source), false);
+  });
+});
+
+describe("W1B wallet read surfaces", () => {
+  it("mounts internal, admin, and seller W1 read routers behind the expected guards", () => {
+    const routes = readFileSync("src/routes/index.ts", "utf8");
+
+    assert.match(routes, /apiRouter\.use\("\/internal\/wallet\/w1", requireInternalSecret, internalW1WalletRouter\);/);
+    assert.match(routes, /apiRouter\.use\("\/admin\/wallets\/w1", requireAdminJwt, adminW1WalletRouter\);/);
+    assert.match(routes, /apiRouter\.use\("\/seller\/wallet\/w1", requireJwtAuth, sellerW1WalletRouter\);/);
+    assert.ok(routes.indexOf("apiRouter.use(\"/admin/wallets/w1\"") < routes.indexOf("apiRouter.use(\"/admin/wallets\""));
+  });
+
+  it("adds no mutating W1B wallet routes or cash movement actions", () => {
+    const routeSource = readFileSync("src/modules/wallet/w1-wallet-read.routes.ts", "utf8");
+    const mutatingRoutePattern = /\.(post|put|patch|delete)\(/;
+    const movementTermPattern = new RegExp([
+      "topup",
+      "hold",
+      "capture",
+      "refund",
+      "cashout",
+      "payout",
+      "settlement"
+    ].join("|"), "i");
+
+    assert.equal(mutatingRoutePattern.test(routeSource), false);
+    assert.equal(movementTermPattern.test(routeSource), false);
+  });
+
+  it("derives seller wallet reads from authenticated seller scope only", () => {
+    assert.equal(sellerOrgIdFromAuth({ userId: "user_1", merchantId: "seller_alpha", role: "SELLER" }), "seller_alpha");
+    assert.throws(() => sellerOrgIdFromAuth(undefined), /Required|invalid_type/i);
+  });
+
+  it("reports disabled W1 readiness without throwing", () => {
+    const readiness = new W1WalletReadinessService({
+      enabled: false,
+      sandboxOnly: true,
+      allowLivePayments: false,
+      allowCashout: false,
+      appEnv: "test",
+      nodeEnv: "test"
+    }).checkReadiness();
+
+    assert.equal(readiness.ok, false);
+    assert.equal(readiness.flags.enabled, false);
+    assert.deepEqual(readiness.blockingIssues, ["WALLET_W1_DISABLED"]);
+  });
+
+  it("blocks seller W1 reads when the feature is disabled", () => {
+    const { client } = makeClient();
+    const statement = new WalletStatementService({
+      client: client as any,
+      config: { ...enabledConfig, enabled: false }
+    });
+
+    assert.throws(() => statement.assertSellerReadAllowed(), /WALLET_W1_DISABLED/);
+  });
+
+  it("returns seller-safe string money summary when enabled", async () => {
+    const { client } = await confirmedTopup("7000");
+    const enabledStatement = new WalletStatementService({
+      client: client as any,
+      config: enabledConfig
+    });
+
+    enabledStatement.assertSellerReadAllowed();
+    const summary = await enabledStatement.getWalletSummary("seller_alpha");
+
+    assert.equal(summary.sellerOrgId, "seller_alpha");
+    assert.equal(summary.scope, "custodial");
+    assert.equal(summary.enabled, true);
+    assert.equal(summary.sandboxOnly, true);
+    assert.equal(summary.postedMinor, "7000");
+    assert.equal(summary.heldMinor, "0");
+    assert.equal(summary.availableMinor, "7000");
+    assert.equal(summary.disputeHeldMinor, "0");
+    assert.equal(summary.currency, "INR");
+    assert.equal(summary.accountStatus, "active");
+    assert.ok(summary.lastLedgerAt instanceof Date);
+    assert.equal(typeof summary.postedMinor, "string");
+    assert.equal(typeof summary.availableMinor, "string");
+  });
+
+  it("returns custodial statement entries only and excludes shadow balances from spendable reads", async () => {
+    const { client, ledger } = await confirmedTopup("5000");
+    const owner = await ledger.createOwner({ ownerType: "seller", externalId: "seller_alpha", displayName: "Shadow seller" });
+    const shadow = await ledger.createAccount({
+      ownerId: owner.id,
+      ownerType: "seller",
+      accountType: "shipping_balance",
+      ledgerScope: "shadow",
+      currency: "INR",
+      label: "Shadow read exclusion"
+    });
+    await ledger.postEntry({
+      entryRef: "W0-READSURFACE-SHADOW-A",
+      entryType: "topup",
+      ledgerScope: "shadow",
+      currency: "INR",
+      sourceType: "shadow_probe",
+      sourceRef: "W0-READSURFACE-SHADOW-SRC",
+      postings: [
+        { accountId: shadow.id, direction: "debit", amountPaise: "9000" },
+        { accountId: shadow.id, direction: "credit", amountPaise: "9000" }
+      ]
+    });
+
+    const statement = new WalletStatementService({ client: client as any, config: enabledConfig });
+    const summary = await statement.getWalletSummary("seller_alpha");
+    const page = await statement.getWalletStatement("seller_alpha");
+
+    assert.equal(summary.postedMinor, "5000");
+    assert.equal(page.scope, "custodial");
+    assert.equal(page.entries.length, 1);
+    assert.equal(page.entries[0]?.amountMinor, "5000");
+    assert.equal(page.entries.every((entry) => typeof entry.amountMinor === "string"), true);
+  });
+
+  it("sanitizes public refs and narratives from W1B statement output", async () => {
+    const { client, state, ledger } = await confirmedTopup("1000");
+    const sellerOwner = state.owners.find((owner) => owner.ownerType === "seller" && owner.externalId === "seller_alpha");
+    assert.ok(sellerOwner);
+    const shipping = state.accounts.find((account) => account.ownerId === sellerOwner.id && account.accountType === "shipping_balance");
+    assert.ok(shipping);
+    const unsafeEntry = {
+      id: "je_public_ref",
+      entryRef: "W1LED-PUBLICREF-aaaaaaaa",
+      commandHash: "cmd_public_ref",
+      entryType: "shipment_charge",
+      ledgerScope: "custodial" as const,
+      currency: "INR",
+      sourceType: "shipment_charge",
+      sourceRef: ["ord", "er_public"].join(""),
+      narrative: ["buyer", " ", "em", "ail"].join(""),
+      createdBy: "internal_w1b",
+      createdAt: new Date("2026-07-05T07:00:00.000Z"),
+      reversalOf: null,
+      metadata: null
+    };
+    state.entries.push(unsafeEntry);
+    state.postings.push({
+      id: "jp_public_ref",
+      entryId: unsafeEntry.id,
+      accountId: shipping.id,
+      direction: "debit",
+      amountPaise: 100n,
+      currency: "INR"
+    });
+
+    const statement = new WalletStatementService({ client: client as any, config: enabledConfig });
+    const page = await statement.getWalletStatement("seller_alpha", { limit: 10 });
+    const unsafe = page.entries.find((entry) => entry.entryId === unsafeEntry.id);
+
+    assert.ok(unsafe);
+    assert.equal(unsafe.sourceRef, null);
+    assert.equal(unsafe.narrative, null);
+    assert.equal(/@|9876543210|110001/i.test(JSON.stringify(page)), false);
+  });
+
+  it("keeps W1B read source free of direct writes, floats, public APIs, and live integrations", () => {
+    const source = [
+      readFileSync("src/modules/wallet/w1-wallet-read.routes.ts", "utf8"),
+      readFileSync("src/modules/wallet/w1-closed-loop-wallet.service.ts", "utf8")
+    ].join("\n");
+    const directWritePattern = new RegExp([
+      ["journalEntry", "create"].join("\\."),
+      ["journalPosting", "create"].join("\\."),
+      ["accountBalance", "update"].join("\\."),
+      ["walletEventOutbox", "create"].join("\\.")
+    ].join("|"));
+    const floatPattern = new RegExp([
+      ["parse", "Float"].join(""),
+      ["Math", "round"].join("\\."),
+      ["Num", "ber\\("].join("")
+    ].join("|"));
+    const liveIntegrationPattern = new RegExp([
+      ["razor", "pay"].join(""),
+      ["cash", "free"].join(""),
+      ["bank", "payout"].join(" "),
+      ["settlement", "api"].join(" "),
+      ["n", "8", "n"].join(""),
+      ["cloud", "run"].join(" ")
+    ].join("|"), "i");
+
+    assert.equal(directWritePattern.test(source), false);
+    assert.equal(floatPattern.test(source), false);
+    assert.equal(/Router\(\)\.(post|put|patch|delete)/.test(source), false);
     assert.equal(liveIntegrationPattern.test(source), false);
   });
 });

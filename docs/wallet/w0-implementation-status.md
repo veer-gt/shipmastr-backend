@@ -131,6 +131,12 @@ W1A has a separate internal-only foundation for sandbox closed-loop shipping wal
 
 W1A does not change W0 behavior. It does not add public APIs, live payment movement, bank movement, checkout split settlement, COD custody, lending, live database work, or deployment automation.
 
+## Post-W0 W1B Read Surfaces
+
+W1B exposes W1A through read-only internal, admin, and seller-safe wallet read surfaces. It adds readiness, summary, and statement endpoints only.
+
+W1B does not add mutation routes, live payment movement, bank movement, checkout split settlement, COD custody, lending, live database work, deployment automation, or external workflow automation. Shadow balances remain excluded from spendable wallet reads.
+
 ## Not Implemented
 
 These are explicitly outside W0D:

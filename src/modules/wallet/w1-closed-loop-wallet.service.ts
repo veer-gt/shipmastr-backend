@@ -78,6 +78,9 @@ type JournalEntryRecord = {
   entryType: string;
   ledgerScope: "custodial" | "shadow";
   currency: string;
+  sourceType?: string | null;
+  sourceRef?: string | null;
+  narrative?: string | null;
   createdAt?: Date;
 };
 
@@ -91,7 +94,7 @@ type JournalPostingRecord = {
   entry?: JournalEntryRecord;
 };
 
-type W1Client = {
+export type W1Client = {
   $transaction?<T>(callback: (tx: W1Client) => Promise<T>): Promise<T>;
   walletOwner: {
     findUnique(input: Record<string, unknown>): Promise<WalletOwnerRecord | null>;
@@ -523,31 +526,50 @@ export class ClosedLoopWalletService {
 
 export class WalletStatementService {
   private readonly client: W1Client;
+  private readonly config: W1RuntimeConfig;
 
-  constructor(deps: Pick<W1ServiceDeps, "client"> = {}) {
+  constructor(deps: Pick<W1ServiceDeps, "client" | "config"> = {}) {
     this.client = deps.client ?? prisma as unknown as W1Client;
+    this.config = resolveConfig(deps.config);
+  }
+
+  assertSellerReadAllowed() {
+    if (!this.config.enabled) throw new HttpError(403, "WALLET_W1_DISABLED");
+    if (!this.config.sandboxOnly) throw new HttpError(403, "WALLET_W1_LIVE_MODE_FORBIDDEN");
+    if (this.config.allowLivePayments) throw new HttpError(403, "WALLET_W1_LIVE_PAYMENTS_FORBIDDEN");
+    if (this.config.allowCashout) throw new HttpError(403, "WALLET_W1_CASHOUT_FORBIDDEN");
   }
 
   async getWalletSummary(sellerOrgId: string) {
-    const owner = await this.findSellerOwner(sellerOrgId);
-    if (!owner) return zeroSummary(sellerOrgId);
+    const normalizedSellerOrgId = cleanRequiredValue(sellerOrgId, "W1_SELLER_ORG_ID_REQUIRED");
+    const owner = await this.findSellerOwner(normalizedSellerOrgId);
+    if (!owner) return zeroSummary(normalizedSellerOrgId, this.config);
     const shipping = await this.findSellerAccount(owner.id, "shipping_balance");
-    if (!shipping) return zeroSummary(sellerOrgId);
+    const dispute = await this.findSellerAccount(owner.id, "dispute_hold");
+    if (!shipping) return zeroSummary(normalizedSellerOrgId, this.config);
     const posted = await postedMinor(this.client, shipping.id);
     const held = await heldMinor(this.client, shipping.id);
+    const disputeHeld = dispute ? await postedMinor(this.client, dispute.id) + await heldMinor(this.client, dispute.id) : 0n;
+    const lastLedgerAt = await this.lastLedgerAt([shipping.id, ...(dispute ? [dispute.id] : [])]);
     return {
-      sellerOrgId,
+      sellerOrgId: normalizedSellerOrgId,
+      scope: CUSTODIAL_SCOPE,
+      sandboxOnly: this.config.sandboxOnly,
+      enabled: this.config.enabled,
       currency: DEFAULT_CURRENCY,
       postedMinor: minorString(posted),
       heldMinor: minorString(held),
       availableMinor: minorString(posted - held),
-      ledgerScope: CUSTODIAL_SCOPE
+      disputeHeldMinor: minorString(disputeHeld),
+      accountStatus: shipping.status,
+      lastLedgerAt
     };
   }
 
-  async getWalletStatement(sellerOrgId: string, filters: { limit?: number } = {}) {
-    const owner = await this.findSellerOwner(sellerOrgId);
-    if (!owner) return { sellerOrgId, entries: [], ledgerScope: CUSTODIAL_SCOPE };
+  async getWalletStatement(sellerOrgId: string, filters: { limit?: number | undefined } = {}) {
+    const normalizedSellerOrgId = cleanRequiredValue(sellerOrgId, "W1_SELLER_ORG_ID_REQUIRED");
+    const owner = await this.findSellerOwner(normalizedSellerOrgId);
+    if (!owner) return { sellerOrgId: normalizedSellerOrgId, scope: CUSTODIAL_SCOPE, entries: [] };
     const accounts = await this.client.walletAccount.findMany({
       where: {
         ownerId: owner.id,
@@ -556,7 +578,7 @@ export class WalletStatementService {
       }
     });
     const accountIds = accounts.map((account) => account.id);
-    if (accountIds.length === 0) return { sellerOrgId, entries: [], ledgerScope: CUSTODIAL_SCOPE };
+    if (accountIds.length === 0) return { sellerOrgId: normalizedSellerOrgId, scope: CUSTODIAL_SCOPE, entries: [] };
     const postings = await this.client.journalPosting.findMany({
       where: { accountId: { in: accountIds } },
       include: { entry: true },
@@ -564,17 +586,20 @@ export class WalletStatementService {
       take: filters.limit ?? 50
     });
     return {
-      sellerOrgId,
-      ledgerScope: CUSTODIAL_SCOPE,
+      sellerOrgId: normalizedSellerOrgId,
+      scope: CUSTODIAL_SCOPE,
       entries: postings
         .filter((posting) => posting.entry?.ledgerScope === CUSTODIAL_SCOPE)
         .map((posting) => ({
           entryId: posting.entryId,
           entryType: posting.entry?.entryType ?? null,
+          sourceType: sanitizeOutputText(posting.entry?.sourceType ?? null),
+          sourceRef: safeInternalRef(posting.entry?.sourceRef ?? null),
           direction: posting.direction,
           amountMinor: minorString(posting.amountPaise),
           currency: posting.currency,
-          createdAt: posting.entry?.createdAt ?? null
+          createdAt: posting.entry?.createdAt ?? null,
+          narrative: sanitizeOutputText(posting.entry?.narrative ?? null)
         }))
     };
   }
@@ -595,6 +620,18 @@ export class WalletStatementService {
       }
     });
     return accounts.find((account) => matchesAccount(account, accountType, ownerId)) ?? null;
+  }
+
+  private async lastLedgerAt(accountIds: string[]) {
+    if (accountIds.length === 0) return null;
+    const postings = await this.client.journalPosting.findMany({
+      where: { accountId: { in: accountIds } },
+      include: { entry: true },
+      orderBy: { createdAt: "desc" },
+      take: 1
+    });
+    const createdAt = postings.find((posting) => posting.entry?.ledgerScope === CUSTODIAL_SCOPE)?.entry?.createdAt;
+    return createdAt ?? null;
   }
 }
 
@@ -648,14 +685,34 @@ function assertActiveAccount(account: WalletAccountRecord) {
   if (account.status !== "active") throw new HttpError(409, "W1_WALLET_ACCOUNT_NOT_ACTIVE");
 }
 
-function zeroSummary(sellerOrgId: string) {
+function safeInternalRef(value: string | null) {
+  if (!value) return null;
+  if (!/^W1[A-Z-]*-[a-p]{8,}$/u.test(value)) return null;
+  if (sensitiveTermPattern.test(value) || contactPattern.test(value) || postalPattern.test(value)) return null;
+  return value;
+}
+
+function sanitizeOutputText(value: string | null) {
+  if (!value) return null;
+  const next = value.trim();
+  if (!next) return null;
+  if (sensitiveTermPattern.test(next) || contactPattern.test(next) || postalPattern.test(next)) return null;
+  return next;
+}
+
+function zeroSummary(sellerOrgId: string, config: W1RuntimeConfig) {
   return {
     sellerOrgId,
+    scope: CUSTODIAL_SCOPE,
+    sandboxOnly: config.sandboxOnly,
+    enabled: config.enabled,
     currency: DEFAULT_CURRENCY,
     postedMinor: "0",
     heldMinor: "0",
     availableMinor: "0",
-    ledgerScope: CUSTODIAL_SCOPE
+    disputeHeldMinor: "0",
+    accountStatus: "missing",
+    lastLedgerAt: null
   };
 }
 
