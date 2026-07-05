@@ -94,4 +94,6 @@ W2B export-preview is a review artifact, not payment execution. It does not move
 
 W2C does not activate COD settlement. Live activation remains blocked by W1D and future W2 approvals.
 
+W2D adds a separate COD activation gate/checklist. It keeps current W2 mode instruction-only and does not implement custody, payout execution, bank/cashout, W3, lending, or early COD funding.
+
 Shadow dispute aging is intentionally separate future work.

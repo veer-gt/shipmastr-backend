@@ -195,6 +195,18 @@ W2C adds a local/internal smoke runner for the W2A + W2B instruction stack:
 
 W2C execution is local/test-style only and writes W2A instruction records only. It remains blocked for production, staging, and live runtime modes.
 
+## Post-W0 W2D COD Activation Gate
+
+W2D adds a read-only activation gate/checklist for the COD custody-versus-instruction-only decision:
+
+- current mode remains instruction-only
+- custody target remains blocked without complete legal, accounting, banking, operations, and owner evidence
+- complete custody evidence returns review-ready only, not activated
+- W3, lending, and early COD funding remain blocked
+- no database writes, routes, custody, payout execution, bank/cashout, provider calls, or live activation are added
+
+Live activation remains blocked by W1D, W2D, and future W2 approvals.
+
 ## Not Implemented
 
 These are explicitly outside W0D:

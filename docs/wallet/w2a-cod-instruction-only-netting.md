@@ -97,8 +97,10 @@ W2B adds protected read and export-preview surfaces over these same instruction 
 
 W2C adds a local/internal smoke runner over W2A + W2B. It dry-runs by default, can write W2A instruction records only in local/test-style runtime with an explicit execute flag, and verifies that review traps, clean instruction approval, and export-preview remain non-custodial.
 
+W2D adds a COD activation gate/checklist. It does not activate custody or execution; it keeps W2 instruction-only unless separate legal, accounting, banking, operations, and owner evidence reaches review-ready status.
+
 ## Activation Boundary
 
-W2A remains blocked by W1D and future W2 approvals. `W2CodReadinessService` intentionally returns blocked live readiness. W2A is only an instruction/reporting layer until separate legal, accounting, operations, and owner approvals exist.
+W2A remains blocked by W1D, W2D, and future W2 approvals. `W2CodReadinessService` intentionally returns blocked live readiness. W2A is only an instruction/reporting layer until separate legal, accounting, operations, and owner approvals exist.
 
 Shadow dispute aging is intentionally separate future work and is not part of W2A.
