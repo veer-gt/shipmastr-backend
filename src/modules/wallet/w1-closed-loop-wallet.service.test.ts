@@ -22,6 +22,7 @@ import {
   type W1RuntimeConfig
 } from "./w1-closed-loop-wallet.service.js";
 import { sellerOrgIdFromAuth } from "./w1-wallet-read.routes.js";
+import { W1SandboxSmokeService } from "./w1c-sandbox-smoke.service.js";
 
 const now = new Date("2026-07-05T06:30:00.000Z");
 const enabledConfig: W1RuntimeConfig = {
@@ -321,6 +322,14 @@ function services(config: Partial<W1RuntimeConfig> = {}) {
   const wallet = new ClosedLoopWalletService({ client, ledger, config: mergedConfig, provisioning });
   const statement = new WalletStatementService({ client });
   return { client, state, ledger, provisioning, topup, hold, wallet, statement };
+}
+
+function smokeServices(config: Partial<W1RuntimeConfig> = {}) {
+  const { client, state } = makeClient();
+  const ledger = new LedgerService(client);
+  const mergedConfig = { ...enabledConfig, ...config };
+  const smoke = new W1SandboxSmokeService({ client, ledger, config: mergedConfig });
+  return { client, state, ledger, smoke };
 }
 
 async function confirmedTopup(amountMinor = "10000") {
@@ -809,6 +818,147 @@ describe("W1B wallet read surfaces", () => {
     assert.equal(directWritePattern.test(source), false);
     assert.equal(floatPattern.test(source), false);
     assert.equal(/Router\(\)\.(post|put|patch|delete)/.test(source), false);
+    assert.equal(liveIntegrationPattern.test(source), false);
+  });
+});
+
+describe("W1C sandbox operations smoke", () => {
+  it("plans a dry-run without writing wallet rows", async () => {
+    const { state, smoke } = smokeServices();
+    const report = await smoke.run({ dryRun: true }) as any;
+
+    assert.equal(report.dryRun, true);
+    assert.equal(report.execute, false);
+    assert.deepEqual(report.writes, { accounts: 0, intents: 0, holds: 0, entries: 0 });
+    assert.equal(state.accounts.length, 0);
+    assert.equal(state.topups.length, 0);
+    assert.equal(state.holds.length, 0);
+    assert.equal(state.entries.length, 0);
+  });
+
+  it("refuses execute in disabled, production, or live-like runtime", async () => {
+    await assert.rejects(() => smokeServices({ enabled: false }).smoke.run({ execute: true }), /WALLET_W1_DISABLED/);
+    await assert.rejects(() => smokeServices({ appEnv: "production" }).smoke.run({ execute: true }), /W1C_PRODUCTION_EXECUTE_FORBIDDEN/);
+    await assert.rejects(() => smokeServices({ appEnv: "staging" }).smoke.run({ execute: true }), /W1C_LOCAL_TEST_EXECUTE_REQUIRED/);
+    await assert.rejects(() => smokeServices({ sandboxOnly: false }).smoke.run({ execute: true }), /WALLET_W1_LIVE_MODE_FORBIDDEN/);
+    await assert.rejects(() => smokeServices({ allowLivePayments: true }).smoke.run({ execute: true }), /WALLET_W1_LIVE_PAYMENTS_FORBIDDEN/);
+  });
+
+  it("executes the full sandbox flow and verifies final balances", async () => {
+    const { state, smoke } = smokeServices();
+    const report = await smoke.run({ execute: true }) as any;
+
+    assert.equal(report.ok, true);
+    assert.equal(report.dryRun, false);
+    assert.equal(report.summaries.final.postedMinor, "65000");
+    assert.equal(report.summaries.final.heldMinor, "0");
+    assert.equal(report.summaries.final.availableMinor, "65000");
+    assert.equal(report.amounts.releasedUnusedMinor, "3000");
+    assert.equal(report.steps.refundMode, "wallet_only");
+    assert.equal(state.holds.find((hold) => hold.id === report.steps.holdId)?.status, "captured");
+    assert.deepEqual(report.blockers.map((blocker: { refused: boolean }) => blocker.refused), [true, true]);
+    assert.equal(state.entries.map((entry) => entry.entryType).sort().join(","), "shipment_charge,shipment_refund,topup");
+  });
+
+  it("reruns idempotently without double posting", async () => {
+    const { state, smoke } = smokeServices();
+    const first = await smoke.run({ execute: true }) as any;
+    const second = await smoke.run({ execute: true }) as any;
+
+    assert.equal(first.summaries.final.availableMinor, "65000");
+    assert.equal(second.summaries.final.availableMinor, "65000");
+    assert.equal(second.idempotency.topupIntent, true);
+    assert.equal(second.idempotency.topupConfirmation, true);
+    assert.equal(second.idempotency.hold, true);
+    assert.equal(second.idempotency.capture, true);
+    assert.equal(second.idempotency.refund, true);
+    assert.equal(state.entries.length, 3);
+    assert.equal(state.outbox.length, 3);
+  });
+
+  it("detects conflicting deterministic amount reuse", async () => {
+    const { smoke } = smokeServices();
+    await smoke.run({ execute: true });
+
+    await assert.rejects(
+      () => smoke.run({ execute: true, amounts: { topupMinor: "100001" } }),
+      /W1_TOPUP_INTENT_CONFLICT/
+    );
+  });
+
+  it("keeps W1C statement custodial-only and excludes shadow rows", async () => {
+    const { state, ledger, smoke } = smokeServices();
+    await smoke.run({ execute: true });
+
+    const owner = await ledger.createOwner({ ownerType: "seller", externalId: "org_w1c_sandbox_seller", displayName: "Shadow probe" });
+    const shortfall = await ledger.createAccount({ ownerId: owner.id, ownerType: "seller", accountType: "seller_shortfall", ledgerScope: "shadow" });
+    const shadowShipping = await ledger.createAccount({ ownerId: owner.id, ownerType: "seller", accountType: "shipping_balance", ledgerScope: "shadow" });
+    await ledger.postEntry({
+      entryRef: "W0-W1C-SHADOW-PROBE",
+      entryType: "adjustment",
+      ledgerScope: "shadow",
+      currency: "INR",
+      sourceType: "shadow_probe",
+      sourceRef: "W0-W1C-SHADOW-SRC",
+      postings: [
+        { accountId: shortfall.id, direction: "debit", amountPaise: "9000" },
+        { accountId: shadowShipping.id, direction: "credit", amountPaise: "9000" }
+      ]
+    });
+
+    const report = await smoke.run({ execute: true }) as any;
+    assert.equal(report.statement.scope, "custodial");
+    assert.equal(report.statement.entries.length, 3);
+    assert.equal(report.summaries.final.postedMinor, "65000");
+    assert.equal(state.balances.some((balance) => balance.ledgerScope === "shadow"), true);
+  });
+
+  it("keeps generated report refs internal-safe", async () => {
+    const { smoke } = smokeServices();
+    const report = await smoke.run({ execute: true }) as any;
+    const unsafePattern = new RegExp([
+      ["a", "wb"].join(""),
+      ["ord", "er_"].join(""),
+      ["pho", "ne"].join(""),
+      ["em", "ail"].join(""),
+      ["addr", "ess"].join(""),
+      ["pin", "code"].join(""),
+      "@",
+      "9876543210",
+      "110001"
+    ].join("|"), "i");
+
+    assert.equal(unsafePattern.test(JSON.stringify(report)), false);
+  });
+
+  it("keeps W1C source free of direct ledger writes, float conversion, routes, and live integrations", () => {
+    const source = [
+      readFileSync("src/modules/wallet/w1c-sandbox-smoke.service.ts", "utf8"),
+      readFileSync("scripts/wallet-w1c-sandbox-smoke.mjs", "utf8")
+    ].join("\n");
+    const directWritePattern = new RegExp([
+      ["journalEntry", "create"].join("\\."),
+      ["journalPosting", "create"].join("\\."),
+      ["accountBalance", "update"].join("\\."),
+      ["walletEventOutbox", "create"].join("\\.")
+    ].join("|"));
+    const floatPattern = new RegExp([
+      ["parse", "Float"].join(""),
+      ["Math", "round"].join("\\."),
+      ["Num", "ber\\("].join("")
+    ].join("|"));
+    const liveIntegrationPattern = new RegExp([
+      ["razor", "pay"].join(""),
+      ["cash", "free"].join(""),
+      ["bank", "payout"].join(" "),
+      ["settlement", "api"].join(" "),
+      ["n", "8", "n"].join(""),
+      ["cloud", "run"].join(" ")
+    ].join("|"), "i");
+
+    assert.equal(directWritePattern.test(source), false);
+    assert.equal(floatPattern.test(source), false);
+    assert.equal(/Router\(|\.(post|put|patch|delete)\(/.test(source), false);
     assert.equal(liveIntegrationPattern.test(source), false);
   });
 });

@@ -137,6 +137,14 @@ W1B exposes W1A through read-only internal, admin, and seller-safe wallet read s
 
 W1B does not add mutation routes, live payment movement, bank movement, checkout split settlement, COD custody, lending, live database work, deployment automation, or external workflow automation. Shadow balances remain excluded from spendable wallet reads.
 
+## Post-W0 W1C Sandbox Smoke
+
+W1C adds a local/internal sandbox operations smoke runner for the W1A/W1B foundation. It plans by default and executes only with explicit local/test flags.
+
+W1C verifies provisioning, sandbox top-up, hold, capture, unused hold remainder release, wallet-only refund, final summary, custodial statement reads, and unsupported-action blockers.
+
+W1C does not add public mutation APIs, live payment movement, bank movement, checkout split settlement, COD custody, lending, live database work, deployment automation, or external workflow automation. Shadow balances remain excluded from spendable wallet reads.
+
 ## Not Implemented
 
 These are explicitly outside W0D:
