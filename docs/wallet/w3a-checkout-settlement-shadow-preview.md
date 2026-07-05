@@ -129,3 +129,9 @@ W3B adds protected read and export-preview surfaces over W3A preview batches:
 W3B does not change W3A planning or persistence behavior. Export-preview remains read-only: it does not change batch status, does not create events, and is not payment execution.
 
 W3B still does not move money, capture payments, create custody, pay sellers, settle couriers, implement lending or early COD funding, or activate payment aggregator behavior. Live activation remains blocked by future W3D approvals.
+
+## W3C Boundary
+
+W3C adds a separate early COD partner prequalification preview. It may reference W2A instruction batches and W3A checkout preview batches by opaque internal id, but it does not change W3A formulas, allocations, persistence behavior, statuses, or export-preview behavior.
+
+W3C remains instruction/pre-qualification preview only. It does not create loans, disburse funds, create repayment obligations, call partners, capture payments, pay sellers, settle couriers, create COD custody, or credit W1 shipping balance.

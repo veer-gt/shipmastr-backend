@@ -80,3 +80,11 @@ W3B does not:
 - expose payment, payout, split execution, capture, or settlement execution routes
 
 Live activation remains blocked by future W3D approvals.
+
+## W3C Boundary
+
+W3C early COD partner prequalification is separate from W3B checkout settlement reads.
+
+W3B continues to expose only W3A checkout preview reads and export-preview. W3C does not add W3B routes, mutate W3A preview batches, or convert checkout preview rows into payment execution.
+
+W3C remains instruction/pre-qualification preview only. It does not create loans, disburse funds, create repayment obligations, call partners, capture payments, pay sellers, settle couriers, create custody, or credit W1 shipping balance.
