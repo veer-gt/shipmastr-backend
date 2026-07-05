@@ -179,6 +179,33 @@ W2B export-preview does not change batch status, does not create instruction eve
 
 W2B does not create COD custody, move money, pay sellers, settle couriers, credit W1 shipping balance, create spendable balances, implement W3 checkout split settlement, or implement early COD/lending.
 
+## Post-W0 W3A Checkout Settlement Shadow Preview
+
+W3A adds checkout split settlement shadow preview tables and calculations only. It uses minor-unit strings and integer arithmetic to produce preview receivables, allocations, review reasons, and read/export-preview output.
+
+W3A does not capture payments, create payouts, create custody, move money, credit W1 shipping balance, or activate checkout settlement.
+
+## Post-W0 W3B Checkout Settlement Read Surfaces
+
+W3B exposes W3A preview batches through protected internal/admin/seller-safe read surfaces and export-preview only.
+
+W3B does not change W3A planning or persistence behavior. It does not add payment, payout, split execution, capture, settlement execution, or public mutating seller routes.
+
+## Post-W0 W3C Early COD Partner Prequalification
+
+W3C adds an internal early COD partner prequalification preview only:
+
+- additive preview tables for batches, items, and events
+- dry-run planning by default
+- local/test execution only with explicit execute flag
+- review flags for negative eligible base, requested amount above cap, missing internal source ref, unsupported currency, invalid amount, high review activity, and unsafe internal refs
+- JSON/CSV preview export
+- deterministic smoke CLI
+
+W3C does not implement lending, funding, disbursement, repayment, loan accounts or contracts, partner API calls, payment capture, payout execution, checkout settlement execution, COD custody, live provider calls, public seller mutation APIs, or shipping balance credit.
+
+Shadow dispute aging is intentionally separate future work.
+
 Live activation remains blocked by W1D and future W2 approvals.
 
 ## Post-W0 W2C COD Reconciliation Smoke

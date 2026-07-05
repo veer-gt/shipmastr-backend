@@ -3726,6 +3726,100 @@ model CheckoutSettlementPreviewEvent {
   @@map("checkout_settlement_preview_events")
 }
 
+model EarlyCodPrequalificationBatch {
+  id                       String   @id @default(cuid())
+  sellerOrgId              String   @map("seller_org_id")
+  period                   String
+  sourceRef                String   @map("source_ref")
+  sourceHash               String   @map("source_hash")
+  status                   String   @default("draft")
+  currency                 String   @default("INR")
+  grossCodDueMinor         BigInt   @default(0) @map("gross_cod_due_minor")
+  expectedDeductionMinor   BigInt   @default(0) @map("expected_deduction_minor")
+  riskReserveMinor         BigInt   @default(0) @map("risk_reserve_minor")
+  partnerFeeEstimateMinor  BigInt   @default(0) @map("partner_fee_estimate_minor")
+  eligibleBaseMinor        BigInt   @default(0) @map("eligible_base_minor")
+  maxPreviewAdvanceMinor   BigInt   @default(0) @map("max_preview_advance_minor")
+  previewAdvanceMinor      BigInt   @default(0) @map("preview_advance_minor")
+  reviewRequiredCount      Int      @default(0) @map("review_required_count")
+  metadata                 Json?
+  createdBy                String?  @map("created_by")
+  createdAt                DateTime @default(now()) @map("created_at")
+  updatedAt                DateTime @default(now()) @updatedAt @map("updated_at")
+
+  items  EarlyCodPrequalificationItem[]
+  events EarlyCodPrequalificationEvent[]
+
+  @@unique([sellerOrgId, period, sourceRef])
+  @@index([sellerOrgId])
+  @@index([period])
+  @@index([status])
+  @@index([createdAt])
+  @@map("early_cod_prequalification_batches")
+}
+
+model EarlyCodPrequalificationItem {
+  id                         String   @id @default(cuid())
+  batchId                    String   @map("batch_id")
+  sellerOrgId                String   @map("seller_org_id")
+  codInstructionBatchId      String?  @map("cod_instruction_batch_id")
+  checkoutPreviewBatchId     String?  @map("checkout_preview_batch_id")
+  courierCode                String   @map("courier_code")
+  period                     String
+  currency                   String   @default("INR")
+  grossCodDueMinor           BigInt   @default(0) @map("gross_cod_due_minor")
+  expectedDeductionMinor     BigInt   @default(0) @map("expected_deduction_minor")
+  riskReserveMinor           BigInt   @default(0) @map("risk_reserve_minor")
+  partnerFeeEstimateMinor    BigInt   @default(0) @map("partner_fee_estimate_minor")
+  maxAdvanceRateBps          BigInt   @default(0) @map("max_advance_rate_bps")
+  requestedAdvanceMinor      BigInt   @default(0) @map("requested_advance_minor")
+  eligibleBaseMinor          BigInt   @default(0) @map("eligible_base_minor")
+  maxPreviewAdvanceMinor     BigInt   @default(0) @map("max_preview_advance_minor")
+  previewAdvanceMinor        BigInt   @default(0) @map("preview_advance_minor")
+  daysSinceDelivery          BigInt   @default(0) @map("days_since_delivery")
+  disputeCount               BigInt   @default(0) @map("dispute_count")
+  rtoCount                   BigInt   @default(0) @map("rto_count")
+  reviewIssueCount           BigInt   @default(0) @map("review_issue_count")
+  status                     String   @default("draft")
+  reviewReasons              Json?    @map("review_reasons")
+  sourceRowHash              String   @map("source_row_hash")
+  metadata                   Json?
+  createdAt                  DateTime @default(now()) @map("created_at")
+  updatedAt                  DateTime @default(now()) @updatedAt @map("updated_at")
+
+  batch  EarlyCodPrequalificationBatch   @relation(fields: [batchId], references: [id], onDelete: Restrict)
+  events EarlyCodPrequalificationEvent[]
+
+  @@index([batchId])
+  @@index([sellerOrgId])
+  @@index([codInstructionBatchId])
+  @@index([checkoutPreviewBatchId])
+  @@index([status])
+  @@map("early_cod_prequalification_items")
+}
+
+model EarlyCodPrequalificationEvent {
+  id        String   @id @default(cuid())
+  batchId   String   @map("batch_id")
+  itemId    String?  @map("item_id")
+  eventType String   @map("event_type")
+  status    String
+  message   String?
+  metadata  Json?
+  createdBy String?  @map("created_by")
+  createdAt DateTime @default(now()) @map("created_at")
+
+  batch EarlyCodPrequalificationBatch @relation(fields: [batchId], references: [id], onDelete: Restrict)
+  item  EarlyCodPrequalificationItem? @relation(fields: [itemId], references: [id], onDelete: Restrict)
+
+  @@index([batchId])
+  @@index([itemId])
+  @@index([eventType])
+  @@index([status])
+  @@index([createdAt])
+  @@map("early_cod_prequalification_events")
+}
+
 model ImportFile {
   id                  String   @id @default(uuid())
   fileHash            String   @unique @map("file_hash")
