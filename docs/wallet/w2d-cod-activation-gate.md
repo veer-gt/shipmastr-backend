@@ -68,6 +68,8 @@ Future W3 items remain blocked:
 - payment aggregator review
 - digital lending review
 
+W3A now provides checkout split settlement shadow preview only. W3A does not activate custody, payment capture, payout, settlement execution, lending, or payment aggregator behavior. Future W3D approvals remain required before any live activation.
+
 ## Technical Lock
 
 W2D reports the technical lock:

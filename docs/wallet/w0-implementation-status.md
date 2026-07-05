@@ -207,9 +207,24 @@ W2D adds a read-only activation gate/checklist for the COD custody-versus-instru
 
 Live activation remains blocked by W1D, W2D, and future W2 approvals.
 
+## Post-W0 W3A Checkout Settlement Shadow Preview
+
+W3A adds checkout split settlement preview records only:
+
+- shadow/preview batches, items, allocations, and events
+- deterministic split preview formula
+- review-required traps for negative preview, missing/duplicate checkout refs, invalid amounts, unsupported currency, and unsafe refs
+- local/test smoke CLI with dry-run default
+- JSON/CSV preview export
+- explicit `movementExecuted=false`, `paymentCaptured=false`, `payoutExecuted=false`, `settlementExecuted=false`, `custodyCreated=false`, and `previewOnly=true`
+
+W3A does not capture payments, pay sellers, settle couriers, create custody, create spendable balances, credit W1 shipping balance, implement lending, or activate payment aggregator behavior.
+
+Live activation remains blocked by future W3D approvals.
+
 ## Not Implemented
 
-These are explicitly outside W0D:
+These remain explicitly outside W0D itself. Later local phases document their own guarded preview or sandbox surfaces separately:
 
 - W1/W2/W3
 - shadow dispute aging
