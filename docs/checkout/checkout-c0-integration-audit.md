@@ -290,7 +290,7 @@ How C1-C6 should interact with W3:
 - C2 can expose admin rules/lifecycle/audit for checkout, but must not call W3 execution.
 - C3 buyer UI should use checkout quote/order/payment APIs only.
 - C4 seller/admin UI can display checkout order/rule status and maybe link to W3 preview read surfaces, but not merge concepts.
-- C5 should verify Postgres E2E and hardening parity.
+- C5 should verify backend hardening parity using the established backend test harness.
 - C6 should be a live provider activation gate, not activation. It should reconcile with W3D and keep payment/custody/settlement blocked until explicit approvals.
 
 What must not be duplicated:
@@ -409,12 +409,11 @@ Rationale: the current `Order` model appears to be post-import/fulfillment order
 
 ### C5
 
-- Postgres E2E smoke and hardening parity with fixed reference.
-- Verify idempotency, refund_due, token access, webhook cross-validation, quote expiry, lifecycle, COD collection, and serializers.
+- Backend hardening-parity smoke with fixed reference coverage.
+- Verify idempotency, refund_due, token access, webhook-readiness fields, quote expiry, lifecycle, COD collection, and serializers.
 
 ### C6
 
 - Live payment-provider activation gate only.
 - Check legal/accounting/provider/ops/owner evidence.
 - Must reconcile with W3D and still not activate settlement/custody/payout without separate approval.
-

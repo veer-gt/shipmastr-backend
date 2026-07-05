@@ -18,6 +18,7 @@ C1 adds the backend quote/order/payment foundation for Shipmastr Checkout. It is
 - Separate checkout accounting events for auditability.
 - Buyer-safe serializers that omit `riskNotes`.
 - Persisted quote `riskNotes` are intentionally internal. C2 admin detail can read them, but buyer serializers continue omitting them.
+- C5 adds hardening-parity smoke coverage for this C1 behavior using the existing backend in-memory/mocked checkout test harness. C5 is not a live-database end-to-end suite.
 
 ## Database Shape
 
@@ -89,6 +90,18 @@ If a mock payment capture arrives after an order is `cancelled` or `expired`:
 - the order is never reconfirmed
 - checkout accounting records both the capture and refund-due marker
 
+## Webhook Cross-Validation Boundary
+
+C1 stores payment fields needed for future webhook cross-validation:
+
+- internal checkout payment id
+- amount
+- currency
+- gateway intent/order refs
+- gateway payment ref when applicable
+
+C1 does not add a live payment-provider webhook route. C5 proves these fields are retained for readiness. Actual live webhook signature, replay, and amount/currency/order-ref cross-validation remain a C6 gate.
+
 ## Explicit Non-Goals
 
 C1 does not:
@@ -106,7 +119,7 @@ C1 does not:
 - add admin/seller UI
 - add n8n, GCP secret, Cloud Run, live DB, or deploy behavior
 
-Live payment provider activation remains gated for later phase C6.
+Live payment provider activation and live webhook validation remain gated for later phase C6.
 
 ## C2 Follow-Up Boundary
 
