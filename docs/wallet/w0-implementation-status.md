@@ -166,6 +166,21 @@ W2A does not create COD custody, move money, pay sellers, settle couriers, credi
 
 Live activation remains blocked by W1D and future W2 approvals.
 
+## Post-W0 W2B COD Instruction Read Surfaces
+
+W2B exposes W2A COD instruction batches through protected read and export-preview surfaces only:
+
+- internal W2 COD readiness
+- admin batch list and detail reads
+- admin export-preview reads
+- seller-scoped summary and batch list reads
+
+W2B export-preview does not change batch status, does not create instruction events, and is not payment execution. W2B responses keep `movementExecuted=false`, `custodyCreated=false`, `payoutExecuted=false`, `settlementExecuted=false`, and `spendableBalanceCreated=false`.
+
+W2B does not create COD custody, move money, pay sellers, settle couriers, credit W1 shipping balance, create spendable balances, implement W3 checkout split settlement, or implement early COD/lending.
+
+Live activation remains blocked by W1D and future W2 approvals.
+
 ## Not Implemented
 
 These are explicitly outside W0D:
