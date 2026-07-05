@@ -17,6 +17,7 @@ C1 adds the backend quote/order/payment foundation for Shipmastr Checkout. It is
 - Mock/sandbox payment intent and capture flow.
 - Separate checkout accounting events for auditability.
 - Buyer-safe serializers that omit `riskNotes`.
+- Persisted quote `riskNotes` are intentionally internal. C2 admin detail can read them, but buyer serializers continue omitting them.
 
 ## Database Shape
 
@@ -106,3 +107,17 @@ C1 does not:
 - add n8n, GCP secret, Cloud Run, live DB, or deploy behavior
 
 Live payment provider activation remains gated for later phase C6.
+
+## C2 Follow-Up Boundary
+
+C2 adds admin rules, lifecycle, COD collection recording, and audit APIs on top of the C1 tables.
+
+C2 still does not:
+
+- add frontend UI
+- activate live payment
+- create COD custody
+- move wallet money
+- credit seller `shipping_balance`
+- settle sellers or couriers
+- call payment providers

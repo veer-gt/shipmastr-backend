@@ -10,6 +10,7 @@ import { auditRouter } from "../modules/audit/audit.routes.js";
 import { authRouter } from "../modules/auth/auth.routes.js";
 import { codRemittancesRouter } from "../modules/codRemittances/cod-remittances.routes.js";
 import { codDashboardRouter } from "../modules/codDashboard/cod-dashboard.routes.js";
+import { adminCheckoutRouter } from "../modules/checkout/checkout-admin.routes.js";
 import { checkoutRouter } from "../modules/checkout/checkout.routes.js";
 import { adminCourierPartnerApplicationRouter, courierPartnerApplicationRouter } from "../modules/courierPartnerApplications/courier-partner-application.routes.js";
 import { adminCourierProviderRegistryRouter } from "../modules/courierPartners/providerRegistry/courier-provider-registry.routes.js";
@@ -75,6 +76,7 @@ apiRouter.use("/admin/tax-compliance", requireAdminJwt, adminTaxComplianceRouter
 apiRouter.use("/admin/automation", requireAdminJwt, adminAutomationRouter);
 apiRouter.use("/admin/domains", requireAdminJwt, adminDomainsRouter);
 apiRouter.use("/admin/storefronts", requireAdminJwt, adminStorefrontsRouter);
+apiRouter.use("/admin/checkout", requireAdminJwt, adminCheckoutRouter);
 apiRouter.use("/admin/wallets/w1", requireAdminJwt, adminW1WalletRouter);
 apiRouter.use("/admin/wallets/w2/cod", requireAdminJwt, adminW2CodNettingRouter);
 apiRouter.use("/admin/wallets/w3/checkout", requireAdminJwt, adminW3CheckoutPreviewRouter);
