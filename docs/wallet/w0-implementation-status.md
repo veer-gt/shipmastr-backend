@@ -153,6 +153,19 @@ W1D is not activation. It does not enable live wallet movement, write database r
 
 Live W1 remains blocked until counsel, accountant, operations, and owner approvals are documented. W2/W3 remain separately gated and not approved.
 
+## Post-W0 W2A COD Instruction Netting
+
+W2A adds non-custodial COD netting instructions only:
+
+- draft/review/approved/exportable instruction batches
+- item-level COD net calculation from string minor-unit inputs
+- review flags for negative net, missing or duplicate internal shipment reference, invalid amount, unknown courier code, and unsafe inbound reference
+- JSON/CSV instruction export for review
+
+W2A does not create COD custody, move money, pay sellers, settle couriers, credit W1 shipping balance, create spendable balances, implement W3 checkout split settlement, or implement early COD/lending.
+
+Live activation remains blocked by W1D and future W2 approvals.
+
 ## Not Implemented
 
 These are explicitly outside W0D:
