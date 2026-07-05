@@ -408,3 +408,6 @@ Prefer none for C6 unless an internal/admin read-only readiness route is explici
 - activation report is machine-readable
 - all live provider blockers explicit
 - owner review required before any live key/env/provider rollout
+- runtime booleans are explicit gate inputs, not config/env fields
+- CLI runtime booleans are populated only from explicit flags
+- APP_ENV handling uses the real `development`, `test`, `staging`, and `production` values
