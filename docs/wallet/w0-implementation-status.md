@@ -145,6 +145,14 @@ W1C verifies provisioning, sandbox top-up, hold, capture, unused hold remainder 
 
 W1C does not add public mutation APIs, live payment movement, bank movement, checkout split settlement, COD custody, lending, live database work, deployment automation, or external workflow automation. Shadow balances remain excluded from spendable wallet reads.
 
+## Post-W0 W1D Activation Gate
+
+W1D adds a read-only wallet activation gate and compliance/accounting checklist. It reports whether live W1 is blocked, sandbox-only, or review-ready.
+
+W1D is not activation. It does not enable live wallet movement, write database rows, add public wallet APIs, or change W0/W1A/W1B/W1C behavior.
+
+Live W1 remains blocked until counsel, accountant, operations, and owner approvals are documented. W2/W3 remain separately gated and not approved.
+
 ## Not Implemented
 
 These are explicitly outside W0D:

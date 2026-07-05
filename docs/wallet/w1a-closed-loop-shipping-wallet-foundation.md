@@ -119,6 +119,8 @@ W1B adds route-level read surfaces for these read models. W1B remains read-only 
 
 W1C adds a local/internal sandbox smoke runner that exercises the same W1A services and verifies the result through W1B read services. W1C is not a live wallet launch and does not add public mutation routes.
 
+W1D adds a read-only activation gate and compliance/accounting checklist. W1D does not enable live W1; it only reports whether the legal, accounting, operations, technical, and owner evidence is documented for review.
+
 ## Closure Policy
 
 W1A blocks:
@@ -146,3 +148,5 @@ W1A hashes shipment inputs into opaque internal refs before persistence.
 W1A is a sandbox/internal foundation only. It does not alter W0 shadow import behavior, W0 correction behavior, W0 recovery reports, or normalized W0B import schema.
 
 W1C remains inside the same boundary: dry-run by default, execute local/test only, no real payment movement, no bank movement, no COD custody, no checkout split settlement, and no external workflow automation.
+
+W1D keeps live wallet movement blocked until closed-loop scope, no-cashout position, refund-to-source SOP, GST/TDS/principal-agent treatment, operational SOPs, rollback, and pilot-limit approvals are documented. Shadow balances remain non-spendable.
