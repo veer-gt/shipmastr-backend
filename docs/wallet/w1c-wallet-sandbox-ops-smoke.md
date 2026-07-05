@@ -107,6 +107,8 @@ Shadow balances remain non-spendable and are excluded from W1C summary and state
 
 Generated refs are opaque/internal. Buyer-resolvable, contact-like, and location-like values must not enter journal refs, source refs, narratives, or smoke output.
 
+W1D follows W1C with an activation gate and compliance/accounting checklist. W1D is not activation; it keeps live wallet movement blocked until legal, accounting, operations, and owner evidence is documented.
+
 ## Rerun Behavior
 
 The runner uses deterministic refs for the period. Re-running the same seller and period is idempotent for:

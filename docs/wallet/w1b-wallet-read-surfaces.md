@@ -106,3 +106,9 @@ W1B does not change W0 import behavior, W0 shadow ledger behavior, W0 correction
 W1C adds a local/internal sandbox smoke runner that consumes these W1B read services to verify final wallet summary and statement output after a deterministic W1A sandbox flow.
 
 W1C does not add read or mutation routes. It keeps dry-run as the default and execute mode local/test only. Shadow balances remain excluded from W1C reads.
+
+## W1D Activation Gate
+
+W1D adds a read-only activation gate and compliance/accounting checklist. It does not add wallet routes and does not enable live wallet movement.
+
+Live W1 remains blocked until counsel, accountant, operations, and owner approvals are documented. W2/W3 remain separately gated.
