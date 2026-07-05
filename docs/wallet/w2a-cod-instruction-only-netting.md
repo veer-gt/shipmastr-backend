@@ -95,6 +95,8 @@ Exports do not execute external movement and do not create spendable balances.
 
 W2B adds protected read and export-preview surfaces over these same instruction batches. W2B export-preview is read-only: it does not change batch status, does not create an instruction event, and is not payment execution.
 
+W2C adds a local/internal smoke runner over W2A + W2B. It dry-runs by default, can write W2A instruction records only in local/test-style runtime with an explicit execute flag, and verifies that review traps, clean instruction approval, and export-preview remain non-custodial.
+
 ## Activation Boundary
 
 W2A remains blocked by W1D and future W2 approvals. `W2CodReadinessService` intentionally returns blocked live readiness. W2A is only an instruction/reporting layer until separate legal, accounting, operations, and owner approvals exist.

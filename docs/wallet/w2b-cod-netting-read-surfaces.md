@@ -69,6 +69,8 @@ Instruction preview only. No money movement has been executed by Shipmastr.
 
 Export-preview is not payment execution.
 
+W2C uses this export-preview surface in its local/internal smoke runner to prove that clean `approved_instruction` batches can be inspected without changing status or creating new instruction events.
+
 ## Activation
 
 Live activation remains blocked by W1D and future W2 approvals. W2B is visibility and review support only.

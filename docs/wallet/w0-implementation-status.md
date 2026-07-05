@@ -181,6 +181,20 @@ W2B does not create COD custody, move money, pay sellers, settle couriers, credi
 
 Live activation remains blocked by W1D and future W2 approvals.
 
+## Post-W0 W2C COD Reconciliation Smoke
+
+W2C adds a local/internal smoke runner for the W2A + W2B instruction stack:
+
+- dry-run by default
+- deterministic review and clean fixtures
+- review trap verification
+- clean `approved_instruction` verification
+- W2B read and export-preview verification
+- no status change from export-preview
+- no W1 COD credit, COD custody, payout execution, courier settlement execution, W3 split settlement, lending, early COD funding, live provider calls, or public mutating seller APIs
+
+W2C execution is local/test-style only and writes W2A instruction records only. It remains blocked for production, staging, and live runtime modes.
+
 ## Not Implemented
 
 These are explicitly outside W0D:
