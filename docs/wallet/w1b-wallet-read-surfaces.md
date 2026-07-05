@@ -100,3 +100,9 @@ W1B does not bypass `LedgerService`, but it also does not post journal movement.
 Default statement serialization removes buyer-resolvable, contact-like, and location-like refs or narratives. Public operational refs must not appear in seller responses.
 
 W1B does not change W0 import behavior, W0 shadow ledger behavior, W0 corrections, W1A posting behavior, or W1A sandbox mutation rules.
+
+## W1C Smoke Runner
+
+W1C adds a local/internal sandbox smoke runner that consumes these W1B read services to verify final wallet summary and statement output after a deterministic W1A sandbox flow.
+
+W1C does not add read or mutation routes. It keeps dry-run as the default and execute mode local/test only. Shadow balances remain excluded from W1C reads.
