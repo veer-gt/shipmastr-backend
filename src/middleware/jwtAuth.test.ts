@@ -240,6 +240,24 @@ describe("requireMasterAdminJwt", () => {
     assert.deepEqual(result.capture.body, { error: "INTERNAL_ADMIN_ONLY" });
   });
 
+  it("blocks non-master internal operator roles from checkout intelligence style endpoints", async () => {
+    for (const role of ["OPS_MANAGER", "FINANCE_MANAGER", "RISK_MANAGER", "COURIER_MANAGER", "SUPPORT_AGENT"]) {
+      mockUserFindUnique(async () => ({
+        id: "user_1",
+        merchantId: "merchant_1",
+        email: `${role.toLowerCase()}@shipmastr.test`,
+        userType: "INTERNAL_SHIPMASTR",
+        role
+      }));
+
+      const result = await runMasterAdminMiddleware(signRole(role));
+
+      assert.equal(result.nextCalled, false);
+      assert.equal(result.capture.statusCode, 403);
+      assert.deepEqual(result.capture.body, { error: "INTERNAL_ADMIN_ONLY" });
+    }
+  });
+
   it("reads active JWT req.auth rather than stale req.user fields", async () => {
     mockUserFindUnique(async () => ({
       id: "user_1",
