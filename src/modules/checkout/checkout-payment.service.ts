@@ -3,6 +3,14 @@ import { prisma } from "../../lib/prisma.js";
 import { HttpError } from "../../lib/httpError.js";
 import { serializeBuyerOrder, serializeCheckoutPayment } from "./checkout-serializers.js";
 import { CheckoutOrderService, checkoutRequestHash, type IdempotencyReplayPointer } from "./checkout-order.service.js";
+import { CheckoutTelemetryService } from "./checkout-telemetry.service.js";
+import {
+  checkoutTelemetryCartSize,
+  checkoutTelemetryContactFromCustomer,
+  checkoutTelemetryGateway,
+  checkoutTelemetryPaymentMethod,
+  checkoutTelemetrySessionIdForOrder
+} from "./checkout-telemetry-instrumentation.js";
 
 type DbClient = typeof prisma | any;
 
@@ -31,12 +39,14 @@ async function findPaymentWithOrder(client: DbClient, paymentId: string) {
 
 export class CheckoutPaymentService {
   private readonly orderService: CheckoutOrderService;
+  private readonly telemetry: CheckoutTelemetryService;
 
   constructor(
     private readonly client: DbClient = prisma,
     private readonly now: () => Date = () => new Date()
   ) {
     this.orderService = new CheckoutOrderService(client, now);
+    this.telemetry = new CheckoutTelemetryService(client, now);
   }
 
   async initiatePayment(paymentId: string, orderToken: string) {
@@ -46,9 +56,13 @@ export class CheckoutPaymentService {
 
     let nextPayment = payment;
     if (payment.state === "created") {
-      nextPayment = await this.client.checkoutPayment.update({
-        where: { id: payment.id },
-        data: { state: "initiated" }
+      nextPayment = await runTransaction(this.client, async (tx) => {
+        const initiated = await tx.checkoutPayment.update({
+          where: { id: payment.id },
+          data: { state: "initiated" }
+        });
+        await this.recordPaymentAttemptStarted(tx, { ...initiated, order: payment.order });
+        return initiated;
       });
     }
 
@@ -130,6 +144,14 @@ export class CheckoutPaymentService {
           where: { id: payment.id },
           data: { state: "failed" }
         });
+        await this.recordPaymentFailed(client, { ...failed, order: payment.order }, {
+          failureCode: "PAYMENT_CAPTURE_FAILED",
+          failureReason: "payment_capture_failed",
+          payload: {
+            paymentState: "failed",
+            outcome: "failure"
+          }
+        });
         const order = await client.checkoutOrder.findUnique({
           where: { id: payment.orderId },
           include: { timeline: { orderBy: { createdAt: "asc" } }, payments: { orderBy: { createdAt: "asc" } } }
@@ -150,6 +172,7 @@ export class CheckoutPaymentService {
       }
 
       if (["cancelled", "expired", "refund_due"].includes(payment.order.state)) {
+        const orderStateAtCapture = payment.order.state;
         const refundDue = await client.checkoutPayment.update({
           where: { id: payment.id },
           data: {
@@ -174,7 +197,7 @@ export class CheckoutPaymentService {
             metadata: { gateway: "mock", late: true }
           }
         });
-        await client.checkoutAccountingEvent.create({
+        const refundAccountingEvent = await client.checkoutAccountingEvent.create({
           data: {
             merchantId: payment.merchantId,
             orderId: payment.orderId,
@@ -184,6 +207,16 @@ export class CheckoutPaymentService {
             amountMinor: payment.amountMinor,
             currency: payment.currency,
             metadata: { reason: "late_capture_after_terminal_order_state" }
+          }
+        });
+        await this.recordPaymentFailed(client, { ...refundDue, order: payment.order }, {
+          failureCode: "CHECKOUT_PAYMENT_REFUND_DUE",
+          failureReason: "late_capture_refund_due",
+          accountingEventId: refundAccountingEvent.id,
+          payload: {
+            paymentState: "refund_due",
+            orderStateAtCapture,
+            reason: "late_capture_refund_due"
           }
         });
         const order = await client.checkoutOrder.findUnique({
@@ -221,7 +254,7 @@ export class CheckoutPaymentService {
           advancePaidMinor: payment.purpose === "advance" ? payment.amountMinor : payment.order.advancePaidMinor
         }
       });
-      await client.checkoutOrderTimeline.create({
+      const timeline = await client.checkoutOrderTimeline.create({
         data: {
           merchantId: payment.merchantId,
           orderId: payment.orderId,
@@ -230,7 +263,7 @@ export class CheckoutPaymentService {
           actor: "buyer"
         }
       });
-      await client.checkoutAccountingEvent.create({
+      const capturedAccountingEvent = await client.checkoutAccountingEvent.create({
         data: {
           merchantId: payment.merchantId,
           orderId: payment.orderId,
@@ -254,6 +287,10 @@ export class CheckoutPaymentService {
           metadata: { via: payment.purpose }
         }
       });
+      await this.recordPaymentSucceeded(client, { ...captured, order: payment.order }, {
+        timelineEntryId: timeline.id,
+        accountingEventId: capturedAccountingEvent.id
+      });
       const order = await client.checkoutOrder.findUnique({
         where: { id: payment.orderId },
         include: { timeline: { orderBy: { createdAt: "asc" } }, payments: { orderBy: { createdAt: "asc" } } }
@@ -272,5 +309,161 @@ export class CheckoutPaymentService {
         }
       };
     });
+  }
+
+  private async ensureTelemetrySession(client: DbClient, payment: any, status: "STARTED" | "COMPLETED" = "STARTED") {
+    const contact = checkoutTelemetryContactFromCustomer(payment.order?.customerJson);
+    return this.telemetry.createOrUpdateSession({
+      merchantId: payment.merchantId,
+      sessionId: checkoutTelemetrySessionIdForOrder(payment.orderId),
+      checkoutOrderId: payment.orderId,
+      quoteId: payment.order?.quoteId,
+      email: contact.email,
+      phone: contact.phone,
+      cartValueMinor: payment.order?.grandTotalMinor ?? payment.amountMinor,
+      currency: payment.currency,
+      cartSize: checkoutTelemetryCartSize(payment.order?.itemsJson),
+      status
+    }, { client });
+  }
+
+  private async recordPaymentAttemptStarted(client: DbClient, payment: any) {
+    const session = await this.ensureTelemetrySession(client, payment);
+    await this.telemetry.upsertPaymentAttemptForCheckoutPayment({
+      telemetrySessionId: session.id,
+      merchantId: payment.merchantId,
+      checkoutOrderId: payment.orderId,
+      checkoutPaymentId: payment.id,
+      paymentMethod: checkoutTelemetryPaymentMethod(payment),
+      gatewayUsed: checkoutTelemetryGateway(payment),
+      amountMinor: payment.amountMinor,
+      currency: payment.currency,
+      status: "STARTED",
+      gatewayOrderId: payment.gatewayOrderRef,
+      gatewayPaymentId: payment.gatewayPaymentRef,
+      attemptNumber: 1,
+      startedAt: payment.createdAt ?? this.now()
+    }, { client });
+    await this.telemetry.recordEvent({
+      telemetrySessionId: session.id,
+      merchantId: payment.merchantId,
+      checkoutOrderId: payment.orderId,
+      checkoutPaymentId: payment.id,
+      eventName: "payment_attempt_started",
+      idempotencyKey: `payment_attempt_started:${payment.id}`,
+      source: "BACKEND",
+      payloadJson: {
+        paymentState: "initiated",
+        paymentPurpose: payment.purpose,
+        gateway: payment.gateway,
+        amountMinor: payment.amountMinor,
+        currency: payment.currency
+      }
+    }, { client });
+  }
+
+  private async recordPaymentSucceeded(
+    client: DbClient,
+    payment: any,
+    links: { timelineEntryId?: string | null; accountingEventId?: string | null }
+  ) {
+    const session = await this.ensureTelemetrySession(client, payment, "COMPLETED");
+    await this.telemetry.upsertPaymentAttemptForCheckoutPayment({
+      telemetrySessionId: session.id,
+      merchantId: payment.merchantId,
+      checkoutOrderId: payment.orderId,
+      checkoutPaymentId: payment.id,
+      paymentMethod: checkoutTelemetryPaymentMethod(payment),
+      gatewayUsed: checkoutTelemetryGateway(payment),
+      amountMinor: payment.amountMinor,
+      currency: payment.currency,
+      status: "SUCCEEDED",
+      gatewayOrderId: payment.gatewayOrderRef,
+      gatewayPaymentId: payment.gatewayPaymentRef,
+      attemptNumber: 1,
+      startedAt: payment.createdAt ?? this.now(),
+      completedAt: payment.capturedAt ?? this.now()
+    }, { client });
+    await this.telemetry.recordEvent({
+      telemetrySessionId: session.id,
+      merchantId: payment.merchantId,
+      checkoutOrderId: payment.orderId,
+      checkoutPaymentId: payment.id,
+      timelineEntryId: links.timelineEntryId,
+      accountingEventId: links.accountingEventId,
+      eventName: "payment_succeeded",
+      idempotencyKey: `payment_succeeded:${payment.id}`,
+      source: "BACKEND",
+      payloadJson: {
+        paymentState: "captured",
+        orderState: "confirmed",
+        paymentPurpose: payment.purpose,
+        gateway: payment.gateway,
+        amountMinor: payment.amountMinor,
+        currency: payment.currency
+      }
+    }, { client });
+  }
+
+  private async recordPaymentFailed(
+    client: DbClient,
+    payment: any,
+    input: {
+      failureCode: string;
+      failureReason: string;
+      accountingEventId?: string | null;
+      payload?: Record<string, unknown>;
+    }
+  ) {
+    const session = await this.ensureTelemetrySession(client, payment);
+    const attempt = await this.telemetry.upsertPaymentAttemptForCheckoutPayment({
+      telemetrySessionId: session.id,
+      merchantId: payment.merchantId,
+      checkoutOrderId: payment.orderId,
+      checkoutPaymentId: payment.id,
+      paymentMethod: checkoutTelemetryPaymentMethod(payment),
+      gatewayUsed: checkoutTelemetryGateway(payment),
+      amountMinor: payment.amountMinor,
+      currency: payment.currency,
+      status: "FAILED",
+      gatewayOrderId: payment.gatewayOrderRef,
+      gatewayPaymentId: payment.gatewayPaymentRef,
+      errorCode: input.failureCode,
+      errorMessage: input.failureReason,
+      attemptNumber: 1,
+      startedAt: payment.createdAt ?? this.now(),
+      completedAt: payment.capturedAt ?? this.now()
+    }, { client });
+    await this.telemetry.recordEvent({
+      telemetrySessionId: session.id,
+      merchantId: payment.merchantId,
+      checkoutOrderId: payment.orderId,
+      checkoutPaymentId: payment.id,
+      accountingEventId: input.accountingEventId,
+      eventName: "payment_failed",
+      idempotencyKey: `payment_failed:${payment.id}:${input.failureCode}`,
+      source: "BACKEND",
+      payloadJson: {
+        paymentPurpose: payment.purpose,
+        gateway: payment.gateway,
+        amountMinor: payment.amountMinor,
+        currency: payment.currency,
+        ...input.payload
+      }
+    }, { client });
+    await this.telemetry.createFailure({
+      telemetrySessionId: session.id,
+      merchantId: payment.merchantId,
+      checkoutOrderId: payment.orderId,
+      checkoutPaymentId: payment.id,
+      telemetryPaymentAttemptId: attempt.id,
+      failureStage: "PAYMENT",
+      failureReason: input.failureReason,
+      failureCode: input.failureCode,
+      amountAtRiskMinor: payment.amountMinor,
+      currency: payment.currency,
+      isRecoverable: true,
+      source: "BACKEND"
+    }, { client });
   }
 }

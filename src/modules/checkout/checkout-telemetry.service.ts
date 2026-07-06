@@ -364,26 +364,52 @@ export class CheckoutTelemetryService {
   async createPaymentAttempt(input: CheckoutTelemetryPaymentAttemptInput, options: ServiceOptions = {}) {
     const client = this.db(options);
     return client.checkoutTelemetryPaymentAttempt.create({
+      data: this.paymentAttemptData(input)
+    });
+  }
+
+  async upsertPaymentAttemptForCheckoutPayment(input: CheckoutTelemetryPaymentAttemptInput, options: ServiceOptions = {}) {
+    const client = this.db(options);
+    const checkoutPaymentId = optionalText(input.checkoutPaymentId);
+    const data = this.paymentAttemptData(input);
+    if (!checkoutPaymentId) return client.checkoutTelemetryPaymentAttempt.create({ data });
+
+    const existing = await client.checkoutTelemetryPaymentAttempt.findFirst({
+      where: { checkoutPaymentId },
+      orderBy: { createdAt: "asc" }
+    });
+
+    if (!existing) return client.checkoutTelemetryPaymentAttempt.create({ data });
+
+    return client.checkoutTelemetryPaymentAttempt.update({
+      where: { id: existing.id },
       data: {
-        telemetrySessionId: nonEmpty(input.telemetrySessionId, "telemetrySessionId"),
-        merchantId: nonEmpty(input.merchantId, "merchantId"),
-        sellerId: optionalText(input.sellerId),
-        checkoutOrderId: optionalText(input.checkoutOrderId),
-        checkoutPaymentId: optionalText(input.checkoutPaymentId),
-        paymentMethod: nonEmpty(input.paymentMethod, "paymentMethod"),
-        gatewayUsed: optionalText(input.gatewayUsed),
-        amountMinor: normalizeMinor(input.amountMinor, "amountMinor"),
-        currency: normalizeCurrency(input.currency),
-        status: assertOneOf(input.status, CHECKOUT_TELEMETRY_PAYMENT_ATTEMPT_STATUSES, "status"),
-        gatewayPaymentId: optionalText(input.gatewayPaymentId),
-        gatewayOrderId: optionalText(input.gatewayOrderId),
-        errorCode: optionalText(input.errorCode),
-        errorMessage: optionalText(input.errorMessage),
-        attemptNumber: requiredPositiveInt(input.attemptNumber, 1, "attemptNumber"),
-        startedAt: input.startedAt ?? this.now(),
-        completedAt: input.completedAt ?? null
+        ...data,
+        startedAt: input.startedAt ?? undefined
       }
     });
+  }
+
+  private paymentAttemptData(input: CheckoutTelemetryPaymentAttemptInput) {
+    return {
+      telemetrySessionId: nonEmpty(input.telemetrySessionId, "telemetrySessionId"),
+      merchantId: nonEmpty(input.merchantId, "merchantId"),
+      sellerId: optionalText(input.sellerId),
+      checkoutOrderId: optionalText(input.checkoutOrderId),
+      checkoutPaymentId: optionalText(input.checkoutPaymentId),
+      paymentMethod: nonEmpty(input.paymentMethod, "paymentMethod"),
+      gatewayUsed: optionalText(input.gatewayUsed),
+      amountMinor: normalizeMinor(input.amountMinor, "amountMinor"),
+      currency: normalizeCurrency(input.currency),
+      status: assertOneOf(input.status, CHECKOUT_TELEMETRY_PAYMENT_ATTEMPT_STATUSES, "status"),
+      gatewayPaymentId: optionalText(input.gatewayPaymentId),
+      gatewayOrderId: optionalText(input.gatewayOrderId),
+      errorCode: optionalText(input.errorCode),
+      errorMessage: optionalText(input.errorMessage),
+      attemptNumber: requiredPositiveInt(input.attemptNumber, 1, "attemptNumber"),
+      startedAt: input.startedAt ?? this.now(),
+      completedAt: input.completedAt ?? null
+    };
   }
 
   async createFailure(input: CheckoutTelemetryFailureInput, options: ServiceOptions = {}) {

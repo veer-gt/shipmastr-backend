@@ -26,6 +26,17 @@ function uniqueConflict() {
   return Object.assign(new Error("unique conflict"), { code: "P2002" });
 }
 
+function matchesWhere(row: any, where: any = {}) {
+  for (const [key, value] of Object.entries(where)) {
+    if (row[key] !== value) return false;
+  }
+  return true;
+}
+
+function replaceArray<T>(target: T[], next: T[]) {
+  target.splice(0, target.length, ...next);
+}
+
 function makeHarness() {
   const state = {
     now: new Date(baseTime),
@@ -38,6 +49,12 @@ function makeHarness() {
     payments: [] as any[],
     accountingEvents: [] as any[],
     idempotencyKeys: [] as any[],
+    telemetrySessions: [] as any[],
+    telemetryEvents: [] as any[],
+    telemetryPaymentAttempts: [] as any[],
+    telemetryFailures: [] as any[],
+    failTelemetryEventNames: new Set<string>(),
+    transactionDepth: 0,
     walletWrites: [] as string[]
   };
 
@@ -68,7 +85,44 @@ function makeHarness() {
   }
 
   const client: any = {
-    $transaction: async (callback: any) => callback(client),
+    $transaction: async (callback: any) => {
+      const snapshot = {
+        settings: clone(state.settings),
+        rulesVersions: clone(state.rulesVersions),
+        quotes: clone(state.quotes),
+        orders: clone(state.orders),
+        timeline: clone(state.timeline),
+        payments: clone(state.payments),
+        accountingEvents: clone(state.accountingEvents),
+        idempotencyKeys: clone(state.idempotencyKeys),
+        telemetrySessions: clone(state.telemetrySessions),
+        telemetryEvents: clone(state.telemetryEvents),
+        telemetryPaymentAttempts: clone(state.telemetryPaymentAttempts),
+        telemetryFailures: clone(state.telemetryFailures),
+        walletWrites: clone(state.walletWrites)
+      };
+      state.transactionDepth += 1;
+      try {
+        return await callback(client);
+      } catch (error) {
+        replaceArray(state.settings, snapshot.settings);
+        replaceArray(state.rulesVersions, snapshot.rulesVersions);
+        replaceArray(state.quotes, snapshot.quotes);
+        replaceArray(state.orders, snapshot.orders);
+        replaceArray(state.timeline, snapshot.timeline);
+        replaceArray(state.payments, snapshot.payments);
+        replaceArray(state.accountingEvents, snapshot.accountingEvents);
+        replaceArray(state.idempotencyKeys, snapshot.idempotencyKeys);
+        replaceArray(state.telemetrySessions, snapshot.telemetrySessions);
+        replaceArray(state.telemetryEvents, snapshot.telemetryEvents);
+        replaceArray(state.telemetryPaymentAttempts, snapshot.telemetryPaymentAttempts);
+        replaceArray(state.telemetryFailures, snapshot.telemetryFailures);
+        replaceArray(state.walletWrites, snapshot.walletWrites);
+        throw error;
+      } finally {
+        state.transactionDepth -= 1;
+      }
+    },
     merchant: {
       findUnique: async ({ where }: any) => clone(state.merchants.find((row) => row.id === where.id) ?? null)
     },
@@ -182,6 +236,93 @@ function makeHarness() {
           ...data
         };
         state.idempotencyKeys.push(row);
+        return clone(row);
+      }
+    },
+    checkoutTelemetrySession: {
+      upsert: async ({ where, create, update }: any) => {
+        const unique = where.merchantId_sessionId;
+        const existing = state.telemetrySessions.find((row) =>
+          row.merchantId === unique.merchantId && row.sessionId === unique.sessionId
+        );
+        if (existing) {
+          Object.assign(existing, update, {
+            updatedAt: state.now,
+            insideTransaction: state.transactionDepth > 0
+          });
+          return clone(existing);
+        }
+        const row = {
+          id: `telemetry_session_${state.telemetrySessions.length + 1}`,
+          createdAt: state.now,
+          updatedAt: state.now,
+          insideTransaction: state.transactionDepth > 0,
+          ...create
+        };
+        state.telemetrySessions.push(row);
+        return clone(row);
+      }
+    },
+    checkoutTelemetryEvent: {
+      create: async ({ data }: any) => {
+        if (state.failTelemetryEventNames.has(data.eventName)) throw new Error(`telemetry failed: ${data.eventName}`);
+        if (data.idempotencyKey && state.telemetryEvents.some((row) =>
+          row.telemetrySessionId === data.telemetrySessionId
+          && row.eventName === data.eventName
+          && row.idempotencyKey === data.idempotencyKey
+        )) {
+          throw uniqueConflict();
+        }
+        const row = {
+          id: `telemetry_event_${state.telemetryEvents.length + 1}`,
+          createdAt: state.now,
+          insideTransaction: state.transactionDepth > 0,
+          ...data
+        };
+        state.telemetryEvents.push(row);
+        return clone(row);
+      },
+      findUnique: async ({ where }: any) => {
+        const unique = where.telemetrySessionId_eventName_idempotencyKey;
+        return clone(state.telemetryEvents.find((row) => matchesWhere(row, unique)) ?? null);
+      }
+    },
+    checkoutTelemetryPaymentAttempt: {
+      create: async ({ data }: any) => {
+        const row = {
+          id: `telemetry_payment_attempt_${state.telemetryPaymentAttempts.length + 1}`,
+          createdAt: state.now,
+          updatedAt: state.now,
+          insideTransaction: state.transactionDepth > 0,
+          ...data
+        };
+        state.telemetryPaymentAttempts.push(row);
+        return clone(row);
+      },
+      findFirst: async ({ where, orderBy }: any) => {
+        let rows = state.telemetryPaymentAttempts.filter((row) => matchesWhere(row, where));
+        if (orderBy?.createdAt === "asc") rows = rows.sort((a, b) => a.createdAt.getTime() - b.createdAt.getTime());
+        return clone(rows[0] ?? null);
+      },
+      update: async ({ where, data }: any) => {
+        const row = state.telemetryPaymentAttempts.find((item) => item.id === where.id);
+        if (!row) throw new Error("TELEMETRY_PAYMENT_ATTEMPT_NOT_FOUND");
+        Object.assign(row, data, {
+          updatedAt: state.now,
+          insideTransaction: state.transactionDepth > 0
+        });
+        return clone(row);
+      }
+    },
+    checkoutTelemetryFailure: {
+      create: async ({ data }: any) => {
+        const row = {
+          id: `telemetry_failure_${state.telemetryFailures.length + 1}`,
+          createdAt: state.now,
+          insideTransaction: state.transactionDepth > 0,
+          ...data
+        };
+        state.telemetryFailures.push(row);
         return clone(row);
       }
     },
@@ -404,6 +545,45 @@ describe("Checkout C1 order and payment foundation", () => {
     assert.equal((partialResult.body as any).order.amounts.payOnDelivery, 103920);
   });
 
+  it("writes order_placed telemetry inside the authoritative order transaction", async () => {
+    const { state, createOrder } = makeHarness();
+    const result = await createOrder("full_cod", "idem_order_telemetry");
+    const body = result.body as any;
+
+    assert.equal(state.telemetrySessions.length, 1);
+    assert.equal(state.telemetrySessions[0].sessionId, `checkout-order:${body.order.id}`);
+    assert.equal(state.telemetrySessions[0].checkoutOrderId, body.order.id);
+    assert.equal(state.telemetrySessions[0].sellerId, null);
+    assert.ok(state.telemetrySessions[0].emailHash);
+    assert.ok(state.telemetrySessions[0].phoneHash);
+    assert.equal(state.telemetrySessions[0].insideTransaction, true);
+
+    const event = state.telemetryEvents.find((row) => row.eventName === "order_placed");
+    assert.ok(event);
+    assert.equal(event.checkoutOrderId, body.order.id);
+    assert.equal(event.timelineEntryId, state.timeline[0].id);
+    assert.equal(event.accountingEventId, state.accountingEvents.find((row) => row.eventType === "checkout_order_created")?.id);
+    assert.equal(event.idempotencyKey, `order_placed:${body.order.id}`);
+    assert.equal(event.source, "ORDER_SERVICE");
+    assert.equal(event.insideTransaction, true);
+    assert.equal(JSON.stringify(event.payloadJson).includes("asha@example.test"), false);
+    assert.equal(JSON.stringify(event.payloadJson).includes("9876543210"), false);
+  });
+
+  it("rolls back order_placed telemetry with the order transaction", async () => {
+    const { state, createOrder } = makeHarness();
+    state.failTelemetryEventNames.add("order_placed");
+
+    await assert.rejects(() => createOrder("full_cod", "idem_order_telemetry_rollback"), /telemetry failed: order_placed/);
+
+    assert.equal(state.orders.length, 0);
+    assert.equal(state.timeline.length, 0);
+    assert.equal(state.accountingEvents.length, 0);
+    assert.equal(state.telemetrySessions.length, 0);
+    assert.equal(state.telemetryEvents.length, 0);
+    assert.equal(state.idempotencyKeys.length, 0);
+  });
+
   it("protects buyer reads with signed order token", async () => {
     const { createOrder, orderService } = makeHarness();
     const result = await createOrder("partial_cod", "idem_token");
@@ -420,6 +600,7 @@ describe("Checkout C1 order and payment foundation", () => {
     const partial = makeHarness();
     const partialOrder = await partial.createOrder("partial_cod", "idem_capture_order");
     const partialBody = partialOrder.body as any;
+    await partial.paymentService.initiatePayment(partialBody.payment.id, partialBody.orderToken);
     const captured = await partial.paymentService.mockComplete({
       paymentId: partialBody.payment.id,
       orderToken: partialBody.orderToken,
@@ -436,6 +617,11 @@ describe("Checkout C1 order and payment foundation", () => {
     assert.equal((replay.body as any).order.state, "confirmed");
     assert.equal(partial.state.accountingEvents.filter((event) => event.eventType === "advance_captured").length, 1);
     assert.equal(partial.state.timeline.filter((row) => row.type === "payment").length, 1);
+    assert.equal(partial.state.telemetryEvents.filter((event) => event.eventName === "payment_attempt_started").length, 1);
+    assert.equal(partial.state.telemetryEvents.filter((event) => event.eventName === "payment_succeeded").length, 1);
+    assert.equal(partial.state.telemetryPaymentAttempts.length, 1);
+    assert.equal(partial.state.telemetryPaymentAttempts[0].status, "SUCCEEDED");
+    assert.equal(partial.state.telemetryPaymentAttempts[0].checkoutPaymentId, partialBody.payment.id);
 
     const prepaid = makeHarness();
     const prepaidOrder = await prepaid.createOrder("prepaid", "idem_full_payment_order");
@@ -448,6 +634,49 @@ describe("Checkout C1 order and payment foundation", () => {
     });
     assert.equal((full.body as any).order.state, "confirmed");
     assert.equal(prepaid.state.accountingEvents.filter((event) => event.eventType === "full_payment_captured").length, 1);
+  });
+
+  it("writes payment_attempt_started when payment initiation becomes authoritative", async () => {
+    const harness = makeHarness();
+    const order = await harness.createOrder("prepaid", "idem_payment_attempt_started");
+    const body = order.body as any;
+
+    await harness.paymentService.initiatePayment(body.payment.id, body.orderToken);
+
+    const event = harness.state.telemetryEvents.find((row) => row.eventName === "payment_attempt_started");
+    assert.ok(event);
+    assert.equal(event.checkoutPaymentId, body.payment.id);
+    assert.equal(event.checkoutOrderId, body.order.id);
+    assert.equal(event.idempotencyKey, `payment_attempt_started:${body.payment.id}`);
+    assert.equal(event.insideTransaction, true);
+    assert.equal(harness.state.telemetryPaymentAttempts.length, 1);
+    assert.equal(harness.state.telemetryPaymentAttempts[0].status, "STARTED");
+    assert.equal(harness.state.telemetryPaymentAttempts[0].insideTransaction, true);
+  });
+
+  it("rolls back clean payment success telemetry with the payment transaction", async () => {
+    const harness = makeHarness();
+    const order = await harness.createOrder("partial_cod", "idem_payment_success_rollback_order");
+    const body = order.body as any;
+    await harness.paymentService.initiatePayment(body.payment.id, body.orderToken);
+    harness.state.failTelemetryEventNames.add("payment_succeeded");
+
+    await assert.rejects(
+      () => harness.paymentService.mockComplete({
+        paymentId: body.payment.id,
+        orderToken: body.orderToken,
+        outcome: "success",
+        idempotencyKey: "idem_payment_success_rollback"
+      }),
+      /telemetry failed: payment_succeeded/
+    );
+
+    assert.equal(harness.state.payments[0].state, "initiated");
+    assert.equal(harness.state.orders[0].state, "pending_advance");
+    assert.equal(harness.state.telemetryEvents.some((event) => event.eventName === "payment_succeeded"), false);
+    assert.equal(harness.state.accountingEvents.some((event) => event.eventType === "advance_captured"), false);
+    assert.equal(harness.state.timeline.some((row) => row.type === "payment"), false);
+    assert.equal(harness.state.idempotencyKeys.some((row) => row.operation.startsWith("checkout_payment_capture:")), false);
   });
 
   it("marks late captures after cancelled or expired orders as refund_due", async () => {
@@ -463,6 +692,14 @@ describe("Checkout C1 order and payment foundation", () => {
     });
     assert.equal((lateCancel.body as any).order.state, "refund_due");
     assert.equal((lateCancel.body as any).payment.state, "refund_due");
+    assert.equal(cancelled.state.telemetryEvents.some((event) => event.eventName === "payment_succeeded"), false);
+    const refundEvent = cancelled.state.telemetryEvents.find((event) => event.eventName === "payment_failed");
+    assert.ok(refundEvent);
+    assert.equal(refundEvent.checkoutPaymentId, cancelBody.payment.id);
+    assert.equal(refundEvent.idempotencyKey, `payment_failed:${cancelBody.payment.id}:CHECKOUT_PAYMENT_REFUND_DUE`);
+    assert.equal(refundEvent.payloadJson.reason, "late_capture_refund_due");
+    assert.equal(cancelled.state.telemetryFailures[0].failureStage, "PAYMENT");
+    assert.equal(cancelled.state.telemetryFailures[0].failureCode, "CHECKOUT_PAYMENT_REFUND_DUE");
 
     const expired = makeHarness();
     const expiredOrder = await expired.createOrder("partial_cod", "idem_expired_order");
@@ -476,6 +713,7 @@ describe("Checkout C1 order and payment foundation", () => {
     });
     assert.equal((lateExpired.body as any).order.state, "refund_due");
     assert.equal(expired.state.accountingEvents.filter((event) => event.eventType === "payment_refund_due").length, 1);
+    assert.equal(expired.state.telemetryEvents.some((event) => event.eventName === "payment_succeeded"), false);
   });
 
   it("keeps failed mock payments from confirming an order", async () => {
@@ -497,6 +735,16 @@ describe("Checkout C1 order and payment foundation", () => {
     assert.equal((failed.body as any).payment.state, "failed");
     assert.equal((failed.body as any).order.state, "pending_payment");
     assert.equal((replay.body as any).alreadyCaptured, false);
+    const failureEvent = harness.state.telemetryEvents.find((event) => event.eventName === "payment_failed");
+    assert.ok(failureEvent);
+    assert.equal(failureEvent.checkoutPaymentId, body.payment.id);
+    assert.equal(failureEvent.checkoutOrderId, body.order.id);
+    assert.equal(failureEvent.idempotencyKey, `payment_failed:${body.payment.id}:PAYMENT_CAPTURE_FAILED`);
+    assert.equal(harness.state.telemetryEvents.some((event) => event.eventName === "payment_succeeded"), false);
+    assert.equal(harness.state.telemetryPaymentAttempts[0].status, "FAILED");
+    assert.equal(harness.state.telemetryFailures[0].failureStage, "PAYMENT");
+    assert.equal(harness.state.telemetryFailures[0].failureCode, "PAYMENT_CAPTURE_FAILED");
+    assert.equal(harness.state.payments[0].state, "failed");
   });
 
   it("uses dedicated CheckoutIdempotencyKey request hashes", () => {

@@ -8,6 +8,11 @@ import {
   type CheckoutMode
 } from "./checkout-quote.service.js";
 import { serializeBuyerOrder, serializeCheckoutPayment } from "./checkout-serializers.js";
+import { CheckoutTelemetryService } from "./checkout-telemetry.service.js";
+import {
+  checkoutTelemetryCartSize,
+  checkoutTelemetrySessionIdForOrder
+} from "./checkout-telemetry-instrumentation.js";
 
 type DbClient = typeof prisma | any;
 
@@ -176,10 +181,14 @@ async function persistCheckoutIdempotency(input: {
 }
 
 export class CheckoutOrderService {
+  private readonly telemetry: CheckoutTelemetryService;
+
   constructor(
     private readonly client: DbClient = prisma,
     private readonly now: () => Date = () => new Date()
-  ) {}
+  ) {
+    this.telemetry = new CheckoutTelemetryService(client, now);
+  }
 
   async createOrder(input: CreateCheckoutOrderInput) {
     const quote = await this.client.checkoutQuote.findUnique({ where: { id: input.quoteId } });
@@ -339,7 +348,7 @@ export class CheckoutOrderService {
         actor: "buyer"
       }
     });
-    await tx.checkoutAccountingEvent.create({
+    const accountingEvent = await tx.checkoutAccountingEvent.create({
       data: {
         merchantId: quote.merchantId,
         orderId,
@@ -352,6 +361,38 @@ export class CheckoutOrderService {
         }
       }
     });
+    const telemetrySession = await this.telemetry.createOrUpdateSession({
+      merchantId: quote.merchantId,
+      sessionId: checkoutTelemetrySessionIdForOrder(orderId),
+      checkoutOrderId: orderId,
+      quoteId: quote.id,
+      email: customer.email,
+      phone: customer.phone,
+      cartValueMinor: selected.total,
+      currency: quote.currency,
+      cartSize: checkoutTelemetryCartSize(quote.itemsJson),
+      status: selected.payNow > 0n ? "STARTED" : "COMPLETED"
+    }, { client: tx });
+    await this.telemetry.recordEvent({
+      telemetrySessionId: telemetrySession.id,
+      merchantId: quote.merchantId,
+      checkoutOrderId: orderId,
+      timelineEntryId: timeline.id,
+      accountingEventId: accountingEvent.id,
+      eventName: "order_placed",
+      idempotencyKey: `order_placed:${orderId}`,
+      source: "ORDER_SERVICE",
+      payloadJson: {
+        mode: input.mode,
+        orderState: state,
+        currency: quote.currency,
+        quoteId: quote.id,
+        totalMinor: selected.total,
+        payNowMinor: selected.payNow,
+        payOnDeliveryMinor: selected.payOnDelivery,
+        cartSize: checkoutTelemetryCartSize(quote.itemsJson)
+      }
+    }, { client: tx });
 
     let payment: any = null;
     if (selected.payNow > 0n) {

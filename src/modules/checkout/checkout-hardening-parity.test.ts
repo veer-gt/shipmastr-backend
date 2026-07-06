@@ -81,6 +81,11 @@ function makeHarness() {
     accountingEvents: [] as any[],
     auditLogs: [] as any[],
     idempotencyKeys: [] as any[],
+    telemetrySessions: [] as any[],
+    telemetryEvents: [] as any[],
+    telemetryPaymentAttempts: [] as any[],
+    telemetryFailures: [] as any[],
+    transactionDepth: 0,
     walletWrites: [] as string[]
   };
 
@@ -128,7 +133,14 @@ function makeHarness() {
   }
 
   const client: any = {
-    $transaction: async (callback: any) => callback(client),
+    $transaction: async (callback: any) => {
+      state.transactionDepth += 1;
+      try {
+        return await callback(client);
+      } finally {
+        state.transactionDepth -= 1;
+      }
+    },
     merchant: {
       findUnique: async ({ where }: any) => clone(state.merchants.find((row) => row.id === where.id) ?? null)
     },
@@ -314,6 +326,92 @@ function makeHarness() {
           ...data
         };
         state.idempotencyKeys.push(row);
+        return clone(row);
+      }
+    },
+    checkoutTelemetrySession: {
+      upsert: async ({ where, create, update }: any) => {
+        const unique = where.merchantId_sessionId;
+        const existing = state.telemetrySessions.find((row) =>
+          row.merchantId === unique.merchantId && row.sessionId === unique.sessionId
+        );
+        if (existing) {
+          Object.assign(existing, update, {
+            updatedAt: state.now,
+            insideTransaction: state.transactionDepth > 0
+          });
+          return clone(existing);
+        }
+        const row = {
+          id: `telemetry_session_${state.telemetrySessions.length + 1}`,
+          createdAt: state.now,
+          updatedAt: state.now,
+          insideTransaction: state.transactionDepth > 0,
+          ...create
+        };
+        state.telemetrySessions.push(row);
+        return clone(row);
+      }
+    },
+    checkoutTelemetryEvent: {
+      create: async ({ data }: any) => {
+        if (data.idempotencyKey && state.telemetryEvents.some((row) =>
+          row.telemetrySessionId === data.telemetrySessionId
+          && row.eventName === data.eventName
+          && row.idempotencyKey === data.idempotencyKey
+        )) {
+          throw uniqueConflict();
+        }
+        const row = {
+          id: `telemetry_event_${state.telemetryEvents.length + 1}`,
+          createdAt: state.now,
+          insideTransaction: state.transactionDepth > 0,
+          ...data
+        };
+        state.telemetryEvents.push(row);
+        return clone(row);
+      },
+      findUnique: async ({ where }: any) => {
+        const unique = where.telemetrySessionId_eventName_idempotencyKey;
+        return clone(state.telemetryEvents.find((row) => matchesWhere(row, unique)) ?? null);
+      }
+    },
+    checkoutTelemetryPaymentAttempt: {
+      create: async ({ data }: any) => {
+        const row = {
+          id: `telemetry_payment_attempt_${state.telemetryPaymentAttempts.length + 1}`,
+          createdAt: state.now,
+          updatedAt: state.now,
+          insideTransaction: state.transactionDepth > 0,
+          ...data
+        };
+        state.telemetryPaymentAttempts.push(row);
+        return clone(row);
+      },
+      findFirst: async ({ where, orderBy }: any) => {
+        let rows = state.telemetryPaymentAttempts.filter((row) => matchesWhere(row, where));
+        if (orderBy?.createdAt === "asc") rows = rows.sort((a, b) => a.createdAt.getTime() - b.createdAt.getTime());
+        return clone(rows[0] ?? null);
+      },
+      update: async ({ where, data }: any) => {
+        const row = state.telemetryPaymentAttempts.find((item) => item.id === where.id);
+        if (!row) throw new Error("TELEMETRY_PAYMENT_ATTEMPT_NOT_FOUND");
+        Object.assign(row, data, {
+          updatedAt: state.now,
+          insideTransaction: state.transactionDepth > 0
+        });
+        return clone(row);
+      }
+    },
+    checkoutTelemetryFailure: {
+      create: async ({ data }: any) => {
+        const row = {
+          id: `telemetry_failure_${state.telemetryFailures.length + 1}`,
+          createdAt: state.now,
+          insideTransaction: state.transactionDepth > 0,
+          ...data
+        };
+        state.telemetryFailures.push(row);
         return clone(row);
       }
     },
