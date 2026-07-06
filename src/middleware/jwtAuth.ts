@@ -2,6 +2,7 @@ import type { Request, Response, NextFunction } from "express";
 import jwt from "jsonwebtoken";
 import { env } from "../config/env.js";
 import { isAdminRole, isCourierRole, normalizeAccountRole, UserRole } from "../lib/accountRoles.js";
+import { isInternalMasterAdminUser } from "../lib/masterAdmin.js";
 import { prisma } from "../lib/prisma.js";
 
 type SellerJwtPayload = {
@@ -50,15 +51,6 @@ export function requireJwtAuth(req: Request, res: Response, next: NextFunction) 
   }
 }
 
-const INTERNAL_ADMIN_ROLES = new Set([
-  "MASTER_ADMIN",
-  "ADMIN",
-  "OPS_MANAGER",
-  "FINANCE_MANAGER",
-  "RISK_MANAGER",
-  "COURIER_MANAGER",
-]);
-
 export function requireAdminJwt(req: Request, res: Response, next: NextFunction) {
   return requireJwtAuth(req, res, async () => {
     if (!isAdminRole(req.auth?.role)) {
@@ -70,16 +62,13 @@ export function requireAdminJwt(req: Request, res: Response, next: NextFunction)
       select: {
         id: true,
         merchantId: true,
+        email: true,
         userType: true,
         role: true,
       },
     });
 
-    if (
-      !user ||
-      user.userType !== "INTERNAL_SHIPMASTR" ||
-      !INTERNAL_ADMIN_ROLES.has(user.role)
-    ) {
+    if (!user || !isInternalMasterAdminUser(user)) {
       return res.status(403).json({ error: "INTERNAL_ADMIN_ONLY" });
     }
 
