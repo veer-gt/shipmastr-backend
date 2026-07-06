@@ -48,6 +48,7 @@ describe("Phase 30 end-to-end merchant shipping beta audit", () => {
       webhookWorkerEnabled: false,
       notificationWorkerEnabled: false,
       retryWorkerEnabled: false,
+      checkoutTelemetryAbandonmentWorkerEnabled: false,
       maxBatch: 25,
       lockSeconds: 300,
       dryRun: true
