@@ -291,14 +291,19 @@ describe("internal storefront renderer lookup", () => {
     assert.equal(response.statusCode, 200);
     assert.deepEqual(Object.keys(response.body as Record<string, unknown>).sort(), [
       "domain",
+      "merchantId",
       "status",
       "storeName",
       "themeJson"
     ]);
     assert.equal((response.body as any).domain, "celvyawellness.in");
+    assert.equal((response.body as any).merchantId, "merchant_celvya");
     assert.equal((response.body as any).status, "ACTIVE");
-    assert.equal(JSON.stringify(response.body).includes("merchant_"), false);
     assert.equal(JSON.stringify(response.body).includes("tenant_"), false);
+    assert.equal(Object.hasOwn(response.body as Record<string, unknown>, "tenantId"), false);
+    assert.equal(Object.hasOwn(response.body as Record<string, unknown>, "customHostnameId"), false);
+    assert.equal(Object.hasOwn(response.body as Record<string, unknown>, "provider"), false);
+    assert.equal(Object.hasOwn(response.body as Record<string, unknown>, "provisioningStatus"), false);
   });
 
   it("returns NOT_FOUND for missing public storefront lookup domains", async () => {
@@ -392,9 +397,10 @@ describe("internal storefront renderer lookup", () => {
 
     assert.equal(response.statusCode, 200);
     assert.equal((response.body as any).domain, "www.shipmastr.co.in");
+    assert.equal((response.body as any).merchantId, "merchant_storefront_demo");
     assert.equal((response.body as any).storeName, "Shipmastr Demo Store");
     assert.equal((response.body as any).status, "ACTIVE");
-    assert.equal(JSON.stringify(response.body).includes("merchant_storefront_demo"), false);
+    assert.equal(Object.hasOwn(response.body as Record<string, unknown>, "tenantId"), false);
     assert.equal(JSON.stringify(response.body).includes("customHostnameId"), false);
   });
 
@@ -426,8 +432,9 @@ describe("internal storefront renderer lookup", () => {
 
     assert.equal(response.statusCode, 200);
     assert.equal((response.body as any).domain, "www.shipmastr.co.in");
+    assert.equal((response.body as any).merchantId, "merchant_storefront_demo");
     assert.equal((response.body as any).storeName, "Shipmastr Demo Store");
-    assert.equal(JSON.stringify(response.body).includes("merchant_storefront_demo"), false);
+    assert.equal(Object.hasOwn(response.body as Record<string, unknown>, "tenantId"), false);
   });
 
   it("returns CONFIG_ERROR when theme settings are missing", async () => {

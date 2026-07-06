@@ -99,6 +99,7 @@ export function createPublicStorefrontLookupHandler(client?: StorefrontLookupCli
 
       return res.json({
         domain: storefront.domain,
+        merchantId: storefront.merchantId,
         storeName: storefront.storeName,
         status: storefront.status,
         themeJson: storefront.themeJson
