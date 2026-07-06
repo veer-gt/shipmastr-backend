@@ -134,7 +134,7 @@ function createClient() {
     { id: "event_order_2", eventName: "order_placed", telemetrySessionId: "session_refund_due", merchantId, sellerId: null, checkoutOrderId: "order_refund_due", source: "ORDER_SERVICE", occurredAt: new Date("2026-07-06T09:05:00.000Z"), payloadJson: { orderState: "cancelled" } },
     { id: "event_failed_refund", eventName: "payment_failed", telemetrySessionId: "session_refund_due", merchantId, sellerId: null, checkoutOrderId: "order_refund_due", checkoutPaymentId: "payment_refund_due", source: "PAYMENT_WEBHOOK", occurredAt: new Date("2026-07-06T09:06:00.000Z"), payloadJson: { reason: "late_capture" } },
     { id: "event_order_3", eventName: "order_placed", telemetrySessionId: "session_abandoned", merchantId, sellerId: null, checkoutOrderId: "order_abandoned", source: "ORDER_SERVICE", occurredAt: new Date("2026-07-06T09:10:00.000Z"), payloadJson: { buyerEmail: "buyer@example.test" } },
-    { id: "event_abandoned", eventName: "checkout_abandoned", telemetrySessionId: "session_abandoned", merchantId, sellerId: null, checkoutOrderId: "order_abandoned", source: "WORKER", occurredAt: new Date("2026-07-06T11:10:00.000Z"), payloadJson: { phone: "+919999999999", safe: "visible" } },
+    { id: "event_abandoned", eventName: "checkout_abandoned", telemetrySessionId: "session_abandoned", merchantId, sellerId: null, checkoutOrderId: "order_abandoned", source: "WORKER", occurredAt: new Date("2026-07-06T11:10:00.000Z"), payloadJson: { phone: "+919999999999", ipAddress: "203.0.113.10", safe: "visible", neutral: "203.0.113.10" } },
     { id: "event_order_other", eventName: "order_placed", telemetrySessionId: "session_other", merchantId: otherMerchantId, sellerId: null, checkoutOrderId: "order_other", source: "ORDER_SERVICE", occurredAt: new Date("2026-07-06T09:20:00.000Z"), payloadJson: {} }
   ];
   const attempts = [
@@ -254,8 +254,11 @@ describe("CheckoutIntelligenceAnalyticsService", () => {
     const eventLog = await createService().getEventLog({ merchantId });
     const abandoned = eventLog.events.find((event: any) => event.eventName === "checkout_abandoned");
 
-    assert.deepEqual(abandoned?.payload, { safe: "visible" });
+    assert.deepEqual(abandoned?.payload, { safe: "visible", neutral: "[redacted]" });
     assert.deepEqual(sanitizeCheckoutIntelligencePayload({ note: "email buyer@example.test phone 9999999999" }), {
+      note: "[redacted]"
+    });
+    assert.deepEqual(sanitizeCheckoutIntelligencePayload({ note: "Client IP 203.0.113.10" }), {
       note: "[redacted]"
     });
   });

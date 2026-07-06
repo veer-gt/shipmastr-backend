@@ -102,10 +102,16 @@ function byKey<T>(rows: T[], keyFor: (row: T) => string) {
 
 const unsafePayloadKey = /email|phone|mobile|whatsapp|address|customer|buyer|ip|token|secret|cookie|password|authorization|header/i;
 const emailLike = /[A-Z0-9._%+-]+@[A-Z0-9.-]+\.[A-Z]{2,}/iu;
+const ipLike =
+  /\b(?:(?:25[0-5]|2[0-4]\d|1?\d?\d)\.){3}(?:25[0-5]|2[0-4]\d|1?\d?\d)\b|(?:\b[0-9a-f]{1,4}:){2,}[0-9a-f]{0,4}\b/iu;
 
 function containsPhoneLike(value: string) {
   const digits = value.replace(/\D/g, "");
   return digits.length >= 10 && digits.length <= 15;
+}
+
+function containsIpLike(value: string) {
+  return ipLike.test(value);
 }
 
 export function sanitizeCheckoutIntelligencePayload(value: unknown): unknown {
@@ -121,7 +127,7 @@ export function sanitizeCheckoutIntelligencePayload(value: unknown): unknown {
     }
     return output;
   }
-  if (typeof value === "string" && (emailLike.test(value) || containsPhoneLike(value))) return "[redacted]";
+  if (typeof value === "string" && (emailLike.test(value) || containsPhoneLike(value) || containsIpLike(value))) return "[redacted]";
   return value;
 }
 
