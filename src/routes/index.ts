@@ -20,6 +20,7 @@ import { adminCourierPartnerRouter, courierOnboardingRouter } from "../modules/c
 import { courierRouter } from "../modules/courier/courier.routes.js";
 import { courierAuditRouter } from "../modules/courierAudit/courier-audit.routes.js";
 import { courierInvoicesRouter } from "../modules/courierInvoices/courier-invoices.routes.js";
+import { pincodeRouter } from "../modules/address/pincode.routes.js";
 import { adminDomainsRouter, domainStatusRouter, internalDomainProvisioningRouter, merchantDomainsRouter } from "../modules/domains/domains.routes.js";
 import { ordersRouter } from "../modules/orders/orders.routes.js";
 import { financeRouter } from "../modules/sellerSettlements/finance.routes.js";
@@ -93,6 +94,7 @@ apiRouter.use("/courier/onboarding", requireCourierJwt, courierOnboardingRouter)
 apiRouter.use("/courier/tax-compliance", requireCourierJwt, courierTaxComplianceRouter);
 apiRouter.use("/courier", courierRouter);
 apiRouter.use("/courier-invoices", requireJwtAuth, courierInvoicesRouter);
+apiRouter.use("/pincode", pincodeRouter);
 apiRouter.use("/finance", requireJwtAuth, financeRouter);
 apiRouter.use("/first-shipment-request", requireJwtAuth, firstShipmentRequestRouter);
 apiRouter.use("/growth-network", requireJwtAuth, growthNetworkRouter);
