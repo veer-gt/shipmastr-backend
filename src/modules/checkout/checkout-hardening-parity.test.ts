@@ -461,6 +461,7 @@ describe("Checkout C5 hardening-parity smoke", () => {
       actorId: "admin_c5",
       codCollection: {
         method: "cash",
+        reference: "cash_receipt_001",
         amountMinor: harness.state.orders[0].payOnDeliveryMinor.toString()
       }
     });

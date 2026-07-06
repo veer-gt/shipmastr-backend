@@ -413,8 +413,22 @@ describe("Checkout C2 admin rules, lifecycle, and audit APIs", () => {
 
   it("moves confirmed orders through packed, shipped, and delivered with required COD collection", async () => {
     const { state, adminService, createOrder } = makeHarness();
+    const prepaid = await createOrder("prepaid", "idem_prepaid_deliver");
+    const prepaidId = orderId(prepaid);
+    const prepaidOrder = state.orders.find((row) => row.id === prepaidId);
+    assert.ok(prepaidOrder);
+    prepaidOrder.state = "confirmed";
+    await adminService.transitionOrder({ orderId: prepaidId, toState: "packed", actorId: "admin_a" });
+    await adminService.transitionOrder({ orderId: prepaidId, toState: "shipped", actorId: "admin_a" });
+    const prepaidDelivered = await adminService.transitionOrder({ orderId: prepaidId, toState: "delivered", actorId: "admin_a" });
+    assert.equal(prepaidDelivered.order.state, "delivered");
+    assert.equal(prepaidDelivered.order.codCollection.status, "none");
+    assert.equal(state.accountingEvents.some((row) => row.orderId === prepaidId && row.eventType === "cod_collected"), false);
+
     const created = await createOrder("full_cod", "idem_full");
     const id = orderId(created);
+    const codOrder = state.orders.find((row) => row.id === id);
+    assert.ok(codOrder);
 
     await adminService.transitionOrder({ orderId: id, toState: "packed", actorId: "admin_a" });
     await adminService.transitionOrder({ orderId: id, toState: "shipped", actorId: "admin_a" });
@@ -428,7 +442,25 @@ describe("Checkout C2 admin rules, lifecycle, and audit APIs", () => {
         orderId: id,
         toState: "delivered",
         actorId: "admin_a",
-        codCollection: { method: "cash", amountMinor: "1" }
+        codCollection: { method: "cash", amountMinor: codOrder.payOnDeliveryMinor.toString() }
+      }),
+      /CHECKOUT_COD_COLLECTION_REFERENCE_REQUIRED/
+    );
+    await assert.rejects(
+      () => adminService.transitionOrder({
+        orderId: id,
+        toState: "delivered",
+        actorId: "admin_a",
+        codCollection: { method: "cash", reference: "   ", amountMinor: codOrder.payOnDeliveryMinor.toString() }
+      }),
+      /CHECKOUT_COD_COLLECTION_REFERENCE_REQUIRED/
+    );
+    await assert.rejects(
+      () => adminService.transitionOrder({
+        orderId: id,
+        toState: "delivered",
+        actorId: "admin_a",
+        codCollection: { method: "cash", reference: "cash_receipt_001", amountMinor: "1" }
       }),
       /CHECKOUT_COD_COLLECTION_AMOUNT_MISMATCH/
     );
@@ -437,7 +469,7 @@ describe("Checkout C2 admin rules, lifecycle, and audit APIs", () => {
         orderId: id,
         toState: "delivered",
         actorId: "admin_a",
-        codCollection: { method: "u" + "pi", amountMinor: state.orders[0].payOnDeliveryMinor.toString() }
+        codCollection: { method: "u" + "pi", amountMinor: codOrder.payOnDeliveryMinor.toString() }
       }),
       /CHECKOUT_COD_COLLECTION_REFERENCE_REQUIRED/
     );
@@ -449,14 +481,15 @@ describe("Checkout C2 admin rules, lifecycle, and audit APIs", () => {
       codCollection: {
         method: "u" + "pi",
         reference: "internal_ref_001",
-        amountMinor: state.orders[0].payOnDeliveryMinor.toString(),
+        amountMinor: codOrder.payOnDeliveryMinor.toString(),
         collectedAt: "2026-07-05T10:10:00.000Z"
       }
     });
     assert.equal(delivered.order.state, "delivered");
     assert.equal(delivered.order.codCollection.status, "collected");
+    assert.equal(delivered.order.codCollection.collectedAt, baseTime.toISOString());
     assert.equal(state.accountingEvents.filter((row) => row.eventType === "cod_collected").length, 1);
-    assert.equal(state.accountingEvents.some((row) => row.eventType === "cod_collected" && row.amountMinor === state.orders[0].payOnDeliveryMinor), true);
+    assert.equal(state.accountingEvents.some((row) => row.eventType === "cod_collected" && row.amountMinor === codOrder.payOnDeliveryMinor), true);
     assert.deepEqual(state.walletWrites, []);
   });
 
@@ -483,7 +516,7 @@ describe("Checkout C2 admin rules, lifecycle, and audit APIs", () => {
       orderId: id,
       toState: "delivered",
       actorId: "admin_a",
-      codCollection: { method: "cash", amountMinor: deliveredHarness.state.orders[0].payOnDeliveryMinor.toString() }
+      codCollection: { method: "cash", reference: "cash_receipt_001", amountMinor: deliveredHarness.state.orders[0].payOnDeliveryMinor.toString() }
     });
     await assert.rejects(
       () => deliveredHarness.adminService.transitionOrder({ orderId: id, toState: "cancelled", actorId: "admin_a" }),
