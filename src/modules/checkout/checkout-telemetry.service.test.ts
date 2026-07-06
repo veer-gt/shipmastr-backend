@@ -84,6 +84,17 @@ function makeTelemetryClient() {
         };
         state.paymentAttempts.push(row);
         return clone(row);
+      },
+      findFirst: async ({ where, orderBy }: any) => {
+        let rows = state.paymentAttempts.filter((row) => matchesWhere(row, where));
+        if (orderBy?.createdAt === "asc") rows = rows.sort((a, b) => a.createdAt.getTime() - b.createdAt.getTime());
+        return clone(rows[0] ?? null);
+      },
+      update: async ({ where, data }: any) => {
+        const row = state.paymentAttempts.find((item) => item.id === where.id);
+        if (!row) throw new Error("TELEMETRY_PAYMENT_ATTEMPT_NOT_FOUND");
+        Object.assign(row, data, { updatedAt: baseTime });
+        return clone(row);
       }
     },
     checkoutTelemetryFailure: {
@@ -311,6 +322,44 @@ describe("CheckoutTelemetryService", () => {
     assert.equal(attempt.checkoutPaymentId, "checkout_payment_1");
     assert.equal(attempt.amountMinor, 103920n);
     assert.equal(attempt.status, "STARTED");
+  });
+
+  it("updates payment attempt telemetry by CheckoutPayment id", async () => {
+    const { client, state } = makeTelemetryClient();
+    const service = makeService(client);
+    const session = await service.createOrUpdateSession(baseSessionInput());
+
+    const started = await service.upsertPaymentAttemptForCheckoutPayment({
+      telemetrySessionId: session.id,
+      merchantId: session.merchantId,
+      checkoutOrderId: "checkout_order_1",
+      checkoutPaymentId: "checkout_payment_1",
+      paymentMethod: "upi",
+      gatewayUsed: "mock",
+      amountMinor: "103920",
+      status: "STARTED",
+      attemptNumber: 1,
+      gatewayOrderId: "mock_order_1"
+    });
+    const succeeded = await service.upsertPaymentAttemptForCheckoutPayment({
+      telemetrySessionId: session.id,
+      merchantId: session.merchantId,
+      checkoutOrderId: "checkout_order_1",
+      checkoutPaymentId: "checkout_payment_1",
+      paymentMethod: "upi",
+      gatewayUsed: "mock",
+      amountMinor: "103920",
+      status: "SUCCEEDED",
+      attemptNumber: 1,
+      gatewayOrderId: "mock_order_1",
+      gatewayPaymentId: "mock_payment_1",
+      completedAt: baseTime
+    });
+
+    assert.equal(started.id, succeeded.id);
+    assert.equal(state.paymentAttempts.length, 1);
+    assert.equal(state.paymentAttempts[0].status, "SUCCEEDED");
+    assert.equal(state.paymentAttempts[0].gatewayPaymentId, "mock_payment_1");
   });
 
   it("creates failure telemetry with stage and payment attempt fields", async () => {
