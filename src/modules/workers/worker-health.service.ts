@@ -99,15 +99,16 @@ export function workerRunSummary(message: string, extra: Partial<WorkerRunSummar
 }
 
 export async function runWorkerOnce(
-  merchantId: string,
+  merchantId: string | null,
   workerName: ShipmastrWorkerName,
   input: WorkerRunOnceInput,
   processor: (context: {
-    merchantId: string;
+    merchantId: string | null;
     client: WorkerDb;
     dryRun: boolean;
     maxBatch: number;
     config: ShipmastrWorkerConfig;
+    input: WorkerRunOnceInput;
   }) => Promise<WorkerProcessorResult>,
   client: WorkerDb = prisma,
   config: ShipmastrWorkerConfig = defaultWorkerConfig()
@@ -163,7 +164,7 @@ export async function runWorkerOnce(
   }
 
   try {
-    const result = await processor({ merchantId, client, dryRun, maxBatch, config });
+    const result = await processor({ merchantId, client, dryRun, maxBatch, config, input });
     const status: ShipmastrWorkerStatus = result.failedCount ? "FAILED" : "COMPLETED";
     const updated = await client.shipmastrWorkerRun.update({
       where: { id: run.id },

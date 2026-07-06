@@ -1,4 +1,9 @@
-export type ShipmastrWorkerName = "import-jobs" | "webhook-staging" | "notifications" | "retries";
+export type ShipmastrWorkerName =
+  | "import-jobs"
+  | "webhook-staging"
+  | "notifications"
+  | "retries"
+  | "checkout-telemetry-abandonment";
 
 export type ShipmastrWorkerStatus = "RUNNING" | "COMPLETED" | "FAILED" | "SKIPPED";
 
@@ -10,6 +15,7 @@ export type ShipmastrWorkerConfig = {
   webhookWorkerEnabled: boolean;
   notificationWorkerEnabled: boolean;
   retryWorkerEnabled: boolean;
+  checkoutTelemetryAbandonmentWorkerEnabled: boolean;
   maxBatch: number;
   lockSeconds: number;
   dryRun: boolean;
@@ -18,6 +24,8 @@ export type ShipmastrWorkerConfig = {
 export type WorkerRunOnceInput = {
   dry_run?: boolean | undefined;
   max_batch?: number | undefined;
+  older_than_minutes?: number | undefined;
+  now?: string | Date | undefined;
 };
 
 export type WorkerRunSummary = {

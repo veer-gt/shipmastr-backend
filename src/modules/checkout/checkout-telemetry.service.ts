@@ -433,4 +433,26 @@ export class CheckoutTelemetryService {
       }
     });
   }
+
+  async createFailureIfMissing(input: CheckoutTelemetryFailureInput, options: ServiceOptions = {}) {
+    const client = this.db(options);
+    const telemetrySessionId = nonEmpty(input.telemetrySessionId, "telemetrySessionId");
+    const failureCode = optionalText(input.failureCode);
+
+    if (failureCode) {
+      const existing = await client.checkoutTelemetryFailure.findFirst({
+        where: {
+          telemetrySessionId,
+          failureCode
+        },
+        orderBy: { createdAt: "asc" }
+      });
+      if (existing) return existing;
+    }
+
+    return this.createFailure({
+      ...input,
+      telemetrySessionId
+    }, options);
+  }
 }

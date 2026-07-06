@@ -106,6 +106,11 @@ function makeTelemetryClient() {
         };
         state.failures.push(row);
         return clone(row);
+      },
+      findFirst: async ({ where, orderBy }: any) => {
+        let rows = state.failures.filter((row) => matchesWhere(row, where));
+        if (orderBy?.createdAt === "asc") rows = rows.sort((a, b) => a.createdAt.getTime() - b.createdAt.getTime());
+        return clone(rows[0] ?? null);
       }
     }
   };
@@ -386,6 +391,38 @@ describe("CheckoutTelemetryService", () => {
     assert.equal(failure.telemetryPaymentAttemptId, "telemetry_payment_attempt_1");
     assert.equal(failure.amountAtRiskMinor, 299900n);
     assert.equal(failure.isRecoverable, true);
+  });
+
+  it("reuses existing telemetry failures by session and failure code", async () => {
+    const { client, state } = makeTelemetryClient();
+    const service = makeService(client);
+    const session = await service.createOrUpdateSession(baseSessionInput());
+
+    const first = await service.createFailureIfMissing({
+      telemetrySessionId: session.id,
+      merchantId: session.merchantId,
+      checkoutOrderId: "checkout_order_1",
+      failureStage: "PAYMENT",
+      failureReason: "checkout_abandoned",
+      failureCode: "CHECKOUT_ABANDONED",
+      amountAtRiskMinor: "299900",
+      isRecoverable: true,
+      source: "WORKER"
+    });
+    const retry = await service.createFailureIfMissing({
+      telemetrySessionId: session.id,
+      merchantId: session.merchantId,
+      checkoutOrderId: "checkout_order_1",
+      failureStage: "PAYMENT",
+      failureReason: "checkout_abandoned",
+      failureCode: "CHECKOUT_ABANDONED",
+      amountAtRiskMinor: "299900",
+      isRecoverable: true,
+      source: "WORKER"
+    });
+
+    assert.equal(first.id, retry.id);
+    assert.equal(state.failures.length, 1);
   });
 
   it("accepts an explicit transaction client", async () => {

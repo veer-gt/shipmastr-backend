@@ -8,6 +8,7 @@ export function defaultWorkerConfig(): ShipmastrWorkerConfig {
     webhookWorkerEnabled: env.SHIPMASTR_WEBHOOK_WORKER_ENABLED,
     notificationWorkerEnabled: env.SHIPMASTR_NOTIFICATION_WORKER_ENABLED,
     retryWorkerEnabled: env.SHIPMASTR_RETRY_WORKER_ENABLED,
+    checkoutTelemetryAbandonmentWorkerEnabled: env.SHIPMASTR_CHECKOUT_TELEMETRY_ABANDONMENT_WORKER_ENABLED,
     maxBatch: env.SHIPMASTR_WORKER_MAX_BATCH,
     lockSeconds: env.SHIPMASTR_WORKER_LOCK_SECONDS,
     dryRun: env.SHIPMASTR_WORKER_DRY_RUN
@@ -18,6 +19,7 @@ export function workerSpecificEnabled(config: ShipmastrWorkerConfig, workerName:
   if (workerName === "import-jobs") return config.importWorkerEnabled;
   if (workerName === "webhook-staging") return config.webhookWorkerEnabled;
   if (workerName === "notifications") return config.notificationWorkerEnabled;
+  if (workerName === "checkout-telemetry-abandonment") return config.checkoutTelemetryAbandonmentWorkerEnabled;
   return config.retryWorkerEnabled;
 }
 

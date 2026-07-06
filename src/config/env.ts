@@ -148,6 +148,7 @@ const schema = z.object({
   SHIPMASTR_WEBHOOK_WORKER_ENABLED: envBoolean(false),
   SHIPMASTR_NOTIFICATION_WORKER_ENABLED: envBoolean(false),
   SHIPMASTR_RETRY_WORKER_ENABLED: envBoolean(false),
+  SHIPMASTR_CHECKOUT_TELEMETRY_ABANDONMENT_WORKER_ENABLED: envBoolean(false),
   SHIPMASTR_WORKER_MAX_BATCH: z.coerce.number().int().min(1).max(100).default(25),
   SHIPMASTR_WORKER_LOCK_SECONDS: z.coerce.number().int().min(30).max(3600).default(300),
   SHIPMASTR_WORKER_DRY_RUN: envBoolean(true),

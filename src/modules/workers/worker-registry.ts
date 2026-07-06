@@ -24,6 +24,11 @@ export const SHIPMASTR_WORKERS: Array<{
     name: "retries",
     label: "Retries",
     description: "Surfaces retry-ready import items without auto-running retries."
+  },
+  {
+    name: "checkout-telemetry-abandonment",
+    label: "Checkout telemetry abandonment",
+    description: "Marks stale unpaid checkout/order telemetry sessions as abandoned through a MASTER_ADMIN-only run-once worker."
   }
 ];
 
