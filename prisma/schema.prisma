@@ -2512,6 +2512,21 @@ model GoogleMapsUsageCounter {
   @@index([yearMonth])
 }
 
+model AddressPincode {
+  pincode    String   @id @db.VarChar(6)
+  city       String   @db.VarChar(120)
+  district   String   @db.VarChar(120)
+  state      String   @db.VarChar(120)
+  localities String[] @default([])
+  lat        Decimal? @db.Decimal(10, 7)
+  lng        Decimal? @db.Decimal(10, 7)
+  updatedAt  DateTime @default(now()) @updatedAt @map("updated_at")
+
+  @@index([state])
+  @@index([district])
+  @@map("address_pincodes")
+}
+
 model MerchantCustomer {
   id           String   @id @default(cuid())
   merchantId   String
