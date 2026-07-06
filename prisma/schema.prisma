@@ -3969,6 +3969,152 @@ model CheckoutAuditLog {
   @@map("checkout_audit_logs")
 }
 
+model CheckoutTelemetrySession {
+  id              String    @id @default(cuid())
+  merchantId      String    @map("merchant_id")
+  sellerId        String?   @map("seller_id")
+  checkoutOrderId String?   @map("checkout_order_id")
+  cartId          String?   @map("cart_id")
+  quoteId         String?   @map("quote_id")
+  userId          String?   @map("user_id")
+  sessionId       String    @map("session_id")
+  anonymousId     String?   @map("anonymous_id")
+  emailHash       String?   @map("email_hash")
+  phoneHash       String?   @map("phone_hash")
+  deviceType      String    @map("device_type")
+  trafficSource   String?   @map("traffic_source")
+  utmSource       String?   @map("utm_source")
+  utmMedium       String?   @map("utm_medium")
+  utmCampaign     String?   @map("utm_campaign")
+  cartValueMinor  BigInt    @default(0) @map("cart_value_minor")
+  currency        String    @default("INR")
+  cartSize        Int       @default(0) @map("cart_size")
+  status          String    @default("STARTED")
+  startedAt       DateTime  @default(now()) @map("started_at")
+  completedAt     DateTime? @map("completed_at")
+  abandonedAt     DateTime? @map("abandoned_at")
+  createdAt       DateTime  @default(now()) @map("created_at")
+  updatedAt       DateTime  @default(now()) @updatedAt @map("updated_at")
+
+  events          CheckoutTelemetryEvent[]
+  paymentAttempts CheckoutTelemetryPaymentAttempt[]
+  failures        CheckoutTelemetryFailure[]
+
+  @@unique([merchantId, sessionId])
+  @@index([merchantId])
+  @@index([sellerId])
+  @@index([checkoutOrderId])
+  @@index([quoteId])
+  @@index([sessionId])
+  @@index([status])
+  @@index([startedAt])
+  @@index([createdAt])
+  @@map("checkout_telemetry_sessions")
+}
+
+model CheckoutTelemetryEvent {
+  id                 String   @id @default(cuid())
+  eventName          String   @map("event_name")
+  telemetrySessionId String   @map("telemetry_session_id")
+  merchantId         String   @map("merchant_id")
+  sellerId           String?  @map("seller_id")
+  checkoutOrderId    String?  @map("checkout_order_id")
+  checkoutPaymentId  String?  @map("checkout_payment_id")
+  accountingEventId  String?  @map("accounting_event_id")
+  timelineEntryId    String?  @map("timeline_entry_id")
+  requestId          String?  @map("request_id")
+  idempotencyKey     String?  @map("idempotency_key")
+  source             String
+  occurredAt         DateTime @default(now()) @map("occurred_at")
+  payloadJson        Json     @map("payload_json")
+  createdAt          DateTime @default(now()) @map("created_at")
+
+  telemetrySession CheckoutTelemetrySession @relation(fields: [telemetrySessionId], references: [id], onDelete: Cascade)
+
+  @@unique([telemetrySessionId, eventName, idempotencyKey])
+  @@index([telemetrySessionId])
+  @@index([merchantId])
+  @@index([sellerId])
+  @@index([checkoutOrderId])
+  @@index([checkoutPaymentId])
+  @@index([eventName])
+  @@index([source])
+  @@index([occurredAt])
+  @@index([createdAt])
+  @@map("checkout_telemetry_events")
+}
+
+model CheckoutTelemetryPaymentAttempt {
+  id                 String    @id @default(cuid())
+  telemetrySessionId String    @map("telemetry_session_id")
+  merchantId         String    @map("merchant_id")
+  sellerId           String?   @map("seller_id")
+  checkoutOrderId    String?   @map("checkout_order_id")
+  checkoutPaymentId  String?   @map("checkout_payment_id")
+  paymentMethod      String    @map("payment_method")
+  gatewayUsed        String?   @map("gateway_used")
+  amountMinor        BigInt    @default(0) @map("amount_minor")
+  currency           String    @default("INR")
+  status             String
+  gatewayPaymentId   String?   @map("gateway_payment_id")
+  gatewayOrderId     String?   @map("gateway_order_id")
+  errorCode          String?   @map("error_code")
+  errorMessage       String?   @map("error_message")
+  attemptNumber      Int       @default(1) @map("attempt_number")
+  startedAt          DateTime  @default(now()) @map("started_at")
+  completedAt        DateTime? @map("completed_at")
+  createdAt          DateTime  @default(now()) @map("created_at")
+  updatedAt          DateTime  @default(now()) @updatedAt @map("updated_at")
+
+  telemetrySession CheckoutTelemetrySession @relation(fields: [telemetrySessionId], references: [id], onDelete: Cascade)
+  failures         CheckoutTelemetryFailure[]
+
+  @@index([telemetrySessionId])
+  @@index([merchantId])
+  @@index([sellerId])
+  @@index([checkoutOrderId])
+  @@index([checkoutPaymentId])
+  @@index([paymentMethod])
+  @@index([status])
+  @@index([startedAt])
+  @@index([createdAt])
+  @@map("checkout_telemetry_payment_attempts")
+}
+
+model CheckoutTelemetryFailure {
+  id                        String   @id @default(cuid())
+  telemetrySessionId        String   @map("telemetry_session_id")
+  merchantId                String   @map("merchant_id")
+  sellerId                  String?  @map("seller_id")
+  checkoutOrderId           String?  @map("checkout_order_id")
+  checkoutPaymentId         String?  @map("checkout_payment_id")
+  telemetryPaymentAttemptId String?  @map("telemetry_payment_attempt_id")
+  failureStage              String   @map("failure_stage")
+  failureReason             String   @map("failure_reason")
+  failureCode               String?  @map("failure_code")
+  failureMessage            String?  @map("failure_message")
+  amountAtRiskMinor         BigInt   @default(0) @map("amount_at_risk_minor")
+  currency                  String   @default("INR")
+  isRecoverable             Boolean  @default(false) @map("is_recoverable")
+  source                    String
+  createdAt                 DateTime @default(now()) @map("created_at")
+
+  telemetrySession        CheckoutTelemetrySession @relation(fields: [telemetrySessionId], references: [id], onDelete: Cascade)
+  telemetryPaymentAttempt CheckoutTelemetryPaymentAttempt? @relation(fields: [telemetryPaymentAttemptId], references: [id], onDelete: SetNull)
+
+  @@index([telemetrySessionId])
+  @@index([merchantId])
+  @@index([sellerId])
+  @@index([checkoutOrderId])
+  @@index([checkoutPaymentId])
+  @@index([telemetryPaymentAttemptId])
+  @@index([failureStage])
+  @@index([failureCode])
+  @@index([source])
+  @@index([createdAt])
+  @@map("checkout_telemetry_failures")
+}
+
 model EarlyCodPrequalificationBatch {
   id                       String   @id @default(cuid())
   sellerOrgId              String   @map("seller_org_id")
