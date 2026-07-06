@@ -9,6 +9,7 @@ import { env } from "../../config/env.js";
 import { HttpError } from "../../lib/httpError.js";
 import { emailTemplates, sendTransactionalEmail } from "../../lib/email.js";
 import { ActorType, actorTypeForAccount, canonicalRoleForAccount, dashboardPathForRole, normalizeAccountRole, UserRole } from "../../lib/accountRoles.js";
+import { isProtectedMasterAdminEmail } from "../../lib/masterAdmin.js";
 import admin from "../../lib/firebase.js";
 import { changePasswordForAccount, type PasswordAccount } from "./change-password.service.js";
 import { requestPasswordReset, resetPasswordWithToken, verifyPasswordResetToken } from "./password-reset.service.js";
@@ -55,12 +56,11 @@ const mobileAuthSchema = z.object({
 });
 
 function signSellerToken(user: { id: string; merchantId: string; role: string }) {
-  const role = normalizeAccountRole(user.role);
   return jwt.sign(
     {
       userId: user.id,
       merchantId: user.merchantId,
-      role
+      role: user.role
     },
     env.JWT_SECRET,
     { expiresIn: "7d" }
@@ -99,10 +99,6 @@ function phoneSellerEmail(mobile: string) {
 
 function normalizeEmail(email: string) {
   return email.trim().toLowerCase();
-}
-
-function isSeedAdminEmail(email: string) {
-  return Boolean(env.ADMIN_EMAIL && normalizeEmail(env.ADMIN_EMAIL) === normalizeEmail(email));
 }
 
 function createVerificationCode() {
@@ -593,10 +589,16 @@ authRouter.post("/login", async (req, res) => {
 
   if (!user) throw new HttpError(400, "INVALID_LOGIN");
 
-  if (isSeedAdminEmail(user.email) && String(user.role).toUpperCase() !== "ADMIN") {
+  if (
+    isProtectedMasterAdminEmail(user.email) &&
+    (String(user.role).toUpperCase() !== "MASTER_ADMIN" || String(user.userType || "").toUpperCase() !== "INTERNAL_SHIPMASTR")
+  ) {
     user = await prisma.user.update({
       where: { id: user.id },
-      data: { role: "ADMIN" },
+      data: {
+        role: "MASTER_ADMIN",
+        userType: "INTERNAL_SHIPMASTR"
+      },
       include: { merchant: true }
     });
   }
@@ -612,6 +614,9 @@ authRouter.post("/login", async (req, res) => {
     token,
     role: responseUser.role,
     accountType: responseUser.accountType,
+    authRole: responseUser.authRole,
+    actorType: responseUser.actorType,
+    canonicalRole: responseUser.canonicalRole,
     dashboardPath: responseUser.dashboardPath,
     user: responseUser
   });

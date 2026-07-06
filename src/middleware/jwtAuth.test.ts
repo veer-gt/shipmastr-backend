@@ -96,8 +96,25 @@ describe("requireAdminJwt", () => {
     mockUserFindUnique(async () => ({
       id: "user_1",
       merchantId: "merchant_1",
+      email: "master-admin@shipmastr.test",
       userType: "INTERNAL_SHIPMASTR",
       role: "MASTER_ADMIN"
+    }));
+
+    const result = await runAdminMiddleware(signRole("ADMIN"));
+
+    assert.equal(result.nextCalled, true);
+    assert.equal(result.req.auth?.userId, "user_1");
+    assert.equal(result.req.auth?.role, "ADMIN");
+  });
+
+  it("allows the protected master admin email even if the stored role is stale", async () => {
+    mockUserFindUnique(async () => ({
+      id: "user_1",
+      merchantId: "merchant_1",
+      email: "indraveer.chauhan@gmail.com",
+      userType: "INTERNAL_SHIPMASTR",
+      role: "ADMIN"
     }));
 
     const result = await runAdminMiddleware(signRole("ADMIN"));
@@ -119,7 +136,24 @@ describe("requireAdminJwt", () => {
     mockUserFindUnique(async () => ({
       id: "user_1",
       merchantId: "merchant_1",
+      email: "admin@example.test",
       userType: "SELLER_ACCOUNT",
+      role: "ADMIN"
+    }));
+
+    const result = await runAdminMiddleware(signRole("ADMIN"));
+
+    assert.equal(result.nextCalled, false);
+    assert.equal(result.capture.statusCode, 403);
+    assert.deepEqual(result.capture.body, { error: "INTERNAL_ADMIN_ONLY" });
+  });
+
+  it("blocks normal internal ADMIN users from master-admin endpoints", async () => {
+    mockUserFindUnique(async () => ({
+      id: "user_1",
+      merchantId: "merchant_1",
+      email: "ops-admin@shipmastr.test",
+      userType: "INTERNAL_SHIPMASTR",
       role: "ADMIN"
     }));
 
