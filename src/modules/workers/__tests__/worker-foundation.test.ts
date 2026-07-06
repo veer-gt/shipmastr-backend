@@ -6,7 +6,7 @@ import { HttpError } from "../../../lib/httpError.js";
 import { runImportJobWorkerOnce } from "../import-job.worker.js";
 import { runNotificationWorkerOnce } from "../notification.worker.js";
 import { runRetryWorkerOnce } from "../retry.worker.js";
-import { getWorkerHealth, listWorkerRuns } from "../worker-health.service.js";
+import { getWorkerHealth, listWorkerRuns, runWorkerOnce, workerRunSummary } from "../worker-health.service.js";
 import type { ShipmastrWorkerConfig } from "../worker.types.js";
 import { runWebhookStagingWorkerOnce } from "../webhook-staging.worker.js";
 
@@ -18,6 +18,7 @@ const disabledConfig: ShipmastrWorkerConfig = {
   webhookWorkerEnabled: false,
   notificationWorkerEnabled: false,
   retryWorkerEnabled: false,
+  checkoutTelemetryAbandonmentWorkerEnabled: false,
   maxBatch: 25,
   lockSeconds: 300,
   dryRun: true
@@ -30,6 +31,7 @@ function enabledConfig(overrides: Partial<ShipmastrWorkerConfig> = {}): Shipmast
     webhookWorkerEnabled: true,
     notificationWorkerEnabled: true,
     retryWorkerEnabled: true,
+    checkoutTelemetryAbandonmentWorkerEnabled: true,
     maxBatch: 2,
     lockSeconds: 300,
     dryRun: true,
@@ -286,6 +288,58 @@ describe("Phase 26 controlled worker foundation", () => {
     );
   });
 
+  it("allows cross-merchant worker runs with null merchantId and keeps locks global per worker", async () => {
+    const { state, client } = makeClient();
+    const result = await runWorkerOnce(
+      null,
+      "checkout-telemetry-abandonment",
+      { dry_run: false },
+      async () => ({
+        processedCount: 0,
+        summary: workerRunSummary("Cross-merchant worker completed.", {
+          eligible_count: 0,
+          dry_run: false
+        })
+      }),
+      client,
+      enabledConfig({ dryRun: false })
+    );
+
+    assert.equal(result.run.merchant_id, null);
+    assert.equal(result.run.worker_name, "checkout-telemetry-abandonment");
+
+    state.runs.push({
+      id: "running_checkout_abandonment",
+      workerName: "checkout-telemetry-abandonment",
+      merchantId: "merchant_2",
+      status: "RUNNING",
+      mode: "ACTIVE",
+      startedAt: new Date(),
+      finishedAt: null,
+      processedCount: 0,
+      failedCount: 0,
+      warnings: [],
+      errors: [],
+      createdAt: now,
+      updatedAt: now
+    });
+
+    await assert.rejects(
+      () => runWorkerOnce(
+        null,
+        "checkout-telemetry-abandonment",
+        {},
+        async () => ({
+          processedCount: 0,
+          summary: workerRunSummary("Should be locked.", { eligible_count: 0 })
+        }),
+        client,
+        enabledConfig()
+      ),
+      (error: unknown) => error instanceof HttpError && error.message === "SHIPMASTR_WORKER_LOCKED"
+    );
+  });
+
   it("stages webhook events only through the existing staging callback", async () => {
     const { state, client } = makeClient();
     addEvent(state);
@@ -355,6 +409,8 @@ describe("Phase 26 controlled worker foundation", () => {
 
     assert.equal(health.enabled, false);
     assert.equal(health.scheduler_started, false);
+    assert.ok(health.workers.some((worker) => worker.worker_name === "checkout-telemetry-abandonment"));
+    assert.equal(health.workers.find((worker) => worker.worker_name === "checkout-telemetry-abandonment")?.enabled, false);
     assert.equal(health.latest_runs.length, 1);
     assert.equal(runs.runs.length, 1);
     assert.equal(state.runs.length, 2);
@@ -366,7 +422,8 @@ describe("Phase 26 controlled worker foundation", () => {
       "src/modules/workers/webhook-staging.worker.ts",
       "src/modules/workers/notification.worker.ts",
       "src/modules/workers/retry.worker.ts",
-      "src/modules/workers/worker-health.service.ts"
+      "src/modules/workers/worker-health.service.ts",
+      "src/modules/checkout/checkout-telemetry-abandonment.worker.ts"
     ].map((file) => readFileSync(file, "utf8")).join("\n");
 
     assert.doesNotMatch(files, /setInterval|cron|sendMail|nodemailer|smtp|createLabel|getLabel|manifestOrder|getRates|webhook registration/i);

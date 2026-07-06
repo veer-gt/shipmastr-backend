@@ -4,7 +4,7 @@ import type { NextFunction, Request, Response } from "express";
 import jwt from "jsonwebtoken";
 import { env } from "../config/env.js";
 import { prisma } from "../lib/prisma.js";
-import { requireAdminJwt, requireCourierJwt } from "./jwtAuth.js";
+import { requireAdminJwt, requireCourierJwt, requireMasterAdminJwt } from "./jwtAuth.js";
 
 type ResponseCapture = {
   statusCode?: number;
@@ -60,6 +60,20 @@ async function runAdminMiddleware(token?: string) {
   };
 
   await requireAdminJwt(req, res, next);
+
+  return { req, capture, nextCalled };
+}
+
+async function runMasterAdminMiddleware(token?: string, requestOverrides: Partial<Request> = {}) {
+  const req = Object.assign(createRequest(token), requestOverrides) as Request;
+  const capture: ResponseCapture = {};
+  const res = createResponse(capture);
+  let nextCalled = false;
+  const next: NextFunction = () => {
+    nextCalled = true;
+  };
+
+  await requireMasterAdminJwt(req, res, next);
 
   return { req, capture, nextCalled };
 }
@@ -162,6 +176,97 @@ describe("requireAdminJwt", () => {
     assert.equal(result.nextCalled, false);
     assert.equal(result.capture.statusCode, 403);
     assert.deepEqual(result.capture.body, { error: "INTERNAL_ADMIN_ONLY" });
+  });
+});
+
+describe("requireMasterAdminJwt", () => {
+  beforeEach(() => {
+    Object.defineProperty(prisma.user, "findUnique", {
+      configurable: true,
+      value: originalFindUnique,
+    });
+    Object.defineProperty(prisma.courierUser, "findUnique", {
+      configurable: true,
+      value: originalCourierFindUnique,
+    });
+  });
+
+  it("allows exact MASTER_ADMIN users and preserves the master role on req.auth", async () => {
+    mockUserFindUnique(async () => ({
+      id: "user_1",
+      merchantId: "merchant_1",
+      email: "indraveer.chauhan@gmail.com",
+      userType: "INTERNAL_SHIPMASTR",
+      role: "MASTER_ADMIN"
+    }));
+
+    const result = await runMasterAdminMiddleware(signRole("MASTER_ADMIN"));
+
+    assert.equal(result.nextCalled, true);
+    assert.equal(result.req.auth?.userId, "user_1");
+    assert.equal(result.req.auth?.role, "MASTER_ADMIN");
+  });
+
+  it("blocks stale protected-email ADMIN users from exact MASTER_ADMIN-only endpoints", async () => {
+    mockUserFindUnique(async () => ({
+      id: "user_1",
+      merchantId: "merchant_1",
+      email: "indraveer.chauhan@gmail.com",
+      userType: "INTERNAL_SHIPMASTR",
+      role: "ADMIN"
+    }));
+
+    const result = await runMasterAdminMiddleware(signRole("ADMIN"));
+
+    assert.equal(result.nextCalled, false);
+    assert.equal(result.capture.statusCode, 403);
+    assert.deepEqual(result.capture.body, { error: "MASTER_ADMIN_ONLY" });
+    assert.equal(result.req.auth?.role, "ADMIN");
+  });
+
+  it("blocks normal internal ADMIN users from exact MASTER_ADMIN-only endpoints", async () => {
+    mockUserFindUnique(async () => ({
+      id: "user_1",
+      merchantId: "merchant_1",
+      email: "ops-admin@shipmastr.test",
+      userType: "INTERNAL_SHIPMASTR",
+      role: "ADMIN"
+    }));
+
+    const result = await runMasterAdminMiddleware(signRole("ADMIN"));
+
+    assert.equal(result.nextCalled, false);
+    assert.equal(result.capture.statusCode, 403);
+    assert.deepEqual(result.capture.body, { error: "INTERNAL_ADMIN_ONLY" });
+  });
+
+  it("reads active JWT req.auth rather than stale req.user fields", async () => {
+    mockUserFindUnique(async () => ({
+      id: "user_1",
+      merchantId: "merchant_1",
+      email: "ops-admin@shipmastr.test",
+      userType: "INTERNAL_SHIPMASTR",
+      role: "ADMIN"
+    }));
+
+    const result = await runMasterAdminMiddleware(signRole("ADMIN"), {
+      user: {
+        id: "stale_user",
+        role: "MASTER_ADMIN"
+      } as never
+    } as Partial<Request>);
+
+    assert.equal(result.nextCalled, false);
+    assert.equal(result.capture.statusCode, 403);
+    assert.equal(result.req.auth?.userId, "user_1");
+  });
+
+  it("blocks non-admin roles before master-admin route logic", async () => {
+    const result = await runMasterAdminMiddleware(signRole("SELLER"));
+
+    assert.equal(result.nextCalled, false);
+    assert.equal(result.capture.statusCode, 403);
+    assert.deepEqual(result.capture.body, { error: "ADMIN_ONLY" });
   });
 });
 

@@ -1,7 +1,7 @@
 import type { Request, Response, NextFunction } from "express";
 import jwt from "jsonwebtoken";
 import { env } from "../config/env.js";
-import { isAdminRole, isCourierRole, normalizeAccountRole, UserRole } from "../lib/accountRoles.js";
+import { canonicalRoleForAccount, isAdminRole, isCourierRole, normalizeAccountRole, UserRole } from "../lib/accountRoles.js";
 import { isInternalMasterAdminUser } from "../lib/masterAdmin.js";
 import { prisma } from "../lib/prisma.js";
 
@@ -77,6 +77,41 @@ export function requireAdminJwt(req: Request, res: Response, next: NextFunction)
       merchantId: user.merchantId,
       role: normalizeAccountRole(user.role),
     };
+
+    next();
+  });
+}
+
+export function requireMasterAdminJwt(req: Request, res: Response, next: NextFunction) {
+  return requireJwtAuth(req, res, async () => {
+    if (!isAdminRole(req.auth?.role)) {
+      return res.status(403).json({ error: "ADMIN_ONLY" });
+    }
+
+    const user = await prisma.user.findUnique({
+      where: { id: req.auth!.userId },
+      select: {
+        id: true,
+        merchantId: true,
+        email: true,
+        userType: true,
+        role: true,
+      },
+    });
+
+    if (!user || !isInternalMasterAdminUser(user)) {
+      return res.status(403).json({ error: "INTERNAL_ADMIN_ONLY" });
+    }
+
+    req.auth = {
+      userId: user.id,
+      merchantId: user.merchantId,
+      role: canonicalRoleForAccount(user),
+    };
+
+    if (req.auth.role !== UserRole.MASTER_ADMIN) {
+      return res.status(403).json({ error: "MASTER_ADMIN_ONLY" });
+    }
 
     next();
   });
