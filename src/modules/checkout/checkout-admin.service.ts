@@ -162,7 +162,7 @@ function normalizeCodCollection(order: any, input: CheckoutCodCollectionInput | 
   if (!COD_COLLECTION_METHODS.has(method)) throw new HttpError(400, "CHECKOUT_COD_COLLECTION_METHOD_INVALID");
 
   const reference = input.reference?.trim() || null;
-  if (method !== CASH_COLLECTION_METHOD && !reference) {
+  if (!reference) {
     throw new HttpError(400, "CHECKOUT_COD_COLLECTION_REFERENCE_REQUIRED");
   }
 
@@ -171,14 +171,11 @@ function normalizeCodCollection(order: any, input: CheckoutCodCollectionInput | 
     throw new HttpError(409, "CHECKOUT_COD_COLLECTION_AMOUNT_MISMATCH");
   }
 
-  const collectedAt = input.collectedAt ? new Date(input.collectedAt) : now;
-  if (Number.isNaN(collectedAt.getTime())) throw new HttpError(400, "CHECKOUT_COD_COLLECTION_DATE_INVALID");
-
   return {
     method,
     reference,
     amount,
-    collectedAt
+    collectedAt: now
   };
 }
 
