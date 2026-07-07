@@ -2,6 +2,7 @@ import { randomUUID } from "node:crypto";
 
 import { prisma } from "../../lib/prisma.js";
 import { HttpError } from "../../lib/httpError.js";
+import { logger } from "../../lib/logger.js";
 import { getAddressPhonePepper, getPhoneLast2, hashAddressPhone, normalizeIndianPhone } from "../address/phone.service.js";
 import {
   createCheckoutAddressSessionToken,
@@ -15,6 +16,7 @@ import {
   type PhoneVerificationProvider,
   type PhoneVerifier
 } from "./checkout-phone-verifier.js";
+import { recordAddressEventSafely, type AddressEventInput } from "./checkout-address-telemetry.service.js";
 
 type DbClient = typeof prisma | any;
 
@@ -52,6 +54,15 @@ export type VerifiedCheckoutSessionContext = {
   profileName: string | null;
 };
 
+export type CheckoutAddressSessionContext = {
+  sessionId: string;
+  merchantId: string;
+  cartId: string | null;
+  status: CheckoutAddressSessionStatus;
+};
+
+type AddressTelemetryRecorder = (input: AddressEventInput) => Promise<unknown>;
+
 function cleanRequiredText(value: unknown, code: string, max = 180) {
   const text = String(value ?? "").trim();
   if (!text || text.length > max) throw new HttpError(400, code);
@@ -77,7 +88,8 @@ export class CheckoutAddressSessionService {
     private readonly client: DbClient = prisma,
     private readonly now: () => Date = () => new Date(),
     private readonly otpVerifier: PhoneVerifier = new OtpVerifier(),
-    private readonly truecallerVerifier: PhoneVerifier = new TruecallerVerifier()
+    private readonly truecallerVerifier: PhoneVerifier = new TruecallerVerifier(),
+    private readonly telemetryRecorder: AddressTelemetryRecorder = recordAddressEventSafely
   ) {}
 
   async createSession(input: CreateCheckoutAddressSessionInput) {
@@ -197,6 +209,16 @@ export class CheckoutAddressSessionService {
           verifiedAt: this.now()
         }
       });
+      try {
+        await this.telemetryRecorder({
+          sessionId: session.id,
+          merchantId: session.merchantId,
+          event: "phone_verified",
+          meta: { provider: verified.provider }
+        });
+      } catch {
+        logger.warn({ event: "phone_verified" }, "checkout_address_telemetry_record_failed");
+      }
 
       return {
         verified: true as const,
@@ -209,6 +231,16 @@ export class CheckoutAddressSessionService {
       }
       throw error;
     }
+  }
+
+  async requireCheckoutAddressSession(sessionToken: string): Promise<CheckoutAddressSessionContext> {
+    const session = await this.requireActiveSession(sessionToken);
+    return {
+      sessionId: session.id,
+      merchantId: session.merchantId,
+      cartId: session.cartId ?? null,
+      status: ensureStatus(session.status)
+    };
   }
 
   async requireVerifiedCheckoutSession(sessionToken: string): Promise<VerifiedCheckoutSessionContext> {
@@ -266,4 +298,8 @@ export const checkoutAddressSessionService = new CheckoutAddressSessionService()
 
 export function requireVerifiedCheckoutSession(sessionToken: string) {
   return checkoutAddressSessionService.requireVerifiedCheckoutSession(sessionToken);
+}
+
+export function requireCheckoutAddressSession(sessionToken: string) {
+  return checkoutAddressSessionService.requireCheckoutAddressSession(sessionToken);
 }
