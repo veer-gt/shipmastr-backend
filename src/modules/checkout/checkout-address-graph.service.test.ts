@@ -155,7 +155,13 @@ function makeHarness() {
     throw new HttpError(401, "CHECKOUT_SESSION_TOKEN_INVALID");
   };
 
-  const service = new CheckoutAddressGraphService(client, verifiedSessionResolver, pincodeLookup, () => state.now);
+  const service = new CheckoutAddressGraphService(
+    client,
+    verifiedSessionResolver,
+    pincodeLookup,
+    () => state.now,
+    async () => undefined
+  );
   return { state, client, service };
 }
 

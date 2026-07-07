@@ -4042,6 +4042,22 @@ model AddressConsent {
   @@map("address_consents")
 }
 
+model AddressEvent {
+  id         String   @id @default(cuid())
+  sessionId  String   @map("session_id")
+  shopperId  String?  @map("shopper_id")
+  merchantId String   @map("merchant_id")
+  event      String
+  meta       Json     @default("{}")
+  createdAt  DateTime @default(now()) @map("created_at")
+
+  @@index([event, createdAt])
+  @@index([sessionId])
+  @@index([shopperId])
+  @@index([merchantId])
+  @@map("address_events")
+}
+
 model CheckoutAuditLog {
   id         String   @id @default(cuid())
   merchantId String   @map("merchant_id")

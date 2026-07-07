@@ -88,7 +88,13 @@ function makeHarness() {
     }
   };
 
-  const service = new CheckoutAddressSessionService(client, () => state.now, new OtpVerifier(), new TruecallerVerifier());
+  const service = new CheckoutAddressSessionService(
+    client,
+    () => state.now,
+    new OtpVerifier(),
+    new TruecallerVerifier(),
+    async () => undefined
+  );
   return { state, client, service };
 }
 

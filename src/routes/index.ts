@@ -13,6 +13,7 @@ import { codDashboardRouter } from "../modules/codDashboard/cod-dashboard.routes
 import { adminCheckoutRouter } from "../modules/checkout/checkout-admin.routes.js";
 import { adminCheckoutIntelligenceRouter } from "../modules/checkout/checkout-intelligence-admin.routes.js";
 import { checkoutRouter } from "../modules/checkout/checkout.routes.js";
+import { checkoutAddressEventsRouter } from "../modules/checkout/checkout-address-events.routes.js";
 import { adminCourierPartnerApplicationRouter, courierPartnerApplicationRouter } from "../modules/courierPartnerApplications/courier-partner-application.routes.js";
 import { adminCourierProviderRegistryRouter } from "../modules/courierPartners/providerRegistry/courier-provider-registry.routes.js";
 import { adminProvisionalRateCardsRouter, adminRateCardGroupsRouter, adminRateCardTiersRouter, sellerProvisionalRateCardQuotesRouter } from "../modules/courierPartners/provisionalRateCards/provisional-rate-card.routes.js";
@@ -92,6 +93,7 @@ apiRouter.use("/automation", requireJwtAuth, requireReadyMerchantAutopilotAccess
 apiRouter.use("/cod", codDashboardRouter);
 apiRouter.use("/cod-remittances", requireJwtAuth, codRemittancesRouter);
 apiRouter.use("/checkout", checkoutRouter);
+apiRouter.use("/events/address", checkoutAddressEventsRouter);
 apiRouter.use("/courier/onboarding", requireCourierJwt, courierOnboardingRouter);
 apiRouter.use("/courier/tax-compliance", requireCourierJwt, courierTaxComplianceRouter);
 apiRouter.use("/courier", courierRouter);

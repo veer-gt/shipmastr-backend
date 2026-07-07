@@ -1,11 +1,14 @@
 import { prisma } from "../../lib/prisma.js";
 import { HttpError } from "../../lib/httpError.js";
+import { logger } from "../../lib/logger.js";
 import { addressPincodeService, type AddressPincodeResponse } from "../address/pincode.service.js";
 import { requireVerifiedCheckoutSession, type VerifiedCheckoutSessionContext } from "./checkout-address-session.service.js";
+import { recordAddressEventSafely, type AddressEventInput } from "./checkout-address-telemetry.service.js";
 
 type DbClient = typeof prisma | any;
 type VerifiedSessionResolver = (sessionToken: string) => Promise<VerifiedCheckoutSessionContext>;
 type PincodeLookupService = { lookup(inputPin: unknown): Promise<AddressPincodeResponse> };
+type AddressTelemetryRecorder = (input: AddressEventInput) => Promise<unknown>;
 
 export const CHECKOUT_ADDRESS_SOURCES = ["manual", "places", "truecaller", "network_prefill"] as const;
 export type CheckoutAddressSource = (typeof CHECKOUT_ADDRESS_SOURCES)[number];
@@ -150,7 +153,8 @@ export class CheckoutAddressGraphService {
     private readonly client: DbClient = prisma,
     private readonly verifiedSessionResolver: VerifiedSessionResolver = requireVerifiedCheckoutSession,
     private readonly pincodeLookup: PincodeLookupService = addressPincodeService,
-    private readonly now: () => Date = () => new Date()
+    private readonly now: () => Date = () => new Date(),
+    private readonly telemetryRecorder: AddressTelemetryRecorder = recordAddressEventSafely
   ) {}
 
   async upsertShopperIdentityFromVerifiedSession(ctx: VerifiedCheckoutSessionContext) {
@@ -162,7 +166,7 @@ export class CheckoutAddressGraphService {
     const cleanPayload = this.validateAddressPayload(payload);
     const resolvedPincode = await resolvePincode(this.pincodeLookup, cleanPayload.pincode, payload.city, payload.state);
 
-    return this.withTransaction(async (client) => {
+    const result = await this.withTransaction(async (client) => {
       const shopper = await this.upsertShopperIdentityWithClient(client, ctx);
       await this.createAddressConsentWithClient(client, {
         shopperId: shopper.id,
@@ -170,8 +174,32 @@ export class CheckoutAddressGraphService {
         scope: cleanPayload.consentScope,
         consentTextVersion: cleanPayload.consentTextVersion
       });
-      return this.persistAddressWithClient(client, shopper.id, ctx.merchantId, cleanPayload, resolvedPincode);
+      const persisted = await this.persistAddressWithClient(client, shopper.id, ctx.merchantId, cleanPayload, resolvedPincode);
+      return { ...persisted, shopperId: shopper.id };
     });
+
+    try {
+      await this.telemetryRecorder({
+        sessionId: ctx.sessionId,
+        shopperId: result.shopperId,
+        merchantId: ctx.merchantId,
+        event: "manual_completed",
+        meta: {
+          source: cleanPayload.source,
+          quality: cleanPayload.quality,
+          consentScope: cleanPayload.consentScope,
+          deduped: result.deduped,
+          pincode: cleanPayload.pincode
+        }
+      });
+    } catch {
+      logger.warn({ event: "manual_completed" }, "checkout_address_telemetry_record_failed");
+    }
+
+    return {
+      addressId: result.addressId,
+      deduped: result.deduped
+    };
   }
 
   async createAddressConsent(input: AddressConsentInput) {
