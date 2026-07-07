@@ -100,10 +100,13 @@ function byKey<T>(rows: T[], keyFor: (row: T) => string) {
   return grouped;
 }
 
-const unsafePayloadKey = /email|phone|mobile|whatsapp|address|customer|buyer|ip|token|secret|cookie|password|authorization|header/i;
+const unsafePayloadKey =
+  /email|phone|mobile|whatsapp|address|street|line1|line2|landmark|pincode|postal|zipcode|zip|city|state|country|latitude|longitude|lat|lng|customer|buyer|ip|token|secret|cookie|password|authorization|header/i;
 const emailLike = /[A-Z0-9._%+-]+@[A-Z0-9.-]+\.[A-Z]{2,}/iu;
 const ipLike =
   /\b(?:(?:25[0-5]|2[0-4]\d|1?\d?\d)\.){3}(?:25[0-5]|2[0-4]\d|1?\d?\d)\b|(?:\b[0-9a-f]{1,4}:){2,}[0-9a-f]{0,4}\b/iu;
+const addressLike =
+  /\b(?:road|rd|street|lane|avenue|block|sector|floor|flat|apartment|building|landmark|pincode|postal|zipcode|zip)\b/iu;
 
 function containsPhoneLike(value: string) {
   const digits = value.replace(/\D/g, "");
@@ -112,6 +115,10 @@ function containsPhoneLike(value: string) {
 
 function containsIpLike(value: string) {
   return ipLike.test(value);
+}
+
+function containsAddressLike(value: string) {
+  return addressLike.test(value);
 }
 
 export function sanitizeCheckoutIntelligencePayload(value: unknown): unknown {
@@ -127,7 +134,12 @@ export function sanitizeCheckoutIntelligencePayload(value: unknown): unknown {
     }
     return output;
   }
-  if (typeof value === "string" && (emailLike.test(value) || containsPhoneLike(value) || containsIpLike(value))) return "[redacted]";
+  if (typeof value === "string" && (
+    emailLike.test(value) ||
+    containsPhoneLike(value) ||
+    containsIpLike(value) ||
+    containsAddressLike(value)
+  )) return "[redacted]";
   return value;
 }
 

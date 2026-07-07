@@ -3,13 +3,14 @@ import { z } from "zod";
 
 import { successEnvelope } from "../shippingNetwork/shipping-public-serializers.js";
 import { CheckoutIntelligenceAnalyticsService } from "./checkout-intelligence-analytics.service.js";
+import {
+  buildCheckoutIntelligenceCsvExport,
+  CHECKOUT_INTELLIGENCE_EXPORT_REPORT_SEQUENCE
+} from "./checkout-intelligence-export.service.js";
 import { runCheckoutTelemetryAbandonmentWorkerOnce } from "./checkout-telemetry-abandonment.worker.js";
 import { CHECKOUT_TELEMETRY_DEVICE_TYPES } from "./checkout-telemetry.service.js";
 
-export const adminCheckoutIntelligenceRouter = Router();
-const analyticsService = new CheckoutIntelligenceAnalyticsService();
-
-const analyticsQuerySchema = z.object({
+const analyticsQueryShape = {
   dateFrom: z.coerce.date().optional(),
   dateTo: z.coerce.date().optional(),
   from: z.coerce.date().optional(),
@@ -26,17 +27,35 @@ const analyticsQuerySchema = z.object({
   errorCode: z.string().trim().min(1).max(160).optional(),
   limit: z.coerce.number().int().min(1).max(100).optional(),
   cursor: z.string().trim().min(1).optional()
-}).refine((query) => {
+};
+
+function isValidDateRange(query: {
+  dateFrom?: Date | undefined;
+  dateTo?: Date | undefined;
+  from?: Date | undefined;
+  to?: Date | undefined;
+  startDate?: Date | undefined;
+  endDate?: Date | undefined;
+}) {
   const dateFrom = query.dateFrom ?? query.from ?? query.startDate;
   const dateTo = query.dateTo ?? query.to ?? query.endDate;
   return !dateFrom || !dateTo || dateFrom <= dateTo;
-}, {
+}
+
+const analyticsQuerySchema = z.object(analyticsQueryShape).refine(isValidDateRange, {
   message: "dateFrom must be before dateTo",
   path: ["dateTo"]
 });
 
-function parseAnalyticsQuery(query: unknown) {
-  const parsed = analyticsQuerySchema.parse(query);
+const analyticsExportQuerySchema = z.object({
+  ...analyticsQueryShape,
+  format: z.preprocess((value) => typeof value === "string" ? value.toLowerCase() : value, z.literal("csv").default("csv"))
+}).refine(isValidDateRange, {
+  message: "dateFrom must be before dateTo",
+  path: ["dateTo"]
+});
+
+function analyticsFiltersFromParsed(parsed: z.infer<typeof analyticsQuerySchema>) {
   return {
     dateFrom: parsed.dateFrom ?? parsed.from ?? parsed.startDate,
     dateTo: parsed.dateTo ?? parsed.to ?? parsed.endDate,
@@ -53,6 +72,14 @@ function parseAnalyticsQuery(query: unknown) {
   };
 }
 
+function parseAnalyticsQuery(query: unknown) {
+  return analyticsFiltersFromParsed(analyticsQuerySchema.parse(query));
+}
+
+function parseAnalyticsExportQuery(query: unknown) {
+  return analyticsFiltersFromParsed(analyticsExportQuerySchema.parse(query));
+}
+
 const runAbandonmentWorkerSchema = z.object({
   dryRun: z.boolean().optional(),
   dry_run: z.boolean().optional(),
@@ -63,56 +90,80 @@ const runAbandonmentWorkerSchema = z.object({
   now: z.string().trim().datetime().optional()
 }).strict();
 
-adminCheckoutIntelligenceRouter.post("/abandonment-worker/run-once", async (req, res) => {
-  const body = runAbandonmentWorkerSchema.parse(req.body ?? {});
-  const data = await runCheckoutTelemetryAbandonmentWorkerOnce({
-    dryRun: body.dryRun,
-    dry_run: body.dry_run,
-    maxBatch: body.maxBatch,
-    max_batch: body.max_batch,
-    olderThanMinutes: body.olderThanMinutes,
-    older_than_minutes: body.older_than_minutes,
-    now: body.now
+export function createAdminCheckoutIntelligenceRouter(
+  analyticsService = new CheckoutIntelligenceAnalyticsService()
+) {
+  const router = Router();
+
+  router.post("/abandonment-worker/run-once", async (req, res) => {
+    const body = runAbandonmentWorkerSchema.parse(req.body ?? {});
+    const data = await runCheckoutTelemetryAbandonmentWorkerOnce({
+      dryRun: body.dryRun,
+      dry_run: body.dry_run,
+      maxBatch: body.maxBatch,
+      max_batch: body.max_batch,
+      olderThanMinutes: body.olderThanMinutes,
+      older_than_minutes: body.older_than_minutes,
+      now: body.now
+    });
+    return res.json(successEnvelope("Checkout telemetry abandonment worker run-once evaluated safely.", data));
   });
-  return res.json(successEnvelope("Checkout telemetry abandonment worker run-once evaluated safely.", data));
-});
 
-adminCheckoutIntelligenceRouter.get("/overview", async (req, res) => {
-  const data = await analyticsService.getOverview(parseAnalyticsQuery(req.query));
-  return res.json(successEnvelope("Checkout intelligence overview loaded.", data));
-});
+  for (const report of CHECKOUT_INTELLIGENCE_EXPORT_REPORT_SEQUENCE) {
+    router.get(`/${report.pathSegment}/export`, async (req, res) => {
+      const exported = await buildCheckoutIntelligenceCsvExport({
+        report: report.key,
+        filters: parseAnalyticsExportQuery(req.query),
+        analyticsService
+      });
 
-adminCheckoutIntelligenceRouter.get("/funnel", async (req, res) => {
-  const data = await analyticsService.getFunnel(parseAnalyticsQuery(req.query));
-  return res.json(successEnvelope("Checkout intelligence funnel loaded.", data));
-});
+      res.type(exported.contentType);
+      res.setHeader("Content-Disposition", `attachment; filename="${exported.fileName}"`);
+      return res.send(exported.body);
+    });
+  }
 
-adminCheckoutIntelligenceRouter.get("/revenue-leakage", async (req, res) => {
-  const data = await analyticsService.getRevenueLeakage(parseAnalyticsQuery(req.query));
-  return res.json(successEnvelope("Checkout intelligence revenue leakage loaded.", data));
-});
+  router.get("/overview", async (req, res) => {
+    const data = await analyticsService.getOverview(parseAnalyticsQuery(req.query));
+    return res.json(successEnvelope("Checkout intelligence overview loaded.", data));
+  });
 
-adminCheckoutIntelligenceRouter.get("/payment-failures", async (req, res) => {
-  const data = await analyticsService.getPaymentFailures(parseAnalyticsQuery(req.query));
-  return res.json(successEnvelope("Checkout intelligence payment failures loaded.", data));
-});
+  router.get("/funnel", async (req, res) => {
+    const data = await analyticsService.getFunnel(parseAnalyticsQuery(req.query));
+    return res.json(successEnvelope("Checkout intelligence funnel loaded.", data));
+  });
 
-adminCheckoutIntelligenceRouter.get("/cod-risk", async (req, res) => {
-  const data = await analyticsService.getCodRisk(parseAnalyticsQuery(req.query));
-  return res.json(successEnvelope("Checkout intelligence COD risk loaded.", data));
-});
+  router.get("/revenue-leakage", async (req, res) => {
+    const data = await analyticsService.getRevenueLeakage(parseAnalyticsQuery(req.query));
+    return res.json(successEnvelope("Checkout intelligence revenue leakage loaded.", data));
+  });
 
-adminCheckoutIntelligenceRouter.get("/merchant-breakdown", async (req, res) => {
-  const data = await analyticsService.getMerchantBreakdown(parseAnalyticsQuery(req.query));
-  return res.json(successEnvelope("Checkout intelligence merchant breakdown loaded.", data));
-});
+  router.get("/payment-failures", async (req, res) => {
+    const data = await analyticsService.getPaymentFailures(parseAnalyticsQuery(req.query));
+    return res.json(successEnvelope("Checkout intelligence payment failures loaded.", data));
+  });
 
-adminCheckoutIntelligenceRouter.get("/abandoned-checkouts", async (req, res) => {
-  const data = await analyticsService.getAbandonedCheckouts(parseAnalyticsQuery(req.query));
-  return res.json(successEnvelope("Checkout intelligence abandoned checkouts loaded.", data));
-});
+  router.get("/cod-risk", async (req, res) => {
+    const data = await analyticsService.getCodRisk(parseAnalyticsQuery(req.query));
+    return res.json(successEnvelope("Checkout intelligence COD risk loaded.", data));
+  });
 
-adminCheckoutIntelligenceRouter.get("/events", async (req, res) => {
-  const data = await analyticsService.getEventLog(parseAnalyticsQuery(req.query));
-  return res.json(successEnvelope("Checkout intelligence event log loaded.", data));
-});
+  router.get("/merchant-breakdown", async (req, res) => {
+    const data = await analyticsService.getMerchantBreakdown(parseAnalyticsQuery(req.query));
+    return res.json(successEnvelope("Checkout intelligence merchant breakdown loaded.", data));
+  });
+
+  router.get("/abandoned-checkouts", async (req, res) => {
+    const data = await analyticsService.getAbandonedCheckouts(parseAnalyticsQuery(req.query));
+    return res.json(successEnvelope("Checkout intelligence abandoned checkouts loaded.", data));
+  });
+
+  router.get("/events", async (req, res) => {
+    const data = await analyticsService.getEventLog(parseAnalyticsQuery(req.query));
+    return res.json(successEnvelope("Checkout intelligence event log loaded.", data));
+  });
+
+  return router;
+}
+
+export const adminCheckoutIntelligenceRouter = createAdminCheckoutIntelligenceRouter();
