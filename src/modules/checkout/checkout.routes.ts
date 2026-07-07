@@ -5,6 +5,7 @@ import { CheckoutQuoteService } from "./checkout-quote.service.js";
 import { CheckoutOrderService, parseCheckoutMode } from "./checkout-order.service.js";
 import { CheckoutPaymentService } from "./checkout-payment.service.js";
 import { checkoutAddressSessionRouter } from "./checkout-address-session.routes.js";
+import { checkoutAddressGraphRouter } from "./checkout-address-graph.routes.js";
 import { serializeCheckoutQuote } from "./checkout-serializers.js";
 
 export const checkoutRouter = Router();
@@ -57,6 +58,7 @@ const orderService = new CheckoutOrderService();
 const paymentService = new CheckoutPaymentService();
 
 checkoutRouter.use("/", checkoutAddressSessionRouter);
+checkoutRouter.use("/", checkoutAddressGraphRouter);
 
 function idempotencyKey(req: { get(header: string): string | undefined }) {
   return req.get("Idempotency-Key")?.trim() || "";
