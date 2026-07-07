@@ -4,7 +4,7 @@ import { z } from "zod";
 import { successEnvelope } from "../shippingNetwork/shipping-public-serializers.js";
 import { CheckoutIntelligenceAnalyticsService } from "./checkout-intelligence-analytics.service.js";
 import {
-  buildCheckoutIntelligenceCsvExport,
+  buildCheckoutIntelligenceExport,
   CHECKOUT_INTELLIGENCE_EXPORT_REPORT_SEQUENCE
 } from "./checkout-intelligence-export.service.js";
 import { runCheckoutTelemetryAbandonmentWorkerOnce } from "./checkout-telemetry-abandonment.worker.js";
@@ -49,7 +49,7 @@ const analyticsQuerySchema = z.object(analyticsQueryShape).refine(isValidDateRan
 
 const analyticsExportQuerySchema = z.object({
   ...analyticsQueryShape,
-  format: z.preprocess((value) => typeof value === "string" ? value.toLowerCase() : value, z.literal("csv").default("csv"))
+  format: z.preprocess((value) => typeof value === "string" ? value.toLowerCase() : value, z.enum(["csv", "xlsx"]).default("csv"))
 }).refine(isValidDateRange, {
   message: "dateFrom must be before dateTo",
   path: ["dateTo"]
@@ -77,7 +77,11 @@ function parseAnalyticsQuery(query: unknown) {
 }
 
 function parseAnalyticsExportQuery(query: unknown) {
-  return analyticsFiltersFromParsed(analyticsExportQuerySchema.parse(query));
+  const parsed = analyticsExportQuerySchema.parse(query);
+  return {
+    format: parsed.format,
+    filters: analyticsFiltersFromParsed(parsed)
+  };
 }
 
 const runAbandonmentWorkerSchema = z.object({
@@ -111,14 +115,17 @@ export function createAdminCheckoutIntelligenceRouter(
 
   for (const report of CHECKOUT_INTELLIGENCE_EXPORT_REPORT_SEQUENCE) {
     router.get(`/${report.pathSegment}/export`, async (req, res) => {
-      const exported = await buildCheckoutIntelligenceCsvExport({
+      const query = parseAnalyticsExportQuery(req.query);
+      const exported = await buildCheckoutIntelligenceExport({
         report: report.key,
-        filters: parseAnalyticsExportQuery(req.query),
+        format: query.format,
+        filters: query.filters,
         analyticsService
       });
 
       res.type(exported.contentType);
       res.setHeader("Content-Disposition", `attachment; filename="${exported.fileName}"`);
+      res.setHeader("X-Content-Type-Options", "nosniff");
       return res.send(exported.body);
     });
   }

@@ -1,3 +1,5 @@
+import ExcelJS from "exceljs";
+
 import {
   CheckoutIntelligenceAnalyticsService,
   sanitizeCheckoutIntelligencePayload,
@@ -15,6 +17,9 @@ export type CheckoutIntelligenceExportReportKey =
   | "eventLog";
 
 type CsvRow = unknown[];
+type SpreadsheetCell = string | number | boolean | null;
+
+export type CheckoutIntelligenceExportFormat = "csv" | "xlsx";
 
 type ReportDefinition = {
   key: CheckoutIntelligenceExportReportKey;
@@ -89,6 +94,7 @@ export const CHECKOUT_INTELLIGENCE_EXPORT_REPORT_SEQUENCE = REPORT_SEQUENCE.map(
 
 const EXPORT_PAGE_SIZE = 100;
 const EXPORT_MAX_ROWS = 1_000;
+const XLSX_CONTENT_TYPE = "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet";
 
 const semanticNotes: Array<[string, string]> = [
   ["conversionRateMeaningful", "false"],
@@ -144,6 +150,26 @@ function rowsToCsv(rows: CsvRow[]) {
   return `${rows.map((row) => row.map(checkoutIntelligenceCsvCell).join(",")).join("\n")}\n`;
 }
 
+function checkoutIntelligenceSpreadsheetCell(value: unknown): SpreadsheetCell {
+  if (value === null || value === undefined) return null;
+  if (typeof value === "number") return Number.isFinite(value) ? value : String(value);
+  if (typeof value === "boolean") return value;
+
+  let text: string;
+  if (value instanceof Date) {
+    text = value.toISOString();
+  } else if (typeof value === "bigint") {
+    text = value.toString();
+  } else if (typeof value === "object") {
+    text = jsonString(value) ?? "";
+  } else {
+    text = String(value);
+  }
+
+  const sanitized = redactCheckoutIntelligenceCsvText(text);
+  return /^[=+\-@]/u.test(sanitized) ? `'${sanitized}` : sanitized;
+}
+
 function formatFileTimestamp(value: Date) {
   const year = value.getUTCFullYear();
   const month = String(value.getUTCMonth() + 1).padStart(2, "0");
@@ -174,12 +200,18 @@ function flattenRecordRows(value: unknown, prefix: string): CsvRow[] {
   return [[prefix, value]];
 }
 
-function metadataRows(definition: ReportDefinition, generatedAt: Date, filters: CheckoutIntelligenceAnalyticsFilters, data: any): CsvRow[] {
+function metadataRows(
+  definition: ReportDefinition,
+  generatedAt: Date,
+  filters: CheckoutIntelligenceAnalyticsFilters,
+  data: any,
+  format: CheckoutIntelligenceExportFormat
+): CsvRow[] {
   return [
     ["generatedAt", generatedAt.toISOString()],
     ["reportName", definition.reportName],
     ["reportKey", definition.key],
-    ["format", "csv"],
+    ["format", format],
     ...filterRows(filters),
     ...semanticNotes.map(([key, value]): CsvRow => [`note.${key}`, value]),
     ...flattenRecordRows(data?.dataAvailability ?? {}, "dataAvailability"),
@@ -451,11 +483,12 @@ function dataRows(report: CheckoutIntelligenceExportReportKey, data: unknown): C
   return [];
 }
 
-export async function buildCheckoutIntelligenceCsvExport(input: {
+async function buildCheckoutIntelligenceExportRows(input: {
   report: CheckoutIntelligenceExportReportKey;
   filters?: CheckoutIntelligenceAnalyticsFilters | undefined;
   analyticsService?: CheckoutIntelligenceAnalyticsService | undefined;
   generatedAt?: Date | undefined;
+  format: CheckoutIntelligenceExportFormat;
 }) {
   const definition = CHECKOUT_INTELLIGENCE_EXPORT_REPORTS[input.report];
   if (!definition) throw new Error("UNSUPPORTED_CHECKOUT_INTELLIGENCE_EXPORT_REPORT");
@@ -464,14 +497,97 @@ export async function buildCheckoutIntelligenceCsvExport(input: {
   const analyticsService = input.analyticsService ?? new CheckoutIntelligenceAnalyticsService();
   const generatedAt = input.generatedAt ?? new Date();
   const data = await loadReportData(input.report, analyticsService, filters);
+
+  return {
+    definition,
+    generatedAt,
+    metadataRows: metadataRows(definition, generatedAt, filters, data, input.format),
+    dataRows: dataRows(input.report, data)
+  };
+}
+
+function safeSheetName(value: string) {
+  const sanitized = value.replace(/[\\/*?:[\]]/gu, " ").replace(/\s+/gu, " ").trim();
+  return (sanitized || "Sheet").slice(0, 31);
+}
+
+function reportDataSheetRows(rows: CsvRow[]) {
+  const firstNonEmptyIndex = rows.findIndex((row) => row.length > 0);
+  return firstNonEmptyIndex < 0 ? [["section", "empty"]] : rows.slice(firstNonEmptyIndex);
+}
+
+function appendWorksheetRows(worksheet: ExcelJS.Worksheet, rows: CsvRow[]) {
+  let maxColumns = 1;
+  for (const row of rows) {
+    maxColumns = Math.max(maxColumns, row.length || 1);
+    worksheet.addRow(row.map(checkoutIntelligenceSpreadsheetCell));
+  }
+
+  for (let index = 1; index <= maxColumns; index += 1) {
+    worksheet.getColumn(index).width = index === 1 ? 28 : 24;
+  }
+
+  worksheet.eachRow((row) => {
+    row.eachCell((cell) => {
+      cell.alignment = { vertical: "top", wrapText: true };
+    });
+  });
+}
+
+export async function buildCheckoutIntelligenceCsvExport(input: {
+  report: CheckoutIntelligenceExportReportKey;
+  filters?: CheckoutIntelligenceAnalyticsFilters | undefined;
+  analyticsService?: CheckoutIntelligenceAnalyticsService | undefined;
+  generatedAt?: Date | undefined;
+}) {
+  const exported = await buildCheckoutIntelligenceExportRows({ ...input, format: "csv" });
   const rows = [
-    ...metadataRows(definition, generatedAt, filters, data),
-    ...dataRows(input.report, data)
+    ...exported.metadataRows,
+    ...exported.dataRows
   ];
 
   return {
     contentType: "text/csv",
-    fileName: `checkout-intelligence-${definition.fileSegment}-${formatFileTimestamp(generatedAt)}.csv`,
+    fileName: `checkout-intelligence-${exported.definition.fileSegment}-${formatFileTimestamp(exported.generatedAt)}.csv`,
     body: rowsToCsv(rows)
   };
+}
+
+export async function buildCheckoutIntelligenceXlsxExport(input: {
+  report: CheckoutIntelligenceExportReportKey;
+  filters?: CheckoutIntelligenceAnalyticsFilters | undefined;
+  analyticsService?: CheckoutIntelligenceAnalyticsService | undefined;
+  generatedAt?: Date | undefined;
+}) {
+  const exported = await buildCheckoutIntelligenceExportRows({ ...input, format: "xlsx" });
+  const workbook = new ExcelJS.Workbook();
+  workbook.creator = "Shipmastr";
+  workbook.created = exported.generatedAt;
+  workbook.modified = exported.generatedAt;
+
+  const dataSheet = workbook.addWorksheet(safeSheetName("Report Data"));
+  appendWorksheetRows(dataSheet, reportDataSheetRows(exported.dataRows));
+
+  const metadataSheet = workbook.addWorksheet(safeSheetName("Metadata"));
+  appendWorksheetRows(metadataSheet, exported.metadataRows);
+
+  const buffer = await workbook.xlsx.writeBuffer();
+
+  return {
+    contentType: XLSX_CONTENT_TYPE,
+    fileName: `checkout-intelligence-${exported.definition.fileSegment}-${formatFileTimestamp(exported.generatedAt)}.xlsx`,
+    body: Buffer.isBuffer(buffer) ? buffer : Buffer.from(buffer)
+  };
+}
+
+export async function buildCheckoutIntelligenceExport(input: {
+  report: CheckoutIntelligenceExportReportKey;
+  filters?: CheckoutIntelligenceAnalyticsFilters | undefined;
+  analyticsService?: CheckoutIntelligenceAnalyticsService | undefined;
+  generatedAt?: Date | undefined;
+  format?: CheckoutIntelligenceExportFormat | undefined;
+}) {
+  return input.format === "xlsx"
+    ? buildCheckoutIntelligenceXlsxExport(input)
+    : buildCheckoutIntelligenceCsvExport(input);
 }

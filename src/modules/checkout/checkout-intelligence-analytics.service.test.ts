@@ -3,6 +3,7 @@ import { once } from "node:events";
 import { readFileSync } from "node:fs";
 import type { Server } from "node:http";
 import { afterEach, describe, it } from "node:test";
+import ExcelJS from "exceljs";
 import express from "express";
 import jwt from "jsonwebtoken";
 
@@ -17,6 +18,7 @@ import {
 import { createAdminCheckoutIntelligenceRouter } from "./checkout-intelligence-admin.routes.js";
 import {
   buildCheckoutIntelligenceCsvExport,
+  buildCheckoutIntelligenceXlsxExport,
   CHECKOUT_INTELLIGENCE_EXPORT_REPORT_SEQUENCE
 } from "./checkout-intelligence-export.service.js";
 
@@ -85,6 +87,33 @@ async function withCheckoutIntelligenceApp<T>(
   } finally {
     await closeServer(server);
   }
+}
+
+async function loadWorkbook(body: Buffer | ArrayBuffer) {
+  const workbook = new ExcelJS.Workbook();
+  const workbookBody = Buffer.isBuffer(body)
+    ? body.buffer.slice(body.byteOffset, body.byteOffset + body.byteLength)
+    : body;
+  const loadXlsx = workbook.xlsx.load.bind(workbook.xlsx) as unknown as (buffer: ArrayBuffer) => Promise<ExcelJS.Workbook>;
+  await loadXlsx(workbookBody as ArrayBuffer);
+  return workbook;
+}
+
+function worksheetText(worksheet: ExcelJS.Worksheet | undefined) {
+  const values: string[] = [];
+  worksheet?.eachRow({ includeEmpty: true }, (row) => {
+    row.eachCell({ includeEmpty: true }, (cell) => {
+      const value = cell.value;
+      if (value === null || value === undefined) return;
+      values.push(typeof value === "object" ? JSON.stringify(value) : String(value));
+    });
+  });
+  return values.join("\n");
+}
+
+async function workbookText(body: Buffer | ArrayBuffer) {
+  const workbook = await loadWorkbook(body);
+  return workbook.worksheets.map((worksheet) => worksheetText(worksheet)).join("\n");
 }
 
 function matchesScalar(value: any, condition: any): boolean {
@@ -373,7 +402,7 @@ describe("CheckoutIntelligenceAnalyticsService", () => {
   });
 });
 
-describe("Checkout Intelligence CSV export", () => {
+describe("Checkout Intelligence exports", () => {
   it("builds CSV exports for every supported report with metadata, filters, and report filenames", async () => {
     for (const report of CHECKOUT_INTELLIGENCE_EXPORT_REPORT_SEQUENCE) {
       const exported = await buildCheckoutIntelligenceCsvExport({
@@ -389,6 +418,33 @@ describe("Checkout Intelligence CSV export", () => {
       assert.match(exported.body, new RegExp(`reportName,${report.reportName}`));
       assert.match(exported.body, /filter\.merchantId,merchant_skymax/);
       assert.match(exported.body, /note\.conversionRateMeaningful,false/);
+    }
+  });
+
+  it("builds XLSX exports for every supported report with report data and metadata sheets", async () => {
+    for (const report of CHECKOUT_INTELLIGENCE_EXPORT_REPORT_SEQUENCE) {
+      const exported = await buildCheckoutIntelligenceXlsxExport({
+        report: report.key,
+        filters: { merchantId, dateFrom: new Date("2026-07-06T00:00:00.000Z") },
+        analyticsService: createService(),
+        generatedAt: now
+      });
+
+      assert.equal(exported.contentType, "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet");
+      assert.equal(exported.fileName, `checkout-intelligence-${report.fileSegment}-20260706-1200.xlsx`);
+      assert.ok(exported.body.length > 0);
+
+      const workbook = await loadWorkbook(exported.body);
+      assert.deepEqual(workbook.worksheets.map((worksheet) => worksheet.name), ["Report Data", "Metadata"]);
+
+      const metadata = worksheetText(workbook.getWorksheet("Metadata"));
+      const reportData = worksheetText(workbook.getWorksheet("Report Data"));
+      assert.match(metadata, /generatedAt\n2026-07-06T12:00:00.000Z/);
+      assert.match(metadata, new RegExp(`reportName\\n${report.reportName}`));
+      assert.match(metadata, /format\nxlsx/);
+      assert.match(metadata, /filter\.merchantId\nmerchant_skymax/);
+      assert.match(metadata, /note\.conversionRateMeaningful\nfalse/);
+      assert.match(reportData, /section/);
     }
   });
 
@@ -411,6 +467,18 @@ describe("Checkout Intelligence CSV export", () => {
     assert.match(paymentFailures.body, /failedAttempts,1/);
     assert.match(leakage.body, /CHECKOUT_PAYMENT_REFUND_DUE/);
     assert.match(leakage.body, /totalAmountAtRiskMinor,3000/);
+
+    const leakageWorkbook = await buildCheckoutIntelligenceXlsxExport({
+      report: "revenueLeakage",
+      filters: { merchantId },
+      analyticsService: createService(),
+      generatedAt: now
+    });
+    const leakageWorkbookText = await workbookText(leakageWorkbook.body);
+    assert.match(leakageWorkbookText, /CHECKOUT_PAYMENT_REFUND_DUE/);
+    assert.match(leakageWorkbookText, /refund_due is payment leakage, not payment success/);
+    assert.match(leakageWorkbookText, /totalAmountAtRiskMinor/);
+    assert.match(leakageWorkbookText, /3000/);
   });
 
   it("keeps COD Risk export on current COD OTP semantics without pre-shipment OTP terminology", async () => {
@@ -424,9 +492,20 @@ describe("Checkout Intelligence CSV export", () => {
     assert.match(exported.body, /COD OTP metrics are not instrumented yet/);
     assert.match(exported.body, /checkoutCodOtpRequested,0/);
     assert.doesNotMatch(exported.body, new RegExp(["OTP", "BEFORE", "SHIPMENT"].join("_")));
+
+    const workbookExport = await buildCheckoutIntelligenceXlsxExport({
+      report: "codRisk",
+      filters: { merchantId },
+      analyticsService: createService(),
+      generatedAt: now
+    });
+    const text = await workbookText(workbookExport.body);
+    assert.match(text, /COD OTP metrics are not instrumented yet/);
+    assert.match(text, /checkoutCodOtpRequested/);
+    assert.doesNotMatch(text, new RegExp(["OTP", "BEFORE", "SHIPMENT"].join("_")));
   });
 
-  it("sanitizes Event Log payloads in CSV and omits raw email, phone, IP, and address fields", async () => {
+  it("sanitizes Event Log payloads in CSV and XLSX and omits raw email, phone, IP, and address fields", async () => {
     const exported = await buildCheckoutIntelligenceCsvExport({
       report: "eventLog",
       filters: { merchantId },
@@ -439,9 +518,24 @@ describe("Checkout Intelligence CSV export", () => {
     assert.doesNotMatch(exported.body, /9999999999/);
     assert.doesNotMatch(exported.body, /203\.0\.113\.10/);
     assert.doesNotMatch(exported.body, /221B Market Road/);
+
+    const workbookExport = await buildCheckoutIntelligenceXlsxExport({
+      report: "eventLog",
+      filters: { merchantId },
+      analyticsService: createService(),
+      generatedAt: now
+    });
+    const text = await workbookText(workbookExport.body);
+    assert.match(text, /safe/);
+    assert.doesNotMatch(text, /buyer@example\.test/);
+    assert.doesNotMatch(text, /9999999999/);
+    assert.doesNotMatch(text, /203\.0\.113\.10/);
+    assert.doesNotMatch(text, /221B Market Road/);
+    assert.doesNotMatch(text, new RegExp(`${["Seller", "Breakdown"].join(" ")}`));
+    assert.doesNotMatch(text, new RegExp(["OTP", "BEFORE", "SHIPMENT"].join("_")));
   });
 
-  it("honors merchant filters and succeeds for empty report exports with headers and metadata", async () => {
+  it("honors merchant filters and succeeds for empty report exports with headers and metadata in CSV and XLSX", async () => {
     const otherMerchant = await buildCheckoutIntelligenceCsvExport({
       report: "merchantBreakdown",
       filters: { merchantId: otherMerchantId },
@@ -460,32 +554,66 @@ describe("Checkout Intelligence CSV export", () => {
     assert.match(empty.body, /reportName,Merchant Breakdown/);
     assert.match(empty.body, /section,merchants/);
     assert.match(empty.body, /merchantId,merchantName,checkoutStartedSessions/);
+
+    const otherMerchantWorkbook = await buildCheckoutIntelligenceXlsxExport({
+      report: "merchantBreakdown",
+      filters: { merchantId: otherMerchantId },
+      analyticsService: createService(),
+      generatedAt: now
+    });
+    const emptyWorkbook = await buildCheckoutIntelligenceXlsxExport({
+      report: "merchantBreakdown",
+      filters: { merchantId: "merchant_missing" },
+      analyticsService: createService(),
+      generatedAt: now
+    });
+    const otherMerchantText = await workbookText(otherMerchantWorkbook.body);
+    const emptyText = await workbookText(emptyWorkbook.body);
+    assert.match(otherMerchantText, /Other Merchant/);
+    assert.doesNotMatch(otherMerchantText, /Skymax Demo Merchant/);
+    assert.match(emptyText, /Merchant Breakdown/);
+    assert.match(emptyText, /merchants/);
+    assert.match(emptyText, /merchantId/);
   });
 
-  it("guards export routes for MASTER_ADMIN only and returns CSV content headers", async () => {
+  it("guards export routes for MASTER_ADMIN only and returns CSV/XLSX content headers", async () => {
     await withCheckoutIntelligenceApp(createService(), async (baseUrl) => {
       mockUserFindUnique("MASTER_ADMIN");
 
       for (const report of CHECKOUT_INTELLIGENCE_EXPORT_REPORT_SEQUENCE) {
-        const response = await fetch(`${baseUrl}/admin/checkout-intelligence/${report.pathSegment}/export?format=csv&merchantId=${merchantId}`, {
-          headers: { authorization: `Bearer ${signRole("MASTER_ADMIN")}` }
-        });
-        const body = await response.text();
+        for (const format of ["csv", "xlsx"] as const) {
+          const response = await fetch(`${baseUrl}/admin/checkout-intelligence/${report.pathSegment}/export?format=${format}&merchantId=${merchantId}`, {
+            headers: { authorization: `Bearer ${signRole("MASTER_ADMIN")}` }
+          });
 
-        assert.equal(response.status, 200);
-        assert.match(response.headers.get("content-type") ?? "", /text\/csv/);
-        assert.match(
-          response.headers.get("content-disposition") ?? "",
-          new RegExp(`attachment; filename="checkout-intelligence-${report.fileSegment}-\\d{8}-\\d{4}\\.csv"`)
-        );
-        assert.match(body, new RegExp(`reportName,${report.reportName}`));
+          assert.equal(response.status, 200);
+          assert.equal(response.headers.get("x-content-type-options"), "nosniff");
+          assert.match(
+            response.headers.get("content-disposition") ?? "",
+            new RegExp(`attachment; filename="checkout-intelligence-${report.fileSegment}-\\d{8}-\\d{4}\\.${format}"`)
+          );
+
+          if (format === "csv") {
+            const body = await response.text();
+            assert.match(response.headers.get("content-type") ?? "", /text\/csv/);
+            assert.match(body, new RegExp(`reportName,${report.reportName}`));
+          } else {
+            const body = await response.arrayBuffer();
+            assert.match(response.headers.get("content-type") ?? "", /application\/vnd\.openxmlformats-officedocument\.spreadsheetml\.sheet/);
+            const workbook = await loadWorkbook(body);
+            assert.deepEqual(workbook.worksheets.map((worksheet) => worksheet.name), ["Report Data", "Metadata"]);
+            assert.match(worksheetText(workbook.getWorksheet("Metadata")), new RegExp(`reportName\\n${report.reportName}`));
+          }
+        }
       }
 
       const unauthenticated = await fetch(`${baseUrl}/admin/checkout-intelligence/overview/export?format=csv`);
       assert.equal(unauthenticated.status, 401);
+      const unauthenticatedXlsx = await fetch(`${baseUrl}/admin/checkout-intelligence/overview/export?format=xlsx`);
+      assert.equal(unauthenticatedXlsx.status, 401);
 
       mockUserFindUnique("ADMIN");
-      const nonMaster = await fetch(`${baseUrl}/admin/checkout-intelligence/overview/export?format=csv`, {
+      const nonMaster = await fetch(`${baseUrl}/admin/checkout-intelligence/overview/export?format=xlsx`, {
         headers: { authorization: `Bearer ${signRole("ADMIN")}` }
       });
       assert.equal(nonMaster.status, 403);
@@ -496,7 +624,7 @@ describe("Checkout Intelligence CSV export", () => {
       });
       assert.equal(missingSellerBreakdown.status, 404);
 
-      const invalidFormat = await fetch(`${baseUrl}/admin/checkout-intelligence/overview/export?format=xlsx`, {
+      const invalidFormat = await fetch(`${baseUrl}/admin/checkout-intelligence/overview/export?format=pdf`, {
         headers: { authorization: `Bearer ${signRole("MASTER_ADMIN")}` }
       });
       assert.equal(invalidFormat.status, 400);
