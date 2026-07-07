@@ -1,17 +1,91 @@
 import assert from "node:assert/strict";
+import { once } from "node:events";
 import { readFileSync } from "node:fs";
-import { describe, it } from "node:test";
+import type { Server } from "node:http";
+import { afterEach, describe, it } from "node:test";
+import express from "express";
+import jwt from "jsonwebtoken";
 
+import { env } from "../../config/env.js";
+import { prisma } from "../../lib/prisma.js";
+import { requireMasterAdminJwt } from "../../middleware/jwtAuth.js";
+import { errorHandler } from "../../middleware/error.js";
 import {
   CheckoutIntelligenceAnalyticsService,
   sanitizeCheckoutIntelligencePayload
 } from "./checkout-intelligence-analytics.service.js";
+import { createAdminCheckoutIntelligenceRouter } from "./checkout-intelligence-admin.routes.js";
+import {
+  buildCheckoutIntelligenceCsvExport,
+  CHECKOUT_INTELLIGENCE_EXPORT_REPORT_SEQUENCE
+} from "./checkout-intelligence-export.service.js";
 
 const now = new Date("2026-07-06T12:00:00.000Z");
 const merchantId = "merchant_skymax";
 const otherMerchantId = "merchant_other";
+const originalUserFindUnique = prisma.user.findUnique.bind(prisma.user);
 
 type Row = Record<string, any>;
+
+afterEach(() => {
+  Object.defineProperty(prisma.user, "findUnique", {
+    configurable: true,
+    value: originalUserFindUnique
+  });
+});
+
+function mockUserFindUnique(role: "MASTER_ADMIN" | "ADMIN") {
+  Object.defineProperty(prisma.user, "findUnique", {
+    configurable: true,
+    value: async () => ({
+      id: "user_1",
+      merchantId: "merchant_1",
+      email: role === "MASTER_ADMIN" ? "indraveer.chauhan@gmail.com" : "ops-admin@shipmastr.test",
+      userType: "INTERNAL_SHIPMASTR",
+      role
+    })
+  });
+}
+
+function signRole(role: string) {
+  return jwt.sign({
+    userId: "user_1",
+    merchantId: "merchant_1",
+    role
+  }, env.JWT_SECRET);
+}
+
+async function closeServer(server: Server) {
+  await new Promise<void>((resolve, reject) => {
+    server.close((error) => {
+      if (error) reject(error);
+      else resolve();
+    });
+  });
+}
+
+async function withCheckoutIntelligenceApp<T>(
+  service: CheckoutIntelligenceAnalyticsService,
+  callback: (baseUrl: string) => Promise<T>
+) {
+  const app = express();
+  app.use(
+    "/admin/checkout-intelligence",
+    requireMasterAdminJwt,
+    createAdminCheckoutIntelligenceRouter(service)
+  );
+  app.use(errorHandler);
+  const server = app.listen(0);
+  await once(server, "listening");
+  const address = server.address();
+  if (!address || typeof address === "string") throw new Error("CHECKOUT_INTELLIGENCE_TEST_SERVER_ADDRESS_UNAVAILABLE");
+
+  try {
+    return await callback(`http://127.0.0.1:${address.port}`);
+  } finally {
+    await closeServer(server);
+  }
+}
 
 function matchesScalar(value: any, condition: any): boolean {
   if (condition && typeof condition === "object" && !(condition instanceof Date) && !Array.isArray(condition)) {
@@ -134,7 +208,7 @@ function createClient() {
     { id: "event_order_2", eventName: "order_placed", telemetrySessionId: "session_refund_due", merchantId, sellerId: null, checkoutOrderId: "order_refund_due", source: "ORDER_SERVICE", occurredAt: new Date("2026-07-06T09:05:00.000Z"), payloadJson: { orderState: "cancelled" } },
     { id: "event_failed_refund", eventName: "payment_failed", telemetrySessionId: "session_refund_due", merchantId, sellerId: null, checkoutOrderId: "order_refund_due", checkoutPaymentId: "payment_refund_due", source: "PAYMENT_WEBHOOK", occurredAt: new Date("2026-07-06T09:06:00.000Z"), payloadJson: { reason: "late_capture" } },
     { id: "event_order_3", eventName: "order_placed", telemetrySessionId: "session_abandoned", merchantId, sellerId: null, checkoutOrderId: "order_abandoned", source: "ORDER_SERVICE", occurredAt: new Date("2026-07-06T09:10:00.000Z"), payloadJson: { buyerEmail: "buyer@example.test" } },
-    { id: "event_abandoned", eventName: "checkout_abandoned", telemetrySessionId: "session_abandoned", merchantId, sellerId: null, checkoutOrderId: "order_abandoned", source: "WORKER", occurredAt: new Date("2026-07-06T11:10:00.000Z"), payloadJson: { phone: "+919999999999", ipAddress: "203.0.113.10", safe: "visible", neutral: "203.0.113.10" } },
+    { id: "event_abandoned", eventName: "checkout_abandoned", telemetrySessionId: "session_abandoned", merchantId, sellerId: null, checkoutOrderId: "order_abandoned", source: "WORKER", occurredAt: new Date("2026-07-06T11:10:00.000Z"), payloadJson: { phone: "+919999999999", ipAddress: "203.0.113.10", safe: "visible", neutral: "203.0.113.10", note: "Ship to 221B Market Road" } },
     { id: "event_order_other", eventName: "order_placed", telemetrySessionId: "session_other", merchantId: otherMerchantId, sellerId: null, checkoutOrderId: "order_other", source: "ORDER_SERVICE", occurredAt: new Date("2026-07-06T09:20:00.000Z"), payloadJson: {} }
   ];
   const attempts = [
@@ -254,17 +328,26 @@ describe("CheckoutIntelligenceAnalyticsService", () => {
     const eventLog = await createService().getEventLog({ merchantId });
     const abandoned = eventLog.events.find((event: any) => event.eventName === "checkout_abandoned");
 
-    assert.deepEqual(abandoned?.payload, { safe: "visible", neutral: "[redacted]" });
+    assert.deepEqual(abandoned?.payload, { safe: "visible", neutral: "[redacted]", note: "[redacted]" });
     assert.deepEqual(sanitizeCheckoutIntelligencePayload({ note: "email buyer@example.test phone 9999999999" }), {
       note: "[redacted]"
     });
     assert.deepEqual(sanitizeCheckoutIntelligencePayload({ note: "Client IP 203.0.113.10" }), {
       note: "[redacted]"
     });
+    assert.deepEqual(sanitizeCheckoutIntelligencePayload({ note: "Ship to 221B Market Road" }), {
+      note: "[redacted]"
+    });
+    assert.deepEqual(sanitizeCheckoutIntelligencePayload({
+      delivery: { line1: "221B Market Road", city: "Delhi", safe: "visible" }
+    }), {
+      delivery: { safe: "visible" }
+    });
   });
 
-  it("keeps C14 endpoints on the existing guarded router and avoids master routes", () => {
+  it("keeps Checkout Intelligence endpoints on the existing guarded router and avoids master routes", () => {
     const adminRoutes = readFileSync("src/modules/checkout/checkout-intelligence-admin.routes.ts", "utf8");
+    const exportService = readFileSync("src/modules/checkout/checkout-intelligence-export.service.ts", "utf8");
     const indexRoutes = readFileSync("src/routes/index.ts", "utf8");
 
     for (const route of [
@@ -277,11 +360,146 @@ describe("CheckoutIntelligenceAnalyticsService", () => {
       "abandoned-checkouts",
       "events"
     ]) {
-      assert.match(adminRoutes, new RegExp(`\\.get\\("\\/${route}"`));
+      assert.match(adminRoutes, new RegExp(`router\\.get\\("\\/${route}"`));
+      assert.match(exportService, new RegExp(`pathSegment: "${route}"`));
     }
 
+    assert.match(adminRoutes, /CHECKOUT_INTELLIGENCE_EXPORT_REPORT_SEQUENCE/);
+    assert.match(adminRoutes, /report\.pathSegment\}\/export/);
     assert.match(adminRoutes, /abandonment-worker\/run-once/);
     assert.match(indexRoutes, /apiRouter\.use\("\/admin\/checkout-intelligence", requireMasterAdminJwt, adminCheckoutIntelligenceRouter\)/);
     assert.doesNotMatch(indexRoutes, /\/api\/master|\/master\/checkout-intelligence/);
+    assert.doesNotMatch(adminRoutes, new RegExp(`${["Seller", "Breakdown"].join(" ")}|seller-breakdown`));
+  });
+});
+
+describe("Checkout Intelligence CSV export", () => {
+  it("builds CSV exports for every supported report with metadata, filters, and report filenames", async () => {
+    for (const report of CHECKOUT_INTELLIGENCE_EXPORT_REPORT_SEQUENCE) {
+      const exported = await buildCheckoutIntelligenceCsvExport({
+        report: report.key,
+        filters: { merchantId, dateFrom: new Date("2026-07-06T00:00:00.000Z") },
+        analyticsService: createService(),
+        generatedAt: now
+      });
+
+      assert.equal(exported.contentType, "text/csv");
+      assert.equal(exported.fileName, `checkout-intelligence-${report.fileSegment}-20260706-1200.csv`);
+      assert.match(exported.body, /generatedAt,2026-07-06T12:00:00.000Z/);
+      assert.match(exported.body, new RegExp(`reportName,${report.reportName}`));
+      assert.match(exported.body, /filter\.merchantId,merchant_skymax/);
+      assert.match(exported.body, /note\.conversionRateMeaningful,false/);
+    }
+  });
+
+  it("exports revenue and payment leakage without treating refund_due as success", async () => {
+    const paymentFailures = await buildCheckoutIntelligenceCsvExport({
+      report: "paymentFailures",
+      filters: { merchantId },
+      analyticsService: createService(),
+      generatedAt: now
+    });
+    const leakage = await buildCheckoutIntelligenceCsvExport({
+      report: "revenueLeakage",
+      filters: { merchantId },
+      analyticsService: createService(),
+      generatedAt: now
+    });
+
+    assert.match(paymentFailures.body, /CHECKOUT_PAYMENT_REFUND_DUE/);
+    assert.match(paymentFailures.body, /refund_due is payment leakage, not payment success/);
+    assert.match(paymentFailures.body, /failedAttempts,1/);
+    assert.match(leakage.body, /CHECKOUT_PAYMENT_REFUND_DUE/);
+    assert.match(leakage.body, /totalAmountAtRiskMinor,3000/);
+  });
+
+  it("keeps COD Risk export on current COD OTP semantics without pre-shipment OTP terminology", async () => {
+    const exported = await buildCheckoutIntelligenceCsvExport({
+      report: "codRisk",
+      filters: { merchantId },
+      analyticsService: createService(),
+      generatedAt: now
+    });
+
+    assert.match(exported.body, /COD OTP metrics are not instrumented yet/);
+    assert.match(exported.body, /checkoutCodOtpRequested,0/);
+    assert.doesNotMatch(exported.body, new RegExp(["OTP", "BEFORE", "SHIPMENT"].join("_")));
+  });
+
+  it("sanitizes Event Log payloads in CSV and omits raw email, phone, IP, and address fields", async () => {
+    const exported = await buildCheckoutIntelligenceCsvExport({
+      report: "eventLog",
+      filters: { merchantId },
+      analyticsService: createService(),
+      generatedAt: now
+    });
+
+    assert.match(exported.body, /safe/);
+    assert.doesNotMatch(exported.body, /buyer@example\.test/);
+    assert.doesNotMatch(exported.body, /9999999999/);
+    assert.doesNotMatch(exported.body, /203\.0\.113\.10/);
+    assert.doesNotMatch(exported.body, /221B Market Road/);
+  });
+
+  it("honors merchant filters and succeeds for empty report exports with headers and metadata", async () => {
+    const otherMerchant = await buildCheckoutIntelligenceCsvExport({
+      report: "merchantBreakdown",
+      filters: { merchantId: otherMerchantId },
+      analyticsService: createService(),
+      generatedAt: now
+    });
+    const empty = await buildCheckoutIntelligenceCsvExport({
+      report: "merchantBreakdown",
+      filters: { merchantId: "merchant_missing" },
+      analyticsService: createService(),
+      generatedAt: now
+    });
+
+    assert.match(otherMerchant.body, /Other Merchant/);
+    assert.doesNotMatch(otherMerchant.body, /Skymax Demo Merchant/);
+    assert.match(empty.body, /reportName,Merchant Breakdown/);
+    assert.match(empty.body, /section,merchants/);
+    assert.match(empty.body, /merchantId,merchantName,checkoutStartedSessions/);
+  });
+
+  it("guards export routes for MASTER_ADMIN only and returns CSV content headers", async () => {
+    await withCheckoutIntelligenceApp(createService(), async (baseUrl) => {
+      mockUserFindUnique("MASTER_ADMIN");
+
+      for (const report of CHECKOUT_INTELLIGENCE_EXPORT_REPORT_SEQUENCE) {
+        const response = await fetch(`${baseUrl}/admin/checkout-intelligence/${report.pathSegment}/export?format=csv&merchantId=${merchantId}`, {
+          headers: { authorization: `Bearer ${signRole("MASTER_ADMIN")}` }
+        });
+        const body = await response.text();
+
+        assert.equal(response.status, 200);
+        assert.match(response.headers.get("content-type") ?? "", /text\/csv/);
+        assert.match(
+          response.headers.get("content-disposition") ?? "",
+          new RegExp(`attachment; filename="checkout-intelligence-${report.fileSegment}-\\d{8}-\\d{4}\\.csv"`)
+        );
+        assert.match(body, new RegExp(`reportName,${report.reportName}`));
+      }
+
+      const unauthenticated = await fetch(`${baseUrl}/admin/checkout-intelligence/overview/export?format=csv`);
+      assert.equal(unauthenticated.status, 401);
+
+      mockUserFindUnique("ADMIN");
+      const nonMaster = await fetch(`${baseUrl}/admin/checkout-intelligence/overview/export?format=csv`, {
+        headers: { authorization: `Bearer ${signRole("ADMIN")}` }
+      });
+      assert.equal(nonMaster.status, 403);
+
+      mockUserFindUnique("MASTER_ADMIN");
+      const missingSellerBreakdown = await fetch(`${baseUrl}/admin/checkout-intelligence/seller-breakdown/export?format=csv`, {
+        headers: { authorization: `Bearer ${signRole("MASTER_ADMIN")}` }
+      });
+      assert.equal(missingSellerBreakdown.status, 404);
+
+      const invalidFormat = await fetch(`${baseUrl}/admin/checkout-intelligence/overview/export?format=xlsx`, {
+        headers: { authorization: `Bearer ${signRole("MASTER_ADMIN")}` }
+      });
+      assert.equal(invalidFormat.status, 400);
+    });
   });
 });
