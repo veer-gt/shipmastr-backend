@@ -6,5 +6,6 @@ export const corsAllowedHeaders = [
   "X-Shipmastr-Courier-Key",
   "X-Shipmastr-Signature",
   "X-Shipmastr-Timestamp",
-  "Idempotency-Key"
+  "Idempotency-Key",
+  "x-checkout-session-token"
 ] as const;
