@@ -163,6 +163,8 @@ const schema = z.object({
   GOOGLE_GEOCODING_API_KEY: z.string().optional(),
   GOOGLE_GEOCODING_MONTHLY_SOFT_CAP: z.coerce.number().int().min(0).default(5000),
   GOOGLE_GEOCODING_MONTHLY_HARD_CAP: z.coerce.number().int().min(0).default(7000),
+  PLACES_MIN_QUERY_CHARS: z.coerce.number().int().min(1).max(20).default(3),
+  PLACES_DEBOUNCE_MS: z.coerce.number().int().min(0).max(5000).default(300),
   ADDRESS_GEOCODE_QUEUE_NAME: z.string().default("shipmastr-address-geocode-queue"),
   ADDRESS_GEOCODE_TASK_HANDLER_URL: z.string().url().optional(),
   ADDRESS_PHONE_PEPPER: z.string().min(16).optional(),

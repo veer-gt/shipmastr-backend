@@ -3,6 +3,13 @@ import { env } from "../../config/env.js";
 type DbClient = Record<string, any>;
 
 export const GOOGLE_GEOCODING_SERVICE_COUNTER = "GOOGLE_GEOCODING";
+export const GOOGLE_PLACES_AUTOCOMPLETE_SERVICE_COUNTER = "GOOGLE_PLACES_AUTOCOMPLETE";
+export const GOOGLE_PLACES_DETAILS_SERVICE_COUNTER = "GOOGLE_PLACES_DETAILS";
+
+export type GoogleMapsQuotaServiceCounter =
+  | typeof GOOGLE_GEOCODING_SERVICE_COUNTER
+  | typeof GOOGLE_PLACES_AUTOCOMPLETE_SERVICE_COUNTER
+  | typeof GOOGLE_PLACES_DETAILS_SERVICE_COUNTER;
 
 function yearMonth(now = new Date()) {
   return `${now.getUTCFullYear()}-${String(now.getUTCMonth() + 1).padStart(2, "0")}`;
@@ -28,17 +35,27 @@ export function googleGeocodingCaps() {
   };
 }
 
-export async function reserveGoogleGeocodeQuota(client: DbClient, now = new Date()) {
+function quotaErrorCode(service: GoogleMapsQuotaServiceCounter, limit: "SOFT" | "HARD") {
+  if (service === GOOGLE_GEOCODING_SERVICE_COUNTER) return `GOOGLE_GEOCODE_QUOTA_${limit}_LIMIT`;
+  if (service === GOOGLE_PLACES_AUTOCOMPLETE_SERVICE_COUNTER) return `GOOGLE_PLACES_AUTOCOMPLETE_QUOTA_${limit}_LIMIT`;
+  return `GOOGLE_PLACES_DETAILS_QUOTA_${limit}_LIMIT`;
+}
+
+export async function reserveGoogleMapsQuota(
+  client: DbClient,
+  service: GoogleMapsQuotaServiceCounter,
+  now = new Date()
+) {
   const { softCap, hardCap } = googleGeocodingCaps();
   const counter = await client.googleMapsUsageCounter.upsert({
     where: {
       service_yearMonth: {
-        service: GOOGLE_GEOCODING_SERVICE_COUNTER,
+        service,
         yearMonth: yearMonth(now)
       }
     },
     create: {
-      service: GOOGLE_GEOCODING_SERVICE_COUNTER,
+      service,
       yearMonth: yearMonth(now),
       count: 1,
       softLimit: softCap,
@@ -55,7 +72,7 @@ export async function reserveGoogleGeocodeQuota(client: DbClient, now = new Date
     return {
       allowed: false,
       warning: true,
-      errorCode: "GOOGLE_GEOCODE_QUOTA_HARD_LIMIT"
+      errorCode: quotaErrorCode(service, "HARD")
     };
   }
 
@@ -63,7 +80,7 @@ export async function reserveGoogleGeocodeQuota(client: DbClient, now = new Date
     return {
       allowed: false,
       warning: true,
-      errorCode: "GOOGLE_GEOCODE_QUOTA_SOFT_LIMIT"
+      errorCode: quotaErrorCode(service, "SOFT")
     };
   }
 
@@ -72,4 +89,8 @@ export async function reserveGoogleGeocodeQuota(client: DbClient, now = new Date
     warning: false,
     errorCode: null
   };
+}
+
+export function reserveGoogleGeocodeQuota(client: DbClient, now = new Date()) {
+  return reserveGoogleMapsQuota(client, GOOGLE_GEOCODING_SERVICE_COUNTER, now);
 }
