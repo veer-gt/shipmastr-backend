@@ -3,6 +3,7 @@ import { randomUUID } from "node:crypto";
 import { prisma } from "../../lib/prisma.js";
 import { HttpError } from "../../lib/httpError.js";
 import { logger } from "../../lib/logger.js";
+import { env } from "../../config/env.js";
 import { getAddressPhonePepper, getPhoneLast2, hashAddressPhone, normalizeIndianPhone } from "../address/phone.service.js";
 import {
   createCheckoutAddressSessionToken,
@@ -17,8 +18,10 @@ import {
   type PhoneVerifier
 } from "./checkout-phone-verifier.js";
 import { recordAddressEventSafely, type AddressEventInput } from "./checkout-address-telemetry.service.js";
+import { runAddressNetworkShadowLookupForVerifiedSession } from "./checkout-address-network.service.js";
 
 type DbClient = typeof prisma | any;
+type AddressNetworkShadowLookup = (ctx: VerifiedCheckoutSessionContext) => Promise<unknown>;
 
 export const CHECKOUT_ADDRESS_SESSION_STATUSES = ["created", "verification_started", "verified", "expired"] as const;
 export type CheckoutAddressSessionStatus = (typeof CHECKOUT_ADDRESS_SESSION_STATUSES)[number];
@@ -89,7 +92,9 @@ export class CheckoutAddressSessionService {
     private readonly now: () => Date = () => new Date(),
     private readonly otpVerifier: PhoneVerifier = new OtpVerifier(),
     private readonly truecallerVerifier: PhoneVerifier = new TruecallerVerifier(),
-    private readonly telemetryRecorder: AddressTelemetryRecorder = recordAddressEventSafely
+    private readonly telemetryRecorder: AddressTelemetryRecorder = recordAddressEventSafely,
+    private readonly addressNetworkShadowLookup: AddressNetworkShadowLookup = runAddressNetworkShadowLookupForVerifiedSession,
+    private readonly addressNetworkShadowEnabled: () => boolean = () => env.ADDRESS_NETWORK_SHADOW_ENABLED
   ) {}
 
   async createSession(input: CreateCheckoutAddressSessionInput) {
@@ -219,6 +224,14 @@ export class CheckoutAddressSessionService {
       } catch {
         logger.warn({ event: "phone_verified" }, "checkout_address_telemetry_record_failed");
       }
+      await this.runAddressNetworkShadowLookupSafely({
+        sessionId: session.id,
+        merchantId: session.merchantId,
+        cartId: session.cartId ?? null,
+        phoneHash: verified.phoneHash,
+        phoneLast2: verified.phoneLast2,
+        profileName
+      });
 
       return {
         verified: true as const,
@@ -291,6 +304,15 @@ export class CheckoutAddressSessionService {
       where: { id: sessionId },
       data: { status: "expired" }
     });
+  }
+
+  private async runAddressNetworkShadowLookupSafely(ctx: VerifiedCheckoutSessionContext) {
+    if (!this.addressNetworkShadowEnabled()) return;
+    try {
+      await this.addressNetworkShadowLookup(ctx);
+    } catch {
+      logger.warn("checkout_address_network_shadow_hook_failed");
+    }
   }
 }
 

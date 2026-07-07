@@ -45,11 +45,15 @@ function expectString(value: unknown): string {
   return value;
 }
 
-function makeHarness() {
+function makeHarness(input: {
+  shadowLookup?: ((ctx: any) => Promise<unknown>) | undefined;
+  shadowEnabled?: (() => boolean) | undefined;
+} = {}) {
   const state = {
     now: new Date(baseTime),
     merchants: [{ id: "merchant_a2" }],
-    sessions: [] as any[]
+    sessions: [] as any[],
+    shadowCalls: [] as any[]
   };
 
   const client: any = {
@@ -93,7 +97,11 @@ function makeHarness() {
     () => state.now,
     new OtpVerifier(),
     new TruecallerVerifier(),
-    async () => undefined
+    async () => undefined,
+    input.shadowLookup ?? (async (ctx) => {
+      state.shadowCalls.push(clone(ctx));
+    }),
+    input.shadowEnabled ?? (() => false)
   );
   return { state, client, service };
 }
@@ -210,6 +218,66 @@ describe("Checkout Address A2 session service", () => {
       phoneLast2: "43",
       profileName: null
     });
+    assert.equal(state.shadowCalls.length, 0);
+  });
+
+  it("runs A6 network shadow lookup after successful phone verification when enabled", async () => {
+    const { state, service } = makeHarness({ shadowEnabled: () => true });
+    const result = await service.createSession({ merchantId: "merchant_a2", cartId: "cart_shadow" });
+    const start = await service.startPhoneVerification({
+      sessionToken: result.sessionToken,
+      phone: "+91 98765-43243",
+      provider: "otp"
+    });
+
+    const confirmed = await service.confirmPhoneVerification({
+      sessionToken: result.sessionToken,
+      verificationHandle: expectString(start.verificationHandle),
+      proof: "123456"
+    });
+
+    assert.deepEqual(confirmed, { verified: true, phoneLast2: "43", profile: undefined });
+    assert.equal(state.shadowCalls.length, 1);
+    assert.equal(state.shadowCalls[0].sessionId, state.sessions[0].id);
+    assert.equal(state.shadowCalls[0].merchantId, "merchant_a2");
+    assert.equal(state.shadowCalls[0].phoneHash, state.sessions[0].phoneHash);
+    assert.equal(state.shadowCalls[0].phoneLast2, "43");
+    assert.equal("phoneHash" in confirmed, false);
+  });
+
+  it("skips A6 network shadow lookup when disabled and still succeeds when it throws", async () => {
+    const disabled = makeHarness({ shadowEnabled: () => false });
+    const disabledSession = await disabled.service.createSession({ merchantId: "merchant_a2" });
+    const disabledStart = await disabled.service.startPhoneVerification({
+      sessionToken: disabledSession.sessionToken,
+      phone: "9876543243",
+      provider: "otp"
+    });
+    await disabled.service.confirmPhoneVerification({
+      sessionToken: disabledSession.sessionToken,
+      verificationHandle: expectString(disabledStart.verificationHandle),
+      proof: "123456"
+    });
+    assert.equal(disabled.state.shadowCalls.length, 0);
+
+    const throwing = makeHarness({
+      shadowEnabled: () => true,
+      shadowLookup: async () => {
+        throw new Error("NETWORK_SHADOW_DOWN");
+      }
+    });
+    const throwingSession = await throwing.service.createSession({ merchantId: "merchant_a2" });
+    const throwingStart = await throwing.service.startPhoneVerification({
+      sessionToken: throwingSession.sessionToken,
+      phone: "9876543243",
+      provider: "otp"
+    });
+    const confirmed = await throwing.service.confirmPhoneVerification({
+      sessionToken: throwingSession.sessionToken,
+      verificationHandle: expectString(throwingStart.verificationHandle),
+      proof: "123456"
+    });
+    assert.deepEqual(confirmed, { verified: true, phoneLast2: "43", profile: undefined });
   });
 
   it("rejects wrong OTP proof, bounds failed attempts, and rejects expired handles", async () => {
