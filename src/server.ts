@@ -50,6 +50,14 @@ app.use(pinoHttp({ logger }));
 
 app.use(
   express.json({
+    // SF2: reverted from a temporary 8mb global limit. Product/hero/logo images no
+    // longer travel through the JSON body at all — they upload browser -> GCS via
+    // SF1's V4 signed-URL flow (see storefront-assets.service.ts), and themeJson
+    // only ever carries small asset-id references plus a 200KB serialized-size
+    // guard (assertThemeJsonSaveSafety in storefronts.service.ts). 256kb is a
+    // generous cushion over Express's 100kb default for normal API payloads
+    // without reopening the door to inline image bytes in a JSON body.
+    limit: "256kb",
     verify: (req, _res, buf) => {
       (req as express.Request).rawBody = Buffer.from(buf);
     }

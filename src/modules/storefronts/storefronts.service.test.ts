@@ -47,7 +47,7 @@ function makeStorefrontLookupClient(overrides?: Record<string, StorefrontDomainL
   }
 
   return {
-    storefrontDomain: {
+  storefrontDomain: {
       async findUnique(input) {
         return rows.get(input.where.domain) || null;
       }
@@ -190,6 +190,24 @@ function makeAdminStorefrontClient() {
         state.settings.set(where.storefrontId, row);
         return row;
       }
+    },
+    storefrontProduct: {
+      updateMany: async () => ({ count: 0 }),
+      upsert: async (args: any) => ({
+        id: args?.create?.id ?? args?.where?.id ?? "test_storefront_product",
+        ...(args?.create ?? {}),
+        ...(args?.update ?? {})
+      }),
+      create: async (args: any) => ({
+        id: args?.data?.id ?? "test_storefront_product",
+        ...(args?.data ?? {})
+      }),
+      createMany: async (args: any) => ({
+        count: Array.isArray(args?.data) ? args.data.length : 0
+      }),
+      findFirst: async () => null,
+      findMany: async () => [],
+      deleteMany: async () => ({ count: 0 })
     },
     storefrontDomain: {
       async findMany({ where }: any) {

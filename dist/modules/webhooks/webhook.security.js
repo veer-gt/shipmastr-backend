@@ -7,8 +7,9 @@ export function verifyWebhookSignature(rawBody, signature) {
         .createHmac("sha256", env.WEBHOOK_SECRET)
         .update(rawBody)
         .digest("hex");
+    const received = signature.replace(/^sha256=/i, "");
     try {
-        return crypto.timingSafeEqual(Buffer.from(signature), Buffer.from(expected));
+        return crypto.timingSafeEqual(Buffer.from(received, "hex"), Buffer.from(expected, "hex"));
     }
     catch {
         return false;

@@ -70,12 +70,12 @@ export function calculateRisk(order) {
         reasons
     };
 }
-export async function scoreOrder(orderId) {
-    const order = await prisma.order.findUniqueOrThrow({
+export async function scoreOrder(orderId, client = prisma) {
+    const order = await client.order.findUniqueOrThrow({
         where: { id: orderId }
     });
     const result = calculateRisk(order);
-    const risk = await prisma.riskScore.create({
+    const risk = await client.riskScore.create({
         data: {
             orderId,
             score: result.score,
@@ -85,7 +85,7 @@ export async function scoreOrder(orderId) {
             reasons: result.reasons
         }
     });
-    await prisma.order.update({
+    await client.order.update({
         where: { id: orderId },
         data: { status: "RISK_SCORED" }
     });

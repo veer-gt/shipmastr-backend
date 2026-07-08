@@ -962,27 +962,29 @@ model Merchant {
   createdAt           DateTime                     @default(now())
   updatedAt           DateTime                     @updatedAt
 
-  users     User[]
-  leads     Lead[]
-  firstShipmentRequests FirstShipmentRequest[]
-  orders    Order[]
-  orderImportBatches OrderImportBatch[]
-  auditLogs AuditLog[]
-  gstinRecords MerchantGstinRecord[]
-  pickupPoints MerchantPickupPoint[]
-  warehouses MerchantWarehouse[]
-  customers MerchantCustomer[]
-  domains MerchantDomain[]
-  storefronts Storefront[]
-  checkoutRulesVersions CheckoutRulesVersion[]
-  checkoutSettings CheckoutMerchantSetting?
-  checkoutQuotes CheckoutQuote[]
-  checkoutOrders CheckoutOrder[]
-  checkoutPayments CheckoutPayment[]
+  users                    User[]
+  leads                    Lead[]
+  firstShipmentRequests    FirstShipmentRequest[]
+  orders                   Order[]
+  orderImportBatches       OrderImportBatch[]
+  auditLogs                AuditLog[]
+  gstinRecords             MerchantGstinRecord[]
+  pickupPoints             MerchantPickupPoint[]
+  warehouses               MerchantWarehouse[]
+  customers                MerchantCustomer[]
+  domains                  MerchantDomain[]
+  storefronts              Storefront[]
+  storefrontAssets         StorefrontAsset[]
+  storefrontProducts       StorefrontProduct[]
+  checkoutRulesVersions    CheckoutRulesVersion[]
+  checkoutSettings         CheckoutMerchantSetting?
+  checkoutQuotes           CheckoutQuote[]
+  checkoutOrders           CheckoutOrder[]
+  checkoutPayments         CheckoutPayment[]
   checkoutAccountingEvents CheckoutAccountingEvent[]
-  checkoutIdempotencyKeys CheckoutIdempotencyKey[]
-  checkoutAddressSessions CheckoutAddressSession[]
-  checkoutAuditLogs CheckoutAuditLog[]
+  checkoutIdempotencyKeys  CheckoutIdempotencyKey[]
+  checkoutAddressSessions  CheckoutAddressSession[]
+  checkoutAuditLogs        CheckoutAuditLog[]
   domainProvisioningEvents DomainProvisioningEvent[]
 
   @@index([adminStatus])
@@ -999,9 +1001,10 @@ model Storefront {
   createdAt  DateTime @default(now())
   updatedAt  DateTime @updatedAt
 
-  merchant Merchant @relation(fields: [merchantId], references: [id], onDelete: Cascade)
+  merchant Merchant            @relation(fields: [merchantId], references: [id], onDelete: Cascade)
   domains  StorefrontDomain[]
   settings StorefrontSettings?
+  products StorefrontProduct[]
 
   @@index([merchantId])
 }
@@ -1021,7 +1024,7 @@ model StorefrontDomain {
   createdAt                  DateTime     @default(now())
   updatedAt                  DateTime     @updatedAt
 
-  storefront Storefront @relation(fields: [storefrontId], references: [id], onDelete: Cascade)
+  storefront Storefront                @relation(fields: [storefrontId], references: [id], onDelete: Cascade)
   events     DomainProvisioningEvent[]
 
   @@index([storefrontId])
@@ -1029,7 +1032,7 @@ model StorefrontDomain {
 }
 
 model StorefrontSettings {
-  id          String   @id @default(cuid())
+  id           String   @id @default(cuid())
   storefrontId String   @unique
   themeJson    Json
   createdAt    DateTime @default(now())
@@ -1038,17 +1041,71 @@ model StorefrontSettings {
   storefront Storefront @relation(fields: [storefrontId], references: [id], onDelete: Cascade)
 }
 
+enum StorefrontAssetStatus {
+  PENDING
+  READY
+  DELETED
+}
+
+// SF1: images live here (GCS-backed), never as bytes in themeJson. themeJson only ever
+// stores a reference (imageAssetId) to a row here with status = READY.
+model StorefrontAsset {
+  id         String                @id @default(cuid())
+  merchantId String
+  gcsPath    String                @unique
+  mime       String
+  bytes      Int?
+  width      Int?
+  height     Int?
+  sha256     String?
+  status     StorefrontAssetStatus @default(PENDING)
+  createdAt  DateTime              @default(now())
+  updatedAt  DateTime              @updatedAt
+
+  merchant Merchant            @relation(fields: [merchantId], references: [id], onDelete: Cascade)
+  products StorefrontProduct[]
+
+  @@index([merchantId])
+  @@index([status])
+  @@index([sha256])
+}
+
+// SF5 Layer 3: the server-authoritative source of truth for storefront product pricing.
+// Public checkout quotes must resolve priceMinor from here by (merchantId, id) —
+// never accept a price from the storefront/client payload.
+model StorefrontProduct {
+  id           String   @id @default(cuid())
+  storefrontId String
+  merchantId   String
+  name         String
+  priceMinor   Int
+  currency     String   @default("INR")
+  description  String?
+  imageAssetId String?
+  isActive     Boolean  @default(true)
+  createdAt    DateTime @default(now())
+  updatedAt    DateTime @updatedAt
+
+  storefront Storefront       @relation(fields: [storefrontId], references: [id], onDelete: Cascade)
+  merchant   Merchant         @relation(fields: [merchantId], references: [id], onDelete: Cascade)
+  imageAsset StorefrontAsset? @relation(fields: [imageAssetId], references: [id], onDelete: SetNull)
+
+  @@index([storefrontId])
+  @@index([merchantId])
+  @@index([imageAssetId])
+}
+
 model DomainProduct {
-  id                      String         @id @default(cuid())
-  tld                     String
-  provider                DomainProvider @default(RESELLERCLUB)
-  registrationPricePaise  Int
-  renewalPricePaise       Int
-  transferPricePaise      Int            @default(0)
-  currency                String         @default("INR")
-  isActive                Boolean        @default(true)
-  createdAt               DateTime       @default(now())
-  updatedAt               DateTime       @updatedAt
+  id                     String         @id @default(cuid())
+  tld                    String
+  provider               DomainProvider @default(RESELLERCLUB)
+  registrationPricePaise Int
+  renewalPricePaise      Int
+  transferPricePaise     Int            @default(0)
+  currency               String         @default("INR")
+  isActive               Boolean        @default(true)
+  createdAt              DateTime       @default(now())
+  updatedAt              DateTime       @updatedAt
 
   @@unique([tld, provider])
   @@index([provider])
@@ -1076,7 +1133,7 @@ model MerchantDomain {
   createdAt                  DateTime             @default(now())
   updatedAt                  DateTime             @updatedAt
 
-  merchant Merchant @relation(fields: [merchantId], references: [id], onDelete: Cascade)
+  merchant Merchant                  @relation(fields: [merchantId], references: [id], onDelete: Cascade)
   events   DomainProvisioningEvent[]
 
   @@index([merchantId])
@@ -1090,25 +1147,25 @@ model MerchantDomain {
 }
 
 model DomainProvisioningEvent {
-  id                String                    @id @default(cuid())
-  merchantId        String?
-  merchantDomainId  String?
-  storefrontDomainId String?
-  storefrontId      String?
-  provider          DomainProvider
-  eventType         String
-  status            DomainProvisioningStatus
-  payload           Json?
-  requestPayload    Json?
-  responsePayload   Json?
-  safeMessage       String?
-  internalError     String?
+  id                  String                   @id @default(cuid())
+  merchantId          String?
+  merchantDomainId    String?
+  storefrontDomainId  String?
+  storefrontId        String?
+  provider            DomainProvider
+  eventType           String
+  status              DomainProvisioningStatus
+  payload             Json?
+  requestPayload      Json?
+  responsePayload     Json?
+  safeMessage         String?
+  internalError       String?
   providerReferenceId String?
-  idempotencyKey    String?
-  createdAt         DateTime                  @default(now())
+  idempotencyKey      String?
+  createdAt           DateTime                 @default(now())
 
-  merchant       Merchant?       @relation(fields: [merchantId], references: [id], onDelete: SetNull)
-  merchantDomain MerchantDomain? @relation(fields: [merchantDomainId], references: [id], onDelete: SetNull)
+  merchant         Merchant?         @relation(fields: [merchantId], references: [id], onDelete: SetNull)
+  merchantDomain   MerchantDomain?   @relation(fields: [merchantDomainId], references: [id], onDelete: SetNull)
   storefrontDomain StorefrontDomain? @relation(fields: [storefrontDomainId], references: [id], onDelete: SetNull)
 
   @@unique([idempotencyKey])
@@ -1124,53 +1181,53 @@ model DomainProvisioningEvent {
 }
 
 model CourierPartner {
-  id                  String   @id @default(cuid())
-  name                String
-  code                String   @unique
-  status              CourierPartnerStatus @default(active)
-  isSystemManaged     Boolean  @default(false)
-  defaultForNewSellers Boolean @default(false)
-  credentialsRequiredFromSeller Boolean @default(true)
-  country             String   @default("IN")
-  supportedSegments   ShipmentSegment[] @default([])
-  gstin               String?
-  serviceCodeType     String   @default("SAC")
-  serviceCode         String   @default("996812")
-  serviceDescription  String   @default("Courier services")
-  gstRate             Int      @default(18)
-  active              Boolean  @default(true)
-  apiMode             String   @default("manual")
-  bookingMode         String   @default("manual")
-  supportsCOD         Boolean  @default(true)
-  supportsPrepaid     Boolean  @default(true)
-  supportsPickup      Boolean  @default(true)
-  priority            Int      @default(100)
-  trackingUrlTemplate String?
-  createdAt           DateTime @default(now())
-  updatedAt           DateTime @updatedAt
+  id                            String               @id @default(cuid())
+  name                          String
+  code                          String               @unique
+  status                        CourierPartnerStatus @default(active)
+  isSystemManaged               Boolean              @default(false)
+  defaultForNewSellers          Boolean              @default(false)
+  credentialsRequiredFromSeller Boolean              @default(true)
+  country                       String               @default("IN")
+  supportedSegments             ShipmentSegment[]    @default([])
+  gstin                         String?
+  serviceCodeType               String               @default("SAC")
+  serviceCode                   String               @default("996812")
+  serviceDescription            String               @default("Courier services")
+  gstRate                       Int                  @default(18)
+  active                        Boolean              @default(true)
+  apiMode                       String               @default("manual")
+  bookingMode                   String               @default("manual")
+  supportsCOD                   Boolean              @default(true)
+  supportsPrepaid               Boolean              @default(true)
+  supportsPickup                Boolean              @default(true)
+  priority                      Int                  @default(100)
+  trackingUrlTemplate           String?
+  createdAt                     DateTime             @default(now())
+  updatedAt                     DateTime             @updatedAt
 
-  rateCards      RateCard[]
-  users          CourierUser[]
-  shipments      CourierShipment[]
-  webhookConfigs CourierWebhookConfig[]
-  invoices       CourierInvoice[]
-  financePolicies CourierFinancePolicy[]
-  penalties       CourierPenalty[]
-  onboarding      CourierPartnerOnboarding?
-  onboardingSecrets CourierPartnerSecret[]
-  sandboxVerificationChecklist CourierSandboxVerificationChecklistItem[]
-  gstinRecords CourierGstinRecord[]
-  operationalLocations CourierOperationalLocation[]
-  serviceablePincodes CourierServiceablePincode[]
-  pilotChecklist CourierPilotChecklistItem[]
-  developerCredentials CourierDeveloperCredential[]
-  apiEvents CourierApiEvent[]
-  sellerCourierPartners SellerCourierPartner[]
+  rateCards                      RateCard[]
+  users                          CourierUser[]
+  shipments                      CourierShipment[]
+  webhookConfigs                 CourierWebhookConfig[]
+  invoices                       CourierInvoice[]
+  financePolicies                CourierFinancePolicy[]
+  penalties                      CourierPenalty[]
+  onboarding                     CourierPartnerOnboarding?
+  onboardingSecrets              CourierPartnerSecret[]
+  sandboxVerificationChecklist   CourierSandboxVerificationChecklistItem[]
+  gstinRecords                   CourierGstinRecord[]
+  operationalLocations           CourierOperationalLocation[]
+  serviceablePincodes            CourierServiceablePincode[]
+  pilotChecklist                 CourierPilotChecklistItem[]
+  developerCredentials           CourierDeveloperCredential[]
+  apiEvents                      CourierApiEvent[]
+  sellerCourierPartners          SellerCourierPartner[]
   pickupLocationProviderMappings PickupLocationProviderMapping[]
-  networkShipments Shipment[]
-  shipmentProviderRefs ShipmentProviderRef[]
-  shipmentRates ShipmentRate[]
-  shipmentTrackingEvents ShipmentTrackingEvent[]
+  networkShipments               Shipment[]
+  shipmentProviderRefs           ShipmentProviderRef[]
+  shipmentRates                  ShipmentRate[]
+  shipmentTrackingEvents         ShipmentTrackingEvent[]
 
   @@index([status])
   @@index([active])
@@ -1197,10 +1254,10 @@ model SellerCourierPartner {
   createdAt                     DateTime                   @default(now()) @map("created_at")
   updatedAt                     DateTime                   @default(now()) @updatedAt @map("updated_at")
 
-  courierPartner CourierPartner @relation(fields: [courierPartnerId], references: [id], onDelete: Cascade)
+  courierPartner                 CourierPartner                  @relation(fields: [courierPartnerId], references: [id], onDelete: Cascade)
   pickupLocationProviderMappings PickupLocationProviderMapping[]
-  shipments Shipment[]
-  shipmentRates ShipmentRate[]
+  shipments                      Shipment[]
+  shipmentRates                  ShipmentRate[]
 
   @@unique([sellerId, courierPartnerId])
   @@index([sellerId])
@@ -1229,8 +1286,8 @@ model PickupLocation {
   updatedAt    DateTime @default(now()) @updatedAt @map("updated_at")
 
   providerMappings PickupLocationProviderMapping[]
-  shipments Shipment[]
-  orders Order[]
+  shipments        Shipment[]
+  orders           Order[]
 
   @@index([sellerId])
   @@index([sellerId, status])
@@ -1251,9 +1308,9 @@ model PickupLocationProviderMapping {
   createdAt              DateTime @default(now()) @map("created_at")
   updatedAt              DateTime @default(now()) @updatedAt @map("updated_at")
 
-  pickupLocation PickupLocation @relation(fields: [pickupLocationId], references: [id], onDelete: Cascade)
+  pickupLocation       PickupLocation        @relation(fields: [pickupLocationId], references: [id], onDelete: Cascade)
   sellerCourierPartner SellerCourierPartner? @relation(fields: [sellerCourierPartnerId], references: [id], onDelete: SetNull)
-  courierPartner CourierPartner @relation(fields: [courierPartnerId], references: [id], onDelete: Cascade)
+  courierPartner       CourierPartner        @relation(fields: [courierPartnerId], references: [id], onDelete: Cascade)
 
   @@unique([pickupLocationId, courierPartnerId])
   @@index([pickupLocationId])
@@ -1297,14 +1354,14 @@ model Shipment {
   createdAt              DateTime            @default(now()) @map("created_at")
   updatedAt              DateTime            @default(now()) @updatedAt @map("updated_at")
 
-  pickupLocation PickupLocation? @relation(fields: [pickupLocationId], references: [id], onDelete: SetNull)
-  sellerCourierPartner SellerCourierPartner? @relation(fields: [sellerCourierPartnerId], references: [id], onDelete: SetNull)
-  courierPartner CourierPartner? @relation(fields: [courierPartnerId], references: [id], onDelete: SetNull)
-  providerRefs ShipmentProviderRef[]
-  rates ShipmentRate[]
-  trackingEvents ShipmentTrackingEvent[]
+  pickupLocation             PickupLocation?                     @relation(fields: [pickupLocationId], references: [id], onDelete: SetNull)
+  sellerCourierPartner       SellerCourierPartner?               @relation(fields: [sellerCourierPartnerId], references: [id], onDelete: SetNull)
+  courierPartner             CourierPartner?                     @relation(fields: [courierPartnerId], references: [id], onDelete: SetNull)
+  providerRefs               ShipmentProviderRef[]
+  rates                      ShipmentRate[]
+  trackingEvents             ShipmentTrackingEvent[]
   weightProofCaptureSessions ShippingWeightProofCaptureSession[]
-  weightProofs ShippingWeightProof[]
+  weightProofs               ShippingWeightProof[]
 
   @@index([sellerId])
   @@index([orderId])
@@ -1333,7 +1390,7 @@ model ShipmentProviderRef {
   createdAt          DateTime @default(now()) @map("created_at")
   updatedAt          DateTime @default(now()) @updatedAt @map("updated_at")
 
-  shipment Shipment @relation(fields: [shipmentId], references: [id], onDelete: Cascade)
+  shipment       Shipment        @relation(fields: [shipmentId], references: [id], onDelete: Cascade)
   courierPartner CourierPartner? @relation(fields: [courierPartnerId], references: [id], onDelete: SetNull)
 
   @@index([shipmentId])
@@ -1362,9 +1419,9 @@ model ShipmentRate {
   createdAt              DateTime        @default(now()) @map("created_at")
   updatedAt              DateTime        @default(now()) @updatedAt @map("updated_at")
 
-  shipment Shipment? @relation(fields: [shipmentId], references: [id], onDelete: Cascade)
+  shipment             Shipment?             @relation(fields: [shipmentId], references: [id], onDelete: Cascade)
   sellerCourierPartner SellerCourierPartner? @relation(fields: [sellerCourierPartnerId], references: [id], onDelete: SetNull)
-  courierPartner CourierPartner? @relation(fields: [courierPartnerId], references: [id], onDelete: SetNull)
+  courierPartner       CourierPartner?       @relation(fields: [courierPartnerId], references: [id], onDelete: SetNull)
 
   @@index([shipmentId])
   @@index([sellerId])
@@ -1390,7 +1447,7 @@ model ShipmentTrackingEvent {
   metadata         Json?
   createdAt        DateTime       @default(now()) @map("created_at")
 
-  shipment Shipment @relation(fields: [shipmentId], references: [id], onDelete: Cascade)
+  shipment       Shipment        @relation(fields: [shipmentId], references: [id], onDelete: Cascade)
   courierPartner CourierPartner? @relation(fields: [courierPartnerId], references: [id], onDelete: SetNull)
 
   @@index([shipmentId])
@@ -1443,21 +1500,21 @@ model AutopilotDecision {
 }
 
 model CourierSlaEvent {
-  id               String   @id @default(cuid())
-  merchantId       String   @map("merchant_id")
-  shipmentId       String   @map("shipment_id")
-  orderId          String?  @map("order_id")
-  provider         String?
-  courierCode      String?  @map("courier_code")
-  courierName      String?  @map("courier_name")
-  serviceType      String?  @map("service_type")
-  selectedTier     String?  @map("selected_tier")
-  pickupPincode    String?  @map("pickup_pincode")
-  deliveryPincode  String?  @map("delivery_pincode")
-  eventType        String   @map("event_type")
-  eventAt          DateTime @default(now()) @map("event_at")
-  metadataJson     Json?    @map("metadata_json")
-  createdAt        DateTime @default(now()) @map("created_at")
+  id              String   @id @default(cuid())
+  merchantId      String   @map("merchant_id")
+  shipmentId      String   @map("shipment_id")
+  orderId         String?  @map("order_id")
+  provider        String?
+  courierCode     String?  @map("courier_code")
+  courierName     String?  @map("courier_name")
+  serviceType     String?  @map("service_type")
+  selectedTier    String?  @map("selected_tier")
+  pickupPincode   String?  @map("pickup_pincode")
+  deliveryPincode String?  @map("delivery_pincode")
+  eventType       String   @map("event_type")
+  eventAt         DateTime @default(now()) @map("event_at")
+  metadataJson    Json?    @map("metadata_json")
+  createdAt       DateTime @default(now()) @map("created_at")
 
   @@index([merchantId, eventType])
   @@index([provider, courierCode, deliveryPincode])
@@ -1567,24 +1624,24 @@ model NdrActionAttempt {
 }
 
 model RtoCase {
-  id                 String    @id @default(cuid())
-  merchantId         String    @map("merchant_id")
-  shipmentId         String    @map("shipment_id")
-  orderId            String?   @map("order_id")
-  status             String    @default("initiated")
-  rtoReasonCode      String?   @map("rto_reason_code")
-  rtoReasonLabel     String?   @map("rto_reason_label")
-  initiatedAt        DateTime? @map("initiated_at")
-  receivedAt         DateTime? @map("received_at")
-  closedAt           DateTime? @map("closed_at")
-  forwardFreightPaise Int?     @map("forward_freight_paise")
-  rtoFreightPaise    Int?      @map("rto_freight_paise")
-  codLostPaise       Int?      @map("cod_lost_paise")
-  estimatedLossPaise Int?      @map("estimated_loss_paise")
-  providerStatus     String?   @map("provider_status")
-  metadataJson       Json?     @map("metadata_json")
-  createdAt          DateTime  @default(now()) @map("created_at")
-  updatedAt          DateTime  @default(now()) @updatedAt @map("updated_at")
+  id                  String    @id @default(cuid())
+  merchantId          String    @map("merchant_id")
+  shipmentId          String    @map("shipment_id")
+  orderId             String?   @map("order_id")
+  status              String    @default("initiated")
+  rtoReasonCode       String?   @map("rto_reason_code")
+  rtoReasonLabel      String?   @map("rto_reason_label")
+  initiatedAt         DateTime? @map("initiated_at")
+  receivedAt          DateTime? @map("received_at")
+  closedAt            DateTime? @map("closed_at")
+  forwardFreightPaise Int?      @map("forward_freight_paise")
+  rtoFreightPaise     Int?      @map("rto_freight_paise")
+  codLostPaise        Int?      @map("cod_lost_paise")
+  estimatedLossPaise  Int?      @map("estimated_loss_paise")
+  providerStatus      String?   @map("provider_status")
+  metadataJson        Json?     @map("metadata_json")
+  createdAt           DateTime  @default(now()) @map("created_at")
+  updatedAt           DateTime  @default(now()) @updatedAt @map("updated_at")
 
   @@index([merchantId, status])
   @@index([shipmentId])
@@ -1650,26 +1707,26 @@ model WeightDiscrepancyCase {
 }
 
 model ShippingWeightProofCaptureSession {
-  id               String                   @id @default(cuid())
-  merchantId       String                   @map("merchant_id")
-  shipmentId       String?                  @map("shipment_id")
-  awbNumber        String                   @map("awb_number")
-  imageObjectKey   String                   @map("image_object_key")
-  contentType      String                   @map("content_type")
-  expectedByteSize Int?                     @map("expected_byte_size")
-  imageChecksum    String?                  @map("image_checksum")
-  imageSizeBytes   Int?                     @map("image_size_bytes")
-  qualityStatus    String?                  @map("quality_status")
-  qualityReasonCodes String[]               @default([]) @map("quality_reason_codes")
-  deviceId         String?                  @map("device_id")
-  status           WeightProofCaptureStatus @default(CREATED)
-  expiresAt        DateTime                 @map("expires_at")
-  finalizedAt      DateTime?                @map("finalized_at")
-  createdAt        DateTime                 @default(now()) @map("created_at")
-  updatedAt        DateTime                 @default(now()) @updatedAt @map("updated_at")
+  id                 String                   @id @default(cuid())
+  merchantId         String                   @map("merchant_id")
+  shipmentId         String?                  @map("shipment_id")
+  awbNumber          String                   @map("awb_number")
+  imageObjectKey     String                   @map("image_object_key")
+  contentType        String                   @map("content_type")
+  expectedByteSize   Int?                     @map("expected_byte_size")
+  imageChecksum      String?                  @map("image_checksum")
+  imageSizeBytes     Int?                     @map("image_size_bytes")
+  qualityStatus      String?                  @map("quality_status")
+  qualityReasonCodes String[]                 @default([]) @map("quality_reason_codes")
+  deviceId           String?                  @map("device_id")
+  status             WeightProofCaptureStatus @default(CREATED)
+  expiresAt          DateTime                 @map("expires_at")
+  finalizedAt        DateTime?                @map("finalized_at")
+  createdAt          DateTime                 @default(now()) @map("created_at")
+  updatedAt          DateTime                 @default(now()) @updatedAt @map("updated_at")
 
-  shipment Shipment? @relation(fields: [shipmentId], references: [id], onDelete: SetNull)
-  proof ShippingWeightProof?
+  shipment Shipment?            @relation(fields: [shipmentId], references: [id], onDelete: SetNull)
+  proof    ShippingWeightProof?
 
   @@index([merchantId, awbNumber])
   @@index([shipmentId])
@@ -1678,33 +1735,33 @@ model ShippingWeightProofCaptureSession {
 }
 
 model ShippingWeightProof {
-  id                     String   @id @default(cuid())
-  captureSessionId       String   @unique @map("capture_session_id")
-  merchantId             String   @map("merchant_id")
-  shipmentId             String?  @map("shipment_id")
-  awbNumber              String   @map("awb_number")
-  declaredWeightGrams    Int      @map("declared_weight_grams")
-  lengthCm               Decimal  @map("length_cm") @db.Decimal(10, 2)
-  widthCm                Decimal  @map("width_cm") @db.Decimal(10, 2)
-  heightCm               Decimal  @map("height_cm") @db.Decimal(10, 2)
-  volumetricWeightGrams  Int      @map("volumetric_weight_grams")
-  chargeableWeightGrams  Int      @map("chargeable_weight_grams")
-  imageObjectKey         String   @map("image_object_key")
-  contentType            String   @map("content_type")
-  imageChecksum          String?  @map("image_checksum")
-  imageSizeBytes         Int?     @map("image_size_bytes")
-  imageQualityStatus     String?  @map("image_quality_status")
-  imageQualityReasonCodes String[] @default([]) @map("image_quality_reason_codes")
-  imageRetentionStatus   String   @default("ACTIVE") @map("image_retention_status")
-  imageDeletedAt         DateTime? @map("image_deleted_at")
-  imageDeletionReason    String?  @map("image_deletion_reason")
-  deletedAfterSettlementRef String? @map("deleted_after_settlement_ref")
-  deviceId               String?  @map("device_id")
-  capturedAt             DateTime @map("captured_at")
-  createdAt              DateTime @default(now()) @map("created_at")
+  id                        String    @id @default(cuid())
+  captureSessionId          String    @unique @map("capture_session_id")
+  merchantId                String    @map("merchant_id")
+  shipmentId                String?   @map("shipment_id")
+  awbNumber                 String    @map("awb_number")
+  declaredWeightGrams       Int       @map("declared_weight_grams")
+  lengthCm                  Decimal   @map("length_cm") @db.Decimal(10, 2)
+  widthCm                   Decimal   @map("width_cm") @db.Decimal(10, 2)
+  heightCm                  Decimal   @map("height_cm") @db.Decimal(10, 2)
+  volumetricWeightGrams     Int       @map("volumetric_weight_grams")
+  chargeableWeightGrams     Int       @map("chargeable_weight_grams")
+  imageObjectKey            String    @map("image_object_key")
+  contentType               String    @map("content_type")
+  imageChecksum             String?   @map("image_checksum")
+  imageSizeBytes            Int?      @map("image_size_bytes")
+  imageQualityStatus        String?   @map("image_quality_status")
+  imageQualityReasonCodes   String[]  @default([]) @map("image_quality_reason_codes")
+  imageRetentionStatus      String    @default("ACTIVE") @map("image_retention_status")
+  imageDeletedAt            DateTime? @map("image_deleted_at")
+  imageDeletionReason       String?   @map("image_deletion_reason")
+  deletedAfterSettlementRef String?   @map("deleted_after_settlement_ref")
+  deviceId                  String?   @map("device_id")
+  capturedAt                DateTime  @map("captured_at")
+  createdAt                 DateTime  @default(now()) @map("created_at")
 
   captureSession ShippingWeightProofCaptureSession @relation(fields: [captureSessionId], references: [id], onDelete: Cascade)
-  shipment Shipment? @relation(fields: [shipmentId], references: [id], onDelete: SetNull)
+  shipment       Shipment?                         @relation(fields: [shipmentId], references: [id], onDelete: SetNull)
 
   @@unique([merchantId, awbNumber])
   @@index([shipmentId])
@@ -1818,17 +1875,17 @@ model ShopifyConnectionState {
 }
 
 model WooCommerceConnectionState {
-  id                         String                   @id @default(cuid())
-  connectionId               String                   @unique @map("connection_id")
-  siteUrl                    String                   @map("site_url")
-  apiVersion                 String?                  @map("api_version")
-  installMode                WooCommerceInstallMode   @default(REST_KEY_PLACEHOLDER) @map("install_mode")
-  webhookStatus              WooCommerceWebhookStatus @default(NOT_CONFIGURED) @map("webhook_status")
-  lastWebhookReceivedAt      DateTime?                @map("last_webhook_received_at")
-  lastOrderWebhookId         String?                  @map("last_order_webhook_id")
-  lastTrackingSyncAttemptAt  DateTime?                @map("last_tracking_sync_attempt_at")
-  createdAt                  DateTime                 @default(now()) @map("created_at")
-  updatedAt                  DateTime                 @default(now()) @updatedAt @map("updated_at")
+  id                        String                   @id @default(cuid())
+  connectionId              String                   @unique @map("connection_id")
+  siteUrl                   String                   @map("site_url")
+  apiVersion                String?                  @map("api_version")
+  installMode               WooCommerceInstallMode   @default(REST_KEY_PLACEHOLDER) @map("install_mode")
+  webhookStatus             WooCommerceWebhookStatus @default(NOT_CONFIGURED) @map("webhook_status")
+  lastWebhookReceivedAt     DateTime?                @map("last_webhook_received_at")
+  lastOrderWebhookId        String?                  @map("last_order_webhook_id")
+  lastTrackingSyncAttemptAt DateTime?                @map("last_tracking_sync_attempt_at")
+  createdAt                 DateTime                 @default(now()) @map("created_at")
+  updatedAt                 DateTime                 @default(now()) @updatedAt @map("updated_at")
 
   @@index([siteUrl])
   @@index([webhookStatus])
@@ -1880,22 +1937,22 @@ model PlatformOrderImport {
 }
 
 model PlatformTrackingSync {
-  id             String                     @id @default(cuid())
-  connectionId   String                     @map("connection_id")
-  merchantId     String                     @map("merchant_id")
-  shipmentId     String                     @map("shipment_id")
-  platform       StorePlatform
-  externalOrderId String?                   @map("external_order_id")
-  trackingNumber String?                    @map("tracking_number")
-  trackingUrl    String?                    @map("tracking_url")
-  status         PlatformTrackingSyncStatus @default(PENDING)
-  mode           String                     @default("DRY_RUN")
-  safeMeta       Json?                      @map("safe_meta")
-  lastAttemptAt  DateTime?                  @map("last_attempt_at")
-  syncedAt       DateTime?                  @map("synced_at")
-  errorMessage   String?                    @map("error_message")
-  createdAt      DateTime                   @default(now()) @map("created_at")
-  updatedAt      DateTime                   @default(now()) @updatedAt @map("updated_at")
+  id              String                     @id @default(cuid())
+  connectionId    String                     @map("connection_id")
+  merchantId      String                     @map("merchant_id")
+  shipmentId      String                     @map("shipment_id")
+  platform        StorePlatform
+  externalOrderId String?                    @map("external_order_id")
+  trackingNumber  String?                    @map("tracking_number")
+  trackingUrl     String?                    @map("tracking_url")
+  status          PlatformTrackingSyncStatus @default(PENDING)
+  mode            String                     @default("DRY_RUN")
+  safeMeta        Json?                      @map("safe_meta")
+  lastAttemptAt   DateTime?                  @map("last_attempt_at")
+  syncedAt        DateTime?                  @map("synced_at")
+  errorMessage    String?                    @map("error_message")
+  createdAt       DateTime                   @default(now()) @map("created_at")
+  updatedAt       DateTime                   @default(now()) @updatedAt @map("updated_at")
 
   @@index([merchantId, status])
   @@index([connectionId])
@@ -1905,21 +1962,21 @@ model PlatformTrackingSync {
 }
 
 model PlatformCredential {
-  id                String                   @id @default(cuid())
-  merchantId        String                   @map("merchant_id")
+  id                String                     @id @default(cuid())
+  merchantId        String                     @map("merchant_id")
   platform          PlatformCredentialProvider
-  credentialType    PlatformCredentialType   @map("credential_type")
+  credentialType    PlatformCredentialType     @map("credential_type")
   name              String
-  status            PlatformCredentialStatus @default(ACTIVE)
-  secretRef         String                   @unique @map("secret_ref")
-  secretFingerprint String                   @map("secret_fingerprint")
-  safeMetadata      Json?                    @map("safe_metadata")
-  lastUsedAt        DateTime?                @map("last_used_at")
-  expiresAt         DateTime?                @map("expires_at")
-  createdAt         DateTime                 @default(now()) @map("created_at")
-  updatedAt         DateTime                 @default(now()) @updatedAt @map("updated_at")
-  rotatedAt         DateTime?                @map("rotated_at")
-  revokedAt         DateTime?                @map("revoked_at")
+  status            PlatformCredentialStatus   @default(ACTIVE)
+  secretRef         String                     @unique @map("secret_ref")
+  secretFingerprint String                     @map("secret_fingerprint")
+  safeMetadata      Json?                      @map("safe_metadata")
+  lastUsedAt        DateTime?                  @map("last_used_at")
+  expiresAt         DateTime?                  @map("expires_at")
+  createdAt         DateTime                   @default(now()) @map("created_at")
+  updatedAt         DateTime                   @default(now()) @updatedAt @map("updated_at")
+  rotatedAt         DateTime?                  @map("rotated_at")
+  revokedAt         DateTime?                  @map("revoked_at")
 
   @@index([merchantId, platform])
   @@index([merchantId, status])
@@ -1941,17 +1998,17 @@ model PlatformCredentialSecret {
 }
 
 model PlatformConnectionHealthCheck {
-  id          String                    @id @default(cuid())
-  connectionId String                   @map("connection_id")
-  merchantId  String                    @map("merchant_id")
-  platform    StorePlatform
-  checkType   PlatformHealthCheckType   @map("check_type")
-  status      PlatformHealthCheckStatus
-  message     String
-  safeDetails Json?                     @map("safe_details")
-  errorCode   String?                   @map("error_code")
-  checkedAt   DateTime                  @default(now()) @map("checked_at")
-  createdAt   DateTime                  @default(now()) @map("created_at")
+  id           String                    @id @default(cuid())
+  connectionId String                    @map("connection_id")
+  merchantId   String                    @map("merchant_id")
+  platform     StorePlatform
+  checkType    PlatformHealthCheckType   @map("check_type")
+  status       PlatformHealthCheckStatus
+  message      String
+  safeDetails  Json?                     @map("safe_details")
+  errorCode    String?                   @map("error_code")
+  checkedAt    DateTime                  @default(now()) @map("checked_at")
+  createdAt    DateTime                  @default(now()) @map("created_at")
 
   @@index([merchantId, platform])
   @@index([connectionId, checkedAt])
@@ -2012,26 +2069,26 @@ model PlatformImportCursor {
 }
 
 model PlatformImportItem {
-  id                String                   @id @default(cuid())
-  jobId             String                   @map("job_id")
-  connectionId      String                   @map("connection_id")
-  merchantId        String                   @map("merchant_id")
-  platform          StorePlatform
-  externalOrderId   String?                  @map("external_order_id")
-  externalOrderName String?                  @map("external_order_name")
-  payloadHash       String                   @map("payload_hash")
-  status            PlatformImportItemStatus @default(PENDING)
-  orderImportId     String?                  @map("order_import_id")
-  normalizedOrderId String?                  @map("normalized_order_id")
-  attemptCount      Int                      @default(0) @map("attempt_count")
-  lastAttemptAt     DateTime?                @map("last_attempt_at")
-  nextAttemptAt     DateTime?                @map("next_attempt_at")
-  errorCode         String?                  @map("error_code")
-  errorMessage      String?                  @map("error_message")
-  mappingWarnings   Json?                    @map("mapping_warnings")
-  safePayloadPreview Json?                   @map("safe_payload_preview")
-  createdAt         DateTime                 @default(now()) @map("created_at")
-  updatedAt         DateTime                 @default(now()) @updatedAt @map("updated_at")
+  id                 String                   @id @default(cuid())
+  jobId              String                   @map("job_id")
+  connectionId       String                   @map("connection_id")
+  merchantId         String                   @map("merchant_id")
+  platform           StorePlatform
+  externalOrderId    String?                  @map("external_order_id")
+  externalOrderName  String?                  @map("external_order_name")
+  payloadHash        String                   @map("payload_hash")
+  status             PlatformImportItemStatus @default(PENDING)
+  orderImportId      String?                  @map("order_import_id")
+  normalizedOrderId  String?                  @map("normalized_order_id")
+  attemptCount       Int                      @default(0) @map("attempt_count")
+  lastAttemptAt      DateTime?                @map("last_attempt_at")
+  nextAttemptAt      DateTime?                @map("next_attempt_at")
+  errorCode          String?                  @map("error_code")
+  errorMessage       String?                  @map("error_message")
+  mappingWarnings    Json?                    @map("mapping_warnings")
+  safePayloadPreview Json?                    @map("safe_payload_preview")
+  createdAt          DateTime                 @default(now()) @map("created_at")
+  updatedAt          DateTime                 @default(now()) @updatedAt @map("updated_at")
 
   @@index([jobId])
   @@index([merchantId, status])
@@ -2063,24 +2120,24 @@ model PlatformImportConversion {
 }
 
 model PlatformWebhookEvent {
-  id              String    @id @default(cuid())
-  merchantId      String    @map("merchant_id")
-  connectionId    String?   @map("connection_id")
+  id              String        @id @default(cuid())
+  merchantId      String        @map("merchant_id")
+  connectionId    String?       @map("connection_id")
   platform        StorePlatform
   topic           String
-  externalEventId String?   @map("external_event_id")
-  eventHash       String    @map("event_hash")
-  status          String    @default("RECEIVED")
-  receivedAt      DateTime  @default(now()) @map("received_at")
-  processedAt     DateTime? @map("processed_at")
-  safeSummary     Json?     @map("safe_summary")
+  externalEventId String?       @map("external_event_id")
+  eventHash       String        @map("event_hash")
+  status          String        @default("RECEIVED")
+  receivedAt      DateTime      @default(now()) @map("received_at")
+  processedAt     DateTime?     @map("processed_at")
+  safeSummary     Json?         @map("safe_summary")
   warnings        Json?
   errors          Json?
-  importJobId     String?   @map("import_job_id")
-  importItemId    String?   @map("import_item_id")
-  dedupeKey       String?   @map("dedupe_key")
-  createdAt       DateTime  @default(now()) @map("created_at")
-  updatedAt       DateTime  @default(now()) @updatedAt @map("updated_at")
+  importJobId     String?       @map("import_job_id")
+  importItemId    String?       @map("import_item_id")
+  dedupeKey       String?       @map("dedupe_key")
+  createdAt       DateTime      @default(now()) @map("created_at")
+  updatedAt       DateTime      @default(now()) @updatedAt @map("updated_at")
 
   @@unique([merchantId, dedupeKey])
   @@index([merchantId, platform])
@@ -2139,17 +2196,17 @@ model MerchantNotification {
 }
 
 model MerchantNotificationPreference {
-  id                      String   @id @default(cuid())
-  merchantId              String   @unique @map("merchant_id")
-  inAppEnabled            Boolean  @default(true) @map("in_app_enabled")
-  importFailedEnabled     Boolean  @default(true) @map("import_failed_enabled")
-  needsReviewEnabled      Boolean  @default(true) @map("needs_review_enabled")
-  duplicateEnabled        Boolean  @default(true) @map("duplicate_enabled")
-  conversionBlockedEnabled Boolean @default(true) @map("conversion_blocked_enabled")
-  digestEnabled           Boolean  @default(true) @map("digest_enabled")
-  emailEnabled            Boolean  @default(false) @map("email_enabled")
-  createdAt               DateTime @default(now()) @map("created_at")
-  updatedAt               DateTime @default(now()) @updatedAt @map("updated_at")
+  id                       String   @id @default(cuid())
+  merchantId               String   @unique @map("merchant_id")
+  inAppEnabled             Boolean  @default(true) @map("in_app_enabled")
+  importFailedEnabled      Boolean  @default(true) @map("import_failed_enabled")
+  needsReviewEnabled       Boolean  @default(true) @map("needs_review_enabled")
+  duplicateEnabled         Boolean  @default(true) @map("duplicate_enabled")
+  conversionBlockedEnabled Boolean  @default(true) @map("conversion_blocked_enabled")
+  digestEnabled            Boolean  @default(true) @map("digest_enabled")
+  emailEnabled             Boolean  @default(false) @map("email_enabled")
+  createdAt                DateTime @default(now()) @map("created_at")
+  updatedAt                DateTime @default(now()) @updatedAt @map("updated_at")
 
   @@map("merchant_notification_preferences")
 }
@@ -2196,18 +2253,18 @@ model ShipmastrWorkerRun {
 }
 
 model MerchantOnboardingState {
-  id                        String    @id @default(cuid())
-  merchantId                String    @unique @map("merchant_id")
-  currentStep               String    @default("WELCOME") @map("current_step")
-  storeConnected            Boolean   @default(false) @map("store_connected")
-  credentialsReady          Boolean   @default(false) @map("credentials_ready")
-  firstFetchCompleted       Boolean   @default(false) @map("first_fetch_completed")
-  reconciliationViewed      Boolean   @default(false) @map("reconciliation_viewed")
-  firstConversionCompleted  Boolean   @default(false) @map("first_conversion_completed")
-  shippingWorkspaceReady    Boolean   @default(false) @map("shipping_workspace_ready")
-  completedAt               DateTime? @map("completed_at")
-  createdAt                 DateTime  @default(now()) @map("created_at")
-  updatedAt                 DateTime  @default(now()) @updatedAt @map("updated_at")
+  id                       String    @id @default(cuid())
+  merchantId               String    @unique @map("merchant_id")
+  currentStep              String    @default("WELCOME") @map("current_step")
+  storeConnected           Boolean   @default(false) @map("store_connected")
+  credentialsReady         Boolean   @default(false) @map("credentials_ready")
+  firstFetchCompleted      Boolean   @default(false) @map("first_fetch_completed")
+  reconciliationViewed     Boolean   @default(false) @map("reconciliation_viewed")
+  firstConversionCompleted Boolean   @default(false) @map("first_conversion_completed")
+  shippingWorkspaceReady   Boolean   @default(false) @map("shipping_workspace_ready")
+  completedAt              DateTime? @map("completed_at")
+  createdAt                DateTime  @default(now()) @map("created_at")
+  updatedAt                DateTime  @default(now()) @updatedAt @map("updated_at")
 
   @@index([merchantId, currentStep])
   @@map("merchant_onboarding_states")
@@ -2282,19 +2339,19 @@ model LivePilotAuditLog {
 }
 
 model CourierProviderCredential {
-  id              String   @id @default(cuid())
-  merchantId      String?  @map("merchant_id")
-  providerKey     String   @map("provider_key")
+  id              String                          @id @default(cuid())
+  merchantId      String?                         @map("merchant_id")
+  providerKey     String                          @map("provider_key")
   mode            String
-  status          String   @default("DRAFT")
-  credentialRef   String?  @map("credential_ref")
-  requiredFields  Json?    @map("required_fields")
-  safeMeta        Json?    @map("safe_meta")
-  lastTestedAt    DateTime? @map("last_tested_at")
-  lastTestStatus  String?  @map("last_test_status")
-  lastTestSummary Json?    @map("last_test_summary")
-  createdAt       DateTime @default(now()) @map("created_at")
-  updatedAt       DateTime @default(now()) @updatedAt @map("updated_at")
+  status          String                          @default("DRAFT")
+  credentialRef   String?                         @map("credential_ref")
+  requiredFields  Json?                           @map("required_fields")
+  safeMeta        Json?                           @map("safe_meta")
+  lastTestedAt    DateTime?                       @map("last_tested_at")
+  lastTestStatus  String?                         @map("last_test_status")
+  lastTestSummary Json?                           @map("last_test_summary")
+  createdAt       DateTime                        @default(now()) @map("created_at")
+  updatedAt       DateTime                        @default(now()) @updatedAt @map("updated_at")
   readinessProbes CourierProviderReadinessProbe[]
 
   @@index([merchantId, providerKey, mode])
@@ -2304,19 +2361,19 @@ model CourierProviderCredential {
 }
 
 model CourierProviderReadinessProbe {
-  id            String   @id @default(cuid())
-  credentialId  String?  @map("credential_id")
-  credential    CourierProviderCredential? @relation(fields: [credentialId], references: [id], onDelete: SetNull)
-  merchantId    String?  @map("merchant_id")
-  providerKey   String   @map("provider_key")
-  probeType     String   @map("probe_type")
-  mode          String
-  status        String
-  safeSummary   Json?    @map("safe_summary")
-  warnings      Json?
-  errors        Json?
-  testedAt      DateTime @default(now()) @map("tested_at")
-  createdAt     DateTime @default(now()) @map("created_at")
+  id           String                     @id @default(cuid())
+  credentialId String?                    @map("credential_id")
+  credential   CourierProviderCredential? @relation(fields: [credentialId], references: [id], onDelete: SetNull)
+  merchantId   String?                    @map("merchant_id")
+  providerKey  String                     @map("provider_key")
+  probeType    String                     @map("probe_type")
+  mode         String
+  status       String
+  safeSummary  Json?                      @map("safe_summary")
+  warnings     Json?
+  errors       Json?
+  testedAt     DateTime                   @default(now()) @map("tested_at")
+  createdAt    DateTime                   @default(now()) @map("created_at")
 
   @@index([merchantId, providerKey])
   @@index([providerKey, status])
@@ -2325,26 +2382,26 @@ model CourierProviderReadinessProbe {
 }
 
 model CourierPartnerApplication {
-  id                         String                          @id @default(cuid())
-  companyName                String
-  contactName                String
-  phone                      String
-  email                      String
-  website                    String?
-  gstin                      String
-  registeredState            String
-  registeredCity             String
-  operationalStates          String[]                        @default([])
+  id                          String                          @id @default(cuid())
+  companyName                 String
+  contactName                 String
+  phone                       String
+  email                       String
+  website                     String?
+  gstin                       String
+  registeredState             String
+  registeredCity              String
+  operationalStates           String[]                        @default([])
   serviceablePincodesEstimate String
-  codSupported               Boolean
-  apiAvailable               Boolean
-  notes                      String?
-  status                     CourierPartnerApplicationStatus @default(PENDING_REVIEW)
-  convertedCourierId         String?
-  reviewedAt                 DateTime?
-  reviewedBy                 String?
-  createdAt                  DateTime                        @default(now())
-  updatedAt                  DateTime                        @updatedAt
+  codSupported                Boolean
+  apiAvailable                Boolean
+  notes                       String?
+  status                      CourierPartnerApplicationStatus @default(PENDING_REVIEW)
+  convertedCourierId          String?
+  reviewedAt                  DateTime?
+  reviewedBy                  String?
+  createdAt                   DateTime                        @default(now())
+  updatedAt                   DateTime                        @updatedAt
 
   @@index([status])
   @@index([email])
@@ -2383,47 +2440,47 @@ model MerchantGstinRecord {
 }
 
 model MerchantPickupPoint {
-  id            String            @id @default(cuid())
-  merchantId    String
-  linkedGstinId String?
-  label         String
-  contactName   String
-  phone         String
-  addressLine1  String
-  addressLine2  String?
-  city          String
-  state         String
-  pincode       String
-  status        PickupPointStatus @default(PENDING)
-  isDefault     Boolean           @default(false)
-  blockerReason String?
-  approvedAt    DateTime?
-  approvedBy    String?
-  rejectedAt    DateTime?
-  rejectedBy    String?
-  rejectionReason String?
-  latitude      Decimal?          @db.Decimal(10, 7)
-  longitude     Decimal?          @db.Decimal(10, 7)
-  googleGeocodePlaceId String?
+  id                     String               @id @default(cuid())
+  merchantId             String
+  linkedGstinId          String?
+  label                  String
+  contactName            String
+  phone                  String
+  addressLine1           String
+  addressLine2           String?
+  city                   String
+  state                  String
+  pincode                String
+  status                 PickupPointStatus    @default(PENDING)
+  isDefault              Boolean              @default(false)
+  blockerReason          String?
+  approvedAt             DateTime?
+  approvedBy             String?
+  rejectedAt             DateTime?
+  rejectedBy             String?
+  rejectionReason        String?
+  latitude               Decimal?             @db.Decimal(10, 7)
+  longitude              Decimal?             @db.Decimal(10, 7)
+  googleGeocodePlaceId   String?
   googleFormattedAddress String?
-  geocodeProvider String?
-  geocodeStatus AddressGeocodeStatus @default(SKIPPED)
-  geocodeLocationType String?
-  geocodePartialMatch Boolean?
-  geocodeErrorCode String?
-  geocodedAt    DateTime?
-  addressFingerprint String?
-  pinLatitude   Decimal?          @db.Decimal(10, 7)
-  pinLongitude  Decimal?          @db.Decimal(10, 7)
-  pinConfirmedAt DateTime?
-  pinSource     String?
-  pinLabel      String?
-  pinUpdatedAt  DateTime?
-  createdAt     DateTime          @default(now())
-  updatedAt     DateTime          @updatedAt
+  geocodeProvider        String?
+  geocodeStatus          AddressGeocodeStatus @default(SKIPPED)
+  geocodeLocationType    String?
+  geocodePartialMatch    Boolean?
+  geocodeErrorCode       String?
+  geocodedAt             DateTime?
+  addressFingerprint     String?
+  pinLatitude            Decimal?             @db.Decimal(10, 7)
+  pinLongitude           Decimal?             @db.Decimal(10, 7)
+  pinConfirmedAt         DateTime?
+  pinSource              String?
+  pinLabel               String?
+  pinUpdatedAt           DateTime?
+  createdAt              DateTime             @default(now())
+  updatedAt              DateTime             @updatedAt
 
-  merchant    Merchant              @relation(fields: [merchantId], references: [id], onDelete: Cascade)
-  linkedGstin MerchantGstinRecord?  @relation(fields: [linkedGstinId], references: [id], onDelete: SetNull)
+  merchant    Merchant             @relation(fields: [merchantId], references: [id], onDelete: Cascade)
+  linkedGstin MerchantGstinRecord? @relation(fields: [linkedGstinId], references: [id], onDelete: SetNull)
 
   @@index([merchantId])
   @@index([linkedGstinId])
@@ -2436,39 +2493,39 @@ model MerchantPickupPoint {
 }
 
 model MerchantWarehouse {
-  id           String   @id @default(cuid())
-  merchantId   String
-  name         String
-  contactName  String
-  phone        String
-  addressLine1 String
-  addressLine2 String?
-  city         String
-  state        String
-  pincode      String
-  country      String   @default("IN")
-  notes        String?
-  isPrimary    Boolean  @default(false)
-  isActive     Boolean  @default(true)
-  latitude      Decimal?          @db.Decimal(10, 7)
-  longitude     Decimal?          @db.Decimal(10, 7)
-  googleGeocodePlaceId String?
+  id                     String               @id @default(cuid())
+  merchantId             String
+  name                   String
+  contactName            String
+  phone                  String
+  addressLine1           String
+  addressLine2           String?
+  city                   String
+  state                  String
+  pincode                String
+  country                String               @default("IN")
+  notes                  String?
+  isPrimary              Boolean              @default(false)
+  isActive               Boolean              @default(true)
+  latitude               Decimal?             @db.Decimal(10, 7)
+  longitude              Decimal?             @db.Decimal(10, 7)
+  googleGeocodePlaceId   String?
   googleFormattedAddress String?
-  geocodeProvider String?
-  geocodeStatus AddressGeocodeStatus @default(SKIPPED)
-  geocodeLocationType String?
-  geocodePartialMatch Boolean?
-  geocodeErrorCode String?
-  geocodedAt    DateTime?
-  addressFingerprint String?
-  pinLatitude   Decimal?          @db.Decimal(10, 7)
-  pinLongitude  Decimal?          @db.Decimal(10, 7)
-  pinConfirmedAt DateTime?
-  pinSource     String?
-  pinLabel      String?
-  pinUpdatedAt  DateTime?
-  createdAt    DateTime @default(now())
-  updatedAt    DateTime @updatedAt
+  geocodeProvider        String?
+  geocodeStatus          AddressGeocodeStatus @default(SKIPPED)
+  geocodeLocationType    String?
+  geocodePartialMatch    Boolean?
+  geocodeErrorCode       String?
+  geocodedAt             DateTime?
+  addressFingerprint     String?
+  pinLatitude            Decimal?             @db.Decimal(10, 7)
+  pinLongitude           Decimal?             @db.Decimal(10, 7)
+  pinConfirmedAt         DateTime?
+  pinSource              String?
+  pinLabel               String?
+  pinUpdatedAt           DateTime?
+  createdAt              DateTime             @default(now())
+  updatedAt              DateTime             @updatedAt
 
   merchant Merchant @relation(fields: [merchantId], references: [id], onDelete: Cascade)
 
@@ -2484,7 +2541,7 @@ model AddressGeocodeTask {
   id                 String               @id @default(cuid())
   entityType         String
   entityId           String
-  merchantId          String
+  merchantId         String
   addressFingerprint String
   status             AddressGeocodeStatus @default(PENDING)
   attempts           Int                  @default(0)
@@ -2572,7 +2629,7 @@ model CourierGstinRecord {
   createdAt          DateTime                       @default(now())
   updatedAt          DateTime                       @updatedAt
 
-  courier              CourierPartner              @relation(fields: [courierId], references: [id], onDelete: Cascade)
+  courier              CourierPartner               @relation(fields: [courierId], references: [id], onDelete: Cascade)
   operationalLocations CourierOperationalLocation[]
 
   @@unique([courierId, gstin])
@@ -2583,31 +2640,31 @@ model CourierGstinRecord {
 }
 
 model CourierOperationalLocation {
-  id            String            @id @default(cuid())
-  courierId     String
-  linkedGstinId String?
-  label         String
-  contactName   String
-  phone         String
-  email         String?
-  addressLine1  String
-  addressLine2  String?
-  city          String
-  state         String
-  pincode       String
-  status        PickupPointStatus @default(PENDING_REVIEW)
-  isDefault     Boolean           @default(false)
-  blockerReason String?
-  approvedAt    DateTime?
-  approvedBy    String?
-  rejectedAt    DateTime?
-  rejectedBy    String?
+  id              String            @id @default(cuid())
+  courierId       String
+  linkedGstinId   String?
+  label           String
+  contactName     String
+  phone           String
+  email           String?
+  addressLine1    String
+  addressLine2    String?
+  city            String
+  state           String
+  pincode         String
+  status          PickupPointStatus @default(PENDING_REVIEW)
+  isDefault       Boolean           @default(false)
+  blockerReason   String?
+  approvedAt      DateTime?
+  approvedBy      String?
+  rejectedAt      DateTime?
+  rejectedBy      String?
   rejectionReason String?
-  createdAt     DateTime          @default(now())
-  updatedAt     DateTime          @updatedAt
+  createdAt       DateTime          @default(now())
+  updatedAt       DateTime          @updatedAt
 
-  courier      CourierPartner      @relation(fields: [courierId], references: [id], onDelete: Cascade)
-  linkedGstin  CourierGstinRecord? @relation(fields: [linkedGstinId], references: [id], onDelete: SetNull)
+  courier     CourierPartner      @relation(fields: [courierId], references: [id], onDelete: Cascade)
+  linkedGstin CourierGstinRecord? @relation(fields: [linkedGstinId], references: [id], onDelete: SetNull)
 
   @@index([courierId])
   @@index([linkedGstinId])
@@ -2672,7 +2729,7 @@ model CourierUser {
   createdAt    DateTime  @default(now())
   updatedAt    DateTime  @updatedAt
 
-  courier CourierPartner @relation(fields: [courierId], references: [id], onDelete: Cascade)
+  courier             CourierPartner       @relation(fields: [courierId], references: [id], onDelete: Cascade)
   passwordResetTokens PasswordResetToken[]
 
   @@index([courierId])
@@ -2696,7 +2753,7 @@ model CourierPartnerOnboarding {
   createdAt       DateTime                       @default(now())
   updatedAt       DateTime                       @updatedAt
 
-  courier     CourierPartner @relation(fields: [courierId], references: [id], onDelete: Cascade)
+  courier     CourierPartner                  @relation(fields: [courierId], references: [id], onDelete: Cascade)
   credentials CourierPartnerCredential[]
   audits      CourierPartnerOnboardingAudit[]
 
@@ -2705,17 +2762,17 @@ model CourierPartnerOnboarding {
 }
 
 model CourierPartnerCredential {
-  id            String   @id @default(cuid())
-  onboardingId  String
-  courierId     String
-  environment   String
-  fieldKey      String
-  label         String
-  maskedValue   String
-  secretRef     String
-  secretStatus  String   @default("STORED")
-  providedAt    DateTime @default(now())
-  updatedAt     DateTime @updatedAt
+  id           String   @id @default(cuid())
+  onboardingId String
+  courierId    String
+  environment  String
+  fieldKey     String
+  label        String
+  maskedValue  String
+  secretRef    String
+  secretStatus String   @default("STORED")
+  providedAt   DateTime @default(now())
+  updatedAt    DateTime @updatedAt
 
   onboarding CourierPartnerOnboarding @relation(fields: [onboardingId], references: [id], onDelete: Cascade)
 
@@ -2783,7 +2840,7 @@ model CourierSandboxVerificationChecklistItem {
 }
 
 model CourierPilotChecklistItem {
-  id          String                            @id @default(cuid())
+  id          String                           @id @default(cuid())
   courierId   String
   itemKey     String
   label       String
@@ -2793,8 +2850,8 @@ model CourierPilotChecklistItem {
   evidenceUrl String?
   verifiedAt  DateTime?
   verifiedBy  String?
-  createdAt   DateTime                          @default(now())
-  updatedAt   DateTime                          @updatedAt
+  createdAt   DateTime                         @default(now())
+  updatedAt   DateTime                         @updatedAt
 
   courier CourierPartner @relation(fields: [courierId], references: [id], onDelete: Cascade)
 
@@ -2805,26 +2862,26 @@ model CourierPilotChecklistItem {
 }
 
 model CourierShipment {
-  id                   String      @id @default(cuid())
-  courierId            String
-  firstShipmentRequestId String?    @unique
-  orderId              String?
-  awbNumber            String      @unique
-  fromPincode          String
-  toPincode            String
-  status               String      @default("pickup_scheduled")
-  weightGrams          Int?
-  paymentMode          PaymentMode @default(PREPAID)
-  codAmount            Int         @default(0)
-  freightEstimate      Int?
-  trackingUrl          String?
-  opsNotes             String?
-  lastEvent            String?
-  expectedDeliveryDate DateTime?
-  createdAt            DateTime    @default(now())
-  updatedAt            DateTime    @updatedAt
+  id                     String      @id @default(cuid())
+  courierId              String
+  firstShipmentRequestId String?     @unique
+  orderId                String?
+  awbNumber              String      @unique
+  fromPincode            String
+  toPincode              String
+  status                 String      @default("pickup_scheduled")
+  weightGrams            Int?
+  paymentMode            PaymentMode @default(PREPAID)
+  codAmount              Int         @default(0)
+  freightEstimate        Int?
+  trackingUrl            String?
+  opsNotes               String?
+  lastEvent              String?
+  expectedDeliveryDate   DateTime?
+  createdAt              DateTime    @default(now())
+  updatedAt              DateTime    @updatedAt
 
-  courier              CourierPartner       @relation(fields: [courierId], references: [id], onDelete: Cascade)
+  courier              CourierPartner        @relation(fields: [courierId], references: [id], onDelete: Cascade)
   firstShipmentRequest FirstShipmentRequest? @relation(fields: [firstShipmentRequestId], references: [id], onDelete: SetNull)
   events               CourierEvent[]
   ndr                  CourierNdr?
@@ -2892,17 +2949,17 @@ model CourierRto {
 }
 
 model CourierWebhookConfig {
-  id        String   @id @default(cuid())
-  courierId String
-  targetUrl String
-  secret    String
-  secretRef String?
-  maskedSecret String?
-  signingMethod String @default("HMAC_SHA256")
-  active    Boolean  @default(true)
-  events    String[] @default([])
-  createdAt DateTime @default(now())
-  updatedAt DateTime @updatedAt
+  id            String   @id @default(cuid())
+  courierId     String
+  targetUrl     String
+  secret        String
+  secretRef     String?
+  maskedSecret  String?
+  signingMethod String   @default("HMAC_SHA256")
+  active        Boolean  @default(true)
+  events        String[] @default([])
+  createdAt     DateTime @default(now())
+  updatedAt     DateTime @updatedAt
 
   courier CourierPartner @relation(fields: [courierId], references: [id], onDelete: Cascade)
 
@@ -2944,8 +3001,8 @@ model CourierApiEvent {
   rawPayload        Json?
   createdAt         DateTime @default(now())
 
-  courier  CourierPartner    @relation(fields: [courierId], references: [id], onDelete: Cascade)
-  shipment CourierShipment?  @relation(fields: [courierShipmentId], references: [id], onDelete: SetNull)
+  courier  CourierPartner   @relation(fields: [courierId], references: [id], onDelete: Cascade)
+  shipment CourierShipment? @relation(fields: [courierShipmentId], references: [id], onDelete: SetNull)
 
   @@index([courierId])
   @@index([courierShipmentId])
@@ -2971,7 +3028,7 @@ model CourierInvoice {
   createdAt     DateTime @default(now())
   updatedAt     DateTime @updatedAt
 
-  courier CourierPartner @relation(fields: [courierId], references: [id], onDelete: Cascade)
+  courier CourierPartner       @relation(fields: [courierId], references: [id], onDelete: Cascade)
   lines   CourierInvoiceLine[]
 
   @@index([courierId])
@@ -2980,25 +3037,25 @@ model CourierInvoice {
 }
 
 model CourierInvoiceLine {
-  id                   String   @id @default(uuid())
-  courierInvoiceId     String
-  merchantId           String?
-  courierId            String
-  awb                  String?
-  orderId              String?
-  externalOrderId      String?
-  chargedWeightGrams   Int?
-  billedWeightGrams    Int?
-  zone                 String?
-  forwardFreight       Decimal  @default(0) @db.Decimal(12, 2)
-  rtoFreight           Decimal  @default(0) @db.Decimal(12, 2)
-  codFee               Decimal  @default(0) @db.Decimal(12, 2)
-  otherCharges         Decimal  @default(0) @db.Decimal(12, 2)
-  gstAmount            Decimal  @default(0) @db.Decimal(12, 2)
-  totalCharge          Decimal  @db.Decimal(12, 2)
-  rawPayload           Json?
-  createdAt            DateTime @default(now())
-  updatedAt            DateTime @updatedAt
+  id                 String   @id @default(uuid())
+  courierInvoiceId   String
+  merchantId         String?
+  courierId          String
+  awb                String?
+  orderId            String?
+  externalOrderId    String?
+  chargedWeightGrams Int?
+  billedWeightGrams  Int?
+  zone               String?
+  forwardFreight     Decimal  @default(0) @db.Decimal(12, 2)
+  rtoFreight         Decimal  @default(0) @db.Decimal(12, 2)
+  codFee             Decimal  @default(0) @db.Decimal(12, 2)
+  otherCharges       Decimal  @default(0) @db.Decimal(12, 2)
+  gstAmount          Decimal  @default(0) @db.Decimal(12, 2)
+  totalCharge        Decimal  @db.Decimal(12, 2)
+  rawPayload         Json?
+  createdAt          DateTime @default(now())
+  updatedAt          DateTime @updatedAt
 
   invoice CourierInvoice @relation(fields: [courierInvoiceId], references: [id], onDelete: Cascade)
 
@@ -3038,18 +3095,18 @@ model CourierImportFile {
 }
 
 model CourierImportRow {
-  id             String   @id @default(uuid())
-  importFileId   String
-  rowNumber      Int
-  awb            String?
-  orderId        String?
+  id              String   @id @default(uuid())
+  importFileId    String
+  rowNumber       Int
+  awb             String?
+  orderId         String?
   externalOrderId String?
-  valid          Boolean  @default(false)
-  duplicateAwb   Boolean  @default(false)
-  errors         String[] @default([])
-  rawData        Json
-  normalizedData Json?
-  createdAt      DateTime @default(now())
+  valid           Boolean  @default(false)
+  duplicateAwb    Boolean  @default(false)
+  errors          String[] @default([])
+  rawData         Json
+  normalizedData  Json?
+  createdAt       DateTime @default(now())
 
   importFile CourierImportFile @relation(fields: [importFileId], references: [id], onDelete: Cascade)
 
@@ -3062,20 +3119,20 @@ model CourierImportRow {
 }
 
 model CodRemittance {
-  id              String   @id @default(uuid())
+  id              String    @id @default(uuid())
   merchantId      String
   courierId       String?
   awb             String?
   orderId         String?
   externalOrderId String?
-  codAmount       Decimal  @default(0) @db.Decimal(12, 2)
-  remittedAmount  Decimal  @db.Decimal(12, 2)
+  codAmount       Decimal   @default(0) @db.Decimal(12, 2)
+  remittedAmount  Decimal   @db.Decimal(12, 2)
   remittedAt      DateTime?
   utr             String?
-  status          String   @default("imported")
+  status          String    @default("imported")
   rawPayload      Json?
-  createdAt       DateTime @default(now())
-  updatedAt       DateTime @updatedAt
+  createdAt       DateTime  @default(now())
+  updatedAt       DateTime  @updatedAt
 
   @@index([merchantId])
   @@index([courierId])
@@ -3086,21 +3143,21 @@ model CodRemittance {
 }
 
 model CodRemittanceImportFile {
-  id                 String              @id @default(uuid())
-  merchantId         String
-  fileName           String
-  mimeType           String?
-  fileHash           String
-  status             CourierImportStatus @default(UPLOADED)
-  totalRows          Int                 @default(0)
-  validRows          Int                 @default(0)
-  invalidRows        Int                 @default(0)
-  duplicateAwbRows   Int                 @default(0)
-  metadata           Json?
-  importedRowCount   Int?
-  importedAt         DateTime?
-  createdAt          DateTime            @default(now())
-  updatedAt          DateTime            @updatedAt
+  id               String              @id @default(uuid())
+  merchantId       String
+  fileName         String
+  mimeType         String?
+  fileHash         String
+  status           CourierImportStatus @default(UPLOADED)
+  totalRows        Int                 @default(0)
+  validRows        Int                 @default(0)
+  invalidRows      Int                 @default(0)
+  duplicateAwbRows Int                 @default(0)
+  metadata         Json?
+  importedRowCount Int?
+  importedAt       DateTime?
+  createdAt        DateTime            @default(now())
+  updatedAt        DateTime            @updatedAt
 
   rows CodRemittanceImportRow[]
 
@@ -3135,17 +3192,17 @@ model CodRemittanceImportRow {
 }
 
 model SellerWalletLedger {
-  id                 String   @id @default(uuid())
+  id                 String    @id @default(uuid())
   merchantId         String
   orderId            String?
   awb                String?
   entryType          String
   direction          String
-  amount             Decimal  @db.Decimal(12, 2)
-  currency           String   @default("INR")
-  status             String   @default("POSTED")
-  balanceBefore      Decimal? @db.Decimal(12, 2)
-  balanceAfter       Decimal? @db.Decimal(12, 2)
+  amount             Decimal   @db.Decimal(12, 2)
+  currency           String    @default("INR")
+  status             String    @default("POSTED")
+  balanceBefore      Decimal?  @db.Decimal(12, 2)
+  balanceAfter       Decimal?  @db.Decimal(12, 2)
   referenceType      String?
   referenceId        String?
   idempotencyKey     String?
@@ -3154,9 +3211,10 @@ model SellerWalletLedger {
   createdBy          String?
   postedAt           DateTime? @default(now())
   reversedByLedgerId String?
-  createdAt          DateTime @default(now())
-  updatedAt          DateTime @default(now()) @updatedAt
+  createdAt          DateTime  @default(now())
+  updatedAt          DateTime  @default(now()) @updatedAt
 
+  @@unique([merchantId, idempotencyKey])
   @@index([merchantId])
   @@index([orderId])
   @@index([awb])
@@ -3164,7 +3222,6 @@ model SellerWalletLedger {
   @@index([status])
   @@index([referenceType, referenceId])
   @@index([createdAt])
-  @@unique([merchantId, idempotencyKey])
 }
 
 enum WalletOwnerType {
@@ -3266,13 +3323,13 @@ enum WalletHoldStatus {
 }
 
 model WalletOwner {
-  id           String          @id @default(cuid())
-  ownerType    WalletOwnerType @map("owner_type")
-  externalId   String?         @map("external_id")
-  displayName  String?         @map("display_name")
-  metadata     Json?
-  createdAt    DateTime        @default(now()) @map("created_at")
-  updatedAt    DateTime        @default(now()) @updatedAt @map("updated_at")
+  id          String          @id @default(cuid())
+  ownerType   WalletOwnerType @map("owner_type")
+  externalId  String?         @map("external_id")
+  displayName String?         @map("display_name")
+  metadata    Json?
+  createdAt   DateTime        @default(now()) @map("created_at")
+  updatedAt   DateTime        @default(now()) @updatedAt @map("updated_at")
 
   accounts WalletAccount[]
 
@@ -3282,30 +3339,30 @@ model WalletOwner {
 }
 
 model WalletAccount {
-  id            String              @id @default(cuid())
-  ownerId       String              @map("owner_id")
-  ownerType     WalletOwnerType     @map("owner_type")
-  accountType   WalletAccountType   @map("account_type")
-  accountClass  WalletAccountClass  @map("account_class")
-  status        WalletAccountStatus @default(active)
-  ledgerScope   LedgerScope         @map("ledger_scope")
-  currency      String              @default("INR")
-  label         String?
-  metadata      Json?
-  createdAt     DateTime            @default(now()) @map("created_at")
-  updatedAt     DateTime            @default(now()) @updatedAt @map("updated_at")
+  id           String              @id @default(cuid())
+  ownerId      String              @map("owner_id")
+  ownerType    WalletOwnerType     @map("owner_type")
+  accountType  WalletAccountType   @map("account_type")
+  accountClass WalletAccountClass  @map("account_class")
+  status       WalletAccountStatus @default(active)
+  ledgerScope  LedgerScope         @map("ledger_scope")
+  currency     String              @default("INR")
+  label        String?
+  metadata     Json?
+  createdAt    DateTime            @default(now()) @map("created_at")
+  updatedAt    DateTime            @default(now()) @updatedAt @map("updated_at")
 
-  owner    WalletOwner    @relation(fields: [ownerId], references: [id], onDelete: Restrict)
+  owner    WalletOwner      @relation(fields: [ownerId], references: [id], onDelete: Restrict)
   balance  AccountBalance?
   postings JournalPosting[]
   holds    WalletHold[]
 
+  @@unique([ownerId, accountType, ledgerScope, currency])
   @@index([ownerId])
   @@index([ownerType])
   @@index([accountType])
   @@index([ledgerScope])
   @@index([status])
-  @@unique([ownerId, accountType, ledgerScope, currency])
   @@map("wallet_accounts")
 }
 
@@ -3336,9 +3393,9 @@ model JournalEntry {
   metadata    Json?
   createdAt   DateTime        @default(now()) @map("created_at")
 
-  postings          JournalPosting[]
-  reversedEntry     JournalEntry?  @relation("JournalEntryReversal", fields: [reversalOf], references: [id], onDelete: Restrict)
-  reversalEntries   JournalEntry[] @relation("JournalEntryReversal")
+  postings        JournalPosting[]
+  reversedEntry   JournalEntry?    @relation("JournalEntryReversal", fields: [reversalOf], references: [id], onDelete: Restrict)
+  reversalEntries JournalEntry[]   @relation("JournalEntryReversal")
 
   @@unique([entryRef])
   @@index([entryType])
@@ -3383,19 +3440,19 @@ model AccountBalance {
 }
 
 model WalletHold {
-  id               String           @id @default(cuid())
-  accountId        String           @map("account_id")
-  entryId          String           @map("entry_id")
-  holdRef          String           @map("hold_ref")
-  amountPaise      BigInt           @map("amount_paise")
-  currency         String           @default("INR")
-  status           WalletHoldStatus @default(active)
-  sourceType       String           @map("source_type")
-  sourceRef        String           @map("source_ref")
-  releasedByEntryId String?         @map("released_by_entry_id")
-  expiresAt        DateTime?        @map("expires_at")
-  createdAt        DateTime         @default(now()) @map("created_at")
-  updatedAt        DateTime         @default(now()) @updatedAt @map("updated_at")
+  id                String           @id @default(cuid())
+  accountId         String           @map("account_id")
+  entryId           String           @map("entry_id")
+  holdRef           String           @map("hold_ref")
+  amountPaise       BigInt           @map("amount_paise")
+  currency          String           @default("INR")
+  status            WalletHoldStatus @default(active)
+  sourceType        String           @map("source_type")
+  sourceRef         String           @map("source_ref")
+  releasedByEntryId String?          @map("released_by_entry_id")
+  expiresAt         DateTime?        @map("expires_at")
+  createdAt         DateTime         @default(now()) @map("created_at")
+  updatedAt         DateTime         @default(now()) @updatedAt @map("updated_at")
 
   account WalletAccount @relation(fields: [accountId], references: [id], onDelete: Restrict)
 
@@ -3408,20 +3465,20 @@ model WalletHold {
 }
 
 model WalletTopupIntent {
-  id             String   @id @default(cuid())
-  topupRef       String   @unique @map("topup_ref")
-  sellerOrgId    String   @map("seller_org_id")
-  amountPaise    BigInt   @map("amount_paise")
-  currency       String   @default("INR")
-  status         String   @default("created")
-  sourceRefHash  String   @map("source_ref_hash")
-  createdBy      String?  @map("created_by")
-  confirmedBy    String?  @map("confirmed_by")
-  journalEntryId String?  @map("journal_entry_id")
+  id             String    @id @default(cuid())
+  topupRef       String    @unique @map("topup_ref")
+  sellerOrgId    String    @map("seller_org_id")
+  amountPaise    BigInt    @map("amount_paise")
+  currency       String    @default("INR")
+  status         String    @default("created")
+  sourceRefHash  String    @map("source_ref_hash")
+  createdBy      String?   @map("created_by")
+  confirmedBy    String?   @map("confirmed_by")
+  journalEntryId String?   @map("journal_entry_id")
   metadata       Json?
   confirmedAt    DateTime? @map("confirmed_at")
-  createdAt      DateTime @default(now()) @map("created_at")
-  updatedAt      DateTime @default(now()) @updatedAt @map("updated_at")
+  createdAt      DateTime  @default(now()) @map("created_at")
+  updatedAt      DateTime  @default(now()) @updatedAt @map("updated_at")
 
   @@index([sellerOrgId])
   @@index([status])
@@ -3430,16 +3487,16 @@ model WalletTopupIntent {
 }
 
 model SettlementBatch {
-  id           String      @id @default(cuid())
-  batchRef     String      @unique @map("batch_ref")
-  ledgerScope  LedgerScope @map("ledger_scope")
-  currency     String      @default("INR")
-  status       String      @default("draft")
-  batchType    String      @map("batch_type")
-  totalPaise   BigInt      @default(0) @map("total_paise")
-  metadata     Json?
-  createdAt    DateTime    @default(now()) @map("created_at")
-  updatedAt    DateTime    @default(now()) @updatedAt @map("updated_at")
+  id          String      @id @default(cuid())
+  batchRef    String      @unique @map("batch_ref")
+  ledgerScope LedgerScope @map("ledger_scope")
+  currency    String      @default("INR")
+  status      String      @default("draft")
+  batchType   String      @map("batch_type")
+  totalPaise  BigInt      @default(0) @map("total_paise")
+  metadata    Json?
+  createdAt   DateTime    @default(now()) @map("created_at")
+  updatedAt   DateTime    @default(now()) @updatedAt @map("updated_at")
 
   items SettlementBatchItem[]
 
@@ -3450,19 +3507,19 @@ model SettlementBatch {
 }
 
 model SettlementBatchItem {
-  id              String   @id @default(cuid())
-  batchId         String   @map("batch_id")
-  ownerId         String?  @map("owner_id")
-  accountId       String?  @map("account_id")
-  amountPaise     BigInt   @map("amount_paise")
-  currency        String   @default("INR")
-  sourceType      String   @map("source_type")
-  sourceRef       String   @map("source_ref")
-  status          String   @default("pending")
-  journalEntryId  String?  @map("journal_entry_id")
-  metadata        Json?
-  createdAt       DateTime @default(now()) @map("created_at")
-  updatedAt       DateTime @default(now()) @updatedAt @map("updated_at")
+  id             String   @id @default(cuid())
+  batchId        String   @map("batch_id")
+  ownerId        String?  @map("owner_id")
+  accountId      String?  @map("account_id")
+  amountPaise    BigInt   @map("amount_paise")
+  currency       String   @default("INR")
+  sourceType     String   @map("source_type")
+  sourceRef      String   @map("source_ref")
+  status         String   @default("pending")
+  journalEntryId String?  @map("journal_entry_id")
+  metadata       Json?
+  createdAt      DateTime @default(now()) @map("created_at")
+  updatedAt      DateTime @default(now()) @updatedAt @map("updated_at")
 
   batch SettlementBatch @relation(fields: [batchId], references: [id], onDelete: Restrict)
 
@@ -3475,16 +3532,16 @@ model SettlementBatchItem {
 }
 
 model ExternalTransaction {
-  id                  String    @id @default(cuid())
-  provider            String
-  transactionType     String    @map("transaction_type")
-  externalRef         String    @map("external_ref")
-  occurredAt          DateTime? @map("occurred_at")
-  amountPaise         BigInt    @map("amount_paise")
-  currency            String    @default("INR")
-  rawPayload          Json?     @map("raw_payload")
-  normalizedPayload   Json?     @map("normalized_payload")
-  createdAt           DateTime  @default(now()) @map("created_at")
+  id                String    @id @default(cuid())
+  provider          String
+  transactionType   String    @map("transaction_type")
+  externalRef       String    @map("external_ref")
+  occurredAt        DateTime? @map("occurred_at")
+  amountPaise       BigInt    @map("amount_paise")
+  currency          String    @default("INR")
+  rawPayload        Json?     @map("raw_payload")
+  normalizedPayload Json?     @map("normalized_payload")
+  createdAt         DateTime  @default(now()) @map("created_at")
 
   matches ExternalTransactionMatch[]
 
@@ -3514,16 +3571,16 @@ model ExternalTransactionMatch {
 }
 
 model ReconException {
-  id          String      @id @default(cuid())
-  scope       LedgerScope
-  sourceType  String      @map("source_type")
-  sourceRef   String      @map("source_ref")
-  severity    String      @default("medium")
-  status      String      @default("open")
-  reasonCode  String      @map("reason_code")
-  details     Json?
-  createdAt   DateTime    @default(now()) @map("created_at")
-  updatedAt   DateTime    @default(now()) @updatedAt @map("updated_at")
+  id         String      @id @default(cuid())
+  scope      LedgerScope
+  sourceType String      @map("source_type")
+  sourceRef  String      @map("source_ref")
+  severity   String      @default("medium")
+  status     String      @default("open")
+  reasonCode String      @map("reason_code")
+  details    Json?
+  createdAt  DateTime    @default(now()) @map("created_at")
+  updatedAt  DateTime    @default(now()) @updatedAt @map("updated_at")
 
   @@index([scope])
   @@index([sourceType, sourceRef])
@@ -3533,14 +3590,14 @@ model ReconException {
 }
 
 model WalletEventsOutbox {
-  id             String    @id @default(cuid())
-  eventType      String    @map("event_type")
-  aggregateType  String    @map("aggregate_type")
-  aggregateId    String    @map("aggregate_id")
-  payload        Json
-  status         String    @default("pending")
-  createdAt      DateTime  @default(now()) @map("created_at")
-  publishedAt    DateTime? @map("published_at")
+  id            String    @id @default(cuid())
+  eventType     String    @map("event_type")
+  aggregateType String    @map("aggregate_type")
+  aggregateId   String    @map("aggregate_id")
+  payload       Json
+  status        String    @default("pending")
+  createdAt     DateTime  @default(now()) @map("created_at")
+  publishedAt   DateTime? @map("published_at")
 
   @@index([eventType])
   @@index([aggregateType, aggregateId])
@@ -3751,17 +3808,17 @@ model CheckoutSettlementPreviewEvent {
 }
 
 model CheckoutRulesVersion {
-  id          String   @id @default(cuid())
-  merchantId  String   @map("merchant_id")
+  id          String    @id @default(cuid())
+  merchantId  String    @map("merchant_id")
   version     String
-  status      String   @default("active")
-  rulesJson   Json     @map("rules_json")
-  createdBy   String?  @map("created_by")
+  status      String    @default("active")
+  rulesJson   Json      @map("rules_json")
+  createdBy   String?   @map("created_by")
   activatedAt DateTime? @map("activated_at")
-  createdAt   DateTime @default(now()) @map("created_at")
-  updatedAt   DateTime @default(now()) @updatedAt @map("updated_at")
+  createdAt   DateTime  @default(now()) @map("created_at")
+  updatedAt   DateTime  @default(now()) @updatedAt @map("updated_at")
 
-  merchant Merchant @relation(fields: [merchantId], references: [id], onDelete: Cascade)
+  merchant Merchant                  @relation(fields: [merchantId], references: [id], onDelete: Cascade)
   settings CheckoutMerchantSetting[]
   quotes   CheckoutQuote[]
 
@@ -3788,17 +3845,17 @@ model CheckoutMerchantSetting {
 }
 
 model CheckoutQuote {
-  id             String   @id @default(cuid())
-  merchantId     String   @map("merchant_id")
-  rulesVersionId String?  @map("rules_version_id")
-  pincode        String
-  currency       String   @default("INR")
-  itemsJson      Json     @map("items_json")
-  itemsTotalMinor BigInt  @default(0) @map("items_total_minor")
-  optionsJson    Json     @map("options_json")
-  riskNotes      Json?    @map("risk_notes")
-  expiresAt      DateTime @map("expires_at")
-  createdAt      DateTime @default(now()) @map("created_at")
+  id              String   @id @default(cuid())
+  merchantId      String   @map("merchant_id")
+  rulesVersionId  String?  @map("rules_version_id")
+  pincode         String
+  currency        String   @default("INR")
+  itemsJson       Json     @map("items_json")
+  itemsTotalMinor BigInt   @default(0) @map("items_total_minor")
+  optionsJson     Json     @map("options_json")
+  riskNotes       Json?    @map("risk_notes")
+  expiresAt       DateTime @map("expires_at")
+  createdAt       DateTime @default(now()) @map("created_at")
 
   merchant     Merchant              @relation(fields: [merchantId], references: [id], onDelete: Cascade)
   rulesVersion CheckoutRulesVersion? @relation(fields: [rulesVersionId], references: [id], onDelete: SetNull)
@@ -3811,38 +3868,38 @@ model CheckoutQuote {
 }
 
 model CheckoutOrder {
-  id                      String   @id @default(cuid())
-  merchantId              String   @map("merchant_id")
-  quoteId                 String   @map("quote_id")
-  fulfillmentOrderId      String?  @map("fulfillment_order_id")
-  mode                    String
-  state                   String
-  currency                String   @default("INR")
-  pincode                 String
-  itemsJson               Json     @map("items_json")
-  customerJson            Json     @map("customer_json")
-  shippingAddressJson     Json?    @map("shipping_address_json")
-  itemsTotalMinor         BigInt   @default(0) @map("items_total_minor")
-  codFeeMinor             BigInt   @default(0) @map("cod_fee_minor")
-  discountMinor           BigInt   @default(0) @map("discount_minor")
-  grandTotalMinor         BigInt   @default(0) @map("grand_total_minor")
-  payNowMinor             BigInt   @default(0) @map("pay_now_minor")
-  payOnDeliveryMinor      BigInt   @default(0) @map("pay_on_delivery_minor")
-  advancePaidMinor        BigInt   @default(0) @map("advance_paid_minor")
-  codCollectionStatus     String   @default("none") @map("cod_collection_status")
-  codCollectionAmountMinor BigInt  @default(0) @map("cod_collection_amount_minor")
-  codCollectionMethod     String?  @map("cod_collection_method")
-  codCollectionReference  String?  @map("cod_collection_reference")
-  codCollectedAt          DateTime? @map("cod_collected_at")
-  orderTokenHash          String   @map("order_token_hash")
-  tokenIssuedAt           DateTime @default(now()) @map("token_issued_at")
-  advanceExpiresAt        DateTime? @map("advance_expires_at")
-  createdAt               DateTime @default(now()) @map("created_at")
-  updatedAt               DateTime @default(now()) @updatedAt @map("updated_at")
+  id                       String    @id @default(cuid())
+  merchantId               String    @map("merchant_id")
+  quoteId                  String    @map("quote_id")
+  fulfillmentOrderId       String?   @map("fulfillment_order_id")
+  mode                     String
+  state                    String
+  currency                 String    @default("INR")
+  pincode                  String
+  itemsJson                Json      @map("items_json")
+  customerJson             Json      @map("customer_json")
+  shippingAddressJson      Json?     @map("shipping_address_json")
+  itemsTotalMinor          BigInt    @default(0) @map("items_total_minor")
+  codFeeMinor              BigInt    @default(0) @map("cod_fee_minor")
+  discountMinor            BigInt    @default(0) @map("discount_minor")
+  grandTotalMinor          BigInt    @default(0) @map("grand_total_minor")
+  payNowMinor              BigInt    @default(0) @map("pay_now_minor")
+  payOnDeliveryMinor       BigInt    @default(0) @map("pay_on_delivery_minor")
+  advancePaidMinor         BigInt    @default(0) @map("advance_paid_minor")
+  codCollectionStatus      String    @default("none") @map("cod_collection_status")
+  codCollectionAmountMinor BigInt    @default(0) @map("cod_collection_amount_minor")
+  codCollectionMethod      String?   @map("cod_collection_method")
+  codCollectionReference   String?   @map("cod_collection_reference")
+  codCollectedAt           DateTime? @map("cod_collected_at")
+  orderTokenHash           String    @map("order_token_hash")
+  tokenIssuedAt            DateTime  @default(now()) @map("token_issued_at")
+  advanceExpiresAt         DateTime? @map("advance_expires_at")
+  createdAt                DateTime  @default(now()) @map("created_at")
+  updatedAt                DateTime  @default(now()) @updatedAt @map("updated_at")
 
-  merchant         Merchant       @relation(fields: [merchantId], references: [id], onDelete: Cascade)
-  quote            CheckoutQuote  @relation(fields: [quoteId], references: [id], onDelete: Restrict)
-  fulfillmentOrder Order?         @relation(fields: [fulfillmentOrderId], references: [id], onDelete: SetNull)
+  merchant         Merchant                  @relation(fields: [merchantId], references: [id], onDelete: Cascade)
+  quote            CheckoutQuote             @relation(fields: [quoteId], references: [id], onDelete: Restrict)
+  fulfillmentOrder Order?                    @relation(fields: [fulfillmentOrderId], references: [id], onDelete: SetNull)
   timeline         CheckoutOrderTimeline[]
   payments         CheckoutPayment[]
   accountingEvents CheckoutAccountingEvent[]
@@ -3876,23 +3933,23 @@ model CheckoutOrderTimeline {
 }
 
 model CheckoutPayment {
-  id                String   @id @default(cuid())
-  merchantId        String   @map("merchant_id")
-  orderId           String   @map("order_id")
-  amountMinor       BigInt   @default(0) @map("amount_minor")
-  currency          String   @default("INR")
+  id                String    @id @default(cuid())
+  merchantId        String    @map("merchant_id")
+  orderId           String    @map("order_id")
+  amountMinor       BigInt    @default(0) @map("amount_minor")
+  currency          String    @default("INR")
   purpose           String
-  gateway           String   @default("mock")
-  state             String   @default("created")
-  gatewayIntentRef  String?  @map("gateway_intent_ref")
-  gatewayOrderRef   String?  @map("gateway_order_ref")
-  gatewayPaymentRef String?  @map("gateway_payment_ref")
+  gateway           String    @default("mock")
+  state             String    @default("created")
+  gatewayIntentRef  String?   @map("gateway_intent_ref")
+  gatewayOrderRef   String?   @map("gateway_order_ref")
+  gatewayPaymentRef String?   @map("gateway_payment_ref")
   capturedAt        DateTime? @map("captured_at")
-  createdAt         DateTime @default(now()) @map("created_at")
-  updatedAt         DateTime @default(now()) @updatedAt @map("updated_at")
+  createdAt         DateTime  @default(now()) @map("created_at")
+  updatedAt         DateTime  @default(now()) @updatedAt @map("updated_at")
 
-  merchant         Merchant @relation(fields: [merchantId], references: [id], onDelete: Cascade)
-  order            CheckoutOrder @relation(fields: [orderId], references: [id], onDelete: Cascade)
+  merchant         Merchant                  @relation(fields: [merchantId], references: [id], onDelete: Cascade)
+  order            CheckoutOrder             @relation(fields: [orderId], references: [id], onDelete: Cascade)
   accountingEvents CheckoutAccountingEvent[]
 
   @@index([merchantId])
@@ -3915,8 +3972,8 @@ model CheckoutAccountingEvent {
   metadata    Json?
   createdAt   DateTime @default(now()) @map("created_at")
 
-  merchant Merchant @relation(fields: [merchantId], references: [id], onDelete: Cascade)
-  order    CheckoutOrder? @relation(fields: [orderId], references: [id], onDelete: Cascade)
+  merchant Merchant         @relation(fields: [merchantId], references: [id], onDelete: Cascade)
+  order    CheckoutOrder?   @relation(fields: [orderId], references: [id], onDelete: Cascade)
   payment  CheckoutPayment? @relation(fields: [paymentId], references: [id], onDelete: SetNull)
 
   @@index([merchantId])
@@ -3929,16 +3986,16 @@ model CheckoutAccountingEvent {
 }
 
 model CheckoutIdempotencyKey {
-  id             String   @id @default(cuid())
-  merchantId     String   @map("merchant_id")
+  id             String    @id @default(cuid())
+  merchantId     String    @map("merchant_id")
   operation      String
-  idempotencyKey String   @map("idempotency_key")
-  requestHash    String   @map("request_hash")
-  responseJson   Json     @map("response_json")
-  statusCode     Int      @map("status_code")
+  idempotencyKey String    @map("idempotency_key")
+  requestHash    String    @map("request_hash")
+  responseJson   Json      @map("response_json")
+  statusCode     Int       @map("status_code")
   expiresAt      DateTime? @map("expires_at")
-  createdAt      DateTime @default(now()) @map("created_at")
-  updatedAt      DateTime @default(now()) @updatedAt @map("updated_at")
+  createdAt      DateTime  @default(now()) @map("created_at")
+  updatedAt      DateTime  @default(now()) @updatedAt @map("updated_at")
 
   merchant Merchant @relation(fields: [merchantId], references: [id], onDelete: Cascade)
 
@@ -4069,7 +4126,7 @@ model CheckoutAuditLog {
   safeMeta   Json?    @map("safe_meta")
   createdAt  DateTime @default(now()) @map("created_at")
 
-  merchant Merchant @relation(fields: [merchantId], references: [id], onDelete: Cascade)
+  merchant Merchant       @relation(fields: [merchantId], references: [id], onDelete: Cascade)
   order    CheckoutOrder? @relation(fields: [orderId], references: [id], onDelete: SetNull)
 
   @@index([merchantId])
@@ -4176,7 +4233,7 @@ model CheckoutTelemetryPaymentAttempt {
   createdAt          DateTime  @default(now()) @map("created_at")
   updatedAt          DateTime  @default(now()) @updatedAt @map("updated_at")
 
-  telemetrySession CheckoutTelemetrySession @relation(fields: [telemetrySessionId], references: [id], onDelete: Cascade)
+  telemetrySession CheckoutTelemetrySession   @relation(fields: [telemetrySessionId], references: [id], onDelete: Cascade)
   failures         CheckoutTelemetryFailure[]
 
   @@index([telemetrySessionId])
@@ -4209,7 +4266,7 @@ model CheckoutTelemetryFailure {
   source                    String
   createdAt                 DateTime @default(now()) @map("created_at")
 
-  telemetrySession        CheckoutTelemetrySession @relation(fields: [telemetrySessionId], references: [id], onDelete: Cascade)
+  telemetrySession        CheckoutTelemetrySession         @relation(fields: [telemetrySessionId], references: [id], onDelete: Cascade)
   telemetryPaymentAttempt CheckoutTelemetryPaymentAttempt? @relation(fields: [telemetryPaymentAttemptId], references: [id], onDelete: SetNull)
 
   @@index([telemetrySessionId])
@@ -4226,25 +4283,25 @@ model CheckoutTelemetryFailure {
 }
 
 model EarlyCodPrequalificationBatch {
-  id                       String   @id @default(cuid())
-  sellerOrgId              String   @map("seller_org_id")
-  period                   String
-  sourceRef                String   @map("source_ref")
-  sourceHash               String   @map("source_hash")
-  status                   String   @default("draft")
-  currency                 String   @default("INR")
-  grossCodDueMinor         BigInt   @default(0) @map("gross_cod_due_minor")
-  expectedDeductionMinor   BigInt   @default(0) @map("expected_deduction_minor")
-  riskReserveMinor         BigInt   @default(0) @map("risk_reserve_minor")
-  partnerFeeEstimateMinor  BigInt   @default(0) @map("partner_fee_estimate_minor")
-  eligibleBaseMinor        BigInt   @default(0) @map("eligible_base_minor")
-  maxPreviewAdvanceMinor   BigInt   @default(0) @map("max_preview_advance_minor")
-  previewAdvanceMinor      BigInt   @default(0) @map("preview_advance_minor")
-  reviewRequiredCount      Int      @default(0) @map("review_required_count")
-  metadata                 Json?
-  createdBy                String?  @map("created_by")
-  createdAt                DateTime @default(now()) @map("created_at")
-  updatedAt                DateTime @default(now()) @updatedAt @map("updated_at")
+  id                      String   @id @default(cuid())
+  sellerOrgId             String   @map("seller_org_id")
+  period                  String
+  sourceRef               String   @map("source_ref")
+  sourceHash              String   @map("source_hash")
+  status                  String   @default("draft")
+  currency                String   @default("INR")
+  grossCodDueMinor        BigInt   @default(0) @map("gross_cod_due_minor")
+  expectedDeductionMinor  BigInt   @default(0) @map("expected_deduction_minor")
+  riskReserveMinor        BigInt   @default(0) @map("risk_reserve_minor")
+  partnerFeeEstimateMinor BigInt   @default(0) @map("partner_fee_estimate_minor")
+  eligibleBaseMinor       BigInt   @default(0) @map("eligible_base_minor")
+  maxPreviewAdvanceMinor  BigInt   @default(0) @map("max_preview_advance_minor")
+  previewAdvanceMinor     BigInt   @default(0) @map("preview_advance_minor")
+  reviewRequiredCount     Int      @default(0) @map("review_required_count")
+  metadata                Json?
+  createdBy               String?  @map("created_by")
+  createdAt               DateTime @default(now()) @map("created_at")
+  updatedAt               DateTime @default(now()) @updatedAt @map("updated_at")
 
   items  EarlyCodPrequalificationItem[]
   events EarlyCodPrequalificationEvent[]
@@ -4258,33 +4315,33 @@ model EarlyCodPrequalificationBatch {
 }
 
 model EarlyCodPrequalificationItem {
-  id                         String   @id @default(cuid())
-  batchId                    String   @map("batch_id")
-  sellerOrgId                String   @map("seller_org_id")
-  codInstructionBatchId      String?  @map("cod_instruction_batch_id")
-  checkoutPreviewBatchId     String?  @map("checkout_preview_batch_id")
-  courierCode                String   @map("courier_code")
-  period                     String
-  currency                   String   @default("INR")
-  grossCodDueMinor           BigInt   @default(0) @map("gross_cod_due_minor")
-  expectedDeductionMinor     BigInt   @default(0) @map("expected_deduction_minor")
-  riskReserveMinor           BigInt   @default(0) @map("risk_reserve_minor")
-  partnerFeeEstimateMinor    BigInt   @default(0) @map("partner_fee_estimate_minor")
-  maxAdvanceRateBps          BigInt   @default(0) @map("max_advance_rate_bps")
-  requestedAdvanceMinor      BigInt   @default(0) @map("requested_advance_minor")
-  eligibleBaseMinor          BigInt   @default(0) @map("eligible_base_minor")
-  maxPreviewAdvanceMinor     BigInt   @default(0) @map("max_preview_advance_minor")
-  previewAdvanceMinor        BigInt   @default(0) @map("preview_advance_minor")
-  daysSinceDelivery          BigInt   @default(0) @map("days_since_delivery")
-  disputeCount               BigInt   @default(0) @map("dispute_count")
-  rtoCount                   BigInt   @default(0) @map("rto_count")
-  reviewIssueCount           BigInt   @default(0) @map("review_issue_count")
-  status                     String   @default("draft")
-  reviewReasons              Json?    @map("review_reasons")
-  sourceRowHash              String   @map("source_row_hash")
-  metadata                   Json?
-  createdAt                  DateTime @default(now()) @map("created_at")
-  updatedAt                  DateTime @default(now()) @updatedAt @map("updated_at")
+  id                      String   @id @default(cuid())
+  batchId                 String   @map("batch_id")
+  sellerOrgId             String   @map("seller_org_id")
+  codInstructionBatchId   String?  @map("cod_instruction_batch_id")
+  checkoutPreviewBatchId  String?  @map("checkout_preview_batch_id")
+  courierCode             String   @map("courier_code")
+  period                  String
+  currency                String   @default("INR")
+  grossCodDueMinor        BigInt   @default(0) @map("gross_cod_due_minor")
+  expectedDeductionMinor  BigInt   @default(0) @map("expected_deduction_minor")
+  riskReserveMinor        BigInt   @default(0) @map("risk_reserve_minor")
+  partnerFeeEstimateMinor BigInt   @default(0) @map("partner_fee_estimate_minor")
+  maxAdvanceRateBps       BigInt   @default(0) @map("max_advance_rate_bps")
+  requestedAdvanceMinor   BigInt   @default(0) @map("requested_advance_minor")
+  eligibleBaseMinor       BigInt   @default(0) @map("eligible_base_minor")
+  maxPreviewAdvanceMinor  BigInt   @default(0) @map("max_preview_advance_minor")
+  previewAdvanceMinor     BigInt   @default(0) @map("preview_advance_minor")
+  daysSinceDelivery       BigInt   @default(0) @map("days_since_delivery")
+  disputeCount            BigInt   @default(0) @map("dispute_count")
+  rtoCount                BigInt   @default(0) @map("rto_count")
+  reviewIssueCount        BigInt   @default(0) @map("review_issue_count")
+  status                  String   @default("draft")
+  reviewReasons           Json?    @map("review_reasons")
+  sourceRowHash           String   @map("source_row_hash")
+  metadata                Json?
+  createdAt               DateTime @default(now()) @map("created_at")
+  updatedAt               DateTime @default(now()) @updatedAt @map("updated_at")
 
   batch  EarlyCodPrequalificationBatch   @relation(fields: [batchId], references: [id], onDelete: Restrict)
   events EarlyCodPrequalificationEvent[]
@@ -4334,8 +4391,8 @@ model ImportFile {
   createdAt           DateTime @default(now()) @map("created_at")
   updatedAt           DateTime @default(now()) @updatedAt @map("updated_at")
 
-  formatPack        FormatPack?        @relation(fields: [formatPackId], references: [id], onDelete: SetNull)
-  formatPackVersion FormatPackVersion? @relation(fields: [formatPackVersionId], references: [id], onDelete: SetNull)
+  formatPack        FormatPack?             @relation(fields: [formatPackId], references: [id], onDelete: SetNull)
+  formatPackVersion FormatPackVersion?      @relation(fields: [formatPackVersionId], references: [id], onDelete: SetNull)
   stagingRows       StagingRow[]
   correctionBatches ImportCorrectionBatch[] @relation("ImportCorrectionBatchFile")
 
@@ -4348,19 +4405,19 @@ model ImportFile {
 }
 
 model StagingRow {
-  id              BigInt   @id @default(autoincrement())
-  fileId          String   @map("file_id")
-  rowNo           Int      @map("row_no")
+  id              BigInt  @id @default(autoincrement())
+  fileId          String  @map("file_id")
+  rowNo           Int     @map("row_no")
   raw             Json
   parsed          Json?
-  eventClass      String?  @map("event_class")
-  shipmentId      String?  @map("shipment_id")
-  status          String   @default("staged")
-  exceptionCode   String?  @map("exception_code")
-  exceptionDetail Json?    @map("exception_detail")
-  postedEntryRef  String?  @map("posted_entry_ref")
+  eventClass      String? @map("event_class")
+  shipmentId      String? @map("shipment_id")
+  status          String  @default("staged")
+  exceptionCode   String? @map("exception_code")
+  exceptionDetail Json?   @map("exception_detail")
+  postedEntryRef  String? @map("posted_entry_ref")
 
-  file ImportFile @relation(fields: [fileId], references: [id], onDelete: Restrict)
+  file            ImportFile             @relation(fields: [fileId], references: [id], onDelete: Restrict)
   correctionItems ImportCorrectionItem[]
 
   @@unique([fileId, rowNo])
@@ -4397,10 +4454,10 @@ model FormatPackVersion {
   retiredAt        DateTime? @map("retired_at")
   createdAt        DateTime  @default(now()) @map("created_at")
 
-  pack        FormatPack              @relation(fields: [packId], references: [id], onDelete: Restrict)
-  fixtures    FormatPackFixture[]
-  testRuns    FormatPackTestRun[]
-  importFiles ImportFile[]
+  pack                 FormatPack              @relation(fields: [packId], references: [id], onDelete: Restrict)
+  fixtures             FormatPackFixture[]
+  testRuns             FormatPackTestRun[]
+  importFiles          ImportFile[]
   oldCorrectionBatches ImportCorrectionBatch[] @relation("OldCorrectionFormatPackVersion")
   newCorrectionBatches ImportCorrectionBatch[] @relation("NewCorrectionFormatPackVersion")
 
@@ -4426,10 +4483,10 @@ model ImportCorrectionBatch {
   appliedAt              DateTime? @map("applied_at")
   cancelledAt            DateTime? @map("cancelled_at")
 
-  importFile ImportFile @relation("ImportCorrectionBatchFile", fields: [importFileId], references: [id], onDelete: Restrict)
-  oldFormatPackVersion FormatPackVersion? @relation("OldCorrectionFormatPackVersion", fields: [oldFormatPackVersionId], references: [id], onDelete: SetNull)
-  newFormatPackVersion FormatPackVersion @relation("NewCorrectionFormatPackVersion", fields: [newFormatPackVersionId], references: [id], onDelete: Restrict)
-  items ImportCorrectionItem[]
+  importFile           ImportFile             @relation("ImportCorrectionBatchFile", fields: [importFileId], references: [id], onDelete: Restrict)
+  oldFormatPackVersion FormatPackVersion?     @relation("OldCorrectionFormatPackVersion", fields: [oldFormatPackVersionId], references: [id], onDelete: SetNull)
+  newFormatPackVersion FormatPackVersion      @relation("NewCorrectionFormatPackVersion", fields: [newFormatPackVersionId], references: [id], onDelete: Restrict)
+  items                ImportCorrectionItem[]
 
   @@index([importFileId, status])
   @@index([newFormatPackVersionId])
@@ -4439,24 +4496,24 @@ model ImportCorrectionBatch {
 }
 
 model ImportCorrectionItem {
-  id                 String   @id @default(uuid())
-  batchId            String   @map("batch_id")
-  oldStagingRowId    BigInt?  @map("old_staging_row_id")
-  proposedRowNo      Int?     @map("proposed_row_no")
-  oldPostedEntryRef  String?  @map("old_posted_entry_ref")
-  action             String
-  status             String   @default("planned")
-  oldFingerprint     String?  @map("old_fingerprint")
-  newFingerprint     String?  @map("new_fingerprint")
-  diff               Json
-  errorCode          String?  @map("error_code")
-  errorDetail        Json?    @map("error_detail")
-  reversalEntryRef   String?  @map("reversal_entry_ref")
-  correctedEntryRef  String?  @map("corrected_entry_ref")
-  createdAt          DateTime @default(now()) @map("created_at")
+  id                String   @id @default(uuid())
+  batchId           String   @map("batch_id")
+  oldStagingRowId   BigInt?  @map("old_staging_row_id")
+  proposedRowNo     Int?     @map("proposed_row_no")
+  oldPostedEntryRef String?  @map("old_posted_entry_ref")
+  action            String
+  status            String   @default("planned")
+  oldFingerprint    String?  @map("old_fingerprint")
+  newFingerprint    String?  @map("new_fingerprint")
+  diff              Json
+  errorCode         String?  @map("error_code")
+  errorDetail       Json?    @map("error_detail")
+  reversalEntryRef  String?  @map("reversal_entry_ref")
+  correctedEntryRef String?  @map("corrected_entry_ref")
+  createdAt         DateTime @default(now()) @map("created_at")
 
-  batch ImportCorrectionBatch @relation(fields: [batchId], references: [id], onDelete: Cascade)
-  oldStagingRow StagingRow? @relation(fields: [oldStagingRowId], references: [id], onDelete: SetNull)
+  batch         ImportCorrectionBatch @relation(fields: [batchId], references: [id], onDelete: Cascade)
+  oldStagingRow StagingRow?           @relation(fields: [oldStagingRowId], references: [id], onDelete: SetNull)
 
   @@index([batchId, action])
   @@index([oldStagingRowId])
@@ -4522,20 +4579,20 @@ model SellerSettlement {
 }
 
 model ReconciliationRun {
-  id               String   @id @default(uuid())
-  merchantId       String?
-  status           String   @default("COMPLETED")
-  periodStart      DateTime?
-  periodEnd        DateTime?
-  totalResults     Int      @default(0)
-  autoApprovedCount Int     @default(0)
-  disputeCount     Int      @default(0)
-  paymentHoldCount Int      @default(0)
-  metadata         Json?
-  startedAt        DateTime @default(now())
-  completedAt      DateTime?
-  createdAt        DateTime @default(now())
-  updatedAt        DateTime @updatedAt
+  id                String    @id @default(uuid())
+  merchantId        String?
+  status            String    @default("COMPLETED")
+  periodStart       DateTime?
+  periodEnd         DateTime?
+  totalResults      Int       @default(0)
+  autoApprovedCount Int       @default(0)
+  disputeCount      Int       @default(0)
+  paymentHoldCount  Int       @default(0)
+  metadata          Json?
+  startedAt         DateTime  @default(now())
+  completedAt       DateTime?
+  createdAt         DateTime  @default(now())
+  updatedAt         DateTime  @updatedAt
 
   results ReconciliationResult[]
 
@@ -4547,7 +4604,7 @@ model ReconciliationRun {
 model ReconciliationResult {
   id                    String               @id @default(uuid())
   runId                 String
-  merchantId             String
+  merchantId            String
   orderId               String?
   externalOrderId       String?
   awb                   String?
@@ -4567,11 +4624,11 @@ model ReconciliationResult {
   createdAt             DateTime             @default(now())
   updatedAt             DateTime             @updatedAt
 
-  run         ReconciliationRun       @relation(fields: [runId], references: [id], onDelete: Cascade)
-  disputes    ReconciliationDispute[]
+  run          ReconciliationRun       @relation(fields: [runId], references: [id], onDelete: Cascade)
+  disputes     ReconciliationDispute[]
   paymentHolds PaymentHold[]
-  settlements SellerSettlement[]
-  penalties   CourierPenalty[]
+  settlements  SellerSettlement[]
+  penalties    CourierPenalty[]
 
   @@index([runId])
   @@index([merchantId])
@@ -4637,22 +4694,22 @@ model PaymentHold {
 }
 
 model CourierFinancePolicy {
-  id                           String                     @id @default(uuid())
-  merchantId                   String
-  courierId                    String
-  creditPeriodDays             Int                        @default(7)
-  codRemittanceSlaDays         Int                        @default(7)
-  penaltyGraceDays             Int                        @default(0)
-  codDelayPenaltyRateBps       Int                        @default(50)
-  codDelayPenaltyFixedAmount   Decimal                    @default(0) @db.Decimal(12, 2)
-  maxCodDelayPenaltyAmount     Decimal?                   @db.Decimal(12, 2)
-  settlementFrequency          CourierSettlementFrequency @default(WEEKLY)
-  settlementAnchorDay          Int                        @default(5)
-  makerCheckerRequired         Boolean                    @default(true)
-  active                       Boolean                    @default(true)
-  notes                        String?
-  createdAt                    DateTime                   @default(now())
-  updatedAt                    DateTime                   @updatedAt
+  id                         String                     @id @default(uuid())
+  merchantId                 String
+  courierId                  String
+  creditPeriodDays           Int                        @default(7)
+  codRemittanceSlaDays       Int                        @default(7)
+  penaltyGraceDays           Int                        @default(0)
+  codDelayPenaltyRateBps     Int                        @default(50)
+  codDelayPenaltyFixedAmount Decimal                    @default(0) @db.Decimal(12, 2)
+  maxCodDelayPenaltyAmount   Decimal?                   @db.Decimal(12, 2)
+  settlementFrequency        CourierSettlementFrequency @default(WEEKLY)
+  settlementAnchorDay        Int                        @default(5)
+  makerCheckerRequired       Boolean                    @default(true)
+  active                     Boolean                    @default(true)
+  notes                      String?
+  createdAt                  DateTime                   @default(now())
+  updatedAt                  DateTime                   @updatedAt
 
   courier CourierPartner @relation(fields: [courierId], references: [id], onDelete: Cascade)
 
@@ -4757,7 +4814,7 @@ model AdminOnboardingChecklist {
 }
 
 model AdminOnboardingChecklistItem {
-  id            String                              @id @default(uuid())
+  id            String                             @id @default(uuid())
   checklistId   String
   itemKey       String
   title         String
@@ -4770,10 +4827,10 @@ model AdminOnboardingChecklistItem {
   blockerReason String?
   completedAt   DateTime?
   updatedBy     String?
-  createdAt     DateTime                            @default(now())
-  updatedAt     DateTime                            @updatedAt
+  createdAt     DateTime                           @default(now())
+  updatedAt     DateTime                           @updatedAt
 
-  checklist AdminOnboardingChecklist @relation(fields: [checklistId], references: [id], onDelete: Cascade)
+  checklist AdminOnboardingChecklist        @relation(fields: [checklistId], references: [id], onDelete: Cascade)
   audits    AdminOnboardingChecklistAudit[]
 
   @@unique([checklistId, itemKey])
@@ -4819,24 +4876,24 @@ model User {
   createdAt    DateTime @default(now())
   updatedAt    DateTime @updatedAt
 
-  merchant Merchant @relation(fields: [merchantId], references: [id], onDelete: Cascade)
-  passwordResetTokens PasswordResetToken[]
+  merchant              Merchant               @relation(fields: [merchantId], references: [id], onDelete: Cascade)
+  passwordResetTokens   PasswordResetToken[]
   firstShipmentRequests FirstShipmentRequest[]
 
   @@index([firebaseUid])
 }
 
 model PasswordResetToken {
-  id        String               @id @default(uuid())
-  userId    String?
+  id            String               @id @default(uuid())
+  userId        String?
   courierUserId String?
-  tokenHash String               @unique
-  purpose   PasswordResetPurpose
-  expiresAt DateTime
-  usedAt    DateTime?
-  createdAt DateTime             @default(now())
+  tokenHash     String               @unique
+  purpose       PasswordResetPurpose
+  expiresAt     DateTime
+  usedAt        DateTime?
+  createdAt     DateTime             @default(now())
 
-  user User? @relation(fields: [userId], references: [id], onDelete: Cascade)
+  user        User?        @relation(fields: [userId], references: [id], onDelete: Cascade)
   courierUser CourierUser? @relation(fields: [courierUserId], references: [id], onDelete: Cascade)
 
   @@index([userId])
@@ -4847,38 +4904,38 @@ model PasswordResetToken {
 }
 
 model FirstShipmentRequest {
-  id              String                     @id @default(uuid())
-  merchantId      String
-  requesterUserId String
-  pickupName      String
-  pickupPhone     String
-  pickupAddress   String
-  pickupPincode   String
-  deliveryCity    String
-  deliveryPincode String
-  buyerName       String?
-  buyerPhone      String?
-  buyerAddress    String?
+  id                 String                     @id @default(uuid())
+  merchantId         String
+  requesterUserId    String
+  pickupName         String
+  pickupPhone        String
+  pickupAddress      String
+  pickupPincode      String
+  deliveryCity       String
+  deliveryPincode    String
+  buyerName          String?
+  buyerPhone         String?
+  buyerAddress       String?
   packageDescription String?
-  packageWeight   Int
-  paymentMode     PaymentMode
-  codAmount       Int                        @default(0)
-  courierPreference String?
-  assignedCourierId String?
-  freightEstimate Int?
-  awb             String?
-  trackingNumber  String?
-  trackingUrl     String?
-  opsNotes        String?
-  notes           String?
-  status          FirstShipmentRequestStatus @default(NEW)
-  adminApprovedAt DateTime?
-  adminApprovedBy String?
-  createdAt       DateTime                   @default(now())
-  updatedAt       DateTime                   @updatedAt
+  packageWeight      Int
+  paymentMode        PaymentMode
+  codAmount          Int                        @default(0)
+  courierPreference  String?
+  assignedCourierId  String?
+  freightEstimate    Int?
+  awb                String?
+  trackingNumber     String?
+  trackingUrl        String?
+  opsNotes           String?
+  notes              String?
+  status             FirstShipmentRequestStatus @default(NEW)
+  adminApprovedAt    DateTime?
+  adminApprovedBy    String?
+  createdAt          DateTime                   @default(now())
+  updatedAt          DateTime                   @updatedAt
 
-  merchant       Merchant          @relation(fields: [merchantId], references: [id], onDelete: Cascade)
-  requester      User              @relation(fields: [requesterUserId], references: [id], onDelete: Restrict)
+  merchant       Merchant         @relation(fields: [merchantId], references: [id], onDelete: Cascade)
+  requester      User             @relation(fields: [requesterUserId], references: [id], onDelete: Restrict)
   manualShipment CourierShipment?
 
   @@index([merchantId])
@@ -4893,62 +4950,62 @@ model FirstShipmentRequest {
 }
 
 model Order {
-  id              String      @id @default(cuid())
-  merchantId      String
-  externalOrderId String
-  source          String      @default("manual")
-  importBatchId   String?
-  buyerName       String
-  buyerPhone      String
-  buyerEmail      String?
-  buyerAltPhone   String?
-  addressLine1    String
-  addressLine2    String?
-  landmark        String?
-  city            String
-  state           String
-  pincode         String
-  country         String      @default("IN")
-  orderValue      Int
-  codAmount       Int         @default(0)
-  declaredValue   Int         @default(0)
-  paymentMode     PaymentMode
-  weightGrams     Int?
-  packageLengthMm Int?
-  packageWidthMm  Int?
-  packageHeightMm Int?
+  id                    String      @id @default(cuid())
+  merchantId            String
+  externalOrderId       String
+  source                String      @default("manual")
+  importBatchId         String?
+  buyerName             String
+  buyerPhone            String
+  buyerEmail            String?
+  buyerAltPhone         String?
+  addressLine1          String
+  addressLine2          String?
+  landmark              String?
+  city                  String
+  state                 String
+  pincode               String
+  country               String      @default("IN")
+  orderValue            Int
+  codAmount             Int         @default(0)
+  declaredValue         Int         @default(0)
+  paymentMode           PaymentMode
+  weightGrams           Int?
+  packageLengthMm       Int?
+  packageWidthMm        Int?
+  packageHeightMm       Int?
   volumetricWeightGrams Int?
-  productDescription String?
-  hsnCode         String?
-  itemCount       Int         @default(1)
-  tags            Json?
-  codRiskScore    Int?
-  codRiskLevel    String?
-  rtoRiskScore    Int?
-  rtoRiskLevel    String?
-  courierOverride String?
-  addressQualityScore Int?
-  addressQualityFlags Json?
+  productDescription    String?
+  hsnCode               String?
+  itemCount             Int         @default(1)
+  tags                  Json?
+  codRiskScore          Int?
+  codRiskLevel          String?
+  rtoRiskScore          Int?
+  rtoRiskLevel          String?
+  courierOverride       String?
+  addressQualityScore   Int?
+  addressQualityFlags   Json?
   needsAttentionReasons Json?
-  sellerNotes     String?
-  pickupLocationId String?
-  status          OrderStatus @default(CREATED)
-  createdAt       DateTime    @default(now())
-  updatedAt       DateTime    @updatedAt
+  sellerNotes           String?
+  pickupLocationId      String?
+  status                OrderStatus @default(CREATED)
+  createdAt             DateTime    @default(now())
+  updatedAt             DateTime    @updatedAt
 
-  merchant          Merchant           @relation(fields: [merchantId], references: [id], onDelete: Cascade)
-  importBatch       OrderImportBatch?  @relation(fields: [importBatchId], references: [id], onDelete: SetNull)
-  pickupLocation    PickupLocation?    @relation(fields: [pickupLocationId], references: [id], onDelete: SetNull)
-  riskScores        RiskScore[]
-  webhookEvents     WebhookEvent[]
-  shipmentDetails   ShipmentDetails?
-  orderIntelligence OrderIntelligence?
-  predictionOutcome PredictionOutcome?
-  orderDataSignals  OrderDataSignals?
-  autonomousActions AutonomousAction[]
+  merchant                 Merchant                  @relation(fields: [merchantId], references: [id], onDelete: Cascade)
+  importBatch              OrderImportBatch?         @relation(fields: [importBatchId], references: [id], onDelete: SetNull)
+  pickupLocation           PickupLocation?           @relation(fields: [pickupLocationId], references: [id], onDelete: SetNull)
+  riskScores               RiskScore[]
+  webhookEvents            WebhookEvent[]
+  shipmentDetails          ShipmentDetails?
+  orderIntelligence        OrderIntelligence?
+  predictionOutcome        PredictionOutcome?
+  orderDataSignals         OrderDataSignals?
+  autonomousActions        AutonomousAction[]
   buyerCommunicationEvents BuyerCommunicationEvent[]
-  actionOutcomes ActionOutcome[]
-  checkoutOrders CheckoutOrder[]
+  actionOutcomes           ActionOutcome[]
+  checkoutOrders           CheckoutOrder[]
 
   @@unique([merchantId, externalOrderId])
   @@index([merchantId, buyerPhone])
@@ -4973,7 +5030,7 @@ model OrderImportBatch {
   updatedAt    DateTime @updatedAt
 
   merchant Merchant @relation(fields: [merchantId], references: [id], onDelete: Cascade)
-  orders Order[]
+  orders   Order[]
 
   @@index([merchantId])
   @@index([merchantId, status])
@@ -5195,51 +5252,51 @@ model OrderDataSignals {
 }
 
 model MerchantAutomationPolicy {
-  id                                      String   @id @default(uuid())
-  merchantId                              String   @unique
-  autoCodControlEnabled                   Boolean  @default(true)
-  autoOtpForBronzeEnabled                 Boolean  @default(true)
-  autoPrepaidOnlyForIronEnabled           Boolean  @default(false)
-  autoAddressCorrectionEnabled            Boolean  @default(true)
-  autoCourierSelectionEnabled             Boolean  @default(true)
-  autoNdrRecoveryEnabled                  Boolean  @default(true)
-  autoRtoHoldEnabled                      Boolean  @default(false)
-  autoCancelAfterFailedVerificationEnabled Boolean @default(false)
-  maxAutoHoldOrderValue                   Decimal? @db.Decimal(12, 2)
-  maxAutoCourierCostIncrease              Decimal? @db.Decimal(12, 2)
-  maxAutoCodAmount                        Decimal? @db.Decimal(12, 2)
-  allowPrepaidConversionMessage           Boolean  @default(true)
-  allowBuyerWhatsappMessages              Boolean  @default(true)
-  allowBuyerSmsMessages                   Boolean  @default(true)
-  communicationEnabled                    Boolean  @default(true)
-  dailyWhatsappLimit                      Int?
-  dailySmsLimit                           Int?
-  buyerMessageQuietHoursStart             String?
-  buyerMessageQuietHoursEnd               String?
-  createdAt                               DateTime @default(now())
-  updatedAt                               DateTime @updatedAt
+  id                                       String   @id @default(uuid())
+  merchantId                               String   @unique
+  autoCodControlEnabled                    Boolean  @default(true)
+  autoOtpForBronzeEnabled                  Boolean  @default(true)
+  autoPrepaidOnlyForIronEnabled            Boolean  @default(false)
+  autoAddressCorrectionEnabled             Boolean  @default(true)
+  autoCourierSelectionEnabled              Boolean  @default(true)
+  autoNdrRecoveryEnabled                   Boolean  @default(true)
+  autoRtoHoldEnabled                       Boolean  @default(false)
+  autoCancelAfterFailedVerificationEnabled Boolean  @default(false)
+  maxAutoHoldOrderValue                    Decimal? @db.Decimal(12, 2)
+  maxAutoCourierCostIncrease               Decimal? @db.Decimal(12, 2)
+  maxAutoCodAmount                         Decimal? @db.Decimal(12, 2)
+  allowPrepaidConversionMessage            Boolean  @default(true)
+  allowBuyerWhatsappMessages               Boolean  @default(true)
+  allowBuyerSmsMessages                    Boolean  @default(true)
+  communicationEnabled                     Boolean  @default(true)
+  dailyWhatsappLimit                       Int?
+  dailySmsLimit                            Int?
+  buyerMessageQuietHoursStart              String?
+  buyerMessageQuietHoursEnd                String?
+  createdAt                                DateTime @default(now())
+  updatedAt                                DateTime @updatedAt
 
   @@index([merchantId])
 }
 
 model AutonomousAction {
-  id                String                  @id @default(uuid())
-  orderId           String
-  merchantId        String
-  actionType        AutonomousActionType
-  automationLevel   AutomationLevel
-  status            AutonomousActionStatus  @default(PENDING)
-  reason            String
-  inputSnapshot     Json?
-  resultSnapshot    Json?
-  requiresApproval  Boolean                 @default(false)
-  approvedBy        String?
-  approvedAt        DateTime?
-  executedAt        DateTime?
-  failedAt          DateTime?
-  expiresAt         DateTime?
-  createdAt         DateTime                @default(now())
-  updatedAt         DateTime                @updatedAt
+  id               String                 @id @default(uuid())
+  orderId          String
+  merchantId       String
+  actionType       AutonomousActionType
+  automationLevel  AutomationLevel
+  status           AutonomousActionStatus @default(PENDING)
+  reason           String
+  inputSnapshot    Json?
+  resultSnapshot   Json?
+  requiresApproval Boolean                @default(false)
+  approvedBy       String?
+  approvedAt       DateTime?
+  executedAt       DateTime?
+  failedAt         DateTime?
+  expiresAt        DateTime?
+  createdAt        DateTime               @default(now())
+  updatedAt        DateTime               @updatedAt
 
   order Order @relation(fields: [orderId], references: [id], onDelete: Cascade)
 
@@ -5282,16 +5339,16 @@ model BuyerCommunicationEvent {
 
 /// Autonomy v1 uses ActionOutcome as the durable replacement for planned DecisionActionOutcome records.
 model ActionOutcome {
-  id              String                @id @default(uuid())
+  id              String               @id @default(uuid())
   orderId         String
   merchantId      String
   actionType      AutonomousActionType
   expectedOutcome String
   actualOutcome   String?
   worked          Boolean?
-  cost            Decimal?              @db.Decimal(12, 2)
-  createdAt       DateTime              @default(now())
-  updatedAt       DateTime              @updatedAt
+  cost            Decimal?             @db.Decimal(12, 2)
+  createdAt       DateTime             @default(now())
+  updatedAt       DateTime             @updatedAt
 
   order Order @relation(fields: [orderId], references: [id], onDelete: Cascade)
 
@@ -5369,23 +5426,23 @@ model AuditLog {
 }
 
 model AutomationEvent {
-  id                String                @id @default(cuid())
-  merchantId        String
-  eventKey          String
-  status            AutomationEventStatus @default(QUEUED)
-  source            String                @default("shipmastr")
-  sourceId          String?
-  idempotencyKey    String
-  payload           Json                  @default("{}")
-  contextSnapshot   Json?
-  dispatchResult    Json?
-  error             String?
-  attempts          Int                   @default(0)
-  nextAttemptAt     DateTime?
-  processedAt       DateTime?
-  failedAt          DateTime?
-  createdAt         DateTime              @default(now())
-  updatedAt         DateTime              @updatedAt
+  id              String                @id @default(cuid())
+  merchantId      String
+  eventKey        String
+  status          AutomationEventStatus @default(QUEUED)
+  source          String                @default("shipmastr")
+  sourceId        String?
+  idempotencyKey  String
+  payload         Json                  @default("{}")
+  contextSnapshot Json?
+  dispatchResult  Json?
+  error           String?
+  attempts        Int                   @default(0)
+  nextAttemptAt   DateTime?
+  processedAt     DateTime?
+  failedAt        DateTime?
+  createdAt       DateTime              @default(now())
+  updatedAt       DateTime              @updatedAt
 
   @@unique([merchantId, idempotencyKey])
   @@index([merchantId])
@@ -5399,27 +5456,27 @@ model AutomationEvent {
 }
 
 model AutomationPreference {
-  id                      String   @id @default(cuid())
-  merchantId              String   @unique
-  autopilotEnabled        Boolean  @default(true)
-  notificationsEnabled    Boolean  @default(true)
-  codShieldEnabled        Boolean  @default(true)
-  ndrRescueEnabled        Boolean  @default(true)
-  marketingEnabled        Boolean  @default(false)
-  courierControlEnabled   Boolean  @default(true)
-  financeControlEnabled   Boolean  @default(true)
-  buyerIntelligenceEnabled Boolean @default(true)
-  whatsappEnabled         Boolean  @default(true)
-  smsEnabled              Boolean  @default(true)
-  emailEnabled            Boolean  @default(true)
-  quietHoursStart         String   @default("21:00")
-  quietHoursEnd           String   @default("09:00")
-  timezone                String   @default("Asia/Kolkata")
-  dailyBuyerMessageCap    Int      @default(3)
-  weeklyBuyerMessageCap   Int      @default(8)
-  metadata                Json     @default("{}")
-  createdAt               DateTime @default(now())
-  updatedAt               DateTime @updatedAt
+  id                       String   @id @default(cuid())
+  merchantId               String   @unique
+  autopilotEnabled         Boolean  @default(true)
+  notificationsEnabled     Boolean  @default(true)
+  codShieldEnabled         Boolean  @default(true)
+  ndrRescueEnabled         Boolean  @default(true)
+  marketingEnabled         Boolean  @default(false)
+  courierControlEnabled    Boolean  @default(true)
+  financeControlEnabled    Boolean  @default(true)
+  buyerIntelligenceEnabled Boolean  @default(true)
+  whatsappEnabled          Boolean  @default(true)
+  smsEnabled               Boolean  @default(true)
+  emailEnabled             Boolean  @default(true)
+  quietHoursStart          String   @default("21:00")
+  quietHoursEnd            String   @default("09:00")
+  timezone                 String   @default("Asia/Kolkata")
+  dailyBuyerMessageCap     Int      @default(3)
+  weeklyBuyerMessageCap    Int      @default(8)
+  metadata                 Json     @default("{}")
+  createdAt                DateTime @default(now())
+  updatedAt                DateTime @updatedAt
 
   @@index([merchantId])
   @@index([createdAt])
@@ -5505,7 +5562,7 @@ model AutomationFrequencyLedger {
 }
 
 model CommunicationLog {
-  id                String   @id @default(cuid())
+  id                String    @id @default(cuid())
   merchantId        String
   eventId           String?
   campaignId        String?
@@ -5513,17 +5570,17 @@ model CommunicationLog {
   channel           String
   recipient         String
   templateKey       String?
-  status            String   @default("QUEUED")
+  status            String    @default("QUEUED")
   provider          String?
   providerMessageId String?
   renderedMessage   String?
-  metadata          Json     @default("{}")
+  metadata          Json      @default("{}")
   sentAt            DateTime?
   deliveredAt       DateTime?
   readAt            DateTime?
   failedAt          DateTime?
-  createdAt         DateTime @default(now())
-  updatedAt         DateTime @updatedAt
+  createdAt         DateTime  @default(now())
+  updatedAt         DateTime  @updatedAt
 
   @@unique([merchantId, idempotencyKey])
   @@index([merchantId])
@@ -5537,24 +5594,24 @@ model CommunicationLog {
 }
 
 model MarketingCampaign {
-  id              String                   @id @default(cuid())
-  merchantId      String
-  key             String
-  name            String
-  campaignType    String
-  status          AutomationCampaignStatus @default(DRAFT)
-  audienceId      String?
-  channelOrder    String[]                 @default(["WHATSAPP", "SMS", "EMAIL"])
-  templateKey     String?
-  scheduleAt      DateTime?
-  budgetLimitPaise Int?
-  sentCount       Int                      @default(0)
-  clickedCount    Int                      @default(0)
-  convertedCount  Int                      @default(0)
-  recoveredRevenuePaise Int                @default(0)
-  settings        Json                     @default("{}")
-  createdAt       DateTime                 @default(now())
-  updatedAt       DateTime                 @updatedAt
+  id                    String                   @id @default(cuid())
+  merchantId            String
+  key                   String
+  name                  String
+  campaignType          String
+  status                AutomationCampaignStatus @default(DRAFT)
+  audienceId            String?
+  channelOrder          String[]                 @default(["WHATSAPP", "SMS", "EMAIL"])
+  templateKey           String?
+  scheduleAt            DateTime?
+  budgetLimitPaise      Int?
+  sentCount             Int                      @default(0)
+  clickedCount          Int                      @default(0)
+  convertedCount        Int                      @default(0)
+  recoveredRevenuePaise Int                      @default(0)
+  settings              Json                     @default("{}")
+  createdAt             DateTime                 @default(now())
+  updatedAt             DateTime                 @updatedAt
 
   @@unique([merchantId, key])
   @@index([merchantId])
@@ -5583,17 +5640,17 @@ model MarketingAudienceSegment {
 }
 
 model MerchantChannelCredential {
-  id              String   @id @default(cuid())
-  merchantId      String
-  channel         String
-  provider        String
-  label           String
-  credentialRef   String
-  status          String   @default("ACTIVE")
-  lastVerifiedAt  DateTime?
-  metadata        Json     @default("{}")
-  createdAt       DateTime @default(now())
-  updatedAt       DateTime @updatedAt
+  id             String    @id @default(cuid())
+  merchantId     String
+  channel        String
+  provider       String
+  label          String
+  credentialRef  String
+  status         String    @default("ACTIVE")
+  lastVerifiedAt DateTime?
+  metadata       Json      @default("{}")
+  createdAt      DateTime  @default(now())
+  updatedAt      DateTime  @updatedAt
 
   @@unique([merchantId, channel, provider, label])
   @@index([merchantId])
@@ -5603,16 +5660,16 @@ model MerchantChannelCredential {
 }
 
 model BuyerIntelligenceEvent {
-  id          String   @id @default(cuid())
-  merchantId  String
-  buyerKey    String
-  eventKey    String
-  orderId     String?
-  riskTier    String?
-  score       Int?
-  reasons     String[] @default([])
-  metadata    Json     @default("{}")
-  createdAt   DateTime @default(now())
+  id         String   @id @default(cuid())
+  merchantId String
+  buyerKey   String
+  eventKey   String
+  orderId    String?
+  riskTier   String?
+  score      Int?
+  reasons    String[] @default([])
+  metadata   Json     @default("{}")
+  createdAt  DateTime @default(now())
 
   @@index([merchantId])
   @@index([buyerKey])
@@ -5622,19 +5679,19 @@ model BuyerIntelligenceEvent {
 }
 
 model CourierOpsAlert {
-  id          String                @id @default(cuid())
-  merchantId  String
-  alertKey    String
-  courierId   String?
-  awb         String?
-  severity    String                @default("MEDIUM")
-  status      AutomationAlertStatus @default(OPEN)
-  summary     String
-  actionHint  String?
-  metadata    Json                  @default("{}")
-  resolvedAt  DateTime?
-  createdAt   DateTime              @default(now())
-  updatedAt   DateTime              @updatedAt
+  id         String                @id @default(cuid())
+  merchantId String
+  alertKey   String
+  courierId  String?
+  awb        String?
+  severity   String                @default("MEDIUM")
+  status     AutomationAlertStatus @default(OPEN)
+  summary    String
+  actionHint String?
+  metadata   Json                  @default("{}")
+  resolvedAt DateTime?
+  createdAt  DateTime              @default(now())
+  updatedAt  DateTime              @updatedAt
 
   @@index([merchantId])
   @@index([alertKey])
@@ -5763,29 +5820,29 @@ model Lead {
 }
 
 model CourierAuditLead {
-  id                    String   @id @default(uuid())
-  createdAt             DateTime @default(now()) @map("created_at")
-  updatedAt             DateTime @default(now()) @updatedAt @map("updated_at")
+  id                    String    @id @default(uuid())
+  createdAt             DateTime  @default(now()) @map("created_at")
+  updatedAt             DateTime  @default(now()) @updatedAt @map("updated_at")
   brand                 String
   name                  String
   email                 String
   whatsapp              String
-  monthlyShipments      Int      @map("monthly_shipments")
-  currentAggregator     String?  @map("current_aggregator")
-  estimatedLeak         Float?   @map("estimated_leak")
-  bumpRate              Float?   @map("bump_rate")
-  averageOvercharge     Float?   @map("average_overcharge")
-  utmSource             String?  @map("utm_source")
-  utmMedium             String?  @map("utm_medium")
-  utmCampaign           String?  @map("utm_campaign")
-  utmTerm               String?  @map("utm_term")
-  utmContent            String?  @map("utm_content")
-  landingPath           String?  @map("landing_path")
+  monthlyShipments      Int       @map("monthly_shipments")
+  currentAggregator     String?   @map("current_aggregator")
+  estimatedLeak         Float?    @map("estimated_leak")
+  bumpRate              Float?    @map("bump_rate")
+  averageOvercharge     Float?    @map("average_overcharge")
+  utmSource             String?   @map("utm_source")
+  utmMedium             String?   @map("utm_medium")
+  utmCampaign           String?   @map("utm_campaign")
+  utmTerm               String?   @map("utm_term")
+  utmContent            String?   @map("utm_content")
+  landingPath           String?   @map("landing_path")
   referrer              String?
-  status                String   @default("new")
-  source                String   @default("courier-audit")
+  status                String    @default("new")
+  source                String    @default("courier-audit")
   n8nNotifiedAt         DateTime? @map("n8n_notified_at")
-  n8nNotificationStatus String?  @map("n8n_notification_status")
+  n8nNotificationStatus String?   @map("n8n_notification_status")
   notes                 String?
 
   @@index([email])
@@ -6273,20 +6330,20 @@ model GrowthPartnerPlacement {
 }
 
 model GrowthPartnerLead {
-  id              String                  @id @default(cuid())
-  partnerId       String                  @map("partner_id")
-  merchantId      String?                 @map("merchant_id")
-  sellerId        String?                 @map("seller_id")
-  offerId         String?                 @map("offer_id")
-  shipmentId      String?                 @map("shipment_id")
-  orderId         String?                 @map("order_id")
-  status          GrowthPartnerLeadStatus @default(CAPTURED)
-  sourceSurface   GrowthPlacementSurface  @map("source_surface")
-  attributionRef  String?                 @map("attribution_ref")
-  idempotencyKey  String?                 @unique @map("idempotency_key")
-  metadata        Json?
-  createdAt       DateTime                @default(now()) @map("created_at")
-  updatedAt       DateTime                @default(now()) @updatedAt @map("updated_at")
+  id             String                  @id @default(cuid())
+  partnerId      String                  @map("partner_id")
+  merchantId     String?                 @map("merchant_id")
+  sellerId       String?                 @map("seller_id")
+  offerId        String?                 @map("offer_id")
+  shipmentId     String?                 @map("shipment_id")
+  orderId        String?                 @map("order_id")
+  status         GrowthPartnerLeadStatus @default(CAPTURED)
+  sourceSurface  GrowthPlacementSurface  @map("source_surface")
+  attributionRef String?                 @map("attribution_ref")
+  idempotencyKey String?                 @unique @map("idempotency_key")
+  metadata       Json?
+  createdAt      DateTime                @default(now()) @map("created_at")
+  updatedAt      DateTime                @default(now()) @updatedAt @map("updated_at")
 
   @@index([partnerId])
   @@index([merchantId])
@@ -6302,19 +6359,19 @@ model GrowthPartnerLead {
 }
 
 model GrowthPartnerAttributionEvent {
-  id              String                     @id @default(cuid())
-  partnerId       String?                    @map("partner_id")
-  offerId         String?                    @map("offer_id")
-  leadId          String?                    @map("lead_id")
-  merchantId      String?                    @map("merchant_id")
-  sellerId        String?                    @map("seller_id")
-  eventType       GrowthAttributionEventType @map("event_type")
-  surface         GrowthPlacementSurface
-  attributionRef  String?                    @map("attribution_ref")
-  sessionRef      String?                    @map("session_ref")
-  idempotencyKey  String?                    @unique @map("idempotency_key")
-  metadata        Json?
-  createdAt       DateTime                   @default(now()) @map("created_at")
+  id             String                     @id @default(cuid())
+  partnerId      String?                    @map("partner_id")
+  offerId        String?                    @map("offer_id")
+  leadId         String?                    @map("lead_id")
+  merchantId     String?                    @map("merchant_id")
+  sellerId       String?                    @map("seller_id")
+  eventType      GrowthAttributionEventType @map("event_type")
+  surface        GrowthPlacementSurface
+  attributionRef String?                    @map("attribution_ref")
+  sessionRef     String?                    @map("session_ref")
+  idempotencyKey String?                    @unique @map("idempotency_key")
+  metadata       Json?
+  createdAt      DateTime                   @default(now()) @map("created_at")
 
   @@index([partnerId])
   @@index([offerId])
@@ -6333,8 +6390,8 @@ model MerchantCampaign {
   merchantId      String                       @map("merchant_id")
   title           String
   description     String?
-  campaignType    MerchantCampaignType        @map("campaign_type")
-  status          MerchantCampaignStatus      @default(DRAFT)
+  campaignType    MerchantCampaignType         @map("campaign_type")
+  status          MerchantCampaignStatus       @default(DRAFT)
   reviewStatus    MerchantCampaignReviewStatus @default(NOT_REQUIRED) @map("review_status")
   rejectionReason String?                      @map("rejection_reason")
   growthOfferId   String?                      @map("growth_offer_id")
@@ -6512,23 +6569,23 @@ model PrepaidIncentivePolicy {
 }
 
 model PrepaidConversionIntent {
-  id                String                        @id @default(cuid())
-  policyId          String?                       @map("policy_id")
-  merchantId        String?                       @map("merchant_id")
-  sellerId          String?                       @map("seller_id")
-  orderId           String?                       @map("order_id")
-  shipmentId        String?                       @map("shipment_id")
-  growthOfferId     String?                       @map("growth_offer_id")
-  status            PrepaidConversionIntentStatus @default(INTENT_CREATED)
-  originalPaymentMode String?                     @map("original_payment_mode")
-  targetPaymentMode String                        @default("PREPAID") @map("target_payment_mode")
-  incentiveSnapshot Json                          @map("incentive_snapshot")
-  idempotencyKey    String?                       @unique @map("idempotency_key")
-  expiresAt         DateTime?                     @map("expires_at")
-  convertedAt       DateTime?                     @map("converted_at")
-  metadata          Json?
-  createdAt         DateTime                      @default(now()) @map("created_at")
-  updatedAt         DateTime                      @default(now()) @updatedAt @map("updated_at")
+  id                  String                        @id @default(cuid())
+  policyId            String?                       @map("policy_id")
+  merchantId          String?                       @map("merchant_id")
+  sellerId            String?                       @map("seller_id")
+  orderId             String?                       @map("order_id")
+  shipmentId          String?                       @map("shipment_id")
+  growthOfferId       String?                       @map("growth_offer_id")
+  status              PrepaidConversionIntentStatus @default(INTENT_CREATED)
+  originalPaymentMode String?                       @map("original_payment_mode")
+  targetPaymentMode   String                        @default("PREPAID") @map("target_payment_mode")
+  incentiveSnapshot   Json                          @map("incentive_snapshot")
+  idempotencyKey      String?                       @unique @map("idempotency_key")
+  expiresAt           DateTime?                     @map("expires_at")
+  convertedAt         DateTime?                     @map("converted_at")
+  metadata            Json?
+  createdAt           DateTime                      @default(now()) @map("created_at")
+  updatedAt           DateTime                      @default(now()) @updatedAt @map("updated_at")
 
   @@index([policyId])
   @@index([merchantId])
@@ -6543,22 +6600,22 @@ model PrepaidConversionIntent {
 }
 
 model RtoNdrRecoveryPolicy {
-  id                       String                     @id @default(cuid())
-  merchantId               String                     @map("merchant_id")
-  title                    String
-  description              String?
-  status                   RtoNdrRecoveryPolicyStatus @default(DRAFT)
-  actionType               RtoNdrRecoveryActionType   @map("action_type")
-  incentiveAmountPaise     Int?                       @map("incentive_amount_paise")
-  maxIncentiveAmountPaise  Int?                       @map("max_incentive_amount_paise")
-  minOrderAmountPaise      Int?                       @map("min_order_amount_paise")
-  maxOrderAmountPaise      Int?                       @map("max_order_amount_paise")
-  allowedFailureReasons    Json?                      @map("allowed_failure_reasons")
-  startsAt                 DateTime?                  @map("starts_at")
-  endsAt                   DateTime?                  @map("ends_at")
-  metadata                 Json?
-  createdAt                DateTime                   @default(now()) @map("created_at")
-  updatedAt                DateTime                   @default(now()) @updatedAt @map("updated_at")
+  id                      String                     @id @default(cuid())
+  merchantId              String                     @map("merchant_id")
+  title                   String
+  description             String?
+  status                  RtoNdrRecoveryPolicyStatus @default(DRAFT)
+  actionType              RtoNdrRecoveryActionType   @map("action_type")
+  incentiveAmountPaise    Int?                       @map("incentive_amount_paise")
+  maxIncentiveAmountPaise Int?                       @map("max_incentive_amount_paise")
+  minOrderAmountPaise     Int?                       @map("min_order_amount_paise")
+  maxOrderAmountPaise     Int?                       @map("max_order_amount_paise")
+  allowedFailureReasons   Json?                      @map("allowed_failure_reasons")
+  startsAt                DateTime?                  @map("starts_at")
+  endsAt                  DateTime?                  @map("ends_at")
+  metadata                Json?
+  createdAt               DateTime                   @default(now()) @map("created_at")
+  updatedAt               DateTime                   @default(now()) @updatedAt @map("updated_at")
 
   @@index([merchantId])
   @@index([status])
@@ -6570,22 +6627,22 @@ model RtoNdrRecoveryPolicy {
 }
 
 model RtoNdrRecoveryIntent {
-  id              String                     @id @default(cuid())
-  policyId        String?                    @map("policy_id")
-  merchantId      String?                    @map("merchant_id")
-  sellerId        String?                    @map("seller_id")
-  orderId         String?                    @map("order_id")
-  shipmentId      String?                    @map("shipment_id")
-  growthOfferId   String?                    @map("growth_offer_id")
-  status          RtoNdrRecoveryIntentStatus @default(INTENT_CREATED)
-  actionType      RtoNdrRecoveryActionType   @map("action_type")
-  recoverySnapshot Json                      @map("recovery_snapshot")
-  idempotencyKey  String?                    @unique @map("idempotency_key")
-  expiresAt       DateTime?                  @map("expires_at")
-  recoveredAt     DateTime?                  @map("recovered_at")
-  metadata        Json?
-  createdAt       DateTime                   @default(now()) @map("created_at")
-  updatedAt       DateTime                   @default(now()) @updatedAt @map("updated_at")
+  id               String                     @id @default(cuid())
+  policyId         String?                    @map("policy_id")
+  merchantId       String?                    @map("merchant_id")
+  sellerId         String?                    @map("seller_id")
+  orderId          String?                    @map("order_id")
+  shipmentId       String?                    @map("shipment_id")
+  growthOfferId    String?                    @map("growth_offer_id")
+  status           RtoNdrRecoveryIntentStatus @default(INTENT_CREATED)
+  actionType       RtoNdrRecoveryActionType   @map("action_type")
+  recoverySnapshot Json                       @map("recovery_snapshot")
+  idempotencyKey   String?                    @unique @map("idempotency_key")
+  expiresAt        DateTime?                  @map("expires_at")
+  recoveredAt      DateTime?                  @map("recovered_at")
+  metadata         Json?
+  createdAt        DateTime                   @default(now()) @map("created_at")
+  updatedAt        DateTime                   @default(now()) @updatedAt @map("updated_at")
 
   @@index([policyId])
   @@index([merchantId])

@@ -1,3 +1,4 @@
+import { Prisma } from "@prisma/client";
 import { ZodError } from "zod";
 import { HttpError } from "../lib/httpError.js";
 import { logger } from "../lib/logger.js";
@@ -13,6 +14,17 @@ export const errorHandler = (err, _req, res, _next) => {
             error: err.message,
             details: err.details
         });
+    }
+    if (err instanceof Prisma.PrismaClientKnownRequestError) {
+        if (err.code === "P2025") {
+            return res.status(404).json({ error: "NOT_FOUND" });
+        }
+        if (err.code === "P2002") {
+            return res.status(409).json({
+                error: "UNIQUE_CONSTRAINT_VIOLATION",
+                details: err.meta
+            });
+        }
     }
     logger.error({ err }, "Unhandled error");
     return res.status(500).json({ error: "INTERNAL_SERVER_ERROR" });

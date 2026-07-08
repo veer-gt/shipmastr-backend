@@ -44,7 +44,8 @@ import { returnsRouter } from "../modules/returns/returns.routes.js";
 import { sellerAccountRouter } from "../modules/sellerAccount/seller-account.routes.js";
 import { settingsRouter } from "../modules/settings/settings.routes.js";
 import { shippingNetworkRouter, shippingSellerApiRouter } from "../modules/shippingNetwork/shipping-network.routes.js";
-import { adminStorefrontsRouter, publicStorefrontsRouter, storefrontsRouter } from "../modules/storefronts/storefronts.routes.js";
+import { adminStorefrontsRouter, merchantStorefrontAssetsRouter, merchantStorefrontsRouter, publicStorefrontsRouter, storefrontsRouter } from "../modules/storefronts/storefronts.routes.js";
+import { storefrontCheckoutRouter } from "../modules/storefronts/storefront-checkout.routes.js";
 import { adminTaxComplianceRouter, courierTaxComplianceRouter, sellerTaxComplianceRouter } from "../modules/taxCompliance/tax-compliance.routes.js";
 import { vasRouter } from "../modules/vas/vas.routes.js";
 import { webhooksRouter } from "../modules/webhooks/webhooks.routes.js";
@@ -110,6 +111,8 @@ apiRouter.use("/leads", leadsRouter);
 apiRouter.use("/domains", requireJwtAuth, domainStatusRouter);
 apiRouter.use("/merchant/account", requireJwtAuth, merchantAccountRouter);
 apiRouter.use("/merchant/domains", requireJwtAuth, merchantDomainsRouter);
+apiRouter.use("/merchant/storefronts/assets", requireJwtAuth, merchantStorefrontAssetsRouter);
+apiRouter.use("/merchant/storefronts", requireJwtAuth, merchantStorefrontsRouter);
 apiRouter.use("/merchant", requireJwtAuth, merchantWorkspaceRouter);
 apiRouter.use("/ndr", requireJwtAuth, ndrRouter);
 apiRouter.use("/newsletter", newsletterRouter);
@@ -132,6 +135,11 @@ apiRouter.use("/shipping/seller-api", shippingSellerApiRouter);
 apiRouter.use("/shipping", requireJwtAuth, shippingNetworkRouter);
 apiRouter.use("/shipments", requireJwtAuth, shipmentsRouter);
 apiRouter.use("/storefronts", publicStorefrontsRouter);
+// SF5 Layer 3 — public, shopper-facing checkout quote endpoint. Price is always resolved
+// server-side from StorefrontProduct by (storefrontId, productId); see
+// storefront-checkout.service.ts. Deliberately not authenticated (anonymous shoppers),
+// same trust model as /storefronts/lookup above.
+apiRouter.use("/storefront/checkout", storefrontCheckoutRouter);
 apiRouter.use("/vas", requireJwtAuth, vasRouter);
 apiRouter.use("/value-added-services", requireJwtAuth, vasRouter);
 apiRouter.use("/wallet", requireJwtAuth, walletRouter);
