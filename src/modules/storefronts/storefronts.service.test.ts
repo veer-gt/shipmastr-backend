@@ -1,7 +1,23 @@
 import assert from "node:assert/strict";
 import { readFileSync } from "node:fs";
 import { describe, it } from "node:test";
+import { StorefrontAssetStatus } from "@prisma/client";
 import { HttpError } from "../../lib/httpError.js";
+import {
+  GcsStorefrontAssetStorageAdapter,
+  InMemoryStorefrontAssetStorageAdapter,
+  MAX_STOREFRONT_ASSET_BYTES,
+  STOREFRONT_ASSET_UPLOAD_IF_GENERATION_MATCH,
+  STOREFRONT_ASSET_UPLOAD_IF_GENERATION_MATCH_HEADER,
+  STOREFRONT_ASSET_UPLOAD_LENGTH_RANGE,
+  STOREFRONT_ASSET_UPLOAD_LENGTH_RANGE_HEADER
+} from "./storefront-asset-storage.js";
+import {
+  assertReadyStorefrontAssetOwnedByMerchant,
+  confirmStorefrontAsset,
+  createStorefrontAssetUploadUrl,
+  sweepPendingStorefrontAssetOrphans
+} from "./storefront-assets.service.js";
 import { createPublicStorefrontLookupHandler, createStorefrontLookupHandler } from "./storefronts.routes.js";
 import {
   addAdminStorefrontDomain,
@@ -286,6 +302,97 @@ function makeAdminStorefrontClient() {
   };
 
   return { client, state };
+}
+
+function makeStorefrontAssetHarness(options: { storefrontEntitled?: boolean } = {}) {
+  const state = {
+    now: new Date("2026-07-08T10:00:00.000Z"),
+    merchants: new Map([
+      ["merchant_a", { id: "merchant_a" }],
+      ["merchant_b", { id: "merchant_b" }]
+    ]),
+    storefronts: options.storefrontEntitled === false
+      ? [] as any[]
+      : [{ id: "storefront_a", merchantId: "merchant_a" }],
+    assets: [] as any[]
+  };
+
+  function selectObject(row: any, select?: Record<string, boolean>) {
+    if (!row || !select) return row;
+    return Object.fromEntries(Object.keys(select).filter((key) => select[key]).map((key) => [key, row[key]]));
+  }
+
+  const client: any = {
+    merchant: {
+      findUnique: async ({ where, select }: any) => selectObject(state.merchants.get(where.id) ?? null, select)
+    },
+    storefront: {
+      findFirst: async ({ where, select }: any) => selectObject(
+        state.storefronts.find((row) => row.merchantId === where.merchantId) ?? null,
+        select
+      )
+    },
+    storefrontAsset: {
+      create: async ({ data }: any) => {
+        const row = {
+          id: data.id ?? `asset_${state.assets.length + 1}`,
+          merchantId: data.merchantId,
+          gcsPath: data.gcsPath,
+          mime: data.mime,
+          bytes: data.bytes ?? null,
+          width: data.width ?? null,
+          height: data.height ?? null,
+          sha256: data.sha256 ?? null,
+          status: data.status ?? StorefrontAssetStatus.PENDING,
+          createdAt: data.createdAt ?? state.now,
+          updatedAt: data.updatedAt ?? state.now
+        };
+        state.assets.push(row);
+        return structuredClone(row);
+      },
+      update: async ({ where, data }: any) => {
+        const row = state.assets.find((asset) => asset.id === where.id);
+        if (!row) throw new Error("ASSET_NOT_FOUND");
+        Object.assign(row, data, { updatedAt: state.now });
+        return structuredClone(row);
+      },
+      findUnique: async ({ where, select }: any) => selectObject(
+        structuredClone(state.assets.find((asset) => asset.id === where.id) ?? null),
+        select
+      ),
+      findFirst: async ({ where }: any) => structuredClone(state.assets.find((asset) =>
+        asset.merchantId === where.merchantId
+        && asset.sha256 === where.sha256
+        && asset.status === where.status
+        && asset.id !== where.id?.not
+      ) ?? null),
+      findMany: async ({ where, select }: any) => {
+        let rows = state.assets.slice();
+        if (where?.status) rows = rows.filter((asset) => asset.status === where.status);
+        if (where?.createdAt?.lt) rows = rows.filter((asset) => asset.createdAt < where.createdAt.lt);
+        return structuredClone(rows.map((row) => selectObject(row, select)));
+      }
+    }
+  };
+
+  const storage = new InMemoryStorefrontAssetStorageAdapter();
+  return { state, client, storage };
+}
+
+async function createPendingStorefrontAsset(input: {
+  client: any;
+  storage: InMemoryStorefrontAssetStorageAdapter;
+  merchantId?: string;
+  contentType?: "image/webp" | "image/jpeg" | "image/png";
+}) {
+  const upload = await createStorefrontAssetUploadUrl({
+    merchantId: input.merchantId ?? "merchant_a",
+    contentType: input.contentType ?? "image/png",
+    client: input.client,
+    storage: input.storage
+  });
+  const asset = await input.client.storefrontAsset.findUnique({ where: { id: upload.assetId } });
+  return { upload, asset };
 }
 
 describe("internal storefront renderer lookup", () => {
@@ -837,5 +944,193 @@ describe("admin storefront management", () => {
     for (const key of sensitiveKeys) {
       assert.equal(key in domain, false, `Domain object should not contain sensitive key: ${key}`);
     }
+  });
+});
+
+describe("storefront asset signed-upload proof gates", () => {
+  it("signs and returns the required GCS upload headers", async () => {
+    let signedOptions: any = null;
+    const storage = new GcsStorefrontAssetStorageAdapter({
+      bucket: "test-bucket",
+      projectId: "test-project",
+      storage: {
+        bucket: () => ({
+          file: () => ({
+            getSignedUrl: async (options: any) => {
+              signedOptions = options;
+              return ["https://storage.googleapis.test/signed"];
+            }
+          })
+        })
+      } as any
+    });
+
+    const result = await storage.createSignedPutUrl({
+      gcsPath: "merchants/merchant_a/storefront/asset_1.png",
+      contentType: "image/png",
+      expiresAt: new Date("2026-07-08T10:05:00.000Z")
+    });
+
+    assert.equal(signedOptions.contentType, "image/png");
+    assert.deepEqual(signedOptions.extensionHeaders, {
+      [STOREFRONT_ASSET_UPLOAD_LENGTH_RANGE_HEADER]: STOREFRONT_ASSET_UPLOAD_LENGTH_RANGE,
+      [STOREFRONT_ASSET_UPLOAD_IF_GENERATION_MATCH_HEADER]: STOREFRONT_ASSET_UPLOAD_IF_GENERATION_MATCH
+    });
+    assert.deepEqual(result.headers, {
+      "content-type": "image/png",
+      [STOREFRONT_ASSET_UPLOAD_LENGTH_RANGE_HEADER]: STOREFRONT_ASSET_UPLOAD_LENGTH_RANGE,
+      [STOREFRONT_ASSET_UPLOAD_IF_GENERATION_MATCH_HEADER]: STOREFRONT_ASSET_UPLOAD_IF_GENERATION_MATCH
+    });
+  });
+
+  it("B1 returns 422 for missing object confirm and leaves asset pending", async () => {
+    const { client, storage, state } = makeStorefrontAssetHarness();
+    const { upload } = await createPendingStorefrontAsset({ client, storage });
+
+    await assert.rejects(
+      () => confirmStorefrontAsset({ merchantId: "merchant_a", assetId: upload.assetId, client, storage }),
+      (error) => error instanceof HttpError && error.status === 422 && error.message === "STOREFRONT_ASSET_UPLOAD_NOT_FOUND"
+    );
+    assert.equal(state.assets[0].status, StorefrontAssetStatus.PENDING);
+  });
+
+  it("B2 returns 422 for wrong object mime", async () => {
+    const { client, storage } = makeStorefrontAssetHarness();
+    const { upload, asset } = await createPendingStorefrontAsset({ client, storage, contentType: "image/png" });
+    storage.seedObject(asset.gcsPath, Buffer.from("jpg"), "image/jpeg");
+
+    await assert.rejects(
+      () => confirmStorefrontAsset({ merchantId: "merchant_a", assetId: upload.assetId, client, storage }),
+      (error) => error instanceof HttpError && error.status === 422 && error.message === "STOREFRONT_ASSET_MIME_MISMATCH"
+    );
+  });
+
+  it("B3 returns 422 for uploads larger than 8MB and deletes the object", async () => {
+    const { client, storage } = makeStorefrontAssetHarness();
+    const { upload, asset } = await createPendingStorefrontAsset({ client, storage });
+    storage.seedObject(asset.gcsPath, Buffer.alloc(MAX_STOREFRONT_ASSET_BYTES + 1), "image/png");
+
+    await assert.rejects(
+      () => confirmStorefrontAsset({ merchantId: "merchant_a", assetId: upload.assetId, client, storage }),
+      (error) => error instanceof HttpError && error.status === 422 && error.message === "STOREFRONT_ASSET_TOO_LARGE"
+    );
+    assert.equal((await storage.headObject({ gcsPath: asset.gcsPath })).exists, false);
+  });
+
+  it("B4 returns 404 when merchant A confirms merchant B asset", async () => {
+    const { client, storage } = makeStorefrontAssetHarness();
+    const { upload, asset } = await createPendingStorefrontAsset({ client, storage });
+    storage.seedObject(asset.gcsPath, Buffer.from("png"), "image/png");
+
+    await assert.rejects(
+      () => confirmStorefrontAsset({ merchantId: "merchant_b", assetId: upload.assetId, client, storage }),
+      (error) => error instanceof HttpError && error.status === 404 && error.message === "STOREFRONT_ASSET_NOT_FOUND"
+    );
+  });
+
+  it("B5 rejects pending asset references in themeJson with ASSET_NOT_READY", async () => {
+    const { client, storage } = makeStorefrontAssetHarness();
+    const { upload } = await createPendingStorefrontAsset({ client, storage });
+
+    await assert.rejects(
+      () => assertReadyStorefrontAssetOwnedByMerchant({ merchantId: "merchant_a", assetId: upload.assetId, client }),
+      (error) => error instanceof HttpError && error.status === 400 && error.message === "ASSET_NOT_READY"
+    );
+  });
+
+  it("B6 rejects deleted asset references", async () => {
+    const { client, storage } = makeStorefrontAssetHarness();
+    const { upload } = await createPendingStorefrontAsset({ client, storage });
+    await client.storefrontAsset.update({
+      where: { id: upload.assetId },
+      data: { status: StorefrontAssetStatus.DELETED }
+    });
+
+    await assert.rejects(
+      () => assertReadyStorefrontAssetOwnedByMerchant({ merchantId: "merchant_a", assetId: upload.assetId, client }),
+      (error) => error instanceof HttpError && error.status === 400 && error.message === "ASSET_NOT_READY"
+    );
+  });
+
+  it("B7 rejects merchant A referencing merchant B ready asset", async () => {
+    const { client, storage } = makeStorefrontAssetHarness();
+    const { upload, asset } = await createPendingStorefrontAsset({ client, storage });
+    storage.seedObject(asset.gcsPath, Buffer.from("png"), "image/png");
+    await confirmStorefrontAsset({ merchantId: "merchant_a", assetId: upload.assetId, client, storage });
+
+    await assert.rejects(
+      () => assertReadyStorefrontAssetOwnedByMerchant({ merchantId: "merchant_b", assetId: upload.assetId, client }),
+      (error) => error instanceof HttpError && error.status === 400 && error.message === "STOREFRONT_ASSET_NOT_FOUND_OR_NOT_OWNED"
+    );
+  });
+
+  it("B8 treats double confirm as idempotent", async () => {
+    const { client, storage } = makeStorefrontAssetHarness();
+    const { upload, asset } = await createPendingStorefrontAsset({ client, storage });
+    storage.seedObject(asset.gcsPath, Buffer.from("png"), "image/png");
+
+    const first = await confirmStorefrontAsset({ merchantId: "merchant_a", assetId: upload.assetId, client, storage });
+    const second = await confirmStorefrontAsset({ merchantId: "merchant_a", assetId: upload.assetId, client, storage });
+
+    assert.equal(first.id, upload.assetId);
+    assert.equal(second.id, upload.assetId);
+    assert.equal(first.status, StorefrontAssetStatus.READY);
+    assert.equal(second.status, StorefrontAssetStatus.READY);
+  });
+
+  it("B9 sweeps pending assets older than 24h and leaves ready assets untouched", async () => {
+    const { client, storage, state } = makeStorefrontAssetHarness();
+    const oldPending = await client.storefrontAsset.create({
+      data: {
+        merchantId: "merchant_a",
+        gcsPath: "merchants/merchant_a/storefront/old_pending.png",
+        mime: "image/png",
+        status: StorefrontAssetStatus.PENDING,
+        createdAt: new Date("2026-07-06T09:00:00.000Z")
+      }
+    });
+    const oldReady = await client.storefrontAsset.create({
+      data: {
+        merchantId: "merchant_a",
+        gcsPath: "merchants/merchant_a/storefront/old_ready.png",
+        mime: "image/png",
+        status: StorefrontAssetStatus.READY,
+        createdAt: new Date("2026-07-06T09:00:00.000Z")
+      }
+    });
+    const recentPending = await client.storefrontAsset.create({
+      data: {
+        merchantId: "merchant_a",
+        gcsPath: "merchants/merchant_a/storefront/recent_pending.png",
+        mime: "image/png",
+        status: StorefrontAssetStatus.PENDING,
+        createdAt: new Date("2026-07-08T09:30:00.000Z")
+      }
+    });
+
+    const result = await sweepPendingStorefrontAssetOrphans({
+      client,
+      storage,
+      now: state.now
+    });
+
+    assert.deepEqual(result, { scanned: 1, deleted: 1 });
+    assert.equal(state.assets.find((asset) => asset.id === oldPending.id).status, StorefrontAssetStatus.DELETED);
+    assert.equal(state.assets.find((asset) => asset.id === oldReady.id).status, StorefrontAssetStatus.READY);
+    assert.equal(state.assets.find((asset) => asset.id === recentPending.id).status, StorefrontAssetStatus.PENDING);
+  });
+
+  it("B10 returns 403 for upload-url issuance without storefront entitlement", async () => {
+    const { client, storage } = makeStorefrontAssetHarness({ storefrontEntitled: false });
+
+    await assert.rejects(
+      () => createStorefrontAssetUploadUrl({
+        merchantId: "merchant_a",
+        contentType: "image/png",
+        client,
+        storage
+      }),
+      (error) => error instanceof HttpError && error.status === 403 && error.message === "STOREFRONT_ASSET_UPLOAD_NOT_ENTITLED"
+    );
   });
 });

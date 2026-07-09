@@ -1,5 +1,7 @@
 import { prisma } from "../../lib/prisma.js";
 import { HttpError } from "../../lib/httpError.js";
+import { logger } from "../../lib/logger.js";
+import { resolveQuotePriceSource, type QuotePriceSource } from "../../config/quote-price-source.js";
 
 export const CHECKOUT_MODES = ["prepaid", "partial_cod", "full_cod"] as const;
 export type CheckoutMode = (typeof CHECKOUT_MODES)[number];
@@ -9,7 +11,7 @@ export type CheckoutItemInput = {
   id: string;
   name?: string | undefined;
   quantity: number;
-  priceMinor: string | number;
+  priceMinor?: string | number | undefined;
 };
 
 export type CheckoutItem = {
@@ -77,6 +79,24 @@ export type CheckoutRules = {
 
 type DbClient = typeof prisma | any;
 
+type CheckoutItemReference = {
+  id: string;
+  name: string | null;
+  quantity: bigint;
+  clientPriceMinor: bigint | null;
+};
+
+export type CheckoutQuoteTamperTelemetryInput = {
+  merchantId: string;
+  itemId: string;
+  suppliedMinor: bigint;
+  resolvedMinor: bigint;
+  deltaMinor: bigint;
+  source: QuotePriceSource;
+};
+
+export type CheckoutQuoteTamperTelemetryRecorder = (input: CheckoutQuoteTamperTelemetryInput) => void | Promise<void>;
+
 export const DEFAULT_CHECKOUT_RULES: CheckoutRules = {
   cod: {
     enabled: true,
@@ -134,6 +154,11 @@ export function parseMinorUnit(value: string | number | bigint, field: string): 
     throw new HttpError(400, "INVALID_MONEY_MINOR", { field });
   }
   return BigInt(trimmed);
+}
+
+function parseOptionalClientMinorUnit(value: string | number | undefined, field: string): bigint | null {
+  if (value === undefined) return null;
+  return parseMinorUnit(value, field);
 }
 
 export function minorToJsonInteger(value: bigint): number {
@@ -212,7 +237,7 @@ function normalizePincode(pincode: string) {
   return normalized;
 }
 
-export function normalizeCheckoutItems(items: CheckoutItemInput[]): CheckoutItem[] {
+function normalizeCheckoutItemReferences(items: CheckoutItemInput[]): CheckoutItemReference[] {
   if (!Array.isArray(items) || items.length === 0) {
     throw new HttpError(400, "CHECKOUT_ITEMS_REQUIRED");
   }
@@ -228,7 +253,21 @@ export function normalizeCheckoutItems(items: CheckoutItemInput[]): CheckoutItem
       id,
       name: item.name?.trim() || null,
       quantity: BigInt(item.quantity.toString()),
-      priceMinor: parseMinorUnit(item.priceMinor, `items.${index}.priceMinor`)
+      clientPriceMinor: parseOptionalClientMinorUnit(item.priceMinor, `items.${index}.priceMinor`)
+    };
+  });
+}
+
+export function normalizeCheckoutItems(items: CheckoutItemInput[]): CheckoutItem[] {
+  return normalizeCheckoutItemReferences(items).map((item, index) => {
+    if (item.clientPriceMinor === null) {
+      throw new HttpError(400, "CHECKOUT_ITEM_PRICE_REQUIRED", { index });
+    }
+    return {
+      id: item.id,
+      name: item.name,
+      quantity: item.quantity,
+      priceMinor: item.clientPriceMinor
     };
   });
 }
@@ -360,11 +399,76 @@ export function quoteOptionsFromJson(value: unknown): Record<CheckoutOptionKey, 
   })) as Record<CheckoutOptionKey, CheckoutOption>;
 }
 
+export function recordCheckoutQuoteTamperTelemetry(input: CheckoutQuoteTamperTelemetryInput) {
+  logger.warn({
+    eventName: "checkout_quote_client_money_ignored",
+    merchantId: input.merchantId,
+    itemId: input.itemId,
+    supplied_minor: input.suppliedMinor.toString(),
+    resolved_minor: input.resolvedMinor.toString(),
+    delta_minor: input.deltaMinor.toString(),
+    quotePriceSource: input.source
+  }, "Ignored client-supplied checkout quote money field");
+}
+
+function bigintAbs(value: bigint) {
+  return value < 0n ? -value : value;
+}
+
 export class CheckoutQuoteService {
   constructor(
     private readonly client: DbClient = prisma,
-    private readonly now: () => Date = () => new Date()
+    private readonly now: () => Date = () => new Date(),
+    private readonly quotePriceSource: () => QuotePriceSource = () => resolveQuotePriceSource(process.env),
+    private readonly tamperTelemetry: CheckoutQuoteTamperTelemetryRecorder = recordCheckoutQuoteTamperTelemetry
   ) {}
+
+  private async resolveItems(input: {
+    merchantId: string;
+    items: CheckoutItemInput[];
+    source: QuotePriceSource;
+  }): Promise<CheckoutItem[]> {
+    if (input.source === "client_allowed") {
+      return normalizeCheckoutItems(input.items);
+    }
+
+    const requested = normalizeCheckoutItemReferences(input.items);
+    const productIds = requested.map((item) => item.id);
+    const products = await this.client.storefrontProduct?.findMany?.({
+      where: {
+        merchantId: input.merchantId,
+        id: { in: productIds },
+        isActive: true
+      }
+    });
+
+    if (!Array.isArray(products)) {
+      throw new HttpError(503, "CHECKOUT_CATALOG_PRICE_SOURCE_UNAVAILABLE");
+    }
+
+    const byId = new Map(products.map((product: any) => [product.id, product]));
+    return requested.map((item, index) => {
+      const product = byId.get(item.id);
+      if (!product) throw new HttpError(422, "CHECKOUT_PRODUCT_PRICE_NOT_FOUND", { index, itemId: item.id });
+      const resolvedMinor = parseMinorUnit(product.priceMinor, `catalog.${index}.priceMinor`);
+      if (item.clientPriceMinor !== null) {
+        void Promise.resolve(this.tamperTelemetry({
+          merchantId: input.merchantId,
+          itemId: item.id,
+          suppliedMinor: item.clientPriceMinor,
+          resolvedMinor,
+          deltaMinor: bigintAbs(resolvedMinor - item.clientPriceMinor),
+          source: input.source
+        })).catch((error) => logger.warn({ err: error, itemId: item.id }, "checkout quote tamper telemetry failed"));
+      }
+      return {
+        id: product.id,
+        name: String(product.name ?? item.name ?? "") || item.name,
+        quantity: item.quantity,
+        priceMinor: resolvedMinor
+      };
+    });
+  }
 
   async createQuote(input: { merchantId: string; items: CheckoutItemInput[]; pincode: string }) {
     const merchantId = input.merchantId.trim();
@@ -378,7 +482,8 @@ export class CheckoutQuoteService {
     });
     const activeRules = settings?.activeRulesVersion?.rulesJson as CheckoutRules | undefined;
     const quoteTtlSeconds = settings?.quoteTtlSeconds ?? 900;
-    const items = normalizeCheckoutItems(input.items);
+    const source = this.quotePriceSource();
+    const items = await this.resolveItems({ merchantId, items: input.items, source });
     const quote = computeCheckoutQuote({
       items,
       pincode: input.pincode,

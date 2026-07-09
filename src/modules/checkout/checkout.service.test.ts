@@ -1,7 +1,11 @@
 import assert from "node:assert/strict";
+import { once } from "node:events";
 import { readFileSync } from "node:fs";
+import { createServer } from "node:http";
 import { describe, it } from "node:test";
+import express from "express";
 
+import { errorHandler } from "../../middleware/error.js";
 import { HttpError } from "../../lib/httpError.js";
 import {
   CHECKOUT_MODES,
@@ -13,10 +17,47 @@ import {
 } from "./checkout-quote.service.js";
 import { CheckoutOrderService, checkoutRequestHash } from "./checkout-order.service.js";
 import { CheckoutPaymentService } from "./checkout-payment.service.js";
+import { createCheckoutRouter } from "./checkout.routes.js";
 import { assertLowercaseCheckoutModes } from "./checkout-serializers.js";
 
 const baseTime = new Date("2026-07-05T10:00:00.000Z");
 const merchant = { id: "merchant_c1", name: "Skymax", email: "owner@example.test" };
+
+async function withCheckoutRouteApp<T>(
+  routerOptions: Parameters<typeof createCheckoutRouter>[0],
+  callback: (baseUrl: string) => Promise<T>
+) {
+  const app = express();
+  app.use(express.json());
+  app.use("/checkout", createCheckoutRouter(routerOptions));
+  app.use(errorHandler);
+  const server = createServer(app);
+  server.listen(0);
+  await once(server, "listening");
+  const address = server.address();
+  assert.ok(address && typeof address === "object");
+  try {
+    return await callback(`http://127.0.0.1:${address.port}`);
+  } finally {
+    server.close();
+    await once(server, "close");
+  }
+}
+
+async function postJson(baseUrl: string, path: string, body: unknown, headers: Record<string, string> = {}) {
+  const response = await fetch(`${baseUrl}${path}`, {
+    method: "POST",
+    headers: {
+      "content-type": "application/json",
+      ...headers
+    },
+    body: JSON.stringify(body)
+  });
+  return {
+    status: response.status,
+    body: await response.json().catch(() => null)
+  };
+}
 
 function clone<T>(value: T): T {
   return structuredClone(value as never) as T;
@@ -41,6 +82,7 @@ function makeHarness() {
   const state = {
     now: new Date(baseTime),
     merchants: [merchant],
+    storefrontProducts: [] as any[],
     settings: [] as any[],
     rulesVersions: [] as any[],
     quotes: [] as any[],
@@ -88,6 +130,7 @@ function makeHarness() {
     $transaction: async (callback: any) => {
       const snapshot = {
         settings: clone(state.settings),
+        storefrontProducts: clone(state.storefrontProducts),
         rulesVersions: clone(state.rulesVersions),
         quotes: clone(state.quotes),
         orders: clone(state.orders),
@@ -106,6 +149,7 @@ function makeHarness() {
         return await callback(client);
       } catch (error) {
         replaceArray(state.settings, snapshot.settings);
+        replaceArray(state.storefrontProducts, snapshot.storefrontProducts);
         replaceArray(state.rulesVersions, snapshot.rulesVersions);
         replaceArray(state.quotes, snapshot.quotes);
         replaceArray(state.orders, snapshot.orders);
@@ -136,6 +180,16 @@ function makeHarness() {
             ? clone(state.rulesVersions.find((row) => row.id === setting.activeRulesVersionId) ?? null)
             : undefined
         };
+      }
+    },
+    storefrontProduct: {
+      findMany: async ({ where }: any) => {
+        const ids = new Set(where.id?.in ?? []);
+        return clone(state.storefrontProducts.filter((row) =>
+          row.merchantId === where.merchantId
+          && ids.has(row.id)
+          && (where.isActive === undefined || row.isActive === where.isActive)
+        ));
       }
     },
     checkoutQuote: {
@@ -452,6 +506,66 @@ describe("Checkout C1 quote engine", () => {
     assert.equal(quote.options.full_cod.available, false);
     assert.match(quote.options.full_cod.reason ?? "", /above/);
   });
+
+  it("resolves legacy quote prices from catalog in strict mode and records tamper telemetry", async () => {
+    const { state, client } = makeHarness();
+    state.storefrontProducts.push({
+      id: "sku_999",
+      merchantId: merchant.id,
+      storefrontId: "storefront_1",
+      name: "Catalog Kurta",
+      priceMinor: 99900,
+      currency: "INR",
+      isActive: true
+    });
+    const telemetry: any[] = [];
+    const quoteService = new CheckoutQuoteService(
+      client,
+      () => state.now,
+      () => "catalog_strict",
+      (event) => {
+        telemetry.push(event);
+      }
+    );
+
+    const quote = await quoteService.createQuote({
+      merchantId: merchant.id,
+      pincode: "560001",
+      items: [{ id: "sku_999", name: "Tampered Kurta", quantity: 1, priceMinor: 1 }]
+    });
+
+    assert.equal(quote.itemsTotal, 99900n);
+    assert.equal(state.quotes[0].itemsTotalMinor, 99900n);
+    assert.equal(state.quotes[0].itemsJson[0].priceMinor, 99900);
+    assert.equal(telemetry.length, 1);
+    assert.equal(telemetry[0].suppliedMinor, 1n);
+    assert.equal(telemetry[0].resolvedMinor, 99900n);
+    assert.equal(telemetry[0].deltaMinor, 99899n);
+  });
+
+  it("returns 401 for unauthenticated legacy quote in production strict mode", async () => {
+    const fakeQuoteService = {
+      createQuote: async () => {
+        throw new Error("quote service should not run without checkout session");
+      }
+    } as unknown as CheckoutQuoteService;
+
+    await withCheckoutRouteApp({
+      quoteService: fakeQuoteService,
+      quotePriceSource: () => "catalog_strict",
+      checkoutSessionResolver: async () => {
+        throw new HttpError(401, "CHECKOUT_SESSION_TOKEN_REQUIRED");
+      }
+    }, async (baseUrl) => {
+      const response = await postJson(baseUrl, "/checkout/quote", {
+        merchantId: merchant.id,
+        pincode: "560001",
+        items: [{ id: "sku_999", quantity: 1, priceMinor: 1 }]
+      });
+      assert.equal(response.status, 401);
+      assert.equal((response.body as any).error, "CHECKOUT_SESSION_TOKEN_REQUIRED");
+    });
+  });
 });
 
 describe("Checkout C1 order and payment foundation", () => {
@@ -512,7 +626,7 @@ describe("Checkout C1 order and payment foundation", () => {
         idempotencyKey: "idem_expired",
         customer: { name: "Asha", phone: "9876543210" }
       }),
-      /CHECKOUT_QUOTE_EXPIRED/
+      (error) => error instanceof HttpError && error.status === 422 && error.message === "CHECKOUT_QUOTE_EXPIRED"
     );
 
     const harness = makeHarness();
@@ -543,6 +657,45 @@ describe("Checkout C1 order and payment foundation", () => {
     assert.equal((partialResult.body as any).payment.purpose, "advance");
     assert.equal((partialResult.body as any).payment.amount, 25980);
     assert.equal((partialResult.body as any).order.amounts.payOnDelivery, 103920);
+  });
+
+  it("ignores client echoed order totals and re-reads amounts from the persisted quote", async () => {
+    const { quote, orderService, state } = makeHarness();
+    const createdQuote = await quote();
+
+    const result = await orderService.createOrder({
+      quoteId: createdQuote.quoteId,
+      mode: "full_cod",
+      idempotencyKey: "idem_echoed_totals",
+      customer: { name: "Asha", phone: "9876543210" },
+      grandTotalMinor: 1,
+      total: 1,
+      shippingCharge: 1,
+      discountAmount: 1,
+      codAmount: 1,
+      walletAmount: 1
+    } as any);
+
+    assert.equal(result.statusCode, 201);
+    assert.equal(state.orders[0].itemsTotalMinor, 129900n);
+    assert.equal(state.orders[0].grandTotalMinor, 134800n);
+    assert.equal(state.orders[0].codCollectionAmountMinor, 134800n);
+  });
+
+  it("does not allow one merchant session context to use another merchant quote", async () => {
+    const { quote, orderService } = makeHarness();
+    const createdQuote = await quote();
+
+    await assert.rejects(
+      () => orderService.createOrder({
+        quoteId: createdQuote.quoteId,
+        mode: "prepaid",
+        idempotencyKey: "idem_cross_merchant",
+        customer: { name: "Asha", phone: "9876543210" },
+        expectedMerchantId: "merchant_other"
+      }),
+      (error) => error instanceof HttpError && error.status === 404 && error.message === "CHECKOUT_QUOTE_NOT_FOUND"
+    );
   });
 
   it("writes order_placed telemetry inside the authoritative order transaction", async () => {

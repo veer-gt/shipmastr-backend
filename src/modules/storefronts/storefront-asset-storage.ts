@@ -9,6 +9,10 @@ import { logger } from "../../lib/logger.js";
 
 export const ALLOWED_STOREFRONT_ASSET_CONTENT_TYPES = new Set(["image/webp", "image/jpeg", "image/png"]);
 export const MAX_STOREFRONT_ASSET_BYTES = 8 * 1024 * 1024; // 8MB, matches SF1 spec
+export const STOREFRONT_ASSET_UPLOAD_LENGTH_RANGE_HEADER = "x-goog-content-length-range";
+export const STOREFRONT_ASSET_UPLOAD_LENGTH_RANGE = `0,${MAX_STOREFRONT_ASSET_BYTES}`;
+export const STOREFRONT_ASSET_UPLOAD_IF_GENERATION_MATCH_HEADER = "x-goog-if-generation-match";
+export const STOREFRONT_ASSET_UPLOAD_IF_GENERATION_MATCH = "0";
 const SAFE_ID_SEGMENT = /^[A-Za-z0-9_-]+$/;
 
 export type StorefrontAssetSignedPutUrl = {
@@ -98,12 +102,20 @@ export class GcsStorefrontAssetStorageAdapter implements StorefrontAssetStorageA
           version: "v4",
           action: "write",
           expires: input.expiresAt,
-          contentType
+          contentType,
+          extensionHeaders: {
+            [STOREFRONT_ASSET_UPLOAD_LENGTH_RANGE_HEADER]: STOREFRONT_ASSET_UPLOAD_LENGTH_RANGE,
+            [STOREFRONT_ASSET_UPLOAD_IF_GENERATION_MATCH_HEADER]: STOREFRONT_ASSET_UPLOAD_IF_GENERATION_MATCH
+          }
         });
       return {
         uploadUrl,
         method: "PUT",
-        headers: { "content-type": contentType },
+        headers: {
+          "content-type": contentType,
+          [STOREFRONT_ASSET_UPLOAD_LENGTH_RANGE_HEADER]: STOREFRONT_ASSET_UPLOAD_LENGTH_RANGE,
+          [STOREFRONT_ASSET_UPLOAD_IF_GENERATION_MATCH_HEADER]: STOREFRONT_ASSET_UPLOAD_IF_GENERATION_MATCH
+        },
         expiresAt: input.expiresAt
       };
     } catch (error) {
@@ -185,7 +197,11 @@ export class InMemoryStorefrontAssetStorageAdapter implements StorefrontAssetSto
     return {
       uploadUrl: `mock://storefront-asset-put/${encodeURIComponent(input.gcsPath)}`,
       method: "PUT",
-      headers: { "content-type": contentType },
+      headers: {
+        "content-type": contentType,
+        [STOREFRONT_ASSET_UPLOAD_LENGTH_RANGE_HEADER]: STOREFRONT_ASSET_UPLOAD_LENGTH_RANGE,
+        [STOREFRONT_ASSET_UPLOAD_IF_GENERATION_MATCH_HEADER]: STOREFRONT_ASSET_UPLOAD_IF_GENERATION_MATCH
+      },
       expiresAt: input.expiresAt
     };
   }

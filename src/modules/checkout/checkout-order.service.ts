@@ -36,6 +36,7 @@ export type CreateCheckoutOrderInput = {
   customer: CheckoutCustomerInput;
   shippingAddress?: CheckoutAddressInput | undefined;
   idempotencyKey: string;
+  expectedMerchantId?: string | undefined;
 };
 
 export type IdempotencyReplayPointer = {
@@ -193,6 +194,9 @@ export class CheckoutOrderService {
   async createOrder(input: CreateCheckoutOrderInput) {
     const quote = await this.client.checkoutQuote.findUnique({ where: { id: input.quoteId } });
     if (!quote) throw new HttpError(404, "CHECKOUT_QUOTE_NOT_FOUND");
+    if (input.expectedMerchantId && quote.merchantId !== input.expectedMerchantId) {
+      throw new HttpError(404, "CHECKOUT_QUOTE_NOT_FOUND");
+    }
     const requestHash = checkoutRequestHash({
       quoteId: input.quoteId,
       mode: input.mode,
@@ -297,7 +301,7 @@ export class CheckoutOrderService {
 
   private async createOrderFromQuote(tx: DbClient, quote: any, input: CreateCheckoutOrderInput) {
     if (!CHECKOUT_MODES.includes(input.mode)) throw new HttpError(400, "CHECKOUT_MODE_INVALID");
-    if (quote.expiresAt.getTime() <= this.now().getTime()) throw new HttpError(410, "CHECKOUT_QUOTE_EXPIRED");
+    if (quote.expiresAt.getTime() <= this.now().getTime()) throw new HttpError(422, "CHECKOUT_QUOTE_EXPIRED");
 
     const options = quoteOptionsFromJson(quote.optionsJson);
     const selected = options[input.mode];

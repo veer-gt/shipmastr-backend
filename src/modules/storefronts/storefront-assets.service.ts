@@ -14,6 +14,7 @@ import {
 } from "./storefront-asset-storage.js";
 
 const UPLOAD_URL_TTL_MS = 5 * 60 * 1000; // 5 minutes — plenty for a client to PUT one photo
+const ORPHAN_PENDING_ASSET_AGE_MS = 24 * 60 * 60 * 1000;
 
 type DbClient = Prisma.TransactionClient | typeof prisma;
 
@@ -62,6 +63,11 @@ export async function createStorefrontAssetUploadUrl(input: CreateStorefrontAsse
     select: { id: true }
   });
   if (!merchant) throw new HttpError(404, "MERCHANT_NOT_FOUND");
+  const storefront = await client.storefront?.findFirst?.({
+    where: { merchantId: input.merchantId },
+    select: { id: true }
+  });
+  if (!storefront) throw new HttpError(403, "STOREFRONT_ASSET_UPLOAD_NOT_ENTITLED");
 
   const asset = await client.storefrontAsset.create({
     data: {
@@ -119,12 +125,20 @@ export async function confirmStorefrontAsset(input: ConfirmStorefrontAssetInput)
 
   const head = await storage.headObject({ gcsPath: asset.gcsPath });
   if (!head.exists) {
-    throw new HttpError(409, "STOREFRONT_ASSET_UPLOAD_NOT_FOUND");
+    throw new HttpError(422, "STOREFRONT_ASSET_UPLOAD_NOT_FOUND");
   }
 
-  const contentType = normalizeStorefrontAssetContentType(head.contentType ?? asset.mime);
+  let contentType: string;
+  try {
+    contentType = normalizeStorefrontAssetContentType(head.contentType ?? asset.mime);
+  } catch {
+    throw new HttpError(422, "STOREFRONT_ASSET_MIME_MISMATCH");
+  }
+  if (contentType !== asset.mime) {
+    throw new HttpError(422, "STOREFRONT_ASSET_MIME_MISMATCH");
+  }
   if (head.contentLength === null || head.contentLength <= 0) {
-    throw new HttpError(409, "STOREFRONT_ASSET_UPLOAD_EMPTY");
+    throw new HttpError(422, "STOREFRONT_ASSET_UPLOAD_EMPTY");
   }
   if (head.contentLength > MAX_STOREFRONT_ASSET_BYTES) {
     // GCS already has the (oversized) object — delete it, don't leave orphaned storage,
@@ -133,7 +147,7 @@ export async function confirmStorefrontAsset(input: ConfirmStorefrontAssetInput)
     await storage.deleteObject({ gcsPath: asset.gcsPath }).catch((error) => {
       logger.error({ err: error, assetId: asset.id }, "Failed to delete oversized storefront asset upload");
     });
-    throw new HttpError(413, "STOREFRONT_ASSET_TOO_LARGE");
+    throw new HttpError(422, "STOREFRONT_ASSET_TOO_LARGE");
   }
 
   let sha256: string | null = null;
@@ -194,7 +208,7 @@ export async function assertReadyStorefrontAssetOwnedByMerchant(input: {
     throw new HttpError(400, "STOREFRONT_ASSET_NOT_FOUND_OR_NOT_OWNED");
   }
   if (asset.status !== StorefrontAssetStatus.READY) {
-    throw new HttpError(400, "STOREFRONT_ASSET_NOT_READY");
+    throw new HttpError(400, "ASSET_NOT_READY");
   }
 
   return asset;
@@ -202,4 +216,41 @@ export async function assertReadyStorefrontAssetOwnedByMerchant(input: {
 
 export function storefrontAssetPublicUrl(gcsPath: string) {
   return buildStorefrontAssetPublicUrl(gcsPath);
+}
+
+export async function sweepPendingStorefrontAssetOrphans(input: {
+  client?: DbClient;
+  storage?: StorefrontAssetStorageAdapter;
+  now?: Date;
+  olderThanMs?: number;
+} = {}) {
+  const client = input.client || prisma;
+  const storage = input.storage || getStorefrontAssetStorageAdapter();
+  const now = input.now ?? new Date();
+  const olderThanMs = input.olderThanMs ?? ORPHAN_PENDING_ASSET_AGE_MS;
+  const cutoff = new Date(now.getTime() - olderThanMs);
+  const pending = await client.storefrontAsset.findMany({
+    where: {
+      status: StorefrontAssetStatus.PENDING,
+      createdAt: { lt: cutoff }
+    },
+    select: { id: true, gcsPath: true }
+  });
+
+  let deleted = 0;
+  for (const asset of pending) {
+    await storage.deleteObject({ gcsPath: asset.gcsPath }).catch((error) => {
+      logger.warn({ err: error, assetId: asset.id }, "Failed to delete orphaned pending storefront asset object");
+    });
+    await client.storefrontAsset.update({
+      where: { id: asset.id },
+      data: { status: StorefrontAssetStatus.DELETED }
+    });
+    deleted += 1;
+  }
+
+  return {
+    scanned: pending.length,
+    deleted
+  };
 }
