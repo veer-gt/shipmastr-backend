@@ -9,12 +9,150 @@ ARTIFACT_REPOSITORY="${ARTIFACT_REPOSITORY:-shipmastr}"
 IMAGE_NAME="${IMAGE_NAME:-shipmastr-api}"
 SERVICE_ACCOUNT="${SERVICE_ACCOUNT:-shipmastr-runner@shipmastr-core-prod.iam.gserviceaccount.com}"
 CLOUD_SQL_INSTANCE="${CLOUD_SQL_INSTANCE:-shipmastr-core-prod:asia-south1:shipmastr-postgres}"
+MIGRATION_STATUS_JOB="${MIGRATION_STATUS_JOB:-shipmastr-prisma-migrate-status-prod}"
+PROD_DATABASE_URL_SECRET="${PROD_DATABASE_URL_SECRET:-DATABASE_URL}"
+PROD_DATABASE_NAME_ALLOWLIST="${PROD_DATABASE_NAME_ALLOWLIST:-shipmastr,shipmastr_prod,shipmastr_production}"
 EMAIL_QUEUE_NAME="${EMAIL_QUEUE_NAME:-shipmastr-email-queue}"
 TASK_HANDLER_URL="${TASK_HANDLER_URL:-https://shipmastr-api-525178961393.asia-south1.run.app/v1/tasks/email/lead-notification}"
 EMAIL_FROM="${EMAIL_FROM:-noreply@shipmastr.com}"
 EMAIL_FROM_NAME="${EMAIL_FROM_NAME:-Shipmastr}"
 SMTP_REPLY_TO="${SMTP_REPLY_TO:-no-reply@shipmastr.com}"
 ADMIN_EMAIL="${ADMIN_EMAIL:-indraveer.chauhan@gmail.com}"
+
+verify_production_database_target() {
+  if [[ "${PROD_DATABASE_URL_SECRET}" != "DATABASE_URL" ]]; then
+    echo "Production DATABASE_URL secret resolution ambiguous - deploy blocked" >&2
+    exit 1
+  fi
+
+  local database_url
+  local secret_status
+
+  set +e
+  database_url="$(gcloud secrets versions access latest \
+    --secret "${PROD_DATABASE_URL_SECRET}" \
+    --project "${PROJECT_ID}" 2>/dev/null)"
+  secret_status=$?
+  set -e
+
+  if [[ "${secret_status}" -ne 0 || -z "${database_url}" ]]; then
+    echo "Production DATABASE_URL secret could not be resolved - deploy blocked" >&2
+    exit 1
+  fi
+
+  local database_identifier
+  local verify_status
+
+  set +e
+  database_identifier="$(
+    DATABASE_URL_TO_VERIFY="${database_url}" \
+    PROD_DATABASE_NAME_ALLOWLIST="${PROD_DATABASE_NAME_ALLOWLIST}" \
+    node <<'NODE'
+const rawUrl = process.env.DATABASE_URL_TO_VERIFY || "";
+const allowlist = (process.env.PROD_DATABASE_NAME_ALLOWLIST || "")
+  .split(",")
+  .map((value) => value.trim())
+  .filter(Boolean);
+
+let parsed;
+try {
+  parsed = new URL(rawUrl);
+} catch {
+  console.error("INVALID_DATABASE_URL");
+  process.exit(2);
+}
+
+const databaseName = decodeURIComponent(parsed.pathname.replace(/^\/+/, "").split("?")[0] || "");
+if (!databaseName) {
+  console.error("MISSING_DATABASE_NAME");
+  process.exit(3);
+}
+
+if (/(staging|stage|dev|development|local|scratch|test|ci)/i.test(databaseName)) {
+  console.error("NON_PRODUCTION_DATABASE_NAME");
+  process.exit(4);
+}
+
+if (!allowlist.includes(databaseName) && !/(prod|production)/i.test(databaseName)) {
+  console.error("DATABASE_NAME_NOT_ALLOWLISTED");
+  process.exit(5);
+}
+
+console.log(`database=${databaseName}`);
+NODE
+  )"
+  verify_status=$?
+  set -e
+
+  unset database_url
+
+  if [[ "${verify_status}" -ne 0 ]]; then
+    echo "Production DB target could not be proven safe - deploy blocked" >&2
+    exit 1
+  fi
+
+  echo "Production DB target verified: ${database_identifier}"
+}
+
+run_production_migration_status_gate() {
+  echo "Production migration status gate running"
+  verify_production_database_target
+
+  echo "Running production Prisma migration status gate with ${IMAGE_DIGEST}"
+  local deploy_status
+  set +e
+  gcloud run jobs deploy "${MIGRATION_STATUS_JOB}" \
+    --project "${PROJECT_ID}" \
+    --region "${REGION}" \
+    --image "${IMAGE_DIGEST}" \
+    --service-account "${SERVICE_ACCOUNT}" \
+    --set-cloudsql-instances "${CLOUD_SQL_INSTANCE}" \
+    --set-env-vars "APP_ENV=production" \
+    --set-secrets "DATABASE_URL=${PROD_DATABASE_URL_SECRET}:latest" \
+    --command "npx" \
+    --args "prisma,migrate,status,--schema,prisma/schema.prisma" \
+    --max-retries 0 \
+    --task-timeout 600s \
+    --quiet
+  deploy_status=$?
+  set -e
+
+  if [[ "${deploy_status}" -ne 0 ]]; then
+    echo "Production migration status gate could not be prepared - deploy blocked" >&2
+    exit 1
+  fi
+
+  local status_code
+  set +e
+  gcloud run jobs execute "${MIGRATION_STATUS_JOB}" \
+    --project "${PROJECT_ID}" \
+    --region "${REGION}" \
+    --wait
+  status_code=$?
+  set -e
+
+  if [[ "${status_code}" -ne 0 ]]; then
+    echo "Production migrations pending — deploy blocked" >&2
+    echo "Run approved production migration procedure before deploy" >&2
+    exit 1
+  fi
+
+  echo "Production Prisma migration status gate passed"
+}
+
+if [[ "${PROD_MIGRATION_STATUS_DRY_RUN_ONLY:-}" == "1" ]]; then
+  if [[ "${APPROVE_PRODUCTION_MIGRATION_STATUS_DRY_RUN:-}" != "APPROVE PRODUCTION MIGRATION STATUS DRY RUN" ]]; then
+    echo "Refusing production migration status dry run without exact approval phrase." >&2
+    exit 1
+  fi
+  if [[ -z "${IMAGE_DIGEST:-}" ]]; then
+    echo "Set IMAGE_DIGEST to the staging-tested backend image digest before the dry run." >&2
+    exit 1
+  fi
+  run_production_migration_status_gate
+  echo "Production migration status dry run passed; no deploy attempted."
+  exit 0
+fi
 
 if [[ "${CONFIRM_PROD_DEPLOY:-}" != "shipmastr-prod" ]]; then
   echo "Refusing prod deploy. Set CONFIRM_PROD_DEPLOY=shipmastr-prod after staging smoke passes." >&2
@@ -50,6 +188,8 @@ if [[ -z "${IMAGE_DIGEST:-}" ]]; then
 
   IMAGE_DIGEST="${IMAGE_BASE}@${DIGEST}"
 fi
+
+run_production_migration_status_gate
 
 echo "Deploying ${SERVICE} by immutable digest: ${IMAGE_DIGEST}"
 
