@@ -983,6 +983,65 @@ describe("storefront asset signed-upload proof gates", () => {
     });
   });
 
+  it("falls back to runtime IAM signBlob and signs the required PUT headers", async () => {
+    let signBlobUrl: string | null = null;
+    let signBlobPayload: string | null = null;
+    const signature = Buffer.from("iam-signature").toString("base64");
+    const storage = new GcsStorefrontAssetStorageAdapter({
+      bucket: "test-bucket",
+      projectId: "test-project",
+      signingServiceAccount: "storefront-signer@test.iam.gserviceaccount.com",
+      storage: {
+        bucket: () => ({
+          file: () => ({
+            getSignedUrl: async () => {
+              throw new Error("metadata signer unavailable");
+            }
+          })
+        })
+      } as any,
+      accessTokenProvider: async () => "test-access-token",
+      iamSignBlobRequest: async (input) => {
+        assert.equal(input.accessToken, "test-access-token");
+        signBlobUrl = input.url;
+        signBlobPayload = input.payload;
+        return { signedBlob: signature };
+      }
+    });
+
+    const result = await storage.createSignedPutUrl({
+      gcsPath: "merchants/merchant_a/storefront/asset_1.png",
+      contentType: "image/png",
+      expiresAt: new Date(Date.now() + 5 * 60 * 1000)
+    });
+
+    const uploadUrl = new URL(result.uploadUrl);
+    assert.equal(uploadUrl.protocol, "https:");
+    assert.equal(uploadUrl.hostname, "storage.googleapis.com");
+    assert.equal(uploadUrl.pathname, "/test-bucket/merchants/merchant_a/storefront/asset_1.png");
+    assert.equal(uploadUrl.searchParams.get("X-Goog-Algorithm"), "GOOG4-RSA-SHA256");
+    assert.match(uploadUrl.searchParams.get("X-Goog-Date") || "", /^\d{8}T\d{6}Z$/);
+    assert.equal(
+      uploadUrl.searchParams.get("X-Goog-SignedHeaders"),
+      "content-type;host;x-goog-content-length-range;x-goog-if-generation-match"
+    );
+    assert.equal(uploadUrl.searchParams.get("X-Goog-Signature"), Buffer.from("iam-signature").toString("hex"));
+    assert.equal(
+      uploadUrl.searchParams.get("X-Goog-Credential")?.includes("storefront-signer@test.iam.gserviceaccount.com/"),
+      true
+    );
+    assert.equal(
+      signBlobUrl,
+      "https://iamcredentials.googleapis.com/v1/projects/-/serviceAccounts/storefront-signer%40test.iam.gserviceaccount.com:signBlob"
+    );
+    assert.ok(signBlobPayload);
+    assert.deepEqual(result.headers, {
+      "content-type": "image/png",
+      [STOREFRONT_ASSET_UPLOAD_LENGTH_RANGE_HEADER]: STOREFRONT_ASSET_UPLOAD_LENGTH_RANGE,
+      [STOREFRONT_ASSET_UPLOAD_IF_GENERATION_MATCH_HEADER]: STOREFRONT_ASSET_UPLOAD_IF_GENERATION_MATCH
+    });
+  });
+
   it("B1 returns 422 for missing object confirm and leaves asset pending", async () => {
     const { client, storage, state } = makeStorefrontAssetHarness();
     const { upload } = await createPendingStorefrontAsset({ client, storage });

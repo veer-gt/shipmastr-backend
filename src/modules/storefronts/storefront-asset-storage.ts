@@ -14,6 +14,10 @@ export const STOREFRONT_ASSET_UPLOAD_LENGTH_RANGE = `0,${MAX_STOREFRONT_ASSET_BY
 export const STOREFRONT_ASSET_UPLOAD_IF_GENERATION_MATCH_HEADER = "x-goog-if-generation-match";
 export const STOREFRONT_ASSET_UPLOAD_IF_GENERATION_MATCH = "0";
 const SAFE_ID_SEGMENT = /^[A-Za-z0-9_-]+$/;
+const GCS_XML_HOST = "storage.googleapis.com";
+const GCS_METADATA_SERVICE_ACCOUNT_EMAIL_URL = "http://metadata.google.internal/computeMetadata/v1/instance/service-accounts/default/email";
+const GCS_METADATA_ACCESS_TOKEN_URL = "http://metadata.google.internal/computeMetadata/v1/instance/service-accounts/default/token";
+const GCS_SERVICE_ACCOUNT_EMAIL_SHAPE = /^[^\s@]+@[^\s@]+\.[^\s@]+$/;
 
 export type StorefrontAssetSignedPutUrl = {
   uploadUrl: string;
@@ -35,6 +39,24 @@ export interface StorefrontAssetStorageAdapter {
   deleteObject(input: { gcsPath: string }): Promise<{ deleted: boolean }>;
   downloadForHashing(input: { gcsPath: string; maxBytes: number }): Promise<Buffer>;
 }
+
+export type GcsStorefrontAssetRuntimeSignInput = {
+  serviceAccountEmail: string;
+  stringToSign: string;
+};
+
+export type GcsStorefrontAssetRuntimeSigner = (input: GcsStorefrontAssetRuntimeSignInput) => Promise<string>;
+export type GcsStorefrontAssetServiceAccountEmailResolver = () => Promise<string | null | undefined>;
+export type GcsStorefrontAssetAccessTokenProvider = () => Promise<string | { token?: string | null | undefined } | null | undefined>;
+export type GcsStorefrontAssetIamSignBlobRequest = (input: {
+  url: string;
+  accessToken: string;
+  payload: string;
+}) => Promise<{ signedBlob?: string | undefined }>;
+export type GcsStorefrontAssetAuthClient = {
+  getCredentials?: () => Promise<{ client_email?: string | null | undefined }>;
+  getAccessToken?: GcsStorefrontAssetAccessTokenProvider;
+};
 
 export function normalizeStorefrontAssetContentType(contentType: string | undefined) {
   const normalized = String(contentType ?? "").trim().toLowerCase();
@@ -70,26 +92,259 @@ function secondsUntil(expiresAt: Date, nowMs = Date.now()) {
   return Math.max(1, Math.ceil((expiresAt.getTime() - nowMs) / 1000));
 }
 
-export function sha256Hex(buffer: Buffer) {
-  return createHash("sha256").update(buffer).digest("hex");
+export function sha256Hex(value: Buffer | string) {
+  return createHash("sha256").update(value).digest("hex");
+}
+
+function encodeGcsComponent(value: string) {
+  return encodeURIComponent(value).replace(/[!'()*]/g, (character) => `%${character.charCodeAt(0).toString(16).toUpperCase()}`);
+}
+
+function encodeGcsPathSegment(value: string) {
+  const segment = String(value ?? "");
+  if (!segment || segment === "." || segment === ".." || segment.includes("/") || segment.includes("\\") || /[\u0000-\u001f\u007f]/.test(segment)) {
+    throw new HttpError(400, "STOREFRONT_ASSET_GCS_PATH_INVALID");
+  }
+  return encodeGcsComponent(segment);
+}
+
+function buildGcsXmlPathStyleObjectPath(gcsPath: string) {
+  const trimmed = String(gcsPath ?? "").trim();
+  if (!trimmed || trimmed.includes("..") || trimmed.includes("\\") || /[\u0000-\u001f\u007f]/.test(trimmed)) {
+    throw new HttpError(400, "STOREFRONT_ASSET_GCS_PATH_INVALID");
+  }
+  return trimmed.split("/").map(encodeGcsPathSegment).join("/");
+}
+
+function buildGcsXmlPathStyleCanonicalUri(bucketName: string, gcsPath: string) {
+  return `/${encodeGcsComponent(bucketName)}/${buildGcsXmlPathStyleObjectPath(gcsPath)}`;
+}
+
+function gcsTimestamp(date: Date) {
+  return date.toISOString().replace(/[-:]/g, "").replace(/\.\d{3}Z$/, "Z");
+}
+
+function gcsDateStamp(date: Date) {
+  return gcsTimestamp(date).slice(0, 8);
+}
+
+function canonicalGcsQuery(params: Record<string, string>) {
+  return Object.keys(params).sort().map((key) => `${encodeGcsComponent(key)}=${encodeGcsComponent(params[key]!)}`).join("&");
+}
+
+function validateGcsSigningServiceAccount(value: string) {
+  const email = String(value ?? "").trim();
+  if (!email || !GCS_SERVICE_ACCOUNT_EMAIL_SHAPE.test(email)) {
+    throw Object.assign(new Error("STOREFRONT_ASSET_GCS_SIGNER_MISCONFIGURED"), {
+      code: "STOREFRONT_ASSET_GCS_SIGNER_MISCONFIGURED"
+    });
+  }
+  return email;
+}
+
+function normalizeAccessToken(value: string | { token?: string | null | undefined } | null | undefined) {
+  const token = typeof value === "string" ? value : value?.token;
+  const trimmed = String(token ?? "").trim();
+  return trimmed || null;
+}
+
+async function resolveCloudRunServiceAccountEmail() {
+  if (typeof fetch !== "function") return null;
+  const controller = typeof AbortController === "function" ? new AbortController() : null;
+  const timeout = controller ? setTimeout(() => controller.abort(), 1000) : null;
+  try {
+    const response = await fetch(GCS_METADATA_SERVICE_ACCOUNT_EMAIL_URL, {
+      headers: { "Metadata-Flavor": "Google" },
+      ...(controller ? { signal: controller.signal } : {})
+    });
+    if (!response.ok) return null;
+    const email = String(await response.text()).trim();
+    return email.includes("@") ? email : null;
+  } catch {
+    return null;
+  } finally {
+    if (timeout) clearTimeout(timeout);
+  }
+}
+
+async function fetchGcsMetadataAccessToken() {
+  if (typeof fetch !== "function") return null;
+  const controller = typeof AbortController === "function" ? new AbortController() : null;
+  const timeout = controller ? setTimeout(() => controller.abort(), 1000) : null;
+  try {
+    const response = await fetch(GCS_METADATA_ACCESS_TOKEN_URL, {
+      headers: { "Metadata-Flavor": "Google" },
+      ...(controller ? { signal: controller.signal } : {})
+    });
+    if (!response.ok) return null;
+    const body = await response.json() as { access_token?: string | undefined };
+    return normalizeAccessToken(body.access_token);
+  } catch {
+    return null;
+  } finally {
+    if (timeout) clearTimeout(timeout);
+  }
+}
+
+async function defaultIamCredentialsSignBlobRequest(input: {
+  url: string;
+  accessToken: string;
+  payload: string;
+}) {
+  if (typeof fetch !== "function") {
+    throw new Error("STOREFRONT_ASSET_GCS_SIGN_BLOB_FETCH_UNAVAILABLE");
+  }
+  const response = await fetch(input.url, {
+    method: "POST",
+    headers: {
+      authorization: `Bearer ${input.accessToken}`,
+      "content-type": "application/json"
+    },
+    body: JSON.stringify({ payload: input.payload })
+  });
+  if (!response.ok) {
+    throw Object.assign(new Error(`STOREFRONT_ASSET_GCS_IAM_SIGN_BLOB_FAILED_${response.status}`), {
+      code: response.status
+    });
+  }
+  const data = await response.json() as { signedBlob?: string | undefined };
+  return { signedBlob: data.signedBlob };
 }
 
 /**
  * Real GCS-backed adapter. Requires either a service-account key file
  * (GOOGLE_APPLICATION_CREDENTIALS) or a runtime identity with
- * roles/iam.serviceAccountTokenCreator on itself (Cloud Run default compute SA
- * usually needs this granted explicitly to self-sign V4 URLs — see the
- * shipping-weight-proof-storage.ts runtime-signer fallback in this codebase for
- * the proven pattern if bare getSignedUrl() fails with a signing-permission error
- * in production; not duplicated here to keep this module focused).
+ * roles/iam.serviceAccountTokenCreator on itself. Cloud Run uses the official
+ * library first, then falls back to IAM Credentials signBlob when metadata-based
+ * signing is unavailable.
  */
 export class GcsStorefrontAssetStorageAdapter implements StorefrontAssetStorageAdapter {
   private readonly bucketName: string;
   private readonly storage: Storage;
+  private readonly signingServiceAccount?: string | undefined;
+  private readonly authClient?: GcsStorefrontAssetAuthClient | undefined;
+  private readonly accessTokenProvider?: GcsStorefrontAssetAccessTokenProvider | undefined;
+  private readonly iamSignBlobRequest: GcsStorefrontAssetIamSignBlobRequest;
+  private readonly runtimeSigner?: GcsStorefrontAssetRuntimeSigner | undefined;
+  private readonly serviceAccountEmailResolver: GcsStorefrontAssetServiceAccountEmailResolver;
 
-  constructor(config: { bucket: string; projectId: string; storage?: Storage }) {
+  constructor(config: {
+    bucket: string;
+    projectId: string;
+    signingServiceAccount?: string | undefined;
+    storage?: Storage;
+    authClient?: GcsStorefrontAssetAuthClient | undefined;
+    accessTokenProvider?: GcsStorefrontAssetAccessTokenProvider | undefined;
+    iamSignBlobRequest?: GcsStorefrontAssetIamSignBlobRequest | undefined;
+    runtimeSigner?: GcsStorefrontAssetRuntimeSigner | undefined;
+    serviceAccountEmailResolver?: GcsStorefrontAssetServiceAccountEmailResolver | undefined;
+  }) {
     this.bucketName = config.bucket;
     this.storage = config.storage ?? new Storage({ projectId: config.projectId });
+    this.signingServiceAccount = String(config.signingServiceAccount ?? "").trim() || undefined;
+    this.authClient = config.authClient ?? (this.storage as unknown as { authClient?: GcsStorefrontAssetAuthClient }).authClient;
+    this.accessTokenProvider = config.accessTokenProvider;
+    this.iamSignBlobRequest = config.iamSignBlobRequest ?? defaultIamCredentialsSignBlobRequest;
+    this.runtimeSigner = config.runtimeSigner;
+    this.serviceAccountEmailResolver = config.serviceAccountEmailResolver ?? resolveCloudRunServiceAccountEmail;
+  }
+
+  private requiredPutHeaders(contentType: string) {
+    return {
+      "content-type": contentType,
+      [STOREFRONT_ASSET_UPLOAD_LENGTH_RANGE_HEADER]: STOREFRONT_ASSET_UPLOAD_LENGTH_RANGE,
+      [STOREFRONT_ASSET_UPLOAD_IF_GENERATION_MATCH_HEADER]: STOREFRONT_ASSET_UPLOAD_IF_GENERATION_MATCH
+    };
+  }
+
+  private async resolveSigningServiceAccount() {
+    if (this.signingServiceAccount) return validateGcsSigningServiceAccount(this.signingServiceAccount);
+    const credentials = await this.authClient?.getCredentials?.();
+    const email = String(credentials?.client_email ?? "").trim();
+    if (email) return validateGcsSigningServiceAccount(email);
+    const runtimeEmail = String(await this.serviceAccountEmailResolver().catch(() => null) ?? "").trim();
+    if (runtimeEmail) return validateGcsSigningServiceAccount(runtimeEmail);
+    throw new Error("STOREFRONT_ASSET_GCS_SIGNING_SERVICE_ACCOUNT_UNAVAILABLE");
+  }
+
+  private async resolveRuntimeAccessToken() {
+    const fromInjectedProvider = normalizeAccessToken(await this.accessTokenProvider?.().catch(() => null));
+    if (fromInjectedProvider) return fromInjectedProvider;
+
+    const fromAuthClient = normalizeAccessToken(await this.authClient?.getAccessToken?.().catch(() => null));
+    if (fromAuthClient) return fromAuthClient;
+
+    const fromMetadata = await fetchGcsMetadataAccessToken();
+    if (fromMetadata) return fromMetadata;
+
+    throw new Error("STOREFRONT_ASSET_GCS_RUNTIME_ACCESS_TOKEN_UNAVAILABLE");
+  }
+
+  private async signRuntimeBlob(stringToSign: string, serviceAccountEmail: string) {
+    if (this.runtimeSigner) {
+      const signedBlob = await this.runtimeSigner({ serviceAccountEmail, stringToSign });
+      if (!signedBlob) throw new Error("STOREFRONT_ASSET_GCS_SIGNING_EMPTY_SIGNATURE");
+      return signedBlob;
+    }
+
+    const payload = Buffer.from(stringToSign, "utf8").toString("base64");
+    const encodedEmail = encodeURIComponent(serviceAccountEmail);
+    const accessToken = await this.resolveRuntimeAccessToken();
+    const response = await this.iamSignBlobRequest({
+      url: `https://iamcredentials.googleapis.com/v1/projects/-/serviceAccounts/${encodedEmail}:signBlob`,
+      accessToken,
+      payload
+    });
+    const signedBlob = response.signedBlob;
+    if (!signedBlob) throw new Error("STOREFRONT_ASSET_GCS_SIGNING_EMPTY_SIGNATURE");
+    return signedBlob;
+  }
+
+  private async createRuntimeSignedPutUrl(input: { gcsPath: string; contentType: string; expiresAt: Date }): Promise<StorefrontAssetSignedPutUrl> {
+    const requestDate = new Date();
+    const dateTime = gcsTimestamp(requestDate);
+    const dateStamp = gcsDateStamp(requestDate);
+    const method = "PUT";
+    const canonicalUri = buildGcsXmlPathStyleCanonicalUri(this.bucketName, input.gcsPath);
+    const headers = {
+      ...this.requiredPutHeaders(input.contentType),
+      host: GCS_XML_HOST
+    };
+    const sortedHeaderKeys = Object.keys(headers).sort();
+    const signedHeaders = sortedHeaderKeys.join(";");
+    const canonicalHeaders = sortedHeaderKeys.map((key) => `${key}:${headers[key as keyof typeof headers].trim()}\n`).join("");
+    const serviceAccountEmail = await this.resolveSigningServiceAccount();
+    const credentialScope = `${dateStamp}/auto/storage/goog4_request`;
+    const query = {
+      "X-Goog-Algorithm": "GOOG4-RSA-SHA256",
+      "X-Goog-Credential": `${serviceAccountEmail}/${credentialScope}`,
+      "X-Goog-Date": dateTime,
+      "X-Goog-Expires": String(secondsUntil(input.expiresAt)),
+      "X-Goog-SignedHeaders": signedHeaders
+    };
+    const canonicalQuery = canonicalGcsQuery(query);
+    const canonicalRequest = [
+      method,
+      canonicalUri,
+      canonicalQuery,
+      canonicalHeaders,
+      signedHeaders,
+      "UNSIGNED-PAYLOAD"
+    ].join("\n");
+    const stringToSign = [
+      "GOOG4-RSA-SHA256",
+      dateTime,
+      credentialScope,
+      sha256Hex(canonicalRequest)
+    ].join("\n");
+    const signatureBase64 = await this.signRuntimeBlob(stringToSign, serviceAccountEmail);
+    const signatureHex = Buffer.from(signatureBase64, "base64").toString("hex");
+    return {
+      uploadUrl: `https://${GCS_XML_HOST}${canonicalUri}?${canonicalQuery}&X-Goog-Signature=${signatureHex}`,
+      method: "PUT",
+      headers: this.requiredPutHeaders(input.contentType),
+      expiresAt: input.expiresAt
+    };
   }
 
   async createSignedPutUrl(input: { gcsPath: string; contentType: string; expiresAt: Date }): Promise<StorefrontAssetSignedPutUrl> {
@@ -111,16 +366,22 @@ export class GcsStorefrontAssetStorageAdapter implements StorefrontAssetStorageA
       return {
         uploadUrl,
         method: "PUT",
-        headers: {
-          "content-type": contentType,
-          [STOREFRONT_ASSET_UPLOAD_LENGTH_RANGE_HEADER]: STOREFRONT_ASSET_UPLOAD_LENGTH_RANGE,
-          [STOREFRONT_ASSET_UPLOAD_IF_GENERATION_MATCH_HEADER]: STOREFRONT_ASSET_UPLOAD_IF_GENERATION_MATCH
-        },
+        headers: this.requiredPutHeaders(contentType),
         expiresAt: input.expiresAt
       };
     } catch (error) {
-      logger.error({ err: error, bucket: this.bucketName }, "Failed to create storefront asset signed PUT URL");
-      throw new HttpError(503, "STOREFRONT_ASSET_UPLOAD_URL_FAILED");
+      try {
+        const fallback = await this.createRuntimeSignedPutUrl({
+          gcsPath: input.gcsPath,
+          contentType,
+          expiresAt: input.expiresAt
+        });
+        logger.warn({ err: error, bucket: this.bucketName }, "Storefront asset signed PUT URL used runtime IAM fallback");
+        return fallback;
+      } catch (runtimeError) {
+        logger.error({ err: runtimeError, originalErr: error, bucket: this.bucketName }, "Failed to create storefront asset signed PUT URL");
+        throw new HttpError(503, "STOREFRONT_ASSET_UPLOAD_URL_FAILED");
+      }
     }
   }
 
@@ -232,6 +493,7 @@ export class InMemoryStorefrontAssetStorageAdapter implements StorefrontAssetSto
 export type StorefrontAssetStorageEnvSource = {
   STOREFRONT_ASSETS_GCS_BUCKET?: string | undefined;
   STOREFRONT_ASSETS_GCS_PROJECT_ID?: string | undefined;
+  STOREFRONT_ASSETS_GCS_SIGNING_SERVICE_ACCOUNT?: string | undefined;
   GCP_PROJECT_ID?: string | undefined;
   STOREFRONT_ASSETS_CDN_HOST?: string | undefined;
   NODE_ENV?: string | undefined;
@@ -251,7 +513,11 @@ export function getStorefrontAssetStorageAdapter(env: StorefrontAssetStorageEnvS
     return cachedAdapter;
   }
 
-  cachedAdapter = new GcsStorefrontAssetStorageAdapter({ bucket, projectId });
+  cachedAdapter = new GcsStorefrontAssetStorageAdapter({
+    bucket,
+    projectId,
+    signingServiceAccount: String(env.STOREFRONT_ASSETS_GCS_SIGNING_SERVICE_ACCOUNT ?? "").trim() || undefined
+  });
   return cachedAdapter;
 }
 
