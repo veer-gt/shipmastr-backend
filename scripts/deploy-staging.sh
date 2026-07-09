@@ -49,7 +49,7 @@ gcloud run jobs deploy "${MIGRATION_STATUS_JOB}" \
   --region "${REGION}" \
   --image "${IMAGE_DIGEST}" \
   --service-account "${SERVICE_ACCOUNT}" \
-  --add-cloudsql-instances "${CLOUD_SQL_INSTANCE}" \
+  --set-cloudsql-instances "${CLOUD_SQL_INSTANCE}" \
   --set-env-vars "APP_ENV=staging" \
   --set-secrets "DATABASE_URL=DATABASE_URL_STAGING:latest" \
   --command "npx" \
