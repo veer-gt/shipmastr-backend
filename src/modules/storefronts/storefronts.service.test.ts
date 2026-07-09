@@ -1042,6 +1042,80 @@ describe("storefront asset signed-upload proof gates", () => {
     });
   });
 
+  it("falls back to authenticated GCS JSON APIs for head, download, and delete", async () => {
+    const gcsPath = "merchants/merchant_a/storefront/asset_1.png";
+    const calls: string[] = [];
+    const storage = new GcsStorefrontAssetStorageAdapter({
+      bucket: "test-bucket",
+      projectId: "test-project",
+      storage: {
+        bucket: () => ({
+          file: () => ({
+            getMetadata: async () => {
+              throw new Error("metadata service unavailable");
+            },
+            download: async () => {
+              throw new Error("metadata service unavailable");
+            },
+            delete: async () => {
+              throw new Error("metadata service unavailable");
+            }
+          })
+        })
+      } as any,
+      accessTokenProvider: async () => "test-access-token",
+      metadataRequest: async (input) => {
+        assert.equal(input.accessToken, "test-access-token");
+        assert.equal(input.gcsPath, gcsPath);
+        assert.equal(new URL(input.url).pathname, "/storage/v1/b/test-bucket/o/merchants%2Fmerchant_a%2Fstorefront%2Fasset_1.png");
+        calls.push("metadata");
+        return {
+          ok: true,
+          status: 200,
+          metadata: {
+            name: gcsPath,
+            size: "14",
+            contentType: "image/png",
+            updated: "2026-07-09T10:00:00.000Z"
+          }
+        };
+      },
+      downloadRequest: async (input) => {
+        assert.equal(input.accessToken, "test-access-token");
+        assert.equal(input.gcsPath, gcsPath);
+        assert.equal(new URL(input.url).pathname, "/download/storage/v1/b/test-bucket/o/merchants%2Fmerchant_a%2Fstorefront%2Fasset_1.png");
+        calls.push("download");
+        return {
+          ok: true,
+          status: 200,
+          body: Buffer.from("asset bytes")
+        };
+      },
+      deleteRequest: async (input) => {
+        assert.equal(input.accessToken, "test-access-token");
+        assert.equal(input.gcsPath, gcsPath);
+        calls.push("delete");
+        return {
+          ok: true,
+          status: 204
+        };
+      }
+    });
+
+    const head = await storage.headObject({ gcsPath });
+    assert.deepEqual(head, {
+      exists: true,
+      contentLength: 14,
+      contentType: "image/png",
+      updatedAt: new Date("2026-07-09T10:00:00.000Z")
+    });
+    const bytes = await storage.downloadForHashing({ gcsPath, maxBytes: MAX_STOREFRONT_ASSET_BYTES });
+    assert.equal(bytes.toString("utf8"), "asset bytes");
+    const deleted = await storage.deleteObject({ gcsPath });
+    assert.deepEqual(deleted, { deleted: true });
+    assert.deepEqual(calls, ["metadata", "download", "delete"]);
+  });
+
   it("B1 returns 422 for missing object confirm and leaves asset pending", async () => {
     const { client, storage, state } = makeStorefrontAssetHarness();
     const { upload } = await createPendingStorefrontAsset({ client, storage });

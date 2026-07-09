@@ -53,6 +53,38 @@ export type GcsStorefrontAssetIamSignBlobRequest = (input: {
   accessToken: string;
   payload: string;
 }) => Promise<{ signedBlob?: string | undefined }>;
+export type GcsStorefrontAssetMetadataRequest = (input: {
+  url: string;
+  accessToken: string;
+  gcsPath: string;
+}) => Promise<{
+  ok: boolean;
+  status: number;
+  metadata?: {
+    name?: string | undefined;
+    size?: string | number | undefined;
+    contentType?: string | undefined;
+    updated?: string | Date | undefined;
+    timeCreated?: string | Date | undefined;
+  } | null | undefined;
+}>;
+export type GcsStorefrontAssetDownloadRequest = (input: {
+  url: string;
+  accessToken: string;
+  gcsPath: string;
+}) => Promise<{
+  ok: boolean;
+  status: number;
+  body?: Buffer | undefined;
+}>;
+export type GcsStorefrontAssetDeleteRequest = (input: {
+  url: string;
+  accessToken: string;
+  gcsPath: string;
+}) => Promise<{
+  ok: boolean;
+  status: number;
+}>;
 export type GcsStorefrontAssetAuthClient = {
   getCredentials?: () => Promise<{ client_email?: string | null | undefined }>;
   getAccessToken?: GcsStorefrontAssetAccessTokenProvider;
@@ -211,6 +243,79 @@ async function defaultIamCredentialsSignBlobRequest(input: {
   return { signedBlob: data.signedBlob };
 }
 
+async function defaultGcsMetadataRequest(input: Parameters<GcsStorefrontAssetMetadataRequest>[0]) {
+  if (typeof fetch !== "function") {
+    throw new Error("STOREFRONT_ASSET_GCS_METADATA_FETCH_UNAVAILABLE");
+  }
+  const response = await fetch(input.url, {
+    method: "GET",
+    headers: {
+      authorization: `Bearer ${input.accessToken}`
+    }
+  });
+  const metadata = await response.json().catch(() => null);
+  return {
+    ok: response.ok,
+    status: response.status,
+    metadata
+  };
+}
+
+async function defaultGcsDownloadRequest(input: Parameters<GcsStorefrontAssetDownloadRequest>[0]) {
+  if (typeof fetch !== "function") {
+    throw new Error("STOREFRONT_ASSET_GCS_DOWNLOAD_FETCH_UNAVAILABLE");
+  }
+  const response = await fetch(input.url, {
+    method: "GET",
+    headers: {
+      authorization: `Bearer ${input.accessToken}`
+    }
+  });
+  if (!response.ok) {
+    return { ok: false, status: response.status };
+  }
+  return {
+    ok: true,
+    status: response.status,
+    body: Buffer.from(await response.arrayBuffer())
+  };
+}
+
+async function defaultGcsDeleteRequest(input: Parameters<GcsStorefrontAssetDeleteRequest>[0]) {
+  if (typeof fetch !== "function") {
+    throw new Error("STOREFRONT_ASSET_GCS_DELETE_FETCH_UNAVAILABLE");
+  }
+  const response = await fetch(input.url, {
+    method: "DELETE",
+    headers: {
+      authorization: `Bearer ${input.accessToken}`
+    }
+  });
+  return {
+    ok: response.ok,
+    status: response.status
+  };
+}
+
+function gcsObjectNotFound(error: unknown) {
+  const candidate = error as { code?: number | string; name?: string; message?: string };
+  return candidate.code === 404
+    || candidate.code === "404"
+    || candidate.name === "NotFound"
+    || /not\s*found/i.test(candidate.message ?? "");
+}
+
+function headObjectFromGcsMetadata(metadata: Awaited<ReturnType<GcsStorefrontAssetMetadataRequest>>["metadata"], expectedGcsPath: string): StorefrontAssetHeadResult | null {
+  if (!metadata || (metadata.name && metadata.name !== expectedGcsPath)) return null;
+  const updatedAt = metadata.updated ?? metadata.timeCreated;
+  return {
+    exists: true,
+    contentLength: metadata.size === undefined ? null : Number(metadata.size),
+    contentType: metadata.contentType ?? null,
+    updatedAt: updatedAt ? new Date(updatedAt) : null
+  };
+}
+
 /**
  * Real GCS-backed adapter. Requires either a service-account key file
  * (GOOGLE_APPLICATION_CREDENTIALS) or a runtime identity with
@@ -225,6 +330,9 @@ export class GcsStorefrontAssetStorageAdapter implements StorefrontAssetStorageA
   private readonly authClient?: GcsStorefrontAssetAuthClient | undefined;
   private readonly accessTokenProvider?: GcsStorefrontAssetAccessTokenProvider | undefined;
   private readonly iamSignBlobRequest: GcsStorefrontAssetIamSignBlobRequest;
+  private readonly metadataRequest: GcsStorefrontAssetMetadataRequest;
+  private readonly downloadRequest: GcsStorefrontAssetDownloadRequest;
+  private readonly deleteRequest: GcsStorefrontAssetDeleteRequest;
   private readonly runtimeSigner?: GcsStorefrontAssetRuntimeSigner | undefined;
   private readonly serviceAccountEmailResolver: GcsStorefrontAssetServiceAccountEmailResolver;
 
@@ -236,6 +344,9 @@ export class GcsStorefrontAssetStorageAdapter implements StorefrontAssetStorageA
     authClient?: GcsStorefrontAssetAuthClient | undefined;
     accessTokenProvider?: GcsStorefrontAssetAccessTokenProvider | undefined;
     iamSignBlobRequest?: GcsStorefrontAssetIamSignBlobRequest | undefined;
+    metadataRequest?: GcsStorefrontAssetMetadataRequest | undefined;
+    downloadRequest?: GcsStorefrontAssetDownloadRequest | undefined;
+    deleteRequest?: GcsStorefrontAssetDeleteRequest | undefined;
     runtimeSigner?: GcsStorefrontAssetRuntimeSigner | undefined;
     serviceAccountEmailResolver?: GcsStorefrontAssetServiceAccountEmailResolver | undefined;
   }) {
@@ -245,6 +356,9 @@ export class GcsStorefrontAssetStorageAdapter implements StorefrontAssetStorageA
     this.authClient = config.authClient ?? (this.storage as unknown as { authClient?: GcsStorefrontAssetAuthClient }).authClient;
     this.accessTokenProvider = config.accessTokenProvider;
     this.iamSignBlobRequest = config.iamSignBlobRequest ?? defaultIamCredentialsSignBlobRequest;
+    this.metadataRequest = config.metadataRequest ?? defaultGcsMetadataRequest;
+    this.downloadRequest = config.downloadRequest ?? defaultGcsDownloadRequest;
+    this.deleteRequest = config.deleteRequest ?? defaultGcsDeleteRequest;
     this.runtimeSigner = config.runtimeSigner;
     this.serviceAccountEmailResolver = config.serviceAccountEmailResolver ?? resolveCloudRunServiceAccountEmail;
   }
@@ -255,6 +369,22 @@ export class GcsStorefrontAssetStorageAdapter implements StorefrontAssetStorageA
       [STOREFRONT_ASSET_UPLOAD_LENGTH_RANGE_HEADER]: STOREFRONT_ASSET_UPLOAD_LENGTH_RANGE,
       [STOREFRONT_ASSET_UPLOAD_IF_GENERATION_MATCH_HEADER]: STOREFRONT_ASSET_UPLOAD_IF_GENERATION_MATCH
     };
+  }
+
+  private buildAuthenticatedMetadataUrl(gcsPath: string) {
+    const url = new URL(`https://storage.googleapis.com/storage/v1/b/${encodeGcsComponent(this.bucketName)}/o/${encodeURIComponent(gcsPath)}`);
+    url.searchParams.set("fields", "name,size,contentType,updated,timeCreated");
+    return url.toString();
+  }
+
+  private buildAuthenticatedDownloadUrl(gcsPath: string) {
+    const url = new URL(`https://storage.googleapis.com/download/storage/v1/b/${encodeGcsComponent(this.bucketName)}/o/${encodeURIComponent(gcsPath)}`);
+    url.searchParams.set("alt", "media");
+    return url.toString();
+  }
+
+  private buildAuthenticatedDeleteUrl(gcsPath: string) {
+    return `https://storage.googleapis.com/storage/v1/b/${encodeGcsComponent(this.bucketName)}/o/${encodeURIComponent(gcsPath)}`;
   }
 
   private async resolveSigningServiceAccount() {
@@ -395,12 +525,25 @@ export class GcsStorefrontAssetStorageAdapter implements StorefrontAssetStorageA
         updatedAt: metadata.updated ? new Date(metadata.updated) : null
       };
     } catch (error) {
-      const candidate = error as { code?: number | string };
-      if (candidate.code === 404 || candidate.code === "404") {
+      if (gcsObjectNotFound(error)) {
         return { exists: false, contentLength: null, contentType: null, updatedAt: null };
       }
-      logger.error({ err: error, bucket: this.bucketName }, "Failed to HEAD storefront asset object");
-      throw new HttpError(503, "STOREFRONT_ASSET_HEAD_FAILED");
+      try {
+        const accessToken = await this.resolveRuntimeAccessToken();
+        const result = await this.metadataRequest({
+          url: this.buildAuthenticatedMetadataUrl(input.gcsPath),
+          accessToken,
+          gcsPath: input.gcsPath
+        });
+        if (result.status === 404) return { exists: false, contentLength: null, contentType: null, updatedAt: null };
+        if (!result.ok) throw Object.assign(new Error(`STOREFRONT_ASSET_GCS_METADATA_STATUS_${result.status}`), { code: result.status });
+        const object = headObjectFromGcsMetadata(result.metadata, input.gcsPath);
+        return object?.exists ? object : { exists: false, contentLength: null, contentType: null, updatedAt: null };
+      } catch (fallbackError) {
+        if (gcsObjectNotFound(fallbackError)) return { exists: false, contentLength: null, contentType: null, updatedAt: null };
+        logger.error({ err: fallbackError, originalErr: error, bucket: this.bucketName }, "Failed to HEAD storefront asset object");
+        throw new HttpError(503, "STOREFRONT_ASSET_HEAD_FAILED");
+      }
     }
   }
 
@@ -409,8 +552,21 @@ export class GcsStorefrontAssetStorageAdapter implements StorefrontAssetStorageA
       await this.storage.bucket(this.bucketName).file(input.gcsPath).delete({ ignoreNotFound: true });
       return { deleted: true };
     } catch (error) {
-      logger.error({ err: error, bucket: this.bucketName }, "Failed to delete storefront asset object");
-      throw new HttpError(503, "STOREFRONT_ASSET_DELETE_FAILED");
+      try {
+        const accessToken = await this.resolveRuntimeAccessToken();
+        const result = await this.deleteRequest({
+          url: this.buildAuthenticatedDeleteUrl(input.gcsPath),
+          accessToken,
+          gcsPath: input.gcsPath
+        });
+        if (result.status === 404) return { deleted: false };
+        if (!result.ok) throw Object.assign(new Error(`STOREFRONT_ASSET_GCS_DELETE_STATUS_${result.status}`), { code: result.status });
+        return { deleted: true };
+      } catch (fallbackError) {
+        if (gcsObjectNotFound(fallbackError)) return { deleted: false };
+        logger.error({ err: fallbackError, originalErr: error, bucket: this.bucketName }, "Failed to delete storefront asset object");
+        throw new HttpError(503, "STOREFRONT_ASSET_DELETE_FAILED");
+      }
     }
   }
 
@@ -423,8 +579,24 @@ export class GcsStorefrontAssetStorageAdapter implements StorefrontAssetStorageA
       return buffer;
     } catch (error) {
       if (error instanceof HttpError) throw error;
-      logger.error({ err: error, bucket: this.bucketName }, "Failed to download storefront asset for hashing");
-      throw new HttpError(503, "STOREFRONT_ASSET_DOWNLOAD_FAILED");
+      try {
+        const accessToken = await this.resolveRuntimeAccessToken();
+        const result = await this.downloadRequest({
+          url: this.buildAuthenticatedDownloadUrl(input.gcsPath),
+          accessToken,
+          gcsPath: input.gcsPath
+        });
+        if (result.status === 404) throw new HttpError(404, "STOREFRONT_ASSET_NOT_FOUND");
+        if (!result.ok || !result.body) throw Object.assign(new Error(`STOREFRONT_ASSET_GCS_DOWNLOAD_STATUS_${result.status}`), { code: result.status });
+        if (result.body.byteLength > input.maxBytes) {
+          throw new HttpError(413, "STOREFRONT_ASSET_TOO_LARGE");
+        }
+        return result.body;
+      } catch (fallbackError) {
+        if (fallbackError instanceof HttpError) throw fallbackError;
+        logger.error({ err: fallbackError, originalErr: error, bucket: this.bucketName }, "Failed to download storefront asset for hashing");
+        throw new HttpError(503, "STOREFRONT_ASSET_DOWNLOAD_FAILED");
+      }
     }
   }
 }
