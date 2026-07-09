@@ -18,6 +18,12 @@ EMAIL_FROM="${EMAIL_FROM:-noreply@shipmastr.com}"
 EMAIL_FROM_NAME="${EMAIL_FROM_NAME:-Shipmastr}"
 SMTP_REPLY_TO="${SMTP_REPLY_TO:-no-reply@shipmastr.com}"
 ADMIN_EMAIL="${ADMIN_EMAIL:-indraveer.chauhan@gmail.com}"
+QUOTE_PRICE_SOURCE="${QUOTE_PRICE_SOURCE:-catalog_strict}"
+STOREFRONT_ASSETS_GCS_BUCKET="${STOREFRONT_ASSETS_GCS_BUCKET:-}"
+STOREFRONT_ASSETS_GCS_PROJECT_ID="${STOREFRONT_ASSETS_GCS_PROJECT_ID:-${PROJECT_ID}}"
+STOREFRONT_ASSETS_CDN_HOST="${STOREFRONT_ASSETS_CDN_HOST:-assets.shipmastr.com}"
+STOREFRONT_ASSETS_GCS_SIGNING_SERVICE_ACCOUNT="${STOREFRONT_ASSETS_GCS_SIGNING_SERVICE_ACCOUNT:-${SERVICE_ACCOUNT}}"
+PROD_STOREFRONT_ASSETS_BUCKET_ALLOWLIST="${PROD_STOREFRONT_ASSETS_BUCKET_ALLOWLIST:-shipmastr-core-prod-storefront-assets}"
 
 verify_production_database_target() {
   if [[ "${PROD_DATABASE_URL_SECRET}" != "DATABASE_URL" ]]; then
@@ -140,6 +146,74 @@ run_production_migration_status_gate() {
   echo "Production Prisma migration status gate passed"
 }
 
+verify_production_storefront_asset_target() {
+  if [[ -z "${STOREFRONT_ASSETS_GCS_BUCKET}" ]]; then
+    echo "Production storefront asset bucket is not configured - deploy blocked" >&2
+    exit 1
+  fi
+
+  if [[ -z "${STOREFRONT_ASSETS_GCS_PROJECT_ID}" || "${STOREFRONT_ASSETS_GCS_PROJECT_ID}" != "${PROJECT_ID}" ]]; then
+    echo "Production storefront asset bucket project is ambiguous - deploy blocked" >&2
+    exit 1
+  fi
+
+  local bucket_lower
+  bucket_lower="$(printf '%s' "${STOREFRONT_ASSETS_GCS_BUCKET}" | tr '[:upper:]' '[:lower:]')"
+  if [[ "${bucket_lower}" == "shipmastr-ci-assets" || "${bucket_lower}" =~ (staging|stage|dev|development|local|scratch|test|ci) ]]; then
+    echo "Production storefront asset bucket looks non-production - deploy blocked" >&2
+    exit 1
+  fi
+
+  local bucket_allowed="false"
+  local bucket_candidate
+  IFS=',' read -ra allowed_buckets <<< "${PROD_STOREFRONT_ASSETS_BUCKET_ALLOWLIST}"
+  for bucket_candidate in "${allowed_buckets[@]}"; do
+    bucket_candidate="$(printf '%s' "${bucket_candidate}" | xargs)"
+    if [[ "${STOREFRONT_ASSETS_GCS_BUCKET}" == "${bucket_candidate}" ]]; then
+      bucket_allowed="true"
+      break
+    fi
+  done
+
+  if [[ "${bucket_allowed}" != "true" ]]; then
+    echo "Production storefront asset bucket is not allowlisted - deploy blocked" >&2
+    exit 1
+  fi
+
+  if [[ -z "${STOREFRONT_ASSETS_CDN_HOST}" ]]; then
+    echo "Production storefront assets CDN host is not configured - deploy blocked" >&2
+    exit 1
+  fi
+
+  local cdn_lower
+  cdn_lower="$(printf '%s' "${STOREFRONT_ASSETS_CDN_HOST}" | tr '[:upper:]' '[:lower:]')"
+  if [[ "${cdn_lower}" =~ (staging|stage|dev|development|local|scratch|test|ci) ]]; then
+    echo "Production storefront assets CDN host looks non-production - deploy blocked" >&2
+    exit 1
+  fi
+
+  if [[ -z "${STOREFRONT_ASSETS_GCS_SIGNING_SERVICE_ACCOUNT}" ]]; then
+    echo "Production storefront assets signing service account is not configured - deploy blocked" >&2
+    exit 1
+  fi
+
+  local bucket_metadata
+  local bucket_status
+  set +e
+  bucket_metadata="$(gcloud storage buckets describe "gs://${STOREFRONT_ASSETS_GCS_BUCKET}" \
+    --project "${STOREFRONT_ASSETS_GCS_PROJECT_ID}" \
+    --format='value(name,location)' 2>/dev/null)"
+  bucket_status=$?
+  set -e
+
+  if [[ "${bucket_status}" -ne 0 || -z "${bucket_metadata}" ]]; then
+    echo "Production storefront asset bucket could not be verified - deploy blocked" >&2
+    exit 1
+  fi
+
+  echo "Production storefront asset bucket verified: ${bucket_metadata}"
+}
+
 if [[ "${PROD_MIGRATION_STATUS_DRY_RUN_ONLY:-}" == "1" ]]; then
   if [[ "${APPROVE_PRODUCTION_MIGRATION_STATUS_DRY_RUN:-}" != "APPROVE PRODUCTION MIGRATION STATUS DRY RUN" ]]; then
     echo "Refusing production migration status dry run without exact approval phrase." >&2
@@ -158,6 +232,8 @@ if [[ "${CONFIRM_PROD_DEPLOY:-}" != "shipmastr-prod" ]]; then
   echo "Refusing prod deploy. Set CONFIRM_PROD_DEPLOY=shipmastr-prod after staging smoke passes." >&2
   exit 1
 fi
+
+verify_production_storefront_asset_target
 
 STAGING_URL="$(gcloud run services describe "${STAGING_SERVICE}" \
   --project "${PROJECT_ID}" \
@@ -203,7 +279,7 @@ gcloud run deploy "${SERVICE}" \
   --add-cloudsql-instances "${CLOUD_SQL_INSTANCE}" \
   --min-instances 1 \
   --max-instances 5 \
-  --set-env-vars "APP_ENV=production,GCP_PROJECT_ID=${PROJECT_ID},CLOUD_TASKS_LOCATION=${REGION},EMAIL_QUEUE_NAME=${EMAIL_QUEUE_NAME},TASK_HANDLER_URL=${TASK_HANDLER_URL},EMAIL_FROM=${EMAIL_FROM},EMAIL_FROM_NAME=${EMAIL_FROM_NAME},SMTP_REPLY_TO=${SMTP_REPLY_TO},ADMIN_EMAIL=${ADMIN_EMAIL},ALLOW_CLOUDFLARE_ADMIN_MUTATIONS=true,ALLOW_APEX_DOMAIN_AUTOMATION=true,CLOUDFLARE_AUTH_MODE=api_token" \
+  --set-env-vars "APP_ENV=production,GCP_PROJECT_ID=${PROJECT_ID},CLOUD_TASKS_LOCATION=${REGION},EMAIL_QUEUE_NAME=${EMAIL_QUEUE_NAME},TASK_HANDLER_URL=${TASK_HANDLER_URL},EMAIL_FROM=${EMAIL_FROM},EMAIL_FROM_NAME=${EMAIL_FROM_NAME},SMTP_REPLY_TO=${SMTP_REPLY_TO},ADMIN_EMAIL=${ADMIN_EMAIL},QUOTE_PRICE_SOURCE=${QUOTE_PRICE_SOURCE},STOREFRONT_ASSETS_GCS_BUCKET=${STOREFRONT_ASSETS_GCS_BUCKET},STOREFRONT_ASSETS_GCS_PROJECT_ID=${STOREFRONT_ASSETS_GCS_PROJECT_ID},STOREFRONT_ASSETS_CDN_HOST=${STOREFRONT_ASSETS_CDN_HOST},STOREFRONT_ASSETS_GCS_SIGNING_SERVICE_ACCOUNT=${STOREFRONT_ASSETS_GCS_SIGNING_SERVICE_ACCOUNT},ALLOW_CLOUDFLARE_ADMIN_MUTATIONS=true,ALLOW_APEX_DOMAIN_AUTOMATION=true,CLOUDFLARE_AUTH_MODE=api_token" \
   --set-secrets "DATABASE_URL=DATABASE_URL:latest,JWT_SECRET=JWT_SECRET:latest,APP_SECRET_PEPPER=APP_SECRET_PEPPER:latest,WEBHOOK_SECRET=WEBHOOK_SECRET:latest,ADDRESS_PHONE_PEPPER=ADDRESS_PHONE_PEPPER:latest,CHECKOUT_ADDRESS_SESSION_TOKEN_SECRET=CHECKOUT_ADDRESS_SESSION_TOKEN_SECRET:latest,SMTP_HOST=SMTP_HOST:latest,SMTP_PORT=SMTP_PORT:latest,SMTP_SECURE=SMTP_SECURE:latest,SMTP_USER=SMTP_USER:latest,SMTP_PASS=SMTP_PASS:latest,CLOUDFLARE_API_TOKEN=CLOUDFLARE_API_TOKEN:latest,CLOUDFLARE_ZONE_ID=CLOUDFLARE_ZONE_ID:latest"
 
 PROD_URL="$(gcloud run services describe "${SERVICE}" \
