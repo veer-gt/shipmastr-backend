@@ -1,7 +1,7 @@
 export declare const env: {
     QUOTE_PRICE_SOURCE: "catalog_strict" | "client_allowed";
-    NODE_ENV: "development" | "production" | "test";
-    APP_ENV: "development" | "production" | "staging" | "test";
+    NODE_ENV: "production" | "development" | "test";
+    APP_ENV: "production" | "development" | "staging" | "test";
     PORT: number;
     DATABASE_URL: string;
     JWT_SECRET: string;

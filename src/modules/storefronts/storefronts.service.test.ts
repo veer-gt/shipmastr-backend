@@ -18,15 +18,22 @@ import {
   createStorefrontAssetUploadUrl,
   sweepPendingStorefrontAssetOrphans
 } from "./storefront-assets.service.js";
-import { createPublicStorefrontLookupHandler, createStorefrontLookupHandler } from "./storefronts.routes.js";
+import {
+  createPublicStorefrontLookupHandler,
+  createStorefrontLookupHandler,
+  STOREFRONT_THEME_ROUTE_LIMITS,
+  storefrontThemeJsonSchema
+} from "./storefronts.routes.js";
 import {
   addAdminStorefrontDomain,
+  assertThemeJsonSaveSafety,
   createAdminStorefront,
   getAdminStorefront,
   getStorefrontByDomain,
   listAdminStorefrontDomainEvents,
   listAdminStorefrontDomains,
   listAdminStorefronts,
+  MAX_THEME_JSON_SERIALIZED_BYTES,
   normalizeStorefrontDomain,
   redactStorefrontEventPayload,
   storefrontTestFixtures,
@@ -116,6 +123,60 @@ const adminThemeJson = {
   heroSubtitle: "A local Shipmastr storefront for backend smoke tests.",
   ctaLabel: "Visit store"
 };
+
+function maxEscapedString(length: number) {
+  return "\u0000".repeat(length);
+}
+
+function maxPublicRouteThemeJson() {
+  const product = {
+    id: maxEscapedString(STOREFRONT_THEME_ROUTE_LIMITS.productId),
+    name: maxEscapedString(STOREFRONT_THEME_ROUTE_LIMITS.productName),
+    price: maxEscapedString(STOREFRONT_THEME_ROUTE_LIMITS.productPrice),
+    description: maxEscapedString(STOREFRONT_THEME_ROUTE_LIMITS.productDescription),
+    imageAssetId: maxEscapedString(STOREFRONT_THEME_ROUTE_LIMITS.assetId)
+  };
+
+  return {
+    primaryColor: maxEscapedString(STOREFRONT_THEME_ROUTE_LIMITS.primaryColor),
+    backgroundColor: maxEscapedString(STOREFRONT_THEME_ROUTE_LIMITS.backgroundColor),
+    textColor: maxEscapedString(STOREFRONT_THEME_ROUTE_LIMITS.textColor),
+    fontFamily: maxEscapedString(STOREFRONT_THEME_ROUTE_LIMITS.fontFamily),
+    heroTitle: maxEscapedString(STOREFRONT_THEME_ROUTE_LIMITS.heroTitle),
+    heroSubtitle: maxEscapedString(STOREFRONT_THEME_ROUTE_LIMITS.heroSubtitle),
+    ctaLabel: maxEscapedString(STOREFRONT_THEME_ROUTE_LIMITS.ctaLabel),
+    logoAssetId: maxEscapedString(STOREFRONT_THEME_ROUTE_LIMITS.assetId),
+    heroImageAssetId: maxEscapedString(STOREFRONT_THEME_ROUTE_LIMITS.assetId),
+    templateStyle: maxEscapedString(STOREFRONT_THEME_ROUTE_LIMITS.templateStyle),
+    ctaAction: "shipmastr_checkout",
+    heroLayout: "hero-center",
+    presetId: maxEscapedString(STOREFRONT_THEME_ROUTE_LIMITS.presetId),
+    presetVersion: 999999,
+    products: Array.from({ length: STOREFRONT_THEME_ROUTE_LIMITS.products }, () => product)
+  };
+}
+
+describe("storefront theme size guard", () => {
+  it("keeps the public route schema maximum below the save-time service guard", () => {
+    const themeJson = storefrontThemeJsonSchema.parse(maxPublicRouteThemeJson());
+    const routeMaxBytes = Buffer.byteLength(JSON.stringify(themeJson), "utf8");
+
+    assert.equal(routeMaxBytes, 32776);
+    assert.ok(routeMaxBytes < MAX_THEME_JSON_SERIALIZED_BYTES);
+  });
+
+  it("keeps THEME_TOO_LARGE as a defense-in-depth service guard", () => {
+    assert.throws(
+      () => assertThemeJsonSaveSafety({
+        ...adminThemeJson,
+        heroSubtitle: "x".repeat(MAX_THEME_JSON_SERIALIZED_BYTES + 1)
+      }),
+      (error) => error instanceof HttpError
+        && error.status === 400
+        && error.message === "THEME_TOO_LARGE"
+    );
+  });
+});
 
 function makeAdminStorefrontClient() {
   const state = {

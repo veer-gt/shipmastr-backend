@@ -1,5 +1,6 @@
 import dotenv from "dotenv";
 import { z } from "zod";
+import { assertCheckoutDevOtpCodeProductionSafety } from "./checkout-dev-otp-code.js";
 import { resolveQuotePriceSource } from "./quote-price-source.js";
 dotenv.config();
 const envBoolean = (defaultValue) => z.preprocess((value) => {
@@ -191,6 +192,7 @@ const schema = z.object({
     GROWTH_NETWORK_PUBLIC_TRACKING_ENABLED: envBoolean(false)
 });
 const parsedEnv = schema.parse(process.env);
+assertCheckoutDevOtpCodeProductionSafety(parsedEnv);
 export const env = {
     ...parsedEnv,
     QUOTE_PRICE_SOURCE: resolveQuotePriceSource(process.env)

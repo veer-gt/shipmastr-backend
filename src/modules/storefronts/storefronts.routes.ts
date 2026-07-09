@@ -35,12 +35,30 @@ function sendNoStoreJson(res: Response, body: unknown, status = 200) {
   res.status(status).json(body);
 }
 
+export const STOREFRONT_THEME_ROUTE_LIMITS = {
+  assetId: 80,
+  productId: 80,
+  productName: 160,
+  productPrice: 40,
+  productDescription: 400,
+  products: 5,
+  primaryColor: 80,
+  backgroundColor: 80,
+  textColor: 80,
+  fontFamily: 200,
+  heroTitle: 220,
+  heroSubtitle: 500,
+  ctaLabel: 80,
+  templateStyle: 80,
+  presetId: 80
+} as const;
+
 // SF1: themeJson may only ever reference an asset by id (imageAssetId) — never bytes,
 // never a data: URL. The server resolves imageAssetId -> the real CDN url at save time
 // (see storefronts.service.ts assertReadyStorefrontAssetOwnedByMerchant / resolveThemeImageUrls)
 // after checking the asset is READY and owned by this merchant. The client cannot supply
 // imageUrl directly at all, closing off arbitrary external image URLs too.
-const assetIdSchema = z.string().trim().min(1).max(80);
+const assetIdSchema = z.string().trim().min(1).max(STOREFRONT_THEME_ROUTE_LIMITS.assetId);
 
 const productSchema = z.object({
   // Stable, client-generated catalog key — lets repeat saves upsert the same
@@ -48,48 +66,48 @@ const productSchema = z.object({
   // syncThemeJsonProductsToCatalog in storefronts.service.ts) instead of creating a new
   // one every save, and is what SF5's server-authoritative checkout quote endpoint keys
   // its price lookup on.
-  id: z.string().trim().min(1).max(80).optional(),
-  name: z.string().trim().min(1).max(160),
-  price: z.string().trim().max(40).optional(),
-  description: z.string().trim().max(400).optional(),
+  id: z.string().trim().min(1).max(STOREFRONT_THEME_ROUTE_LIMITS.productId).optional(),
+  name: z.string().trim().min(1).max(STOREFRONT_THEME_ROUTE_LIMITS.productName),
+  price: z.string().trim().max(STOREFRONT_THEME_ROUTE_LIMITS.productPrice).optional(),
+  description: z.string().trim().max(STOREFRONT_THEME_ROUTE_LIMITS.productDescription).optional(),
   imageAssetId: assetIdSchema.optional()
 }).strict();
 
-const themeJsonSchema = z.object({
-  primaryColor: z.string().trim().min(1).max(80),
-  backgroundColor: z.string().trim().min(1).max(80),
-  textColor: z.string().trim().min(1).max(80),
-  fontFamily: z.string().trim().min(1).max(200),
-  heroTitle: z.string().trim().min(1).max(220),
-  heroSubtitle: z.string().trim().min(1).max(500),
-  ctaLabel: z.string().trim().min(1).max(80),
+export const storefrontThemeJsonSchema = z.object({
+  primaryColor: z.string().trim().min(1).max(STOREFRONT_THEME_ROUTE_LIMITS.primaryColor),
+  backgroundColor: z.string().trim().min(1).max(STOREFRONT_THEME_ROUTE_LIMITS.backgroundColor),
+  textColor: z.string().trim().min(1).max(STOREFRONT_THEME_ROUTE_LIMITS.textColor),
+  fontFamily: z.string().trim().min(1).max(STOREFRONT_THEME_ROUTE_LIMITS.fontFamily),
+  heroTitle: z.string().trim().min(1).max(STOREFRONT_THEME_ROUTE_LIMITS.heroTitle),
+  heroSubtitle: z.string().trim().min(1).max(STOREFRONT_THEME_ROUTE_LIMITS.heroSubtitle),
+  ctaLabel: z.string().trim().min(1).max(STOREFRONT_THEME_ROUTE_LIMITS.ctaLabel),
   logoAssetId: assetIdSchema.optional(),
   heroImageAssetId: assetIdSchema.optional(),
-  templateStyle: z.string().trim().min(1).max(80).optional(),
+  templateStyle: z.string().trim().min(1).max(STOREFRONT_THEME_ROUTE_LIMITS.templateStyle).optional(),
   // SF5 Layer 1: closed enum, no URL field alongside it — the only purchase action a
   // storefront theme can ever express. Any other value is rejected at the schema level.
   ctaAction: z.literal("shipmastr_checkout").optional(),
   // SF4: closed enum — the 2 real hero layout archetypes extracted from the 75 preset
   // landing pages (see storefront-presets.ts).
   heroLayout: z.enum(["hero-center", "hero-split"]).optional(),
-  presetId: z.string().trim().min(1).max(80).optional(),
+  presetId: z.string().trim().min(1).max(STOREFRONT_THEME_ROUTE_LIMITS.presetId).optional(),
   presetVersion: z.number().int().positive().optional(),
-  products: z.array(productSchema).max(5).optional()
+  products: z.array(productSchema).max(STOREFRONT_THEME_ROUTE_LIMITS.products).optional()
 }).strict();
 
 const createStorefrontSchema = z.object({
   merchantId: z.string().trim().min(1).max(120),
   name: z.string().trim().min(1).max(160),
-  themeJson: themeJsonSchema
+  themeJson: storefrontThemeJsonSchema
 }).strict();
 
 const settingsSchema = z.object({
-  themeJson: themeJsonSchema
+  themeJson: storefrontThemeJsonSchema
 }).strict();
 
 const merchantCreateStorefrontSchema = z.object({
   name: z.string().trim().min(1).max(160),
-  themeJson: themeJsonSchema
+  themeJson: storefrontThemeJsonSchema
 }).strict();
 
 const merchantSettingsSchema = settingsSchema;

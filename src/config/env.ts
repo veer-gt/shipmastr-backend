@@ -1,5 +1,6 @@
 import dotenv from "dotenv";
 import { z } from "zod";
+import { assertCheckoutDevOtpCodeProductionSafety } from "./checkout-dev-otp-code.js";
 import { resolveQuotePriceSource } from "./quote-price-source.js";
 
 dotenv.config();
@@ -193,6 +194,7 @@ const schema = z.object({
 });
 
 const parsedEnv = schema.parse(process.env);
+assertCheckoutDevOtpCodeProductionSafety(parsedEnv);
 export const env = {
   ...parsedEnv,
   QUOTE_PRICE_SOURCE: resolveQuotePriceSource(process.env)
