@@ -5,6 +5,7 @@ PROJECT_ID="${PROJECT_ID:-shipmastr-core-prod}"
 REGION="${REGION:-asia-south1}"
 SERVICE="${SERVICE:-shipmastr-api-staging}"
 PROD_SERVICE="${PROD_SERVICE:-shipmastr-api}"
+MIGRATION_STATUS_JOB="${MIGRATION_STATUS_JOB:-shipmastr-prisma-migrate-status-staging}"
 ARTIFACT_REPOSITORY="${ARTIFACT_REPOSITORY:-shipmastr}"
 IMAGE_NAME="${IMAGE_NAME:-shipmastr-api}"
 SERVICE_ACCOUNT="${SERVICE_ACCOUNT:-shipmastr-runner@shipmastr-core-prod.iam.gserviceaccount.com}"
@@ -36,6 +37,28 @@ fi
 
 IMAGE_DIGEST="${IMAGE_BASE}@${DIGEST}"
 echo "Deploying ${SERVICE} by immutable digest: ${IMAGE_DIGEST}"
+
+echo "Running staging Prisma migration status gate with ${IMAGE_DIGEST}"
+gcloud run jobs deploy "${MIGRATION_STATUS_JOB}" \
+  --project "${PROJECT_ID}" \
+  --region "${REGION}" \
+  --image "${IMAGE_DIGEST}" \
+  --service-account "${SERVICE_ACCOUNT}" \
+  --add-cloudsql-instances "${CLOUD_SQL_INSTANCE}" \
+  --set-env-vars "APP_ENV=staging" \
+  --set-secrets "DATABASE_URL=DATABASE_URL_STAGING:latest" \
+  --command "npx" \
+  --args "prisma,migrate,status,--schema,prisma/schema.prisma" \
+  --max-retries 0 \
+  --task-timeout 600s \
+  --quiet
+
+gcloud run jobs execute "${MIGRATION_STATUS_JOB}" \
+  --project "${PROJECT_ID}" \
+  --region "${REGION}" \
+  --wait
+
+echo "Staging Prisma migration status gate passed"
 
 gcloud run deploy "${SERVICE}" \
   --project "${PROJECT_ID}" \
