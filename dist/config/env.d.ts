@@ -1,6 +1,7 @@
 export declare const env: {
-    NODE_ENV: "development" | "test" | "production";
-    APP_ENV: "development" | "test" | "production" | "staging";
+    QUOTE_PRICE_SOURCE: "catalog_strict" | "client_allowed";
+    NODE_ENV: "development" | "production" | "test";
+    APP_ENV: "development" | "production" | "staging" | "test";
     PORT: number;
     DATABASE_URL: string;
     JWT_SECRET: string;

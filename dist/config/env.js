@@ -1,5 +1,6 @@
 import dotenv from "dotenv";
 import { z } from "zod";
+import { resolveQuotePriceSource } from "./quote-price-source.js";
 dotenv.config();
 const envBoolean = (defaultValue) => z.preprocess((value) => {
     if (typeof value === "string") {
@@ -173,6 +174,7 @@ const schema = z.object({
     ADDRESS_NETWORK_PREFILL_ENABLED: envBoolean(false),
     ADDRESS_NETWORK_MIN_HIT_RATE_PERCENT: z.coerce.number().min(0).max(100).default(8),
     ADDRESS_NETWORK_METRICS_WINDOW_DAYS: z.coerce.number().int().min(1).max(365).default(30),
+    QUOTE_PRICE_SOURCE: z.enum(["catalog_strict", "client_allowed"]).optional(),
     COURIER_AUDIT_N8N_WEBHOOK_URL: z.string().url().optional(),
     WALLET_W1_ENABLED: envBoolean(false),
     WALLET_W1_SANDBOX_ONLY: envBoolean(true),
@@ -188,7 +190,11 @@ const schema = z.object({
     GROWTH_NETWORK_BUYER_EXPORT_ENABLED: envBoolean(false),
     GROWTH_NETWORK_PUBLIC_TRACKING_ENABLED: envBoolean(false)
 });
-export const env = schema.parse(process.env);
+const parsedEnv = schema.parse(process.env);
+export const env = {
+    ...parsedEnv,
+    QUOTE_PRICE_SOURCE: resolveQuotePriceSource(process.env)
+};
 export const corsOrigins = env.CORS_ORIGINS
     .split(",")
     .map((s) => s.trim())
