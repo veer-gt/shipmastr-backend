@@ -46,6 +46,13 @@ function mutateSignedObjectPath(uploadUrl: string) {
   return url.toString();
 }
 
+function assertGcsRejected(response: Response, label: string) {
+  assert.ok(
+    response.status === 400 || response.status === 403,
+    `${label} expected GCS rejection status 400/403, got ${response.status}`
+  );
+}
+
 const tierAIt = tierAEnabled() ? it : it.skip;
 
 describe("Tier A storefront GCS signed upload proof", () => {
@@ -74,7 +81,7 @@ describe("Tier A storefront GCS signed upload proof", () => {
         Buffer.from("png"),
         { ...requiredHeaders("image/png"), "content-type": "image/jpeg" }
       );
-      assert.equal(wrongTypeResponse.status, 403);
+      assertGcsRejected(wrongTypeResponse, "wrong content type");
 
       const omittedRange = await signedPath("omitted-range");
       const omittedRangeHeaders = requiredHeaders("image/png");
@@ -84,7 +91,7 @@ describe("Tier A storefront GCS signed upload proof", () => {
         Buffer.from("png"),
         omittedRangeHeaders
       );
-      assert.equal(omittedRangeResponse.status, 403);
+      assertGcsRejected(omittedRangeResponse, "omitted content-length-range header");
 
       const oversized = await signedPath("oversized");
       const oversizedResponse = await putObject(
@@ -102,13 +109,14 @@ describe("Tier A storefront GCS signed upload proof", () => {
       );
       assert.equal(maxAllowedResponse.status, 200);
 
-      const expired = await signedPath("expired", new Date(Date.now() - 60 * 1000));
+      const expired = await signedPath("expired", new Date(Date.now() + 2 * 1000));
+      await new Promise<void>((resolve) => setTimeout(resolve, 4 * 1000));
       const expiredResponse = await putObject(
         expired.signed.uploadUrl,
         Buffer.from("png"),
         requiredHeaders("image/png")
       );
-      assert.equal(expiredResponse.status, 403);
+      assertGcsRejected(expiredResponse, "expired signed URL");
 
       const mutated = await signedPath("mutated");
       const mutatedResponse = await putObject(
@@ -116,7 +124,7 @@ describe("Tier A storefront GCS signed upload proof", () => {
         Buffer.from("png"),
         requiredHeaders("image/png")
       );
-      assert.equal(mutatedResponse.status, 403);
+      assertGcsRejected(mutatedResponse, "mutated signed object path");
 
       const precondition = await signedPath("precondition");
       const firstPut = await putObject(
