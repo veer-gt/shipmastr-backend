@@ -1,5 +1,7 @@
 import { createHash } from "node:crypto";
-import { realpathSync } from "node:fs";
+import { existsSync, realpathSync } from "node:fs";
+import { createRequire } from "node:module";
+import { join } from "node:path";
 import { fileURLToPath } from "node:url";
 
 export const CRITICAL_TABLES = Object.freeze([
@@ -28,6 +30,8 @@ const SAFE_ERROR_MESSAGES = Object.freeze({
   QUERY_FAILED: "a read-only verification query failed",
   INVALID_ARGUMENT: "an argument is invalid",
   DATABASE_URL_REQUIRED: "an explicit verifier database URL is required for normal mode",
+  PRISMA_CLIENT_RESOLUTION_FAILED: "Prisma client resolution failed from the validated application root",
+  DATABASE_CONNECTION_FAILED: "database connection bootstrap failed",
   VERIFICATION_FAILED: "read-only verification failed",
 });
 
@@ -42,7 +46,7 @@ export const VERIFICATION_QUERIES = Object.freeze([
   "SELECT current_setting('transaction_read_only') AS transaction_read_only",
   "SELECT table_name FROM information_schema.tables WHERE table_schema = 'public' ORDER BY table_name",
   "SELECT table_name, column_name, ordinal_position, data_type, udt_name, is_nullable, column_default FROM information_schema.columns WHERE table_schema = 'public' ORDER BY table_name, ordinal_position",
-  ...CRITICAL_TABLES.map((table) => `SELECT to_regclass('${quoteIdentifier(table)}') AS table_name`),
+  ...CRITICAL_TABLES.map((table) => `SELECT to_regclass('${quoteIdentifier(table)}')::text AS table_name`),
   ...CRITICAL_TABLES.map((table) => `SELECT COUNT(*)::text AS row_count FROM ${quoteIdentifier(table)}`),
 ]);
 
@@ -109,7 +113,7 @@ async function queryRows(adapter, sql) {
   try {
     return assertRows(await adapter.query(sql));
   } catch (error) {
-    if (error?.code === "ADAPTER_RESULT_INVALID") throw error;
+    if (["ADAPTER_RESULT_INVALID", "DATABASE_CONNECTION_FAILED"].includes(error?.code)) throw error;
     throw verificationError("QUERY_FAILED", error);
   }
 }
@@ -122,7 +126,7 @@ async function executeCommand(adapter, sql) {
     }
     assertRows(await adapter.query(sql));
   } catch (error) {
-    if (error?.code === "ADAPTER_RESULT_INVALID") throw error;
+    if (["ADAPTER_RESULT_INVALID", "DATABASE_CONNECTION_FAILED"].includes(error?.code)) throw error;
     throw verificationError("QUERY_FAILED", error);
   }
 }
@@ -250,7 +254,7 @@ async function verifyQueries(adapter, { managedTransaction, targetInstance, migr
 
     const tables = publicTableNames(await queryRows(adapter, "SELECT table_name FROM information_schema.tables WHERE table_schema = 'public' ORDER BY table_name"));
     const columns = await queryRows(adapter, "SELECT table_name, column_name, ordinal_position, data_type, udt_name, is_nullable, column_default FROM information_schema.columns WHERE table_schema = 'public' ORDER BY table_name, ordinal_position");
-    const presence = tablePresence(await Promise.all(CRITICAL_TABLES.map((table) => queryRows(adapter, `SELECT to_regclass('${quoteIdentifier(table)}') AS table_name`))).then((rows) => rows.map(oneRow)));
+    const presence = tablePresence(await Promise.all(CRITICAL_TABLES.map((table) => queryRows(adapter, `SELECT to_regclass('${quoteIdentifier(table)}')::text AS table_name`))).then((rows) => rows.map(oneRow)));
     const missing = CRITICAL_TABLES.filter((table) => !presence[table]);
     if (missing.length > 0) throw Object.assign(verificationError("CRITICAL_TABLE_MISSING"), { missing });
     const counts = aggregateCounts(await Promise.all(CRITICAL_TABLES.map((table) => queryRows(adapter, `SELECT COUNT(*)::text AS row_count FROM ${quoteIdentifier(table)}`))).then((rows) => rows.map(oneRow)));
@@ -300,16 +304,58 @@ function parseArgs(argv) {
   return options;
 }
 
-async function createPrismaAdapter(databaseUrl) {
+export function resolvePrismaClient(appRoot = process.env.PITR_APP_ROOT ?? process.cwd()) {
+  try {
+    if (typeof appRoot !== "string" || !appRoot.startsWith("/")) throw verificationError("PRISMA_CLIENT_RESOLUTION_FAILED");
+    const resolvedRoot = realpathSync(appRoot);
+    const packagePath = join(resolvedRoot, "package.json");
+    if (!existsSync(packagePath) || !existsSync(join(resolvedRoot, "node_modules", "@prisma", "client"))) {
+      throw verificationError("PRISMA_CLIENT_RESOLUTION_FAILED");
+    }
+    const loaded = createRequire(packagePath)("@prisma/client");
+    if (!loaded || typeof loaded.PrismaClient !== "function") throw verificationError("PRISMA_CLIENT_RESOLUTION_FAILED");
+    return loaded;
+  } catch (error) {
+    if (error?.code === "PRISMA_CLIENT_RESOLUTION_FAILED") throw error;
+    throw verificationError("PRISMA_CLIENT_RESOLUTION_FAILED", error);
+  }
+}
+
+async function createPrismaAdapter(databaseUrl, appRoot) {
   if (typeof databaseUrl !== "string" || databaseUrl.trim() === "") throw verificationError("DATABASE_URL_REQUIRED");
-  const { PrismaClient } = await import("@prisma/client");
+  const { PrismaClient } = resolvePrismaClient(appRoot);
   const prisma = new PrismaClient({ datasources: { db: { url: databaseUrl } }, log: [] });
   return {
-    query: (sql) => prisma.$queryRawUnsafe(sql).then((rows) => ({ rows })),
-    withReadOnlyTransaction: (callback) => prisma.$transaction(async (tx) => callback({
-      query: (sql) => tx.$queryRawUnsafe(sql).then((rows) => ({ rows })),
-      execute: (sql) => tx.$executeRawUnsafe(sql),
-    })),
+    query: async (sql) => {
+      try {
+        return { rows: await prisma.$queryRawUnsafe(sql) };
+      } catch (error) {
+        throw verificationError("DATABASE_CONNECTION_FAILED", error);
+      }
+    },
+    withReadOnlyTransaction: async (callback) => {
+      try {
+        return await prisma.$transaction(async (tx) => callback({
+          query: async (sql) => {
+            try {
+              return { rows: await tx.$queryRawUnsafe(sql) };
+            } catch (error) {
+              throw verificationError("DATABASE_CONNECTION_FAILED", error);
+            }
+          },
+          execute: async (sql) => {
+            try {
+              return await tx.$executeRawUnsafe(sql);
+            } catch (error) {
+              throw verificationError("DATABASE_CONNECTION_FAILED", error);
+            }
+          },
+        }));
+      } catch (error) {
+        if (error?.code && SAFE_ERROR_MESSAGES[error.code]) throw error;
+        throw verificationError("DATABASE_CONNECTION_FAILED", error);
+      }
+    },
     disconnect: () => prisma.$disconnect(),
   };
 }
@@ -324,6 +370,7 @@ function cliConfig(argv, env = process.env) {
     migrationStatus: args.migrationStatus ?? env.PITR_MIGRATION_STATUS,
     migrationCount: args.migrationCount ?? env.PITR_MIGRATION_COUNT,
     expectedMigrationCount: args.expectedMigrationCount ?? env.PITR_EXPECTED_MIGRATION_COUNT,
+    appRoot: env.PITR_APP_ROOT,
     databaseUrl: env.PITR_DATABASE_URL,
   };
 }
@@ -342,7 +389,7 @@ export async function main(argv = process.argv.slice(2), env = process.env) {
       migrationCount: config.dryRun ? config.migrationCount ?? 0 : config.migrationCount,
       expectedMigrationCount: config.expectedMigrationCount,
     });
-    if (!config.dryRun) adapter = await createPrismaAdapter(config.databaseUrl);
+    if (!config.dryRun) adapter = await createPrismaAdapter(config.databaseUrl, config.appRoot);
     const result = await runVerification({ ...config, adapter });
     process.stdout.write(`${JSON.stringify(result)}\n`);
     return 0;
