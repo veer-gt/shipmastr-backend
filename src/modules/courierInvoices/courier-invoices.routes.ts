@@ -10,7 +10,7 @@ import { importCourierInvoice } from "./courier-invoice.service.js";
 export const courierInvoicesRouter = Router();
 const upload = multer({
   storage: multer.memoryStorage(),
-  limits: { fileSize: 10 * 1024 * 1024 }
+  limits: { files: 1, fileSize: 10 * 1024 * 1024, fields: 8, fieldSize: 64 * 1024, parts: 16 }
 });
 
 const invoiceLineSchema = z.object({

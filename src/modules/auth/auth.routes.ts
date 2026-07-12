@@ -1,5 +1,4 @@
 import { Router, type Request } from "express";
-import bcrypt from "bcryptjs";
 import { randomInt } from "node:crypto";
 import jwt from "jsonwebtoken";
 import { z } from "zod";
@@ -13,30 +12,36 @@ import { isProtectedMasterAdminEmail } from "../../lib/masterAdmin.js";
 import admin from "../../lib/firebase.js";
 import { changePasswordForAccount, type PasswordAccount } from "./change-password.service.js";
 import { requestPasswordReset, resetPasswordWithToken, verifyPasswordResetToken } from "./password-reset.service.js";
+import { DUMMY_PASSWORD_HASH, hashPassword, verifyPassword, verifyPasswordAndMaybeRehash } from "./password-hashing.js";
+import { neutralPublicRegistrationResponse } from "./public-auth-response.js";
+import { clientNetworkKey } from "../../lib/client-network.js";
+import { getAuthAbuseStatus, recordAuthFailure, resetAuthAccountFailures } from "./auth-abuse.service.js";
+import { logger } from "../../lib/logger.js";
+import { courierAuthIdentity, courierAuthResponse } from "../courier/courier-auth-response.js";
 
 export const authRouter = Router();
 
 const registerSchema = z.object({
-  businessName: z.string().min(2).optional(),
-  merchantName: z.string().min(2).optional(),
-  email: z.string().email(),
-  password: z.string().min(8),
-  name: z.string().optional()
-}).refine((body) => body.businessName || body.merchantName, {
+  businessName: z.string().trim().min(2).max(180).optional(),
+  merchantName: z.string().trim().min(2).max(180).optional(),
+  email: z.string().trim().email().max(320),
+  password: z.string().min(8).max(128),
+  name: z.string().trim().max(120).optional()
+}).strict().refine((body) => body.businessName || body.merchantName, {
   path: ["businessName"],
   message: "businessName is required"
 });
 
 const requestRegistrationCodeSchema = z.object({
-  businessName: z.string().trim().min(2),
-  email: z.string().trim().email(),
-  password: z.string().min(8)
-});
+  businessName: z.string().trim().min(2).max(180),
+  email: z.string().trim().email().max(320),
+  password: z.string().min(8).max(128)
+}).strict();
 
 const verifyRegistrationCodeSchema = z.object({
-  email: z.string().trim().email(),
+  email: z.string().trim().email().max(320),
   code: z.string().trim().regex(/^\d{6}$/)
-});
+}).strict();
 
 const PENDING_REGISTRATION_ACTION = "PENDING_REGISTRATION";
 const PENDING_REGISTRATION_ENTITY = "auth_registration";
@@ -50,10 +55,10 @@ type PendingRegistrationPayload = {
 };
 
 const mobileAuthSchema = z.object({
-  phoneNumber: z.string().trim(),
-  firebaseIdToken: z.string().min(1),
-  businessName: z.string().trim().min(2).optional()
-});
+  phoneNumber: z.string().trim().min(7).max(32),
+  firebaseIdToken: z.string().min(1).max(4096),
+  businessName: z.string().trim().min(2).max(180).optional()
+}).strict();
 
 function signSellerToken(user: { id: string; merchantId: string; role: string }) {
   return jwt.sign(
@@ -105,6 +110,20 @@ function createVerificationCode() {
   return String(randomInt(100000, 1000000));
 }
 
+function sleep(milliseconds: number) {
+  return milliseconds > 0 ? new Promise((resolve) => setTimeout(resolve, milliseconds)) : Promise.resolve();
+}
+
+async function notifyAuthLockout(input: { to: string; businessName: string; accountKind: "USER" | "COURIER" }) {
+  const template = emailTemplates.authLockout({ businessName: input.businessName });
+  await sendTransactionalEmail({
+    to: input.to,
+    type: "auth-lockout",
+    metadata: { accountKind: input.accountKind },
+    ...template
+  }).catch(() => undefined);
+}
+
 async function sendRegistrationCode(email: string, code: string) {
   const template = emailTemplates.verifyEmail({ code });
   await sendTransactionalEmail({
@@ -150,26 +169,6 @@ function sellerUserResponse(
   };
 }
 
-function courierUserResponse(
-  user: { id: string; name: string; email: string; courierId: string; role?: string | null },
-  courier: { id: string; name: string; code: string }
-) {
-  return {
-    id: user.id,
-    name: user.name,
-    email: user.email,
-    role: UserRole.COURIER_ADMIN,
-    accountType: ActorType.COURIER_PARTNER,
-    authRole: UserRole.COURIER,
-    actorType: ActorType.COURIER_PARTNER,
-    canonicalRole: UserRole.COURIER_ADMIN,
-    courierId: user.courierId,
-    courierName: courier.name,
-    courierCode: courier.code,
-    dashboardPath: dashboardPathForRole(UserRole.COURIER_ADMIN)
-  };
-}
-
 authRouter.post("/register/request-code", async (req, res) => {
   const body = requestRegistrationCodeSchema.parse(req.body);
   const email = normalizeEmail(body.email);
@@ -178,12 +177,17 @@ authRouter.post("/register/request-code", async (req, res) => {
     where: { email }
   });
 
-  if (exists) throw new HttpError(409, "EMAIL_EXISTS");
+  if (exists) {
+    // Keep public self-service registration enumeration-safe. Do comparable
+    // password work but never send a code for an existing account.
+    await hashPassword(body.password);
+    return res.json(neutralPublicRegistrationResponse());
+  }
 
   const code = createVerificationCode();
   const [passwordHash, codeHash] = await Promise.all([
-    bcrypt.hash(body.password, 12),
-    bcrypt.hash(code, 12)
+    hashPassword(body.password),
+    hashPassword(code)
   ]);
 
   const pendingRecord = await prisma.auditLog.create({
@@ -241,7 +245,7 @@ authRouter.post("/register/verify-code", async (req, res) => {
     throw new HttpError(429, "TOO_MANY_CODE_ATTEMPTS");
   }
 
-  const valid = await bcrypt.compare(body.code, pending.codeHash);
+  const valid = await verifyPassword(body.code, pending.codeHash);
   if (!valid) {
     await prisma.auditLog.update({
       where: { id: pendingRecord.id },
@@ -261,7 +265,10 @@ authRouter.post("/register/verify-code", async (req, res) => {
 
   if (exists) {
     await prisma.auditLog.delete({ where: { id: pendingRecord.id } });
-    throw new HttpError(409, "EMAIL_EXISTS");
+    // The verification-code flow is public self-service registration. A race
+    // with another registration must remain neutral rather than disclose that
+    // the address became registered while the code was being verified.
+    return res.json(neutralPublicRegistrationResponse());
   }
 
   const { merchant, user } = await prisma.$transaction(async (tx) => {
@@ -315,9 +322,15 @@ authRouter.post("/register", async (req, res) => {
     where: { email }
   });
 
-  if (exists) throw new HttpError(409, "EMAIL_EXISTS");
+  if (exists) {
+    // This is a public self-service endpoint. Keep the response neutral and do
+    // comparable password work, but never issue a token or send an email for an
+    // already-registered address.
+    await hashPassword(body.password);
+    return res.json(neutralPublicRegistrationResponse());
+  }
 
-  const passwordHash = await bcrypt.hash(body.password, 12);
+  const passwordHash = await hashPassword(body.password);
   const merchantName = body.businessName || body.merchantName!;
 
   const merchant = await prisma.merchant.create({
@@ -397,7 +410,7 @@ authRouter.post("/mobile", async (req, res) => {
 
   const merchantName = body.businessName || `Seller ${requestedPhone.mobile.slice(-4)}`;
   const email = phoneSellerEmail(requestedPhone.mobile);
-  const passwordHash = await bcrypt.hash(`${decoded.uid}:${requestedPhone.e164}:${env.JWT_SECRET}`, 12);
+  const passwordHash = await hashPassword(`${decoded.uid}:${requestedPhone.e164}:${env.JWT_SECRET}`);
 
   const merchant = await prisma.merchant.create({
     data: {
@@ -429,32 +442,32 @@ authRouter.post("/mobile", async (req, res) => {
 });
 
 const loginSchema = z.object({
-  identifier: z.string().trim().min(1).optional(),
-  email: z.string().trim().min(1).optional(),
-  password: z.string()
-}).refine((body) => body.identifier || body.email, {
+  identifier: z.string().trim().min(1).max(320).optional(),
+  email: z.string().trim().min(1).max(320).optional(),
+  password: z.string().min(1).max(128)
+}).strict().refine((body) => body.identifier || body.email, {
   path: ["identifier"],
   message: "identifier is required"
 });
 
 const changePasswordSchema = z.object({
-  currentPassword: z.string().min(1),
-  newPassword: z.string().min(8)
-});
+  currentPassword: z.string().min(1).max(128),
+  newPassword: z.string().min(8).max(128)
+}).strict();
 
 const requestPasswordResetSchema = z.object({
-  email: z.string().trim().email()
-});
+  email: z.string().trim().email().max(320)
+}).strict();
 
 const verifyResetTokenSchema = z.object({
-  token: z.string().trim().min(20)
-});
+  token: z.string().trim().min(20).max(512)
+}).strict();
 
 const resetPasswordSchema = z.object({
-  token: z.string().trim().min(20),
-  newPassword: z.string().min(8).optional(),
-  new_password: z.string().min(8).optional()
-}).refine((body) => body.newPassword || body.new_password, {
+  token: z.string().trim().min(20).max(512),
+  newPassword: z.string().min(8).max(128).optional(),
+  new_password: z.string().min(8).max(128).optional()
+}).strict().refine((body) => body.newPassword || body.new_password, {
   path: ["newPassword"],
   message: "newPassword is required"
 });
@@ -540,6 +553,14 @@ authRouter.post("/login", async (req, res) => {
   const identifier = (body.identifier || body.email || "").trim();
   const mobile = identifier.replace(/\D/g, "");
   const normalizedEmail = normalizeEmail(identifier);
+  const accountKey = /^[6-9]\d{9}$/.test(mobile) ? `phone:${mobile}` : `email:${normalizedEmail}`;
+  const networkKey = clientNetworkKey(req);
+  const abuseStatus = await getAuthAbuseStatus({ accountKey, networkKey });
+  await sleep(abuseStatus.delayMs);
+  if (abuseStatus.blocked) {
+    await verifyPassword(body.password, DUMMY_PASSWORD_HASH);
+    throw new HttpError(400, "INVALID_LOGIN");
+  }
 
   let user = /^[6-9]\d{9}$/.test(mobile)
     ? await prisma.user.findFirst({
@@ -562,32 +583,41 @@ authRouter.post("/login", async (req, res) => {
     });
 
     if (!courierUser || !courierUser.active || !courierUser.courier.active) {
+      await verifyPassword(body.password, DUMMY_PASSWORD_HASH);
+      await recordAuthFailure({ accountKey, networkKey });
       throw new HttpError(400, "INVALID_LOGIN");
     }
 
-    const validCourierPassword = await bcrypt.compare(body.password, courierUser.passwordHash);
-    if (!validCourierPassword) throw new HttpError(400, "INVALID_LOGIN");
+    const courierPassword = await verifyPasswordAndMaybeRehash(body.password, courierUser.passwordHash);
+    if (!courierPassword.valid) {
+      const failure = await recordAuthFailure({ accountKey, networkKey });
+      if (failure.shouldNotify) await notifyAuthLockout({ to: courierUser.email, businessName: courierUser.courier.name, accountKind: "COURIER" });
+      throw new HttpError(400, "INVALID_LOGIN");
+    }
+
+    if (courierPassword.replacementHash) {
+      await prisma.courierUser.updateMany({
+        where: { id: courierUser.id, passwordHash: courierUser.passwordHash },
+        data: { passwordHash: courierPassword.replacementHash }
+      }).catch(() => {
+        logger.warn({ accountKind: "COURIER" }, "Password hash lazy rehash failed");
+      });
+    }
 
     await prisma.courierUser.update({
       where: { id: courierUser.id },
       data: { lastLoginAt: new Date() }
     });
+    await resetAuthAccountFailures(accountKey);
 
-    const courierRole = UserRole.COURIER_ADMIN;
-    const courierActorType = ActorType.COURIER_PARTNER;
-    return res.json({
-      token: signCourierToken(courierUser),
-      role: courierRole,
-      accountType: courierActorType,
-      authRole: UserRole.COURIER,
-      actorType: courierActorType,
-      canonicalRole: courierRole,
-      dashboardPath: dashboardPathForRole(courierRole),
-      user: courierUserResponse(courierUser, courierUser.courier)
-    });
+    return res.json(courierAuthResponse(courierUser, courierUser.courier, signCourierToken(courierUser)));
   }
 
-  if (!user) throw new HttpError(400, "INVALID_LOGIN");
+  if (!user) {
+    await verifyPassword(body.password, DUMMY_PASSWORD_HASH);
+    await recordAuthFailure({ accountKey, networkKey });
+    throw new HttpError(400, "INVALID_LOGIN");
+  }
 
   if (
     isProtectedMasterAdminEmail(user.email) &&
@@ -603,9 +633,23 @@ authRouter.post("/login", async (req, res) => {
     });
   }
 
-  const valid = await bcrypt.compare(body.password, user.passwordHash);
+  const password = await verifyPasswordAndMaybeRehash(body.password, user.passwordHash);
 
-  if (!valid) throw new HttpError(400, "INVALID_LOGIN");
+  if (!password.valid) {
+    const failure = await recordAuthFailure({ accountKey, networkKey });
+    if (failure.shouldNotify) await notifyAuthLockout({ to: user.email, businessName: user.merchant.name, accountKind: "USER" });
+    throw new HttpError(400, "INVALID_LOGIN");
+  }
+
+  if (password.replacementHash) {
+    await prisma.user.updateMany({
+      where: { id: user.id, passwordHash: user.passwordHash },
+      data: { passwordHash: password.replacementHash }
+    }).catch(() => {
+      logger.warn({ accountKind: "USER" }, "Password hash lazy rehash failed");
+    });
+  }
+  await resetAuthAccountFailures(accountKey);
 
   const token = signSellerToken(user);
   const responseUser = sellerUserResponse(user, user.merchant);
@@ -651,7 +695,7 @@ authRouter.get("/me", async (req, res) => {
         return res.status(401).json({ error: "Token is not valid" });
       }
 
-      return res.json(courierUserResponse(courierUser, courierUser.courier));
+      return res.json(courierAuthIdentity(courierUser, courierUser.courier));
     }
 
     if (!decoded.merchantId) return res.status(401).json({ error: "Token is not valid" });

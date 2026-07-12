@@ -138,6 +138,23 @@ describe("requireAdminJwt", () => {
     assert.equal(result.req.auth?.role, "ADMIN");
   });
 
+  it("allows every approved internal admin role", async () => {
+    for (const role of ["MASTER_ADMIN", "ADMIN", "OPS_MANAGER", "FINANCE_MANAGER", "RISK_MANAGER", "COURIER_MANAGER", "SUPPORT_AGENT"]) {
+      mockUserFindUnique(async () => ({
+        id: "user_1",
+        merchantId: "merchant_1",
+        email: `${role.toLowerCase()}@shipmastr.test`,
+        userType: "INTERNAL_SHIPMASTR",
+        role
+      }));
+
+      const result = await runAdminMiddleware(signRole(role));
+
+      assert.equal(result.nextCalled, true, role);
+      assert.equal(result.req.auth?.role, "ADMIN", role);
+    }
+  });
+
   it("blocks a non-admin token before admin routes", async () => {
     const result = await runAdminMiddleware(signRole("SELLER"));
 
@@ -162,7 +179,23 @@ describe("requireAdminJwt", () => {
     assert.deepEqual(result.capture.body, { error: "INTERNAL_ADMIN_ONLY" });
   });
 
-  it("blocks normal internal ADMIN users from master-admin endpoints", async () => {
+  it("blocks unknown internal roles", async () => {
+    mockUserFindUnique(async () => ({
+      id: "user_1",
+      merchantId: "merchant_1",
+      email: "unknown@shipmastr.test",
+      userType: "INTERNAL_SHIPMASTR",
+      role: "UNKNOWN_INTERNAL_ROLE"
+    }));
+
+    const result = await runAdminMiddleware(signRole("ADMIN"));
+
+    assert.equal(result.nextCalled, false);
+    assert.equal(result.capture.statusCode, 403);
+    assert.deepEqual(result.capture.body, { error: "INTERNAL_ADMIN_ONLY" });
+  });
+
+  it("allows normal internal ADMIN users through the general admin guard", async () => {
     mockUserFindUnique(async () => ({
       id: "user_1",
       merchantId: "merchant_1",
@@ -173,9 +206,8 @@ describe("requireAdminJwt", () => {
 
     const result = await runAdminMiddleware(signRole("ADMIN"));
 
-    assert.equal(result.nextCalled, false);
-    assert.equal(result.capture.statusCode, 403);
-    assert.deepEqual(result.capture.body, { error: "INTERNAL_ADMIN_ONLY" });
+    assert.equal(result.nextCalled, true);
+    assert.equal(result.req.auth?.role, "ADMIN");
   });
 });
 

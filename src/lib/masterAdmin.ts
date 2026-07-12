@@ -1,4 +1,5 @@
 import { env } from "../config/env.js";
+import { isInternalAdminRole } from "./accountRoles.js";
 
 export const SHIPMASTR_OWNER_MASTER_ADMIN_EMAIL = "indraveer.chauhan@gmail.com";
 
@@ -27,4 +28,16 @@ export function isInternalMasterAdminUser(user?: {
   if (!user || String(user.userType || "").toUpperCase() !== "INTERNAL_SHIPMASTR") return false;
   if (String(user.role || "").toUpperCase() === "MASTER_ADMIN") return true;
   return isProtectedMasterAdminEmail(user.email);
+}
+
+export function isInternalAdminUser(user?: {
+  email?: string | null;
+  role?: string | null;
+  userType?: string | null;
+} | null) {
+  return Boolean(
+    user &&
+    String(user.userType || "").toUpperCase() === "INTERNAL_SHIPMASTR" &&
+    isInternalAdminRole(user.role)
+  );
 }

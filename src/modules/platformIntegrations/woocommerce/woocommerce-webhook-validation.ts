@@ -20,6 +20,7 @@ function headerValue(headers: Record<string, unknown>, name: string) {
 }
 
 function bodyString(value: unknown) {
+  if (Buffer.isBuffer(value)) return value;
   return typeof value === "string" ? value : JSON.stringify(value ?? {});
 }
 

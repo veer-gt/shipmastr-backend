@@ -1,10 +1,10 @@
 import type { Prisma } from "@prisma/client";
-import bcrypt from "bcryptjs";
 
 import { HttpError } from "../../lib/httpError.js";
 import { logger } from "../../lib/logger.js";
 import { prisma } from "../../lib/prisma.js";
 import { audit } from "../audit/audit.service.js";
+import { hashPassword, verifyPassword } from "./password-hashing.js";
 
 type Db = Prisma.TransactionClient | typeof prisma;
 
@@ -36,8 +36,8 @@ type ChangePasswordDeps = {
 };
 
 const defaultPassword: PasswordHasher = {
-  compare: bcrypt.compare,
-  hash: (newPassword) => bcrypt.hash(newPassword, 12)
+  compare: verifyPassword,
+  hash: hashPassword
 };
 
 async function writePasswordChangedAudit(account: PasswordAccount, client: Db) {

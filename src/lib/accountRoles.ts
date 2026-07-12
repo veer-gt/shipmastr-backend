@@ -18,7 +18,7 @@ export enum ActorType {
   ADMIN = "ADMIN",
 }
 
-const INTERNAL_ADMIN_ROLES = new Set([
+export const INTERNAL_ADMIN_ROLES = new Set([
   "MASTER_ADMIN",
   "ADMIN",
   "OPS_MANAGER",
@@ -27,6 +27,10 @@ const INTERNAL_ADMIN_ROLES = new Set([
   "COURIER_MANAGER",
   "SUPPORT_AGENT",
 ]);
+
+export function isInternalAdminRole(value?: string | null) {
+  return INTERNAL_ADMIN_ROLES.has(String(value || "").toUpperCase());
+}
 
 const COURIER_ROLES = new Set([
   "EXTERNAL_COURIER",

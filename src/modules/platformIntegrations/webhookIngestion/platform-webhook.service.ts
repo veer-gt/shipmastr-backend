@@ -127,14 +127,21 @@ function externalEventId(platform: StorePlatform, headers: Record<string, unknow
   return null;
 }
 
-function verifierFor(platform: StorePlatform, headers: Record<string, unknown>, payload: unknown, options: PlatformWebhookVerifierOptions) {
+function verifierFor(
+  platform: StorePlatform,
+  headers: Record<string, unknown>,
+  payload: unknown,
+  rawBody: Buffer | undefined,
+  options: PlatformWebhookVerifierOptions
+) {
+  const body = rawBody ?? payload;
   if (platform === StorePlatform.SHOPIFY) {
-    return validateShopifyWebhookFoundation({ headers, body: payload, secret: options.signatureSecret });
+    return validateShopifyWebhookFoundation({ headers, body, secret: options.signatureSecret });
   }
   if (platform === StorePlatform.WOOCOMMERCE) {
-    return validateWooCommerceWebhookFoundation({ headers, body: payload, secret: options.signatureSecret });
+    return validateWooCommerceWebhookFoundation({ headers, body, secret: options.signatureSecret });
   }
-  return validateMagentoWebhookFoundation({ headers, body: payload, secret: options.signatureSecret });
+  return validateMagentoWebhookFoundation({ headers, body, secret: options.signatureSecret });
 }
 
 function validationStatus(verification: unknown) {
@@ -398,7 +405,7 @@ export async function ingestPlatformWebhookEvent(
   const connection = await findConnection(merchantId, input.connectionId, client);
   assertPlatformMatches(connection, input.platform);
   const topic = normalizeTopic(input.platform, input.headers);
-  const verification = verifierFor(input.platform, input.headers, input.payload, verifierOptions);
+  const verification = verifierFor(input.platform, input.headers, input.payload, input.rawBody, verifierOptions);
   const status = eventStatus(topic, verification);
   const eventHash = bodyHash({ platform: input.platform, topic, payload: sanitizePlatformWebhookValue(input.payload) });
   const externalId = externalEventId(input.platform, input.headers);

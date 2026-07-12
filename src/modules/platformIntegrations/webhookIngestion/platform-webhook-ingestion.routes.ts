@@ -1,4 +1,5 @@
 import { Router } from "express";
+import { HttpError } from "../../../lib/httpError.js";
 import { StorePlatform } from "@prisma/client";
 import { successEnvelope } from "../../shippingNetwork/shipping-public-serializers.js";
 import {
@@ -8,7 +9,9 @@ import {
   stagePlatformWebhookEventImport
 } from "./platform-webhook.service.js";
 import {
+  assertSupportedPlatformWebhookHeaders,
   platformWebhookEventListQuerySchema,
+  parsePlatformWebhookPayload,
   stagePlatformWebhookEventImportSchema
 } from "./platform-webhook.validation.js";
 
@@ -23,31 +26,40 @@ function headersRecord(headers: Record<string, unknown>) {
 }
 
 platformWebhookIngestionRouter.post("/platform-webhooks/shopify/:connectionId", async (req, res) => {
+  if (!req.rawBody) throw new HttpError(400, "RAW_BODY_REQUIRED");
+  assertSupportedPlatformWebhookHeaders("SHOPIFY", req.headers);
   const data = await ingestPlatformWebhookEvent(req.auth!.merchantId, {
     platform: StorePlatform.SHOPIFY,
     connectionId: routeParam(req.params.connectionId),
     headers: headersRecord(req.headers),
-    payload: req.body
+    payload: parsePlatformWebhookPayload("SHOPIFY", req.body),
+    rawBody: req.rawBody
   });
   return res.status(data.event.status === "REJECTED" ? 202 : 201).json(successEnvelope("Shopify webhook event received safely.", data));
 });
 
 platformWebhookIngestionRouter.post("/platform-webhooks/woocommerce/:connectionId", async (req, res) => {
+  if (!req.rawBody) throw new HttpError(400, "RAW_BODY_REQUIRED");
+  assertSupportedPlatformWebhookHeaders("WOOCOMMERCE", req.headers);
   const data = await ingestPlatformWebhookEvent(req.auth!.merchantId, {
     platform: StorePlatform.WOOCOMMERCE,
     connectionId: routeParam(req.params.connectionId),
     headers: headersRecord(req.headers),
-    payload: req.body
+    payload: parsePlatformWebhookPayload("WOOCOMMERCE", req.body),
+    rawBody: req.rawBody
   });
   return res.status(data.event.status === "REJECTED" ? 202 : 201).json(successEnvelope("WooCommerce webhook event received safely.", data));
 });
 
 platformWebhookIngestionRouter.post("/platform-webhooks/magento/:connectionId", async (req, res) => {
+  if (!req.rawBody) throw new HttpError(400, "RAW_BODY_REQUIRED");
+  assertSupportedPlatformWebhookHeaders("MAGENTO", req.headers);
   const data = await ingestPlatformWebhookEvent(req.auth!.merchantId, {
     platform: StorePlatform.MAGENTO,
     connectionId: routeParam(req.params.connectionId),
     headers: headersRecord(req.headers),
-    payload: req.body
+    payload: parsePlatformWebhookPayload("MAGENTO", req.body),
+    rawBody: req.rawBody
   });
   return res.status(data.event.status === "REJECTED" ? 202 : 201).json(successEnvelope("Magento webhook event received safely.", data));
 });

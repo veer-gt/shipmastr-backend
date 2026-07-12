@@ -1,6 +1,7 @@
 import { parse } from "csv-parse/sync";
 import { OrderStatus, PaymentMode, Prisma, ShipmentStatus } from "@prisma/client";
 import { HttpError } from "../../lib/httpError.js";
+import { assertSafeImportFile, assertSafeImportRows } from "../imports/file-security.js";
 import { prisma } from "../../lib/prisma.js";
 import { parseAmountToPaise, paiseToExistingOrderAmount } from "./shipping-amounts.js";
 import { buildOrUpdateShipmentCandidate } from "./shipping-candidate-builder.js";
@@ -558,6 +559,8 @@ function parseCsvRows(buffer: Buffer): Array<{ rowNumber: number; data: CsvRow }
     trim: true
   }) as CsvRow[];
 
+  assertSafeImportRows(records as Array<Record<string, unknown>>);
+
   return records
     .map((data, index) => ({ rowNumber: index + 2, data }))
     .filter((row) => Object.values(row.data).some((value) => stringValue(value)));
@@ -613,6 +616,7 @@ export async function importShippingOrdersCsv(input: {
   buffer: Buffer;
   pickupLocationId?: string | undefined;
 }, client: Db = prisma) {
+  assertSafeImportFile({ fileName: input.filename, mimeType: input.mimeType, buffer: input.buffer });
   if (input.buffer.length > 2 * 1024 * 1024) {
     throw new HttpError(413, "CSV_FILE_TOO_LARGE");
   }

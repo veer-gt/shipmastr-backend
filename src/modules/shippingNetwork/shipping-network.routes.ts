@@ -161,7 +161,7 @@ export const shippingNetworkRouter = Router();
 export const shippingSellerApiRouter = Router();
 const csvUpload = multer({
   storage: multer.memoryStorage(),
-  limits: { fileSize: 2 * 1024 * 1024 }
+  limits: { files: 1, fileSize: 2 * 1024 * 1024, fields: 8, fieldSize: 64 * 1024, parts: 16 }
 });
 const weightProofImageUpload = multer({
   storage: multer.memoryStorage(),
