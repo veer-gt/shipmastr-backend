@@ -5,12 +5,13 @@ import { Router } from "express";
 import rateLimit from "express-rate-limit";
 import { z } from "zod";
 import { env } from "../../config/env.js";
-import { dashboardPathForRole, UserRole } from "../../lib/accountRoles.js";
+import { UserRole } from "../../lib/accountRoles.js";
 import { emailTemplates, sendTransactionalEmail, trackingUrl } from "../../lib/email.js";
 import { HttpError } from "../../lib/httpError.js";
 import { logger } from "../../lib/logger.js";
 import { prisma } from "../../lib/prisma.js";
 import { requireCourierJwt } from "../../middleware/jwtAuth.js";
+import { courierAuthIdentity, courierAuthResponse } from "./courier-auth-response.js";
 import {
   authenticateInboundCourierSignature,
   getCourierDeveloperProfile,
@@ -388,23 +389,7 @@ courierRouter.post("/auth/login", courierLoginLimiter, async (req, res) => {
     data: { lastLoginAt: new Date() }
   });
 
-  res.json({
-    token: signCourierToken(courierUser),
-    role: UserRole.COURIER,
-    accountType: UserRole.COURIER,
-    dashboardPath: dashboardPathForRole(UserRole.COURIER),
-    user: {
-      id: courierUser.id,
-      name: courierUser.name,
-      email: courierUser.email,
-      role: UserRole.COURIER,
-      accountType: UserRole.COURIER,
-      courierId: courierUser.courierId,
-      courierName: courierUser.courier.name,
-      courierCode: courierUser.courier.code,
-      dashboardPath: dashboardPathForRole(UserRole.COURIER)
-    }
-  });
+  res.json(courierAuthResponse(courierUser, courierUser.courier, signCourierToken(courierUser)));
 });
 
 courierRouter.post("/shipments/:id/tracking-events", courierWriteLimiter, async (req, res) => {
@@ -456,17 +441,7 @@ courierRouter.get("/me", async (req, res) => {
 
   if (!user) throw new HttpError(404, "COURIER_USER_NOT_FOUND");
 
-  res.json({
-    id: user.id,
-    name: user.name,
-    email: user.email,
-    role: UserRole.COURIER,
-    accountType: UserRole.COURIER,
-    courierId: user.courierId,
-    courierName: user.courier.name,
-    courierCode: user.courier.code,
-    dashboardPath: dashboardPathForRole(UserRole.COURIER)
-  });
+  res.json(courierAuthIdentity(user, user.courier));
 });
 
 courierRouter.get("/shipments", async (req, res) => {

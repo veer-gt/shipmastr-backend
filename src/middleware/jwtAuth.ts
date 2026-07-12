@@ -2,7 +2,7 @@ import type { Request, Response, NextFunction } from "express";
 import jwt from "jsonwebtoken";
 import { env } from "../config/env.js";
 import { canonicalRoleForAccount, isAdminRole, isCourierRole, normalizeAccountRole, UserRole } from "../lib/accountRoles.js";
-import { isInternalMasterAdminUser } from "../lib/masterAdmin.js";
+import { isInternalAdminUser, isInternalMasterAdminUser } from "../lib/masterAdmin.js";
 import { prisma } from "../lib/prisma.js";
 
 type SellerJwtPayload = {
@@ -68,7 +68,7 @@ export function requireAdminJwt(req: Request, res: Response, next: NextFunction)
       },
     });
 
-    if (!user || !isInternalMasterAdminUser(user)) {
+    if (!user || !isInternalAdminUser(user)) {
       return res.status(403).json({ error: "INTERNAL_ADMIN_ONLY" });
     }
 

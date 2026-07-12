@@ -1,6 +1,6 @@
 import assert from "node:assert/strict";
 import { describe, it } from "node:test";
-import { ActorType, actorTypeForAccount, canonicalRoleForAccount, dashboardPathForRole, UserRole } from "./accountRoles.js";
+import { ActorType, actorTypeForAccount, canonicalRoleForAccount, dashboardPathForRole, isInternalAdminRole, UserRole } from "./accountRoles.js";
 import { shipmastrActorModel } from "./actorModel.js";
 
 describe("Shipmastr actor model", () => {
@@ -20,6 +20,16 @@ describe("Shipmastr actor model", () => {
     assert.equal(actorTypeForAccount({ role: "COURIER_OPS" }), ActorType.COURIER_PARTNER);
     assert.equal(canonicalRoleForAccount({ role: "COURIER_OPS" }), UserRole.COURIER_OPS);
     assert.equal(dashboardPathForRole("COURIER_OPS"), "/courier/dashboard");
+  });
+
+  it("keeps the approved internal-admin role set centralized", () => {
+    for (const role of ["MASTER_ADMIN", "ADMIN", "OPS_MANAGER", "FINANCE_MANAGER", "RISK_MANAGER", "COURIER_MANAGER", "SUPPORT_AGENT"]) {
+      assert.equal(isInternalAdminRole(role), true);
+    }
+
+    for (const role of ["SELLER", "MERCHANT_OWNER", "COURIER_ADMIN", "UNKNOWN_INTERNAL_ROLE", ""]) {
+      assert.equal(isInternalAdminRole(role), false);
+    }
   });
 
   it("keeps legacy external merchant rows seller-scoped until explicit Merchant readiness", () => {

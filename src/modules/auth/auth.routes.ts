@@ -17,6 +17,7 @@ import { neutralPublicRegistrationResponse } from "./public-auth-response.js";
 import { clientNetworkKey } from "../../lib/client-network.js";
 import { getAuthAbuseStatus, recordAuthFailure, resetAuthAccountFailures } from "./auth-abuse.service.js";
 import { logger } from "../../lib/logger.js";
+import { courierAuthIdentity, courierAuthResponse } from "../courier/courier-auth-response.js";
 
 export const authRouter = Router();
 
@@ -165,26 +166,6 @@ function sellerUserResponse(
     actorType,
     canonicalRole,
     dashboardPath
-  };
-}
-
-function courierUserResponse(
-  user: { id: string; name: string; email: string; courierId: string; role?: string | null },
-  courier: { id: string; name: string; code: string }
-) {
-  return {
-    id: user.id,
-    name: user.name,
-    email: user.email,
-    role: UserRole.COURIER_ADMIN,
-    accountType: ActorType.COURIER_PARTNER,
-    authRole: UserRole.COURIER,
-    actorType: ActorType.COURIER_PARTNER,
-    canonicalRole: UserRole.COURIER_ADMIN,
-    courierId: user.courierId,
-    courierName: courier.name,
-    courierCode: courier.code,
-    dashboardPath: dashboardPathForRole(UserRole.COURIER_ADMIN)
   };
 }
 
@@ -629,18 +610,7 @@ authRouter.post("/login", async (req, res) => {
     });
     await resetAuthAccountFailures(accountKey);
 
-    const courierRole = UserRole.COURIER_ADMIN;
-    const courierActorType = ActorType.COURIER_PARTNER;
-    return res.json({
-      token: signCourierToken(courierUser),
-      role: courierRole,
-      accountType: courierActorType,
-      authRole: UserRole.COURIER,
-      actorType: courierActorType,
-      canonicalRole: courierRole,
-      dashboardPath: dashboardPathForRole(courierRole),
-      user: courierUserResponse(courierUser, courierUser.courier)
-    });
+    return res.json(courierAuthResponse(courierUser, courierUser.courier, signCourierToken(courierUser)));
   }
 
   if (!user) {
@@ -725,7 +695,7 @@ authRouter.get("/me", async (req, res) => {
         return res.status(401).json({ error: "Token is not valid" });
       }
 
-      return res.json(courierUserResponse(courierUser, courierUser.courier));
+      return res.json(courierAuthIdentity(courierUser, courierUser.courier));
     }
 
     if (!decoded.merchantId) return res.status(401).json({ error: "Token is not valid" });
