@@ -277,7 +277,7 @@ export async function sendJournalEmail(input: SendJournalEmailInput) {
       message: startedEvent,
       journalEmail: {
         provider,
-        to: input.to,
+        to: "[redacted]",
         subject: input.subject,
         metadata: input.metadata
       }
@@ -301,7 +301,7 @@ export async function sendJournalEmail(input: SendJournalEmailInput) {
         message: resultEvent,
         journalEmail: {
           provider,
-          to: input.to,
+          to: "[redacted]",
           subject: input.subject,
           status: "sent",
           ...safeResult,
@@ -319,7 +319,7 @@ export async function sendJournalEmail(input: SendJournalEmailInput) {
         message: failedEvent,
         journalEmail: {
           provider,
-          to: input.to,
+          to: "[redacted]",
           subject: input.subject,
           status: "failed",
           metadata: input.metadata

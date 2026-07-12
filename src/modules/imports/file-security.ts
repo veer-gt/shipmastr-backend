@@ -57,7 +57,9 @@ export function assertSafeImportFile(input: { fileName: string; mimeType?: strin
 export function assertSafeImportCell(value: unknown) {
   if (typeof value !== "string") return;
   if (value.length > MAX_IMPORT_CELL_CHARS) throw new HttpError(400, "IMPORT_CELL_LIMIT_EXCEEDED");
-  if (/^[=+@]/.test(value) || /^-(?!\d|\s*$)/.test(value)) {
+  // Keep ordinary signed numeric values (for example +919876543210) valid,
+  // while rejecting spreadsheet formula prefixes and command-like cells.
+  if (/^=/.test(value) || /^\+(?!\d)/.test(value) || /^@/.test(value) || /^-(?!\d|\s*$)/.test(value)) {
     throw new HttpError(400, "IMPORT_FORMULA_NOT_ALLOWED");
   }
 }
