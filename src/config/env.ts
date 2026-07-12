@@ -111,6 +111,8 @@ const schema = z.object({
   ]).default("LOCAL_MOCK"),
   CREDENTIAL_VAULT_KMS_KEY_ID: z.string().optional(),
   CREDENTIAL_VAULT_ENCRYPTION_KEY: z.string().optional(),
+  PLATFORM_CREDENTIAL_ENCRYPTION_KEY: z.string().optional(),
+  PLATFORM_CREDENTIAL_ENCRYPTION_KEY_VERSION: z.string().min(1).default("platform-credential-key-v1"),
   CREDENTIAL_VAULT_ROTATION_ENABLED: envBoolean(false),
   CREDENTIAL_VAULT_REQUIRE_LIVE_FOR_PILOT: envBoolean(true),
   CREDENTIAL_VAULT_ALLOW_LOCAL_MOCK_FOR_PILOT: envBoolean(false),
@@ -196,6 +198,25 @@ const schema = z.object({
 
 const parsedEnv = schema.parse(process.env);
 assertCheckoutDevOtpCodeProductionSafety(parsedEnv);
+
+function isValidPlatformCredentialKey(value: string | undefined) {
+  if (!value) return false;
+  if (/^[0-9a-f]{64}$/i.test(value)) return true;
+  if (!/^[A-Za-z0-9+/]{43}=$/.test(value)) return false;
+  return Buffer.from(value, "base64").length === 32;
+}
+
+const localValidationOnly = parsedEnv.NODE_ENV === "test"
+  || (parsedEnv.NODE_ENV === "development" && /@(localhost|127\.0\.0\.1|::1)(:|\/)/i.test(parsedEnv.DATABASE_URL));
+if (!localValidationOnly && ["staging", "production"].includes(parsedEnv.APP_ENV)) {
+  if (!isValidPlatformCredentialKey(parsedEnv.PLATFORM_CREDENTIAL_ENCRYPTION_KEY)) {
+    throw new Error("PLATFORM_CREDENTIAL_ENCRYPTION_KEY_REQUIRED");
+  }
+}
+if (parsedEnv.PLATFORM_CREDENTIAL_ENCRYPTION_KEY && !isValidPlatformCredentialKey(parsedEnv.PLATFORM_CREDENTIAL_ENCRYPTION_KEY)) {
+  throw new Error("PLATFORM_CREDENTIAL_ENCRYPTION_KEY_INVALID");
+}
+
 export const env = {
   ...parsedEnv,
   QUOTE_PRICE_SOURCE: resolveQuotePriceSource(process.env)

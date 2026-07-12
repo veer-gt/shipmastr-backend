@@ -65,11 +65,19 @@ try {
   if (!indexes.includes("auth_abuse_states_scope_key_key") || !indexes.includes("auth_abuse_states_lock_until_idx")) throw new Error("AuthAbuseState indexes are incomplete");
   console.log(`AuthAbuseState indexes verified: ${indexes}`);
 
+  const webhookCredentialTable = runPsql(name, "SELECT to_regclass('public.platform_webhook_credentials');");
+  if (webhookCredentialTable !== "platform_webhook_credentials") throw new Error("H2A platform webhook credential table was not created");
+  const webhookCredentialColumns = runPsql(name, "SELECT string_agg(column_name, ',' ORDER BY ordinal_position) FROM information_schema.columns WHERE table_schema='public' AND table_name='platform_webhook_credentials';");
+  for (const requiredColumn of ["merchant_id", "connection_id", "encrypted_current_value", "current_nonce", "current_auth_tag", "encrypted_previous_value", "previous_valid_until"]) {
+    if (!webhookCredentialColumns.split(",").includes(requiredColumn)) throw new Error(`H2A credential column missing: ${requiredColumn}`);
+  }
+  console.log("H2A platform webhook credential schema verified without inspecting application rows");
+
   const build = spawnSync("npm", ["run", "build"], { cwd: root, env: safeEnv, encoding: "utf8" });
   process.stdout.write(safeOutput(build.stdout));
   process.stderr.write(safeOutput(build.stderr));
   if (build.status !== 0) throw new Error("Backend build failed before scratch DB tests");
-  const tests = spawnSync(process.execPath, ["--test", "dist/modules/auth/auth-abuse.postgres.test.js"], {
+  const tests = spawnSync(process.execPath, ["--test", "dist/modules/auth/auth-abuse.postgres.test.js", "dist/modules/credentialVault/platform-webhook-credential.postgres.test.js"], {
     cwd: root,
     env: { ...safeEnv, RUN_SCRATCH_DB_TESTS: "1" },
     encoding: "utf8"
