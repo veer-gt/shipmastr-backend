@@ -774,6 +774,10 @@ enum PlatformCredentialStatus {
   EXPIRED
 }
 
+enum PlatformCredentialPurpose {
+  PLATFORM_WEBHOOK_SIGNATURE
+}
+
 enum PlatformHealthCheckStatus {
   HEALTHY
   DEGRADED
@@ -1833,27 +1837,57 @@ model WebhookEventOutbox {
 }
 
 model PlatformConnection {
-  id                 String                   @id @default(cuid())
-  merchantId         String                   @map("merchant_id")
+  id                 String                      @id @default(cuid())
+  merchantId         String                      @map("merchant_id")
   platform           StorePlatform
-  storeName          String?                  @map("store_name")
-  storeUrl           String                   @map("store_url")
-  status             PlatformConnectionStatus @default(DRAFT)
-  syncDirection      PlatformSyncDirection    @default(IMPORT_ONLY) @map("sync_direction")
-  credentialsRef     String?                  @map("credentials_ref")
-  credentialsMeta    Json?                    @map("credentials_meta")
-  lastOrderImportAt  DateTime?                @map("last_order_import_at")
-  lastTrackingSyncAt DateTime?                @map("last_tracking_sync_at")
-  lastErrorCode      String?                  @map("last_error_code")
-  lastErrorMessage   String?                  @map("last_error_message")
-  disabledAt         DateTime?                @map("disabled_at")
-  createdAt          DateTime                 @default(now()) @map("created_at")
-  updatedAt          DateTime                 @default(now()) @updatedAt @map("updated_at")
+  storeName          String?                     @map("store_name")
+  storeUrl           String                      @map("store_url")
+  status             PlatformConnectionStatus    @default(DRAFT)
+  syncDirection      PlatformSyncDirection       @default(IMPORT_ONLY) @map("sync_direction")
+  credentialsRef     String?                     @map("credentials_ref")
+  credentialsMeta    Json?                       @map("credentials_meta")
+  lastOrderImportAt  DateTime?                   @map("last_order_import_at")
+  lastTrackingSyncAt DateTime?                   @map("last_tracking_sync_at")
+  lastErrorCode      String?                     @map("last_error_code")
+  lastErrorMessage   String?                     @map("last_error_message")
+  disabledAt         DateTime?                   @map("disabled_at")
+  createdAt          DateTime                    @default(now()) @map("created_at")
+  updatedAt          DateTime                    @default(now()) @updatedAt @map("updated_at")
+  webhookCredentials PlatformWebhookCredential[]
 
   @@index([merchantId, status])
   @@index([merchantId, platform])
   @@index([merchantId, createdAt])
   @@map("platform_connections")
+}
+
+model PlatformWebhookCredential {
+  id                     String                    @id @default(cuid())
+  merchantId             String                    @map("merchant_id")
+  connectionId           String                    @map("connection_id")
+  platform               StorePlatform
+  purpose                PlatformCredentialPurpose
+  encryptedCurrentValue  String?                   @map("encrypted_current_value")
+  currentNonce           String?                   @map("current_nonce")
+  currentAuthTag         String?                   @map("current_auth_tag")
+  encryptionKeyVersion   String?                   @map("encryption_key_version")
+  configuredAt           DateTime                  @default(now()) @map("configured_at")
+  rotatedAt              DateTime?                 @map("rotated_at")
+  revokedAt              DateTime?                 @map("revoked_at")
+  encryptedPreviousValue String?                   @map("encrypted_previous_value")
+  previousNonce          String?                   @map("previous_nonce")
+  previousAuthTag        String?                   @map("previous_auth_tag")
+  previousValidUntil     DateTime?                 @map("previous_valid_until")
+  createdAt              DateTime                  @default(now()) @map("created_at")
+  updatedAt              DateTime                  @default(now()) @updatedAt @map("updated_at")
+
+  connection PlatformConnection @relation(fields: [connectionId], references: [id], onDelete: Restrict, onUpdate: Cascade)
+
+  @@unique([connectionId, purpose])
+  @@index([merchantId])
+  @@index([connectionId])
+  @@index([merchantId, platform])
+  @@map("platform_webhook_credentials")
 }
 
 model ShopifyConnectionState {

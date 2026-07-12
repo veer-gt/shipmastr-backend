@@ -26,7 +26,15 @@ import {
   upsertConnectionCredential
 } from "../../credentialVault/credential-vault.service.js";
 import {
+  configurePlatformWebhookCredential,
+  getPlatformWebhookCredentialStatus,
+  revokePlatformWebhookCredential,
+  rotatePlatformWebhookCredential
+} from "../../credentialVault/platform-webhook-credential.service.js";
+import {
+  configurePlatformWebhookCredentialSchema,
   rotateConnectionCredentialSchema,
+  rotatePlatformWebhookCredentialSchema,
   testConnectionCredentialReadinessSchema,
   upsertConnectionCredentialSchema
 } from "../../credentialVault/credential-vault.validation.js";
@@ -111,6 +119,28 @@ platformCredentialsRouter.post("/platform-connections/:connectionId/credentials/
 platformCredentialsRouter.delete("/platform-connections/:connectionId/credentials", async (req, res) => {
   const data = await detachCredentialFromConnection(req.auth!.merchantId, routeParam(req.params.connectionId));
   return res.json(successEnvelope("Platform credential detached successfully.", data));
+});
+
+platformCredentialsRouter.put("/platform-connections/:connectionId/webhook-credential", async (req, res) => {
+  const body = configurePlatformWebhookCredentialSchema.parse(req.body);
+  const data = await configurePlatformWebhookCredential(req.auth!.merchantId, routeParam(req.params.connectionId), body);
+  return res.json(successEnvelope("Platform webhook credential configured safely.", data));
+});
+
+platformCredentialsRouter.get("/platform-connections/:connectionId/webhook-credential/status", async (req, res) => {
+  const data = await getPlatformWebhookCredentialStatus(req.auth!.merchantId, routeParam(req.params.connectionId));
+  return res.json(successEnvelope("Platform webhook credential status fetched safely.", data));
+});
+
+platformCredentialsRouter.post("/platform-connections/:connectionId/webhook-credential/rotate", async (req, res) => {
+  const body = rotatePlatformWebhookCredentialSchema.parse(req.body);
+  const data = await rotatePlatformWebhookCredential(req.auth!.merchantId, routeParam(req.params.connectionId), body);
+  return res.json(successEnvelope("Platform webhook credential rotated safely.", data));
+});
+
+platformCredentialsRouter.delete("/platform-connections/:connectionId/webhook-credential", async (req, res) => {
+  const data = await revokePlatformWebhookCredential(req.auth!.merchantId, routeParam(req.params.connectionId));
+  return res.json(successEnvelope("Platform webhook credential revoked safely.", data));
 });
 
 platformCredentialsRouter.get("/credential-vault/readiness", async (_req, res) => {
