@@ -12,6 +12,8 @@ import { createPlatformImportJob } from "../importQueue/platform-import-queue.se
 import { validateMagentoWebhookFoundation } from "../magento/magento-webhook-validation.js";
 import { validateShopifyWebhookFoundation } from "../shopify/shopify-webhook-validation.js";
 import { validateWooCommerceWebhookFoundation } from "../woocommerce/woocommerce-webhook-validation.js";
+import { PLATFORM_WEBHOOK_SIGNATURE_PURPOSE } from "../../credentialVault/platform-webhook-credential.crypto.js";
+import { resolvePlatformWebhookCredentialCandidates } from "../../credentialVault/platform-webhook-credential.service.js";
 import {
   sanitizePlatformWebhookValue,
   serializePlatformWebhookEvent,
@@ -127,21 +129,42 @@ function externalEventId(platform: StorePlatform, headers: Record<string, unknow
   return null;
 }
 
-function verifierFor(
+async function verifierFor(
+  merchantId: string,
   platform: StorePlatform,
+  connectionId: string,
   headers: Record<string, unknown>,
   payload: unknown,
   rawBody: Buffer | undefined,
-  options: PlatformWebhookVerifierOptions
+  options: PlatformWebhookVerifierOptions,
+  client: Db
 ) {
   const body = rawBody ?? payload;
-  if (platform === StorePlatform.SHOPIFY) {
-    return validateShopifyWebhookFoundation({ headers, body, secret: options.signatureSecret });
-  }
-  if (platform === StorePlatform.WOOCOMMERCE) {
-    return validateWooCommerceWebhookFoundation({ headers, body, secret: options.signatureSecret });
-  }
-  return validateMagentoWebhookFoundation({ headers, body, secret: options.signatureSecret });
+  const validate = (secret: string | undefined) => {
+    if (platform === StorePlatform.SHOPIFY) {
+      return validateShopifyWebhookFoundation({ headers, body, secret });
+    }
+    if (platform === StorePlatform.WOOCOMMERCE) {
+      return validateWooCommerceWebhookFoundation({ headers, body, secret });
+    }
+    return validateMagentoWebhookFoundation({ headers, body, secret });
+  };
+
+  const candidates = options.signatureSecret !== undefined
+    ? [options.signatureSecret]
+    : options.credentialCandidates
+      ?? (platform === StorePlatform.SHOPIFY || platform === StorePlatform.WOOCOMMERCE || platform === StorePlatform.MAGENTO
+        ? Object.values(await resolvePlatformWebhookCredentialCandidates({
+          merchantId,
+          connectionId,
+          platform: platform as "SHOPIFY" | "WOOCOMMERCE" | "MAGENTO",
+          purpose: PLATFORM_WEBHOOK_SIGNATURE_PURPOSE
+        }, client)).filter((value): value is string => Boolean(value))
+        : []);
+
+  if (!candidates.length) return validate(undefined);
+  const results = candidates.map((secret) => validate(secret));
+  return results.find((result) => validationStatus(result) === "VALID") ?? results[0];
 }
 
 function validationStatus(verification: unknown) {
@@ -366,11 +389,24 @@ function orderSafePreview(platform: StorePlatform, stagedPayload: Record<string,
 }
 
 function safeSummary(platform: StorePlatform, topic: PlatformWebhookTopic, payload: unknown, verification: unknown) {
+  const verificationStatus = validationStatus(verification);
+  if (verificationStatus !== "VALID" || topic === "UNKNOWN") {
+    return {
+      platform,
+      topic,
+      verification_status: verificationStatus,
+      raw_payload_stored: false,
+      raw_headers_stored: false,
+      store_mutation: false,
+      order_created: false,
+      shipment_created: false
+    };
+  }
   const stagedPayload = stagedOrderPayload(platform, payload);
   return {
     platform,
     topic,
-    verification_status: validationStatus(verification),
+    verification_status: verificationStatus,
     order_preview: orderSafePreview(platform, stagedPayload),
     staged_payload: stagedPayload,
     raw_payload_stored: false,
@@ -405,10 +441,19 @@ export async function ingestPlatformWebhookEvent(
   const connection = await findConnection(merchantId, input.connectionId, client);
   assertPlatformMatches(connection, input.platform);
   const topic = normalizeTopic(input.platform, input.headers);
-  const verification = verifierFor(input.platform, input.headers, input.payload, input.rawBody, verifierOptions);
+  const verification = await verifierFor(
+    merchantId,
+    input.platform,
+    connection.id,
+    input.headers,
+    input.payload,
+    input.rawBody,
+    verifierOptions,
+    client
+  );
   const status = eventStatus(topic, verification);
   const eventHash = bodyHash({ platform: input.platform, topic, payload: sanitizePlatformWebhookValue(input.payload) });
-  const externalId = externalEventId(input.platform, input.headers);
+  const externalId = status === "VERIFIED" ? externalEventId(input.platform, input.headers) : null;
   const key = dedupeKey({
     platform: input.platform,
     connectionId: connection.id,

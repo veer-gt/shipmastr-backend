@@ -28,4 +28,5 @@ export type PlatformWebhookIngestionInput = {
 
 export type PlatformWebhookVerifierOptions = {
   signatureSecret?: string;
+  credentialCandidates?: string[];
 };

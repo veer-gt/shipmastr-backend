@@ -206,16 +206,21 @@ describe("platform webhook ingestion foundation", () => {
       payload: shopifyPayload
     }, client, { signatureSecret: "test_secret" });
     assert.equal(invalid.event.status, "REJECTED");
+    assert.equal(invalid.event.external_event_id, null);
     assert.match(JSON.stringify(invalid.event.errors), /WEBHOOK_SIGNATURE_INVALID/);
+    assert.doesNotMatch(JSON.stringify(invalid), /Buyer One|Mumbai|9876543210|221 Market Street|T-shirt/i);
 
+    const notConfiguredPayload = { ...shopifyPayload, id: "1002" };
     const notConfigured = await ingestPlatformWebhookEvent("merchant_1", {
       platform: StorePlatform.SHOPIFY,
       connectionId: "conn_shopify",
-      headers: shopifyHeaders("test_secret", { "X-Shopify-Webhook-Id": "webhook_2" }),
-      payload: shopifyPayload
+      headers: shopifyHeaders("test_secret", { "X-Shopify-Webhook-Id": "webhook_2" }, notConfiguredPayload),
+      payload: notConfiguredPayload
     }, client);
     assert.equal(notConfigured.event.status, "REJECTED");
+    assert.equal(notConfigured.event.external_event_id, null);
     assert.match(JSON.stringify(notConfigured.event.errors), /WEBHOOK_SIGNATURE_NOT_CONFIGURED/);
+    assert.doesNotMatch(JSON.stringify(notConfigured), /Buyer One|Mumbai|9876543210|221 Market Street|T-shirt/i);
   });
 
   it("deduplicates repeated platform webhook deliveries", async () => {
