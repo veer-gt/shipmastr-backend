@@ -188,7 +188,7 @@ describe("platform webhook ingestion foundation", () => {
       connectionId: "conn_shopify",
       headers: shopifyHeaders("test_secret", {}, unsafePayload),
       payload: unsafePayload
-    }, client, { signatureSecret: "test_secret" });
+    }, client, { credentialCandidates: ["test_secret"] });
 
     assert.equal(result.event.status, "VERIFIED");
     assert.equal(result.event.topic, "SHOPIFY_ORDER_CREATED");
@@ -204,7 +204,7 @@ describe("platform webhook ingestion foundation", () => {
       connectionId: "conn_shopify",
       headers: shopifyHeaders("wrong_secret"),
       payload: shopifyPayload
-    }, client, { signatureSecret: "test_secret" });
+    }, client, { credentialCandidates: ["test_secret"] });
     assert.equal(invalid.event.status, "REJECTED");
     assert.equal(invalid.event.external_event_id, null);
     assert.match(JSON.stringify(invalid.event.errors), /WEBHOOK_SIGNATURE_INVALID/);
@@ -230,13 +230,13 @@ describe("platform webhook ingestion foundation", () => {
       connectionId: "conn_shopify",
       headers: shopifyHeaders("test_secret"),
       payload: shopifyPayload
-    }, client, { signatureSecret: "test_secret" });
+    }, client, { credentialCandidates: ["test_secret"] });
     const duplicate = await ingestPlatformWebhookEvent("merchant_1", {
       platform: StorePlatform.SHOPIFY,
       connectionId: "conn_shopify",
       headers: shopifyHeaders("test_secret"),
       payload: shopifyPayload
-    }, client, { signatureSecret: "test_secret" });
+    }, client, { credentialCandidates: ["test_secret"] });
 
     assert.equal(first.duplicate, false);
     assert.equal(duplicate.duplicate, true);
@@ -251,7 +251,7 @@ describe("platform webhook ingestion foundation", () => {
       connectionId: "conn_shopify",
       headers: shopifyHeaders("test_secret", { "X-Shopify-Topic": "products/create", "X-Shopify-Webhook-Id": "webhook_unknown" }),
       payload: shopifyPayload
-    }, client, { signatureSecret: "test_secret" });
+    }, client, { credentialCandidates: ["test_secret"] });
 
     assert.equal(result.event.status, "IGNORED");
     assert.equal(result.event.topic, "UNKNOWN");
@@ -265,7 +265,7 @@ describe("platform webhook ingestion foundation", () => {
       connectionId: "conn_shopify",
       headers: shopifyHeaders("test_secret"),
       payload: shopifyPayload
-    }, client, { signatureSecret: "test_secret" });
+    }, client, { credentialCandidates: ["test_secret"] });
     state.events.push({
       ...state.events[0],
       id: "webhook_event_other",
@@ -287,7 +287,7 @@ describe("platform webhook ingestion foundation", () => {
       connectionId: "conn_shopify",
       headers: shopifyHeaders("test_secret"),
       payload: shopifyPayload
-    }, client, { signatureSecret: "test_secret" });
+    }, client, { credentialCandidates: ["test_secret"] });
 
     const staged = await stagePlatformWebhookEventImport("merchant_1", ingested.event.event_id, client);
     assert.equal(staged.event.status, "STAGED_FOR_IMPORT");
@@ -308,7 +308,7 @@ describe("platform webhook ingestion foundation", () => {
       connectionId: "conn_shopify",
       headers: shopifyHeaders("wrong_secret"),
       payload: shopifyPayload
-    }, client, { signatureSecret: "test_secret" });
+    }, client, { credentialCandidates: ["test_secret"] });
 
     await assert.rejects(
       () => stagePlatformWebhookEventImport("merchant_1", rejected.event.event_id, client),

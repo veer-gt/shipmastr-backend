@@ -27,6 +27,6 @@ export type PlatformWebhookIngestionInput = {
 };
 
 export type PlatformWebhookVerifierOptions = {
-  signatureSecret?: string;
+  /** Test-only deterministic injection; production routes use the tenant vault resolver. */
   credentialCandidates?: string[];
 };
