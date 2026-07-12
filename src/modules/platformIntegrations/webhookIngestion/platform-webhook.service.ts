@@ -150,17 +150,15 @@ async function verifierFor(
     return validateMagentoWebhookFoundation({ headers, body, secret });
   };
 
-  const candidates = options.signatureSecret !== undefined
-    ? [options.signatureSecret]
-    : options.credentialCandidates
-      ?? (platform === StorePlatform.SHOPIFY || platform === StorePlatform.WOOCOMMERCE || platform === StorePlatform.MAGENTO
-        ? Object.values(await resolvePlatformWebhookCredentialCandidates({
-          merchantId,
-          connectionId,
-          platform: platform as "SHOPIFY" | "WOOCOMMERCE" | "MAGENTO",
-          purpose: PLATFORM_WEBHOOK_SIGNATURE_PURPOSE
-        }, client)).filter((value): value is string => Boolean(value))
-        : []);
+  const candidates = options.credentialCandidates
+    ?? (platform === StorePlatform.SHOPIFY || platform === StorePlatform.WOOCOMMERCE || platform === StorePlatform.MAGENTO
+      ? Object.values(await resolvePlatformWebhookCredentialCandidates({
+        merchantId,
+        connectionId,
+        platform: platform as "SHOPIFY" | "WOOCOMMERCE" | "MAGENTO",
+        purpose: PLATFORM_WEBHOOK_SIGNATURE_PURPOSE
+      }, client)).filter((value): value is string => Boolean(value))
+      : []);
 
   if (!candidates.length) return validate(undefined);
   const results = candidates.map((secret) => validate(secret));
