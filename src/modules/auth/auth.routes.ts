@@ -13,6 +13,8 @@ import admin from "../../lib/firebase.js";
 import { changePasswordForAccount, type PasswordAccount } from "./change-password.service.js";
 import { requestPasswordReset, resetPasswordWithToken, verifyPasswordResetToken } from "./password-reset.service.js";
 import { DUMMY_PASSWORD_HASH, hashPassword, verifyPassword, verifyPasswordAndMaybeRehash } from "./password-hashing.js";
+import { clientNetworkKey } from "../../lib/client-network.js";
+import { getAuthAbuseStatus, recordAuthFailure, resetAuthAccountFailures } from "./auth-abuse.service.js";
 import { logger } from "../../lib/logger.js";
 
 export const authRouter = Router();
@@ -106,6 +108,20 @@ function createVerificationCode() {
   return String(randomInt(100000, 1000000));
 }
 
+function sleep(milliseconds: number) {
+  return milliseconds > 0 ? new Promise((resolve) => setTimeout(resolve, milliseconds)) : Promise.resolve();
+}
+
+async function notifyAuthLockout(input: { to: string; businessName: string; accountKind: "USER" | "COURIER" }) {
+  const template = emailTemplates.authLockout({ businessName: input.businessName });
+  await sendTransactionalEmail({
+    to: input.to,
+    type: "auth-lockout",
+    metadata: { accountKind: input.accountKind },
+    ...template
+  }).catch(() => undefined);
+}
+
 async function sendRegistrationCode(email: string, code: string) {
   const template = emailTemplates.verifyEmail({ code });
   await sendTransactionalEmail({
@@ -179,7 +195,12 @@ authRouter.post("/register/request-code", async (req, res) => {
     where: { email }
   });
 
-  if (exists) throw new HttpError(409, "EMAIL_EXISTS");
+  if (exists) {
+    // Keep public self-service registration enumeration-safe. Do comparable
+    // password work but never send a code for an existing account.
+    await hashPassword(body.password);
+    return res.json({ ok: true });
+  }
 
   const code = createVerificationCode();
   const [passwordHash, codeHash] = await Promise.all([
@@ -316,7 +337,10 @@ authRouter.post("/register", async (req, res) => {
     where: { email }
   });
 
-  if (exists) throw new HttpError(409, "EMAIL_EXISTS");
+  if (exists) {
+    await hashPassword(body.password);
+    return res.status(202).json({ ok: true });
+  }
 
   const passwordHash = await hashPassword(body.password);
   const merchantName = body.businessName || body.merchantName!;
@@ -541,6 +565,14 @@ authRouter.post("/login", async (req, res) => {
   const identifier = (body.identifier || body.email || "").trim();
   const mobile = identifier.replace(/\D/g, "");
   const normalizedEmail = normalizeEmail(identifier);
+  const accountKey = /^[6-9]\d{9}$/.test(mobile) ? `phone:${mobile}` : `email:${normalizedEmail}`;
+  const networkKey = clientNetworkKey(req);
+  const abuseStatus = await getAuthAbuseStatus({ accountKey, networkKey });
+  await sleep(abuseStatus.delayMs);
+  if (abuseStatus.blocked) {
+    await verifyPassword(body.password, DUMMY_PASSWORD_HASH);
+    throw new HttpError(400, "INVALID_LOGIN");
+  }
 
   let user = /^[6-9]\d{9}$/.test(mobile)
     ? await prisma.user.findFirst({
@@ -564,11 +596,16 @@ authRouter.post("/login", async (req, res) => {
 
     if (!courierUser || !courierUser.active || !courierUser.courier.active) {
       await verifyPassword(body.password, DUMMY_PASSWORD_HASH);
+      await recordAuthFailure({ accountKey, networkKey });
       throw new HttpError(400, "INVALID_LOGIN");
     }
 
     const courierPassword = await verifyPasswordAndMaybeRehash(body.password, courierUser.passwordHash);
-    if (!courierPassword.valid) throw new HttpError(400, "INVALID_LOGIN");
+    if (!courierPassword.valid) {
+      const failure = await recordAuthFailure({ accountKey, networkKey });
+      if (failure.shouldNotify) await notifyAuthLockout({ to: courierUser.email, businessName: courierUser.courier.name, accountKind: "COURIER" });
+      throw new HttpError(400, "INVALID_LOGIN");
+    }
 
     if (courierPassword.replacementHash) {
       await prisma.courierUser.updateMany({
@@ -583,6 +620,7 @@ authRouter.post("/login", async (req, res) => {
       where: { id: courierUser.id },
       data: { lastLoginAt: new Date() }
     });
+    await resetAuthAccountFailures(accountKey);
 
     const courierRole = UserRole.COURIER_ADMIN;
     const courierActorType = ActorType.COURIER_PARTNER;
@@ -600,6 +638,7 @@ authRouter.post("/login", async (req, res) => {
 
   if (!user) {
     await verifyPassword(body.password, DUMMY_PASSWORD_HASH);
+    await recordAuthFailure({ accountKey, networkKey });
     throw new HttpError(400, "INVALID_LOGIN");
   }
 
@@ -619,7 +658,11 @@ authRouter.post("/login", async (req, res) => {
 
   const password = await verifyPasswordAndMaybeRehash(body.password, user.passwordHash);
 
-  if (!password.valid) throw new HttpError(400, "INVALID_LOGIN");
+  if (!password.valid) {
+    const failure = await recordAuthFailure({ accountKey, networkKey });
+    if (failure.shouldNotify) await notifyAuthLockout({ to: user.email, businessName: user.merchant.name, accountKind: "USER" });
+    throw new HttpError(400, "INVALID_LOGIN");
+  }
 
   if (password.replacementHash) {
     await prisma.user.updateMany({
@@ -629,6 +672,7 @@ authRouter.post("/login", async (req, res) => {
       logger.warn({ accountKind: "USER" }, "Password hash lazy rehash failed");
     });
   }
+  await resetAuthAccountFailures(accountKey);
 
   const token = signSellerToken(user);
   const responseUser = sellerUserResponse(user, user.merchant);

@@ -6,7 +6,7 @@ import { logger } from "../../lib/logger.js";
 import { prisma } from "../../lib/prisma.js";
 import { audit } from "../audit/audit.service.js";
 import { emailTemplates, sendTransactionalEmail } from "../../lib/email.js";
-import { hashPassword } from "./password-hashing.js";
+import { DUMMY_PASSWORD_HASH, hashPassword, verifyPassword } from "./password-hashing.js";
 
 type Db = Prisma.TransactionClient | typeof prisma;
 
@@ -135,6 +135,9 @@ export async function requestPasswordReset(input: { email: string }, client: Db 
   });
 
   if (!courierUser) {
+    // Preserve a comparable password-verification path for unknown accounts;
+    // the response remains neutral and no token/email is created.
+    await verifyPassword(email, DUMMY_PASSWORD_HASH);
     return { ok: true };
   }
 

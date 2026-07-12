@@ -8,6 +8,7 @@ export type TransactionalEmailType =
   | "seller-invite"
   | "courier-invite"
   | "password-reset"
+  | "auth-lockout"
   | "lead-submitted"
   | "wallet-created"
   | "shipment-created"
@@ -216,7 +217,7 @@ export async function sendTransactionalEmail(input: SendTransactionalEmailInput)
       {
         email: {
           type: input.type,
-          to: input.to,
+          to: "[redacted]",
           status: "sent",
           messageId: result.messageId,
           metadata: input.metadata
@@ -232,7 +233,7 @@ export async function sendTransactionalEmail(input: SendTransactionalEmailInput)
       {
         email: {
           type: input.type,
-          to: input.to,
+          to: "[redacted]",
           status: "failed",
           metadata: input.metadata
         },
@@ -394,6 +395,17 @@ export const emailTemplates = {
         "If you did not request this, you can ignore this email."
       ].join("\n"),
       html: `<p>Password reset requested for <strong>${businessName}</strong>.</p><p><a href="${resetLink}">Set a new password</a>.</p><p>If you did not request this, you can ignore this email.</p>`
+    };
+  },
+
+  authLockout({ businessName }: { businessName: string }) {
+    return {
+      subject: "Shipmastr sign-in temporarily locked",
+      text: [
+        `Repeated unsuccessful sign-in attempts were detected for ${businessName}.`,
+        "Sign-in is temporarily locked. If this was not you, reset your password and contact Shipmastr support."
+      ].join("\n"),
+      html: `<p>Repeated unsuccessful sign-in attempts were detected for <strong>${escapeHtml(businessName)}</strong>.</p><p>Sign-in is temporarily locked. If this was not you, reset your password and contact Shipmastr support.</p>`
     };
   },
 

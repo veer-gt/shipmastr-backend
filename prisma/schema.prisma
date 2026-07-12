@@ -4903,6 +4903,22 @@ model PasswordResetToken {
   @@index([usedAt])
 }
 
+model AuthAbuseState {
+  id                   String    @id @default(cuid())
+  scopeKey             String    @unique @map("scope_key")
+  routeClass           String    @map("route_class")
+  windowStart          DateTime  @map("window_start")
+  attempts             Int       @default(0)
+  lockUntil            DateTime? @map("lock_until")
+  notificationSentAt   DateTime? @map("notification_sent_at")
+  createdAt            DateTime  @default(now()) @map("created_at")
+  updatedAt            DateTime  @updatedAt @map("updated_at")
+
+  @@index([routeClass, windowStart])
+  @@index([lockUntil])
+  @@map("auth_abuse_states")
+}
+
 model FirstShipmentRequest {
   id                 String                     @id @default(uuid())
   merchantId         String
