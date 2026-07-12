@@ -11,6 +11,7 @@ import { logger } from "./lib/logger.js";
 import { codDashboardRouter } from "./modules/codDashboard/cod-dashboard.routes.js";
 import { apiRouter } from "./routes/index.js";
 import { errorHandler } from "./middleware/error.js";
+import { validateRequestTarget } from "./middleware/request-target.js";
 
 declare global {
   namespace Express {
@@ -47,6 +48,7 @@ app.use(
 );
 
 app.use(pinoHttp({ logger }));
+app.use(validateRequestTarget);
 
 app.use(
   express.json({

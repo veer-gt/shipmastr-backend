@@ -23,6 +23,7 @@ export type PlatformWebhookIngestionInput = {
   connectionId: string;
   headers: Record<string, unknown>;
   payload: unknown;
+  rawBody?: Buffer;
 };
 
 export type PlatformWebhookVerifierOptions = {

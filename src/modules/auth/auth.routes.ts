@@ -283,7 +283,10 @@ authRouter.post("/register/verify-code", async (req, res) => {
 
   if (exists) {
     await prisma.auditLog.delete({ where: { id: pendingRecord.id } });
-    throw new HttpError(409, "EMAIL_EXISTS");
+    // The verification-code flow is public self-service registration. A race
+    // with another registration must remain neutral rather than disclose that
+    // the address became registered while the code was being verified.
+    return res.json({ ok: true });
   }
 
   const { merchant, user } = await prisma.$transaction(async (tx) => {
@@ -338,11 +341,11 @@ authRouter.post("/register", async (req, res) => {
   });
 
   if (exists) {
-    // The legacy direct-registration endpoint returns an account conflict for
-    // existing records. A larger public-signup flow redesign is required to
-    // make its success payload fully enumeration-neutral without removing the
-    // immediate-token contract, so it remains explicitly documented as deferred.
-    throw new HttpError(409, "EMAIL_EXISTS");
+    // This is a public self-service endpoint. Keep the response neutral and do
+    // comparable password work, but never issue a token or send an email for an
+    // already-registered address.
+    await hashPassword(body.password);
+    return res.json({ ok: true });
   }
 
   const passwordHash = await hashPassword(body.password);
