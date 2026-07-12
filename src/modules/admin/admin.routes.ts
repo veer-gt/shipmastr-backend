@@ -8,7 +8,6 @@ import {
   Prisma,
   SellerKycStatus
 } from "@prisma/client";
-import bcrypt from "bcryptjs";
 import { Router } from "express";
 import { z } from "zod";
 import { prisma } from "../../lib/prisma.js";
@@ -17,6 +16,7 @@ import { normalizeOptionalGstin, normalizeRequiredGstin } from "../../lib/gstin.
 import { HttpError } from "../../lib/httpError.js";
 import { convertLeadToSeller, listLeads, updateLead } from "../leads/lead.service.js";
 import { createSellerInvite } from "../auth/password-reset.service.js";
+import { hashPassword } from "../auth/password-hashing.js";
 import {
   adminFirstShipmentPatchSchema,
   notFoundFirstShipmentRequest
@@ -109,14 +109,14 @@ const courierUserSchema = z.object({
   courierId: z.string().min(1),
   name: z.string().trim().min(2),
   email: z.string().trim().email(),
-  password: z.string().min(8),
+  password: z.string().min(8).max(128),
   active: z.boolean().default(true)
 });
 
 const courierUserPatchSchema = z.object({
   name: z.string().trim().min(2).optional(),
   email: z.string().trim().email().optional(),
-  password: z.string().min(8).optional(),
+  password: z.string().min(8).max(128).optional(),
   active: z.boolean().optional()
 });
 
@@ -526,7 +526,7 @@ adminRouter.get("/courier-users", async (_req, res) => {
 
 adminRouter.post("/courier-users", async (req, res) => {
   const body = courierUserSchema.parse(req.body);
-  const passwordHash = await bcrypt.hash(body.password, 12);
+  const passwordHash = await hashPassword(body.password);
   const user = await prisma.courierUser.create({
     data: {
       courierId: body.courierId,
@@ -571,7 +571,7 @@ adminRouter.patch("/courier-users/:id", async (req, res) => {
   if (body.name !== undefined) data.name = body.name;
   if (body.email !== undefined) data.email = body.email.toLowerCase();
   if (body.active !== undefined) data.active = body.active;
-  if (body.password !== undefined) data.passwordHash = await bcrypt.hash(body.password, 12);
+  if (body.password !== undefined) data.passwordHash = await hashPassword(body.password);
 
   const user = await prisma.courierUser.update({
     where: { id: req.params.id },

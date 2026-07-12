@@ -13,6 +13,7 @@ import admin from "../../lib/firebase.js";
 import { changePasswordForAccount, type PasswordAccount } from "./change-password.service.js";
 import { requestPasswordReset, resetPasswordWithToken, verifyPasswordResetToken } from "./password-reset.service.js";
 import { DUMMY_PASSWORD_HASH, hashPassword, verifyPassword, verifyPasswordAndMaybeRehash } from "./password-hashing.js";
+import { neutralPublicRegistrationResponse } from "./public-auth-response.js";
 import { clientNetworkKey } from "../../lib/client-network.js";
 import { getAuthAbuseStatus, recordAuthFailure, resetAuthAccountFailures } from "./auth-abuse.service.js";
 import { logger } from "../../lib/logger.js";
@@ -199,7 +200,7 @@ authRouter.post("/register/request-code", async (req, res) => {
     // Keep public self-service registration enumeration-safe. Do comparable
     // password work but never send a code for an existing account.
     await hashPassword(body.password);
-    return res.json({ ok: true });
+    return res.json(neutralPublicRegistrationResponse());
   }
 
   const code = createVerificationCode();
@@ -286,7 +287,7 @@ authRouter.post("/register/verify-code", async (req, res) => {
     // The verification-code flow is public self-service registration. A race
     // with another registration must remain neutral rather than disclose that
     // the address became registered while the code was being verified.
-    return res.json({ ok: true });
+    return res.json(neutralPublicRegistrationResponse());
   }
 
   const { merchant, user } = await prisma.$transaction(async (tx) => {
@@ -345,7 +346,7 @@ authRouter.post("/register", async (req, res) => {
     // comparable password work, but never issue a token or send an email for an
     // already-registered address.
     await hashPassword(body.password);
-    return res.json({ ok: true });
+    return res.json(neutralPublicRegistrationResponse());
   }
 
   const passwordHash = await hashPassword(body.password);
