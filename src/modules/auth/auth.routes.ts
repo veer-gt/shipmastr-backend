@@ -17,26 +17,26 @@ import { requestPasswordReset, resetPasswordWithToken, verifyPasswordResetToken 
 export const authRouter = Router();
 
 const registerSchema = z.object({
-  businessName: z.string().min(2).optional(),
-  merchantName: z.string().min(2).optional(),
-  email: z.string().email(),
-  password: z.string().min(8),
-  name: z.string().optional()
-}).refine((body) => body.businessName || body.merchantName, {
+  businessName: z.string().trim().min(2).max(180).optional(),
+  merchantName: z.string().trim().min(2).max(180).optional(),
+  email: z.string().trim().email().max(320),
+  password: z.string().min(8).max(128),
+  name: z.string().trim().max(120).optional()
+}).strict().refine((body) => body.businessName || body.merchantName, {
   path: ["businessName"],
   message: "businessName is required"
 });
 
 const requestRegistrationCodeSchema = z.object({
-  businessName: z.string().trim().min(2),
-  email: z.string().trim().email(),
-  password: z.string().min(8)
-});
+  businessName: z.string().trim().min(2).max(180),
+  email: z.string().trim().email().max(320),
+  password: z.string().min(8).max(128)
+}).strict();
 
 const verifyRegistrationCodeSchema = z.object({
-  email: z.string().trim().email(),
+  email: z.string().trim().email().max(320),
   code: z.string().trim().regex(/^\d{6}$/)
-});
+}).strict();
 
 const PENDING_REGISTRATION_ACTION = "PENDING_REGISTRATION";
 const PENDING_REGISTRATION_ENTITY = "auth_registration";
@@ -50,10 +50,10 @@ type PendingRegistrationPayload = {
 };
 
 const mobileAuthSchema = z.object({
-  phoneNumber: z.string().trim(),
-  firebaseIdToken: z.string().min(1),
-  businessName: z.string().trim().min(2).optional()
-});
+  phoneNumber: z.string().trim().min(7).max(32),
+  firebaseIdToken: z.string().min(1).max(4096),
+  businessName: z.string().trim().min(2).max(180).optional()
+}).strict();
 
 function signSellerToken(user: { id: string; merchantId: string; role: string }) {
   return jwt.sign(
@@ -429,32 +429,32 @@ authRouter.post("/mobile", async (req, res) => {
 });
 
 const loginSchema = z.object({
-  identifier: z.string().trim().min(1).optional(),
-  email: z.string().trim().min(1).optional(),
-  password: z.string()
-}).refine((body) => body.identifier || body.email, {
+  identifier: z.string().trim().min(1).max(320).optional(),
+  email: z.string().trim().min(1).max(320).optional(),
+  password: z.string().min(1).max(128)
+}).strict().refine((body) => body.identifier || body.email, {
   path: ["identifier"],
   message: "identifier is required"
 });
 
 const changePasswordSchema = z.object({
-  currentPassword: z.string().min(1),
-  newPassword: z.string().min(8)
-});
+  currentPassword: z.string().min(1).max(128),
+  newPassword: z.string().min(8).max(128)
+}).strict();
 
 const requestPasswordResetSchema = z.object({
-  email: z.string().trim().email()
-});
+  email: z.string().trim().email().max(320)
+}).strict();
 
 const verifyResetTokenSchema = z.object({
-  token: z.string().trim().min(20)
-});
+  token: z.string().trim().min(20).max(512)
+}).strict();
 
 const resetPasswordSchema = z.object({
-  token: z.string().trim().min(20),
-  newPassword: z.string().min(8).optional(),
-  new_password: z.string().min(8).optional()
-}).refine((body) => body.newPassword || body.new_password, {
+  token: z.string().trim().min(20).max(512),
+  newPassword: z.string().min(8).max(128).optional(),
+  new_password: z.string().min(8).max(128).optional()
+}).strict().refine((body) => body.newPassword || body.new_password, {
   path: ["newPassword"],
   message: "newPassword is required"
 });

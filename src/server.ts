@@ -22,7 +22,7 @@ declare global {
 
 const app = express();
 
-app.set("trust proxy", 1);
+app.set("trust proxy", env.TRUSTED_PROXY_HOPS);
 
 app.use(helmet());
 app.use(compression());

@@ -27,31 +27,44 @@ import {
 
 export const webhooksRouter = Router();
 
-const whatsappProviderCallbackSchema = z.object({
-  providerMessageId: z.string().min(1),
-  merchantId: z.string().min(1).optional(),
-  provider: z.string().min(1).optional(),
-  status: z.string().min(1).optional(),
-  eventType: z.string().min(1).optional(),
-  sender: z.string().min(1).optional(),
-  recipient: z.string().min(1).optional(),
-  templateKey: z.string().min(1).optional(),
-  failureReason: z.string().min(1).optional(),
-  buyerMessage: z.string().min(1).optional(),
+const whatsappProviderCallbackSchema = z.strictObject({
+  providerMessageId: z.string().trim().min(1).max(240),
+  merchantId: z.string().trim().min(1).max(120).optional(),
+  provider: z.string().trim().min(1).max(80).optional(),
+  status: z.string().trim().min(1).max(80).optional(),
+  eventType: z.string().trim().min(1).max(120).optional(),
+  sender: z.string().trim().min(1).max(120).optional(),
+  recipient: z.string().trim().min(1).max(120).optional(),
+  templateKey: z.string().trim().min(1).max(160).optional(),
+  failureReason: z.string().trim().min(1).max(500).optional(),
+  buyerMessage: z.string().trim().min(1).max(2000).optional(),
   metadata: z.record(z.string(), z.any()).optional()
 });
 
-const schema = z.object({
-  externalId: z.string(),
-  eventType: z.string(),
-  merchantId: z.string().optional(),
-  orderId: z.string().optional(),
-  externalOrderId: z.string().optional(),
-  awbNumber: z.string().optional(),
-  trackingNumber: z.string().optional(),
-  latestEvent: z.string().optional(),
-  description: z.string().optional()
-}).passthrough();
+const carrierSchema = z.strictObject({
+  externalId: z.string().trim().min(1).max(240),
+  eventType: z.string().trim().min(1).max(120),
+  status: z.string().trim().min(1).max(80),
+  merchantId: z.string().trim().min(1).max(120).optional(),
+  orderId: z.string().trim().min(1).max(120).optional(),
+  externalOrderId: z.string().trim().min(1).max(240).optional(),
+  awbNumber: z.string().trim().min(1).max(120).optional(),
+  trackingNumber: z.string().trim().min(1).max(120).optional(),
+  courierId: z.string().trim().min(1).max(120).optional(),
+  courierCode: z.string().trim().min(1).max(120).optional(),
+  latestEvent: z.string().trim().min(1).max(500).optional(),
+  description: z.string().trim().min(1).max(2000).optional(),
+  location: z.string().trim().min(1).max(240).optional(),
+  reason: z.string().trim().min(1).max(500).optional(),
+  ndrReason: z.string().trim().min(1).max(500).optional(),
+  buyerConfirmed: z.boolean().optional(),
+  actionRequired: z.string().trim().min(1).max(240).optional(),
+  shipmentId: z.string().trim().min(1).max(120).optional(),
+  courierName: z.string().trim().min(1).max(180).optional(),
+  courierPartnerName: z.string().trim().min(1).max(180).optional(),
+  attemptCount: z.number().int().min(0).max(1000).optional(),
+  receivedAt: z.string().datetime({ offset: true })
+});
 
 const statusByEventType: Record<string, OrderStatus> = {
   "shipment.delivered": "DELIVERED",
@@ -95,7 +108,8 @@ function rtoReasonFromPayload(body: Record<string, unknown>) {
 }
 
 webhooksRouter.post("/whatsapp/provider", async (req, res) => {
-  const rawBody = req.rawBody ?? Buffer.from(JSON.stringify(req.body));
+  if (!req.rawBody) throw new HttpError(400, "RAW_BODY_REQUIRED");
+  const rawBody = req.rawBody;
   const signature = req.header("x-whatsapp-signature") ??
     req.header("x-provider-signature") ??
     req.header("x-hub-signature-256") ??
@@ -137,8 +151,9 @@ webhooksRouter.post("/whatsapp/provider", async (req, res) => {
 webhooksRouter.post(
   "/carrier",
   async (req, res) => {
+    if (!req.rawBody) throw new HttpError(400, "RAW_BODY_REQUIRED");
     const signatureValid = verifyWebhookSignature(
-      req.rawBody ?? Buffer.from(JSON.stringify(req.body)),
+      req.rawBody,
       req.header("x-shipmastr-signature") ?? undefined
     );
 
@@ -156,7 +171,8 @@ webhooksRouter.post(
       headers,
       receivedAt: new Date()
     });
-    const body = schema.parse(normalizedWebhook);
+    const { rawPayload: _rawPayload, ...safeNormalizedWebhook } = normalizedWebhook;
+    const body = carrierSchema.parse(safeNormalizedWebhook);
 
     const existing = await prisma.webhookEvent.findUnique({
       where: {

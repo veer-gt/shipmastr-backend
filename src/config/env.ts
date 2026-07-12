@@ -22,6 +22,7 @@ const schema = z.object({
   JWT_SECRET: z.string().min(32),
   APP_SECRET_PEPPER: z.string().min(16),
   WEBHOOK_SECRET: z.string().min(32),
+  TRUSTED_PROXY_HOPS: z.coerce.number().int().min(0).max(5).default(0),
   SHIPMASTR_INTERNAL_SECRET: z.string().min(32).optional(),
   CORS_ORIGINS: z.string().default(""),
   SMTP_HOST: z.string().optional(),
