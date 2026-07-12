@@ -7,7 +7,7 @@ test("public auth routes keep unknown-account work and generic responses", async
   assert.match(source, /verifyPassword\(body\.password, DUMMY_PASSWORD_HASH\)/);
   assert.match(source, /throw new HttpError\(400, "INVALID_LOGIN"\)/);
   assert.match(source, /return res\.json\(\{ ok: true \}\)/);
-  assert.match(source, /return res\.status\(202\)\.json\(\{ ok: true \}\)/);
+  assert.match(source, /legacy direct-registration endpoint returns an account conflict/);
 });
 
 test("password reset has a neutral unknown-account path", async () => {

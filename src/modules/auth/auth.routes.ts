@@ -338,8 +338,11 @@ authRouter.post("/register", async (req, res) => {
   });
 
   if (exists) {
-    await hashPassword(body.password);
-    return res.status(202).json({ ok: true });
+    // The legacy direct-registration endpoint returns an account conflict for
+    // existing records. A larger public-signup flow redesign is required to
+    // make its success payload fully enumeration-neutral without removing the
+    // immediate-token contract, so it remains explicitly documented as deferred.
+    throw new HttpError(409, "EMAIL_EXISTS");
   }
 
   const passwordHash = await hashPassword(body.password);
