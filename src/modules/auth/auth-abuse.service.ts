@@ -1,5 +1,5 @@
-import { createHash } from "node:crypto";
-import type { Prisma } from "@prisma/client";
+import { createHash, randomUUID } from "node:crypto";
+import { Prisma } from "@prisma/client";
 import { env } from "../../config/env.js";
 import { prisma } from "../../lib/prisma.js";
 
@@ -9,6 +9,22 @@ type AuthAbuseModel = {
   upsert(input: unknown): Promise<any>;
   update(input: unknown): Promise<any>;
   deleteMany(input: unknown): Promise<unknown>;
+};
+
+type AuthAbuseRow = {
+  id: string;
+  scopeKey: string;
+  routeClass: string;
+  windowStart: Date;
+  attempts: number;
+  lockUntil: Date | null;
+  notificationSentAt: Date | null;
+  createdAt: Date;
+  updatedAt: Date;
+};
+
+type RawQueryClient = {
+  $queryRaw<T>(query: unknown): Promise<T>;
 };
 
 export const AUTH_ABUSE_POLICY = Object.freeze({
@@ -50,6 +66,25 @@ function activeState(state: any, now: Date) {
   return state;
 }
 
+function rawQueryClient(client: Db) {
+  const candidate = client as unknown as Partial<RawQueryClient>;
+  return typeof candidate.$queryRaw === "function" ? candidate as RawQueryClient : null;
+}
+
+function mapAuthAbuseRow(row: Record<string, unknown>): AuthAbuseRow {
+  return {
+    id: String(row.id),
+    scopeKey: String(row.scopeKey),
+    routeClass: String(row.routeClass),
+    windowStart: new Date(String(row.windowStart)),
+    attempts: Number(row.attempts),
+    lockUntil: row.lockUntil ? new Date(String(row.lockUntil)) : null,
+    notificationSentAt: row.notificationSentAt ? new Date(String(row.notificationSentAt)) : null,
+    createdAt: new Date(String(row.createdAt)),
+    updatedAt: new Date(String(row.updatedAt))
+  };
+}
+
 export function delayForAttempts(attempts: number) {
   if (attempts < AUTH_ABUSE_POLICY.delayStartAttempt) return 0;
   const exponent = Math.max(0, attempts - AUTH_ABUSE_POLICY.delayStartAttempt);
@@ -60,6 +95,39 @@ export function delayForAttempts(attempts: number) {
 }
 
 async function incrementScope(client: Db, scopeKey: string, routeClass: string, now: Date) {
+  const raw = rawQueryClient(client);
+  if (raw) {
+    const rows = await raw.$queryRaw<Array<Record<string, unknown>>>(Prisma.sql`
+      INSERT INTO "auth_abuse_states" ("id", "scope_key", "route_class", "window_start", "attempts", "updated_at")
+      VALUES (${randomUUID()}, ${scopeKey}, ${routeClass}, ${windowStart(now)}, 1, CURRENT_TIMESTAMP)
+      ON CONFLICT ("scope_key") DO UPDATE SET
+        "route_class" = EXCLUDED."route_class",
+        "window_start" = CASE
+          WHEN "auth_abuse_states"."window_start" < EXCLUDED."window_start" THEN EXCLUDED."window_start"
+          ELSE "auth_abuse_states"."window_start"
+        END,
+        "attempts" = CASE
+          WHEN "auth_abuse_states"."window_start" < EXCLUDED."window_start" THEN 1
+          ELSE "auth_abuse_states"."attempts" + 1
+        END,
+        "lock_until" = CASE
+          WHEN "auth_abuse_states"."window_start" < EXCLUDED."window_start" THEN NULL
+          ELSE "auth_abuse_states"."lock_until"
+        END,
+        "notification_sent_at" = CASE
+          WHEN "auth_abuse_states"."window_start" < EXCLUDED."window_start" THEN NULL
+          ELSE "auth_abuse_states"."notification_sent_at"
+        END,
+        "updated_at" = CURRENT_TIMESTAMP
+      RETURNING
+        "id", "scope_key" AS "scopeKey", "route_class" AS "routeClass",
+        "window_start" AS "windowStart", "attempts", "lock_until" AS "lockUntil",
+        "notification_sent_at" AS "notificationSentAt", "created_at" AS "createdAt",
+        "updated_at" AS "updatedAt"
+    `);
+    if (!rows[0]) throw new Error("Auth abuse state upsert returned no row");
+    return mapAuthAbuseRow(rows[0]);
+  }
   const authAbuseState = model(client);
   const current = activeState(await authAbuseState.findUnique({ where: { scopeKey } }), now);
   if (!current) {
@@ -140,14 +208,37 @@ export async function recordAuthFailure(input: {
     let accountState = account;
     let shouldNotify = false;
     if (account.attempts >= AUTH_ABUSE_POLICY.accountLockThreshold && !accountWasLocked) {
-      accountState = await model(tx).update({
-        where: { id: account.id },
-        data: {
-          lockUntil: new Date(now.getTime() + AUTH_ABUSE_POLICY.lockMs),
-          notificationSentAt: null
+      const raw = rawQueryClient(tx);
+      if (raw) {
+        const lockedRows = await raw.$queryRaw<Array<Record<string, unknown>>>(Prisma.sql`
+          UPDATE "auth_abuse_states"
+          SET "lock_until" = ${new Date(now.getTime() + AUTH_ABUSE_POLICY.lockMs)},
+              "notification_sent_at" = NULL,
+              "updated_at" = CURRENT_TIMESTAMP
+          WHERE "id" = ${account.id}
+            AND ("lock_until" IS NULL OR "lock_until" <= ${now})
+          RETURNING
+            "id", "scope_key" AS "scopeKey", "route_class" AS "routeClass",
+            "window_start" AS "windowStart", "attempts", "lock_until" AS "lockUntil",
+            "notification_sent_at" AS "notificationSentAt", "created_at" AS "createdAt",
+            "updated_at" AS "updatedAt"
+        `);
+        if (lockedRows[0]) {
+          accountState = mapAuthAbuseRow(lockedRows[0]);
+          shouldNotify = true;
+        } else {
+          accountState = await model(tx).findUnique({ where: { id: account.id } }) ?? account;
         }
-      });
-      shouldNotify = true;
+      } else {
+        accountState = await model(tx).update({
+          where: { id: account.id },
+          data: {
+            lockUntil: new Date(now.getTime() + AUTH_ABUSE_POLICY.lockMs),
+            notificationSentAt: null
+          }
+        });
+        shouldNotify = true;
+      }
     }
     return {
       blocked: Boolean(shouldNotify || (accountState.lockUntil && new Date(accountState.lockUntil).getTime() > now.getTime()) || network.attempts >= AUTH_ABUSE_POLICY.networkLimit),
