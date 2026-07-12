@@ -1,5 +1,4 @@
 import { createHash, randomBytes } from "node:crypto";
-import bcrypt from "bcryptjs";
 import { PasswordResetPurpose, type Prisma } from "@prisma/client";
 import { env } from "../../config/env.js";
 import { HttpError } from "../../lib/httpError.js";
@@ -7,6 +6,7 @@ import { logger } from "../../lib/logger.js";
 import { prisma } from "../../lib/prisma.js";
 import { audit } from "../audit/audit.service.js";
 import { emailTemplates, sendTransactionalEmail } from "../../lib/email.js";
+import { hashPassword } from "./password-hashing.js";
 
 type Db = Prisma.TransactionClient | typeof prisma;
 
@@ -193,7 +193,7 @@ export async function resetPasswordWithToken(input: {
     throw new HttpError(400, "INVALID_OR_EXPIRED_RESET_TOKEN");
   }
 
-  const passwordHash = await bcrypt.hash(input.newPassword, 12);
+  const passwordHash = await hashPassword(input.newPassword);
   const now = new Date();
 
   const completeReset = async (tx: Db) => {

@@ -1,5 +1,4 @@
 import { Router, type Request } from "express";
-import bcrypt from "bcryptjs";
 import { randomInt } from "node:crypto";
 import jwt from "jsonwebtoken";
 import { z } from "zod";
@@ -13,6 +12,8 @@ import { isProtectedMasterAdminEmail } from "../../lib/masterAdmin.js";
 import admin from "../../lib/firebase.js";
 import { changePasswordForAccount, type PasswordAccount } from "./change-password.service.js";
 import { requestPasswordReset, resetPasswordWithToken, verifyPasswordResetToken } from "./password-reset.service.js";
+import { DUMMY_PASSWORD_HASH, hashPassword, verifyPassword, verifyPasswordAndMaybeRehash } from "./password-hashing.js";
+import { logger } from "../../lib/logger.js";
 
 export const authRouter = Router();
 
@@ -182,8 +183,8 @@ authRouter.post("/register/request-code", async (req, res) => {
 
   const code = createVerificationCode();
   const [passwordHash, codeHash] = await Promise.all([
-    bcrypt.hash(body.password, 12),
-    bcrypt.hash(code, 12)
+    hashPassword(body.password),
+    hashPassword(code)
   ]);
 
   const pendingRecord = await prisma.auditLog.create({
@@ -241,7 +242,7 @@ authRouter.post("/register/verify-code", async (req, res) => {
     throw new HttpError(429, "TOO_MANY_CODE_ATTEMPTS");
   }
 
-  const valid = await bcrypt.compare(body.code, pending.codeHash);
+  const valid = await verifyPassword(body.code, pending.codeHash);
   if (!valid) {
     await prisma.auditLog.update({
       where: { id: pendingRecord.id },
@@ -317,7 +318,7 @@ authRouter.post("/register", async (req, res) => {
 
   if (exists) throw new HttpError(409, "EMAIL_EXISTS");
 
-  const passwordHash = await bcrypt.hash(body.password, 12);
+  const passwordHash = await hashPassword(body.password);
   const merchantName = body.businessName || body.merchantName!;
 
   const merchant = await prisma.merchant.create({
@@ -397,7 +398,7 @@ authRouter.post("/mobile", async (req, res) => {
 
   const merchantName = body.businessName || `Seller ${requestedPhone.mobile.slice(-4)}`;
   const email = phoneSellerEmail(requestedPhone.mobile);
-  const passwordHash = await bcrypt.hash(`${decoded.uid}:${requestedPhone.e164}:${env.JWT_SECRET}`, 12);
+  const passwordHash = await hashPassword(`${decoded.uid}:${requestedPhone.e164}:${env.JWT_SECRET}`);
 
   const merchant = await prisma.merchant.create({
     data: {
@@ -562,11 +563,21 @@ authRouter.post("/login", async (req, res) => {
     });
 
     if (!courierUser || !courierUser.active || !courierUser.courier.active) {
+      await verifyPassword(body.password, DUMMY_PASSWORD_HASH);
       throw new HttpError(400, "INVALID_LOGIN");
     }
 
-    const validCourierPassword = await bcrypt.compare(body.password, courierUser.passwordHash);
-    if (!validCourierPassword) throw new HttpError(400, "INVALID_LOGIN");
+    const courierPassword = await verifyPasswordAndMaybeRehash(body.password, courierUser.passwordHash);
+    if (!courierPassword.valid) throw new HttpError(400, "INVALID_LOGIN");
+
+    if (courierPassword.replacementHash) {
+      await prisma.courierUser.updateMany({
+        where: { id: courierUser.id, passwordHash: courierUser.passwordHash },
+        data: { passwordHash: courierPassword.replacementHash }
+      }).catch(() => {
+        logger.warn({ accountKind: "COURIER" }, "Password hash lazy rehash failed");
+      });
+    }
 
     await prisma.courierUser.update({
       where: { id: courierUser.id },
@@ -587,7 +598,10 @@ authRouter.post("/login", async (req, res) => {
     });
   }
 
-  if (!user) throw new HttpError(400, "INVALID_LOGIN");
+  if (!user) {
+    await verifyPassword(body.password, DUMMY_PASSWORD_HASH);
+    throw new HttpError(400, "INVALID_LOGIN");
+  }
 
   if (
     isProtectedMasterAdminEmail(user.email) &&
@@ -603,9 +617,18 @@ authRouter.post("/login", async (req, res) => {
     });
   }
 
-  const valid = await bcrypt.compare(body.password, user.passwordHash);
+  const password = await verifyPasswordAndMaybeRehash(body.password, user.passwordHash);
 
-  if (!valid) throw new HttpError(400, "INVALID_LOGIN");
+  if (!password.valid) throw new HttpError(400, "INVALID_LOGIN");
+
+  if (password.replacementHash) {
+    await prisma.user.updateMany({
+      where: { id: user.id, passwordHash: user.passwordHash },
+      data: { passwordHash: password.replacementHash }
+    }).catch(() => {
+      logger.warn({ accountKind: "USER" }, "Password hash lazy rehash failed");
+    });
+  }
 
   const token = signSellerToken(user);
   const responseUser = sellerUserResponse(user, user.merchant);
