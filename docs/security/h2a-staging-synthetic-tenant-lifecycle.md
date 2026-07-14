@@ -131,7 +131,7 @@ staging.
 
 ## Future staging runner
 
-`/Users/mac/Downloads/h2a-second-tenant-runner.py` is compiled but not executed.
+`/Users/mac/Downloads/shipmastr-h2a-second-tenant-runner.py` is compiled but not executed.
 It uses only Python standard-library HTTP and `getpass`, pins a caller-supplied
 HTTPS candidate origin, rejects redirects and origin changes, requires explicit
 candidate revision/digest and 0%/100% traffic guard inputs, and requires H2B
