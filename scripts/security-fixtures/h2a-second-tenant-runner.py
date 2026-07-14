@@ -50,6 +50,15 @@ class CandidateClient:
         self.origin = origin.rstrip("/")
         self.origin_parts = (parsed.scheme.lower(), parsed.hostname.lower(), parsed.port or 443)
         self.opener = urllib.request.build_opener(NoRedirect())
+        self.sensitive_terms: set[str] = set()
+
+    def register_sensitive(self, *values: str) -> None:
+        self.sensitive_terms.update(value for value in values if value)
+
+    def scan_response(self, raw: bytes) -> None:
+        text = raw.decode("utf-8", "replace")
+        if any(term in text for term in self.sensitive_terms):
+            raise RunnerFailure("H2A_CROSS_TENANT_SECRET_OR_PII_LEAK")
 
     def _url(self, path: str) -> str:
         target = urllib.parse.urlsplit(urllib.parse.urljoin(self.origin + "/", path.lstrip("/")))
@@ -72,6 +81,7 @@ class CandidateClient:
             raw = error.read()
         except (urllib.error.URLError, TimeoutError):
             raise RunnerFailure("H2A_CROSS_TENANT_CANDIDATE_UNAVAILABLE")
+        self.scan_response(raw)
         if expected is not None and status not in expected:
             raise RunnerFailure("H2A_CROSS_TENANT_UNEXPECTED_HTTP_STATUS")
         try:
@@ -91,9 +101,10 @@ class CandidateClient:
                 response.read()
         except urllib.error.HTTPError as error:
             status = error.code
-            error.read()
+            raw = error.read()
         except (urllib.error.URLError, TimeoutError):
             raise RunnerFailure("H2A_CROSS_TENANT_CANDIDATE_UNAVAILABLE")
+        self.scan_response(raw)
         if status not in expected:
             raise RunnerFailure("H2A_CROSS_TENANT_CRYPTOGRAPHIC_ISOLATION_FAILED")
         return status
@@ -121,6 +132,7 @@ def token_from_login(client: CandidateClient, email: str, password: str) -> str:
     token = response.get("token")
     if not isinstance(token, str) or not token:
         raise RunnerFailure("H2A_CROSS_TENANT_LOGIN_TOKEN_MISSING")
+    client.register_sensitive(token)
     return token
 
 
@@ -206,6 +218,7 @@ def main() -> int:
         tenant_a_email = os.environ.get("H2A_TENANT_A_EMAIL", "")
         if not tenant_a_email:
             raise RunnerFailure("H2A_CROSS_TENANT_TENANT_A_EMAIL_REQUIRED")
+        client.register_sensitive(master_password, tenant_a_password)
         master_token = token_from_login(client, os.environ["H2A_MASTER_ADMIN_EMAIL"], master_password)
         tenant_a_token = token_from_login(client, tenant_a_email, tenant_a_password)
         evidence["checks"]["master_login"] = True
@@ -213,6 +226,8 @@ def main() -> int:
 
         timestamp = time.strftime("%Y%m%dT%H%M%SZ", time.gmtime())
         tenant_b_password = secrets.token_urlsafe(32)
+        client.register_sensitive(tenant_b_password)
+        tenant_b_email = f"h2a-tenant-b-{timestamp}@shipmastr.invalid"
         _, created = client.request(
             "POST",
             "/api/admin/security-fixtures/h2a-tenants",
@@ -222,7 +237,7 @@ def main() -> int:
                 "confirmation": "CREATE H2A STAGING SYNTHETIC TENANT",
                 "merchantName": "H2A STAGING SYNTHETIC TENANT B — DO NOT USE",
                 "ownerName": "H2A Synthetic Tenant B Owner",
-                "email": f"h2a-tenant-b-{timestamp}@shipmastr.invalid",
+                "email": tenant_b_email,
                 "storeUrl": "https://h2a-tenant-b.example",
                 "password": tenant_b_password,
                 "expiresInMinutes": 60,
@@ -232,7 +247,7 @@ def main() -> int:
         fixture_id = created.get("fixtureId")
         if not isinstance(fixture_id, str) or not fixture_id:
             raise RunnerFailure("H2A_CROSS_TENANT_FIXTURE_ID_MISSING")
-        tenant_b_token = token_from_login(client, f"h2a-tenant-b-{timestamp}@shipmastr.invalid", tenant_b_password)
+        tenant_b_token = token_from_login(client, tenant_b_email, tenant_b_password)
         _, tenant_a_me = client.request("GET", "/api/auth/me", tenant_a_token, expected={200})
         _, tenant_b_me = client.request("GET", "/api/auth/me", tenant_b_token, expected={200})
         evidence["checks"]["tenant_scope_distinct"] = tenant_a_me.get("merchantId") != tenant_b_me.get("merchantId")
@@ -266,7 +281,7 @@ def main() -> int:
         evidence["checks"]["secret_leak_scan"] = True
         cleanup_fixture(client, master_token, fixture_id)
         fixture_cleaned = True
-        prove_tenant_b_auth_disabled(client, f"h2a-tenant-b-{timestamp}@shipmastr.invalid", tenant_b_password, tenant_b_token)
+        prove_tenant_b_auth_disabled(client, tenant_b_email, tenant_b_password, tenant_b_token)
         evidence["checks"]["tenant_b_login_revoked_after_cleanup"] = True
         evidence["checks"]["tenant_b_token_revoked_after_cleanup"] = True
         evidence["status"] = GREEN

@@ -63,4 +63,6 @@ test("runner contains no cloud, database, migration, deployment, traffic, or pro
   for (const forbidden of ["gcloud", "DATABASE_URL", "subprocess", "psycopg", "docker", "podman", "cloud_sql_proxy", "n8n"]) {
     assert.equal(runner.toLowerCase().includes(forbidden.toLowerCase()), false, forbidden);
   }
+  assert.match(runner, /register_sensitive/);
+  assert.match(runner, /scan_response/);
 });
