@@ -150,6 +150,30 @@ def revoke(client: CandidateClient, token: str, connection_id: str) -> None:
     client.request("DELETE", f"/api/shipping/platform-connections/{connection_id}/webhook-credential", token, expected={200})
 
 
+def cleanup_fixture(client: CandidateClient, token: str, fixture_id: str) -> None:
+    client.request(
+        "POST",
+        f"/api/admin/security-fixtures/h2a-tenants/{fixture_id}/cleanup",
+        token,
+        {"confirmation": "CLEAN H2A STAGING SYNTHETIC TENANT"},
+        expected={200},
+    )
+
+
+def prove_tenant_b_auth_disabled(client: CandidateClient, email: str, password: str, token: str) -> None:
+    login_status, _ = client.request(
+        "POST",
+        "/api/auth/login",
+        body={"identifier": email, "password": password},
+        expected={400, 401, 403},
+    )
+    if login_status not in {400, 401, 403}:
+        raise RunnerFailure("H2A_CROSS_TENANT_CLEANUP_LOGIN_NOT_REVOKED")
+    me_status, _ = client.request("GET", "/api/auth/me", token, expected={401, 403})
+    if me_status not in {401, 403}:
+        raise RunnerFailure("H2A_CROSS_TENANT_CLEANUP_TOKEN_NOT_REVOKED")
+
+
 def signed_webhook(client: CandidateClient, token: str, platform: str, connection_id: str, secret: str, delivery_id: str, expected: set[int] | None = None) -> int:
     raw = json.dumps({"synthetic": True, "delivery": delivery_id}, separators=(",", ":")).encode()
     signature = base64.b64encode(hmac.new(secret.encode(), raw, hashlib.sha256).digest()).decode()
@@ -171,6 +195,7 @@ def main() -> int:
     tenant_a_token = None
     master_token = None
     fixture_id = None
+    fixture_cleaned = False
     tenant_a_connections: list[str] = []
     tenant_b_connections: list[str] = []
     client = None
@@ -239,6 +264,11 @@ def main() -> int:
             revoke(client, tenant_b_token, tenant_b_connections[index])
         evidence["checks"]["provider_rotation_revoke"] = True
         evidence["checks"]["secret_leak_scan"] = True
+        cleanup_fixture(client, master_token, fixture_id)
+        fixture_cleaned = True
+        prove_tenant_b_auth_disabled(client, f"h2a-tenant-b-{timestamp}@shipmastr.invalid", tenant_b_password, tenant_b_token)
+        evidence["checks"]["tenant_b_login_revoked_after_cleanup"] = True
+        evidence["checks"]["tenant_b_token_revoked_after_cleanup"] = True
         evidence["status"] = GREEN
         return 0
     except RunnerFailure as error:
@@ -258,9 +288,9 @@ def main() -> int:
                     revoke(client, tenant_a_token, connection_id)
                 except RunnerFailure:
                     pass
-        if client and fixture_id and master_token:
+        if client and fixture_id and master_token and not fixture_cleaned:
             try:
-                client.request("POST", f"/api/admin/security-fixtures/h2a-tenants/{fixture_id}/cleanup", master_token, {"confirmation": "CLEAN H2A STAGING SYNTHETIC TENANT"}, expected={200})
+                cleanup_fixture(client, master_token, fixture_id)
             except RunnerFailure:
                 evidence["cleanup"]["failed"] = True
         evidence["remaining_temporary_resources"] = False
