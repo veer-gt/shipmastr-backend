@@ -17,6 +17,7 @@ const envBoolean = (defaultValue: boolean) => z.preprocess((value) => {
 const schema = z.object({
   NODE_ENV: z.enum(["development", "test", "production"]).default("development"),
   APP_ENV: z.enum(["development", "test", "staging", "production"]).default("production"),
+  H2A_SYNTHETIC_TENANT_LIFECYCLE_ENABLED: envBoolean(false),
   PORT: z.coerce.number().default(8080),
   DATABASE_URL: z.string().min(1),
   JWT_SECRET: z.string().min(32),
@@ -198,6 +199,10 @@ const schema = z.object({
 
 const parsedEnv = schema.parse(process.env);
 assertCheckoutDevOtpCodeProductionSafety(parsedEnv);
+
+if (parsedEnv.H2A_SYNTHETIC_TENANT_LIFECYCLE_ENABLED && parsedEnv.APP_ENV !== "staging") {
+  throw new Error("H2A_SYNTHETIC_TENANT_LIFECYCLE_FORBIDDEN");
+}
 
 function isValidPlatformCredentialKey(value: string | undefined) {
   if (!value) return false;

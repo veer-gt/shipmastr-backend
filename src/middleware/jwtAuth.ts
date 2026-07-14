@@ -4,6 +4,7 @@ import { env } from "../config/env.js";
 import { canonicalRoleForAccount, isAdminRole, isCourierRole, normalizeAccountRole, UserRole } from "../lib/accountRoles.js";
 import { isInternalAdminUser, isInternalMasterAdminUser } from "../lib/masterAdmin.js";
 import { prisma } from "../lib/prisma.js";
+import { fixtureAuthenticationAllowed } from "../modules/securityFixtures/h2a-staging-tenant.service.js";
 
 type SellerJwtPayload = {
   userId: string;
@@ -24,7 +25,7 @@ function readToken(req: Request) {
   return "";
 }
 
-export function requireJwtAuth(req: Request, res: Response, next: NextFunction) {
+export async function requireJwtAuth(req: Request, res: Response, next: NextFunction) {
   const token = readToken(req);
 
   if (!token) {
@@ -37,6 +38,10 @@ export function requireJwtAuth(req: Request, res: Response, next: NextFunction) 
     const role = normalizeAccountRole(decoded.role);
     if (!decoded.userId || !decoded.merchantId || role === UserRole.COURIER) {
       return res.status(401).json({ error: "Token is not valid" });
+    }
+
+    if (!(await fixtureAuthenticationAllowed(decoded.userId))) {
+      return res.status(401).json({ error: "FIXTURE_AUTH_DISABLED" });
     }
 
     req.auth = {

@@ -73,6 +73,16 @@ try {
   }
   console.log("H2A platform webhook credential schema verified without inspecting application rows");
 
+  const syntheticTenantTable = runPsql(name, "SELECT to_regclass('public.security_fixture_tenants');");
+  if (syntheticTenantTable !== "security_fixture_tenants") throw new Error("H2A synthetic tenant lifecycle table was not created");
+  const syntheticTenantColumns = runPsql(name, "SELECT string_agg(column_name, ',' ORDER BY ordinal_position) FROM information_schema.columns WHERE table_schema='public' AND table_name='security_fixture_tenants';");
+  for (const requiredColumn of ["fixture_kind", "status", "active_slot", "merchant_id", "owner_user_id", "creator_internal_user_id", "expires_at", "cleanup_at", "last_error_code"]) {
+    if (!syntheticTenantColumns.split(",").includes(requiredColumn)) throw new Error(`H2A synthetic tenant column missing: ${requiredColumn}`);
+  }
+  const syntheticTenantIndexes = runPsql(name, "SELECT string_agg(indexname, ',' ORDER BY indexname) FROM pg_indexes WHERE schemaname='public' AND tablename='security_fixture_tenants';");
+  if (!syntheticTenantIndexes.includes("security_fixture_tenants_active_slot_key")) throw new Error("H2A synthetic tenant active-slot uniqueness is missing");
+  console.log("H2A synthetic tenant lifecycle schema verified without inspecting application rows");
+
   const build = spawnSync("npm", ["run", "build"], { cwd: root, env: safeEnv, encoding: "utf8" });
   process.stdout.write(safeOutput(build.stdout));
   process.stderr.write(safeOutput(build.stderr));
@@ -85,6 +95,14 @@ try {
   process.stdout.write(safeOutput(tests.stdout));
   process.stderr.write(safeOutput(tests.stderr));
   if (tests.status !== 0) throw new Error("DB-backed H1 scratch tests failed");
+  const lifecycleScratch = spawnSync(process.execPath, ["scripts/security-fixtures/h2a-synthetic-tenant-scratch.test.mjs"], {
+    cwd: root,
+    env: { ...safeEnv, RUN_SCRATCH_DB_TESTS: "1" },
+    encoding: "utf8"
+  });
+  process.stdout.write(safeOutput(lifecycleScratch.stdout));
+  process.stderr.write(safeOutput(lifecycleScratch.stderr));
+  if (lifecycleScratch.status !== 0) throw new Error("H2A synthetic tenant scratch tests failed");
 } finally {
   try {
     drop();

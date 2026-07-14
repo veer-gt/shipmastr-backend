@@ -18,6 +18,7 @@ import { clientNetworkKey } from "../../lib/client-network.js";
 import { getAuthAbuseStatus, recordAuthFailure, resetAuthAccountFailures } from "./auth-abuse.service.js";
 import { logger } from "../../lib/logger.js";
 import { courierAuthIdentity, courierAuthResponse } from "../courier/courier-auth-response.js";
+import { fixtureAuthenticationAllowed } from "../securityFixtures/h2a-staging-tenant.service.js";
 
 export const authRouter = Router();
 
@@ -619,6 +620,11 @@ authRouter.post("/login", async (req, res) => {
     throw new HttpError(400, "INVALID_LOGIN");
   }
 
+  if (!(await fixtureAuthenticationAllowed(user.id))) {
+    await verifyPassword(body.password, DUMMY_PASSWORD_HASH);
+    throw new HttpError(400, "INVALID_LOGIN");
+  }
+
   if (
     isProtectedMasterAdminEmail(user.email) &&
     (String(user.role).toUpperCase() !== "MASTER_ADMIN" || String(user.userType || "").toUpperCase() !== "INTERNAL_SHIPMASTR")
@@ -706,6 +712,7 @@ authRouter.get("/me", async (req, res) => {
     });
 
     if (!user) return res.status(401).json({ error: "Token is not valid" });
+    if (!(await fixtureAuthenticationAllowed(user.id))) return res.status(401).json({ error: "Token is not valid" });
 
     return res.json({
       id: user.id,
