@@ -291,9 +291,10 @@ def main() -> int:
         if client and fixture_id and master_token and not fixture_cleaned:
             try:
                 cleanup_fixture(client, master_token, fixture_id)
+                fixture_cleaned = True
             except RunnerFailure:
                 evidence["cleanup"]["failed"] = True
-        evidence["remaining_temporary_resources"] = False
+        evidence["remaining_temporary_resources"] = bool(fixture_id and not fixture_cleaned)
         evidence_path = Path(os.environ.get("H2A_EVIDENCE_PATH", "h2a-cross-tenant-evidence.json"))
         evidence_path.parent.mkdir(parents=True, exist_ok=True)
         evidence_path.write_text(json.dumps(evidence, sort_keys=True) + "\n", encoding="utf-8")
