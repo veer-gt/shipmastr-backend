@@ -48,13 +48,13 @@ request-body bypass exists.
 ## Route contract
 
 The isolated router (`src/routes/index.ts:87-96` and
-`src/modules/securityFixtures/h2a-staging-tenant.routes.ts:7-29`) exposes only:
+`src/modules/securityFixtures/h2a-staging-tenant.routes.ts:7-30`) exposes only:
 
 - `POST /api/admin/security-fixtures/h2a-tenants`
 - `GET /api/admin/security-fixtures/h2a-tenants/:fixtureId`
 - `POST /api/admin/security-fixtures/h2a-tenants/:fixtureId/cleanup`
 
-Creation validation (`src/modules/securityFixtures/h2a-staging-tenant.validation.ts:1-45`)
+Creation validation (`src/modules/securityFixtures/h2a-staging-tenant.validation.ts:1-33`)
 requires the exact synthetic fixture type, markers, `.invalid` email,
 `.example` HTTPS URL, 24–128 character password, and 15–120 minute expiry.
 Zod strict parsing rejects unknown fields and does not coerce malformed values.
