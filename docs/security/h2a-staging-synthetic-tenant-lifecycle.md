@@ -73,7 +73,7 @@ synthetic Merchant/owner and `RESTRICT` for the creator; no cascade reaches
 AuditLog, webhook evidence, journal, telemetry, orders, shipments, payments,
 wallets, ledger, reconciliation, or settlements.
 
-Creation (`src/modules/securityFixtures/h2a-staging-tenant.service.ts:102-157`)
+Creation (`src/modules/securityFixtures/h2a-staging-tenant.service.ts:109-164`)
 claims the nullable unique slot inside a serializable Prisma
 transaction, then creates exactly one synthetic Merchant and one owner. A
 unique conflict maps to `H2A_SYNTHETIC_TENANT_ALREADY_ACTIVE`; losing
@@ -83,7 +83,7 @@ back.
 ## Authentication and expiry
 
 The normal Merchant login and `/auth/me` paths remain the contract. The
-fixture check is at `src/modules/securityFixtures/h2a-staging-tenant.service.ts:88-100`
+fixture check is at `src/modules/securityFixtures/h2a-staging-tenant.service.ts:95-107`
 and its login integration is at `src/modules/auth/auth.routes.ts:623-626,714-715`.
 A fixture
 owner is accepted only while its fixture is `ACTIVE` and `expiresAt` is in the
@@ -93,7 +93,7 @@ an already-issued token fails immediately after expiry or when cleanup enters
 
 ## Cleanup state machine
 
-Cleanup (`src/modules/securityFixtures/h2a-staging-tenant.service.ts:190-259`)
+Cleanup (`src/modules/securityFixtures/h2a-staging-tenant.service.ts:197-266`)
 atomically claims `ACTIVE`, `EXPIRED`, or recoverable `FAILED` into
 `CLEANING`. That state immediately disables fixture authentication. It then
 finds only connections owned by the fixture Merchant whose exact store marker is
