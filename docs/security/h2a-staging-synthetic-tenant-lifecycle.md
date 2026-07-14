@@ -140,7 +140,9 @@ bodies remain in memory; the 0600 evidence file contains only statuses/counts.
 The runner has no cloud, database, migration, deployment, traffic, email,
 provider, or business-record code. Its green result is
 `H2A_CROSS_TENANT_STAGING_GREEN_AWAITING_TRAFFIC_APPROVAL`; traffic approval is
-outside this task.
+outside this task. It scans raw candidate responses for registered passwords and
+tokens before decoding them; no response body or candidate diagnostic is
+written to evidence.
 
 ## Staging prerequisites and retirement
 
