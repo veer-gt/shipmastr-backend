@@ -34,7 +34,7 @@ settlement, or provider-registration feature.
 
 The feature is mounted only when `APP_ENV=staging` and
 `H2A_SYNTHETIC_TENANT_LIFECYCLE_ENABLED=true`. The flag defaults to `false` in
-`src/config/env.ts:17-25,200-205` and `.env.example:1-6`. Startup rejects a true flag outside
+`src/config/env.ts:17-25,200-205` and `.env.example:1-5`. Startup rejects a true flag outside
 staging with `H2A_SYNTHETIC_TENANT_LIFECYCLE_FORBIDDEN`; production therefore
 cannot register the routes. With the flag false, the router is not mounted and
 normal route-not-found behavior is retained. The flag is server-only and is not
