@@ -109,7 +109,7 @@ try {
     throw new Error("SCRATCH_ROLLBACK_ASSERTION");
   }), /SCRATCH_ROLLBACK_ASSERTION/);
   assert.equal(await prisma.merchant.findUnique({ where: { email: rollbackEmail } }), null);
-  console.log("H2A synthetic tenant scratch migration/concurrency/rollback checks passed");
+  console.log("H2A synthetic tenant scratch lifecycle/auth/cleanup/concurrency/rollback checks passed");
 } finally {
   if (fixtureIds.length) await prisma.securityFixtureTenant.deleteMany({ where: { id: { in: fixtureIds } } });
   if (ownerId) await prisma.user.delete({ where: { id: ownerId } });
