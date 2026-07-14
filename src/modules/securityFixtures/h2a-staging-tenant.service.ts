@@ -260,7 +260,11 @@ export async function cleanupH2AStagingTenant(fixtureId: string) {
     return safeFixtureStatus(cleaned, await countsFor(prisma, cleaned.merchantId));
   } catch (error) {
     const code = error instanceof Error && error.message === H2A_UNEXPECTED_STATE ? H2A_UNEXPECTED_STATE : H2A_CLEANUP_FAILED;
-    await markCleanupFailed(fixtureId, code);
+    try {
+      await markCleanupFailed(fixtureId, code);
+    } catch {
+      // Preserve the stable cleanup blocker even if the failure marker cannot be written.
+    }
     throw new HttpError(409, code);
   }
 }

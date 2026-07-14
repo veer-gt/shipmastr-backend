@@ -52,6 +52,12 @@ test("route and migration gates are fail-closed and additive", () => {
   assert.equal(/\b(DROP TABLE|DROP TYPE|DELETE FROM|UPDATE\s+\")/i.test(migration), false);
 });
 
+test("cleanup preserves a stable blocker if failure-state recording itself fails", () => {
+  const source = fs.readFileSync(path.join(repoRoot, "src/modules/securityFixtures/h2a-staging-tenant.service.ts"), "utf8");
+  assert.match(source, /try \{\s*await markCleanupFailed\(fixtureId, code\);\s*\} catch \{/s);
+  assert.match(source, /throw new HttpError\(409, code\);/);
+});
+
 test("runner contains no cloud, database, migration, deployment, traffic, or provider command", () => {
   const runner = fs.readFileSync(path.join(repoRoot, "scripts/security-fixtures/h2a-second-tenant-runner.py"), "utf8");
   for (const forbidden of ["gcloud", "DATABASE_URL", "subprocess", "psycopg", "docker", "podman", "cloud_sql_proxy", "n8n"]) {
