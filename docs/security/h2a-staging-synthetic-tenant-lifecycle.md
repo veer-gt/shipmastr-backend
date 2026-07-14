@@ -93,7 +93,7 @@ an already-issued token fails immediately after expiry or when cleanup enters
 
 ## Cleanup state machine
 
-Cleanup (`src/modules/securityFixtures/h2a-staging-tenant.service.ts:197-266`)
+Cleanup (`src/modules/securityFixtures/h2a-staging-tenant.service.ts:197-270`)
 atomically claims `ACTIVE`, `EXPIRED`, or recoverable `FAILED` into
 `CLEANING`. That state immediately disables fixture authentication. It then
 finds only connections owned by the fixture Merchant whose exact store marker is
