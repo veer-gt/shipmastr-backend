@@ -603,6 +603,19 @@ enum PasswordResetPurpose {
   RESET
 }
 
+enum SecurityFixtureKind {
+  H2A_STAGING_CROSS_TENANT
+}
+
+enum SecurityFixtureStatus {
+  CREATING
+  ACTIVE
+  CLEANING
+  CLEANED
+  FAILED
+  EXPIRED
+}
+
 enum CourierPartnerOnboardingStatus {
   DRAFT
   SUBMITTED
@@ -972,6 +985,7 @@ model Merchant {
   orders                   Order[]
   orderImportBatches       OrderImportBatch[]
   auditLogs                AuditLog[]
+  securityFixtureTenants   SecurityFixtureTenant[]   @relation("SecurityFixtureMerchant")
   gstinRecords             MerchantGstinRecord[]
   pickupPoints             MerchantPickupPoint[]
   warehouses               MerchantWarehouse[]
@@ -4910,11 +4924,36 @@ model User {
   createdAt    DateTime @default(now())
   updatedAt    DateTime @updatedAt
 
-  merchant              Merchant               @relation(fields: [merchantId], references: [id], onDelete: Cascade)
-  passwordResetTokens   PasswordResetToken[]
-  firstShipmentRequests FirstShipmentRequest[]
+  merchant                Merchant                @relation(fields: [merchantId], references: [id], onDelete: Cascade)
+  passwordResetTokens     PasswordResetToken[]
+  firstShipmentRequests   FirstShipmentRequest[]
+  securityFixtureOwners   SecurityFixtureTenant[] @relation("SecurityFixtureOwner")
+  securityFixtureCreators SecurityFixtureTenant[] @relation("SecurityFixtureCreator")
 
   @@index([firebaseUid])
+}
+
+model SecurityFixtureTenant {
+  id                    String                @id @default(cuid())
+  fixtureKind           SecurityFixtureKind   @map("fixture_kind")
+  status                SecurityFixtureStatus @default(CREATING)
+  activeSlot            String?               @unique @map("active_slot")
+  merchantId            String?               @unique @map("merchant_id")
+  ownerUserId           String?               @unique @map("owner_user_id")
+  creatorInternalUserId String                @map("creator_internal_user_id")
+  expiresAt             DateTime              @map("expires_at")
+  cleanupAt             DateTime?             @map("cleanup_at")
+  lastErrorCode         String?               @map("last_error_code")
+  createdAt             DateTime              @default(now()) @map("created_at")
+  updatedAt             DateTime              @updatedAt @map("updated_at")
+
+  merchant  Merchant? @relation("SecurityFixtureMerchant", fields: [merchantId], references: [id], onDelete: SetNull)
+  ownerUser User?     @relation("SecurityFixtureOwner", fields: [ownerUserId], references: [id], onDelete: SetNull)
+  creator   User      @relation("SecurityFixtureCreator", fields: [creatorInternalUserId], references: [id], onDelete: Restrict)
+
+  @@index([fixtureKind, status])
+  @@index([expiresAt])
+  @@map("security_fixture_tenants")
 }
 
 model PasswordResetToken {

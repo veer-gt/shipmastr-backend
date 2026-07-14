@@ -1,4 +1,5 @@
 import { Router } from "express";
+import { env } from "../config/env.js";
 
 import { requireFirebaseAuth } from "../middleware/firebaseAuth.js";
 import { requireInternalSecret } from "../middleware/internal.js";
@@ -13,6 +14,7 @@ import { codDashboardRouter } from "../modules/codDashboard/cod-dashboard.routes
 import { adminCheckoutRouter } from "../modules/checkout/checkout-admin.routes.js";
 import { adminCheckoutAddressNetworkRouter } from "../modules/checkout/admin-checkout-address-network.routes.js";
 import { adminCheckoutIntelligenceRouter } from "../modules/checkout/checkout-intelligence-admin.routes.js";
+import { h2aStagingTenantRouter } from "../modules/securityFixtures/h2a-staging-tenant.routes.js";
 import { checkoutRouter } from "../modules/checkout/checkout.routes.js";
 import { checkoutAddressEventsRouter } from "../modules/checkout/checkout-address-events.routes.js";
 import { adminCourierPartnerApplicationRouter, courierPartnerApplicationRouter } from "../modules/courierPartnerApplications/courier-partner-application.routes.js";
@@ -82,6 +84,9 @@ apiRouter.use("/admin/automation", requireAdminJwt, adminAutomationRouter);
 apiRouter.use("/admin/domains", requireAdminJwt, adminDomainsRouter);
 apiRouter.use("/admin/storefronts", requireAdminJwt, adminStorefrontsRouter);
 apiRouter.use("/admin/checkout-intelligence", requireMasterAdminJwt, adminCheckoutIntelligenceRouter);
+if (env.H2A_SYNTHETIC_TENANT_LIFECYCLE_ENABLED && env.APP_ENV === "staging") {
+  apiRouter.use("/admin/security-fixtures/h2a-tenants", h2aStagingTenantRouter);
+}
 apiRouter.use("/admin/checkout-address-network", requireMasterAdminJwt, adminCheckoutAddressNetworkRouter);
 apiRouter.use("/admin/checkout", requireAdminJwt, adminCheckoutRouter);
 apiRouter.use("/admin/wallets/w1", requireAdminJwt, adminW1WalletRouter);
