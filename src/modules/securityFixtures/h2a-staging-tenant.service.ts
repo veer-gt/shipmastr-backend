@@ -108,6 +108,7 @@ export async function fixtureAuthenticationAllowed(userId: string) {
 
 export async function createH2AStagingTenant(input: H2ACreateInput, creatorInternalUserId: string) {
   assertEnabled();
+  const normalizedEmail = input.email.trim().toLowerCase();
   const expiresAt = new Date(Date.now() + input.expiresInMinutes * 60_000);
   try {
     const created = await prisma.$transaction(async (tx) => {
@@ -125,13 +126,13 @@ export async function createH2AStagingTenant(input: H2ACreateInput, creatorInter
       const merchant = await tx.merchant.create({
         data: {
           name: input.merchantName,
-          email: input.email
+          email: normalizedEmail
         }
       });
       const owner = await tx.user.create({
         data: {
           merchantId: merchant.id,
-          email: input.email,
+          email: normalizedEmail,
           name: input.ownerName,
           passwordHash,
           userType: "MERCHANT_ACCOUNT",

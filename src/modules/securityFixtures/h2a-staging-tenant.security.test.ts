@@ -34,6 +34,13 @@ test("fixture authentication is allowed only while ACTIVE and before expiry", ()
   assert.equal(fixtureStatusAllowsAuthentication({ status: "CLEANED" as never, expiresAt: new Date("2026-07-14T10:01:00Z"), now }), false);
 });
 
+test("synthetic tenant email is normalized before persistence", () => {
+  const source = fs.readFileSync(path.join(repoRoot, "src/modules/securityFixtures/h2a-staging-tenant.service.ts"), "utf8");
+  assert.match(source, /const normalizedEmail = input\.email\.trim\(\)\.toLowerCase\(\);/);
+  assert.equal((source.match(/email: normalizedEmail/g) || []).length, 2);
+  assert.equal(source.includes("email: input.email"), false);
+});
+
 test("lifecycle source has no email, invite, reset, lead, Firebase, or automation dependency", () => {
   const source = fs.readFileSync(path.join(repoRoot, "src/modules/securityFixtures/h2a-staging-tenant.service.ts"), "utf8");
   for (const forbidden of ["sendTransactionalEmail", "createSellerInvite", "password-reset", "lead.service", "firebase", "n8n"]) {
