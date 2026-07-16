@@ -83,8 +83,9 @@ export async function rotateH2BEndpoint(merchantId: string, connectionId: string
   const result = await transaction(client, async (tx) => {
     const current = await tx.h2BConnectionEndpoint.findUnique({ where: { connectionId } });
     if (!current || current.status === H2BEndpointStatus.REVOKED || current.revokedAt) throw new HttpError(409, "H2B_ENDPOINT_NOT_CONFIGURED");
-    const generated = generateEndpoint(providerFromPlatform(connection.platform as "SHOPIFY" | "WOOCOMMERCE" | "MAGENTO"));
     const now = new Date();
+    if (current.previousValidUntil && current.previousValidUntil > now) throw new HttpError(409, "H2B_ENDPOINT_ROTATION_IN_PROGRESS");
+    const generated = generateEndpoint(providerFromPlatform(connection.platform as "SHOPIFY" | "WOOCOMMERCE" | "MAGENTO"));
     const row = await tx.h2BConnectionEndpoint.update({ where: { connectionId }, data: {
       merchantId, platform: connection.platform, status: H2BEndpointStatus.ACTIVE,
       currentDigest: generated.digest, currentActivatedAt: now, previousDigest: current.currentDigest,

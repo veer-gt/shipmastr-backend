@@ -12,7 +12,7 @@ if (!/^shipmastr_scratch_h2b2_[a-z0-9_]+$/.test(scratchName)
 
 const { prisma } = await import("../dist/lib/prisma.js");
 const { createApp } = await import("../dist/server.js");
-const { createH2BEndpoint, rotateH2BEndpoint, revokeH2BEndpoint } = await import("../dist/modules/h2b/h2b-endpoint.service.js");
+const { createH2BEndpoint, resolveH2BEndpoint, rotateH2BEndpoint, revokeH2BEndpoint } = await import("../dist/modules/h2b/h2b-endpoint.service.js");
 const { runH2BOutboxOnce } = await import("../dist/modules/h2b/h2b-worker.js");
 const { configurePlatformWebhookCredential, rotatePlatformWebhookCredential } = await import("../dist/modules/credentialVault/platform-webhook-credential.service.js");
 const { PLATFORM_WEBHOOK_SIGNATURE_PURPOSE } = await import("../dist/modules/credentialVault/platform-webhook-credential.crypto.js");
@@ -137,6 +137,21 @@ try {
   }
   const fixtureB = await createConnection(merchantB.id, "SHOPIFY");
 
+  const concurrentConnection = await prisma.platformConnection.create({ data: { merchantId: merchantA.id, platform: "SHOPIFY", storeName: `${fixtureMarker}-CONCURRENT`, storeUrl: `https://${fixtureMarker.toLowerCase()}.example/concurrent`, status: "ACTIVE", syncDirection: "IMPORT_ONLY" } });
+  createdConnections.push(concurrentConnection.id);
+  const createRace = await Promise.allSettled(Array.from({ length: 16 }, () => createH2BEndpoint(merchantA.id, concurrentConnection.id)));
+  assert.equal(createRace.filter((result) => result.status === "fulfilled").length, 1);
+  assert.equal(createRace.filter((result) => result.status === "rejected").length, 15);
+  const committedEndpoint = createRace.find((result) => result.status === "fulfilled").value.endpoint;
+  await resolveH2BEndpoint(committedEndpoint);
+  const rotateRace = await Promise.allSettled(Array.from({ length: 16 }, () => rotateH2BEndpoint(merchantA.id, concurrentConnection.id)));
+  assert.equal(rotateRace.filter((result) => result.status === "fulfilled").length, 1);
+  assert.equal(rotateRace.filter((result) => result.status === "rejected").length, 15);
+  const concurrentRotatedEndpoint = rotateRace.find((result) => result.status === "fulfilled").value.endpoint;
+  await resolveH2BEndpoint(concurrentRotatedEndpoint);
+  await revokeH2BEndpoint(merchantA.id, concurrentConnection.id);
+  assert.equal((await prisma.h2BConnectionEndpoint.findUnique({ where: { connectionId: concurrentConnection.id }, select: { status: true } }))?.status, "REVOKED");
+
   for (const [provider, topic] of [["SHOPIFY", "orders/create"], ["WOOCOMMERCE", "order.created"], ["MAGENTO", "shipmastr.order.committed.v1"]]) {
     const connectionId = fixturesA[provider].connection.id;
     const secret = generatedSecrets.get(connectionId).current;
@@ -247,7 +262,7 @@ try {
   const serialized = JSON.stringify(persisted);
   for (const forbidden of ["buyer@example.invalid", "0000000000", "private address", generatedSecrets.get(wooId).current]) assert.equal(serialized.includes(forbidden), false);
   resetH2BRateLimitForTests();
-  console.log(JSON.stringify({ scratch: "PASS", merchants: 2, providers: 3, duplicateRace: "PASS", rollback: "PASS", leakage: "PASS", worker: "PASS" }));
+  console.log(JSON.stringify({ scratch: "PASS", merchants: 2, providers: 3, duplicateRace: "PASS", endpointConcurrency: "PASS", rollback: "PASS", leakage: "PASS", worker: "PASS" }));
 } finally {
   server.close();
   await prisma.$executeRawUnsafe(`DROP TRIGGER IF EXISTS h2b_scratch_fail_outbox ON h2b_webhook_outbox`);
