@@ -1,6 +1,7 @@
 # Shipmastr Magento extension protocol v1
 
 Protocol name: `SHIPMASTR_MAGENTO_EXTENSION_V1`.
+Public semantic event: `shipmastr.order.committed.v1`.
 
 This document defines the first Shipmastr-specific Magento/Adobe Commerce
 extension profile. It is not a claim that Adobe Commerce universally emits
@@ -37,7 +38,7 @@ For the initial profile, the worker sends:
 
 | Header | Meaning |
 | --- | --- |
-| `X-Magento-Topic` | `sales_order_place_after` or `sales_order_save_after` |
+| `X-Magento-Topic` | `shipmastr.order.committed.v1` |
 | `X-Magento-Event` | Stable extension event name |
 | `X-Magento-Webhook-Id` | Unique delivery identifier |
 | `X-Magento-Signature` | Base64 HMAC-SHA256 over the exact request bytes |
@@ -45,8 +46,23 @@ For the initial profile, the worker sends:
 The current backend foundation validates these headers in
 `src/modules/platformIntegrations/magento/magento-webhook-validation.ts:4-9`
 and resolves delivery ids in `magento-order-ingestion.service.ts:49-58`.
-Existing Adobe I/O Event header names may be accepted only by a separately
-reviewed adapter; they are not silently interchangeable with this profile.
+The existing `sales_order_place_after` and `sales_order_save_after` values are
+legacy/internal foundation candidates only; they are not approved public H2B
+topics. Existing Adobe I/O Event header names may be accepted only by a
+separately reviewed adapter; they are not silently interchangeable with this
+profile.
+
+MAGENTO_INTERNAL_EVENT_HOOK:
+`TBD_AFTER_MAGENTO_EXTENSION_EVENT_AUDIT`
+
+The internal observer/plugin selection requires a separate extension audit
+proving that execution occurs only after durable order commit, rolled-back
+orders do not enqueue deliveries, duplicate observer firing is idempotent,
+supported Magento Open Source and Adobe Commerce editions/versions behave
+compatibly, no outbound Shipmastr request occurs during checkout/order
+placement, the outbox write does not make Shipmastr availability part of the
+checkout transaction, and missed enqueue operations are recoverable through
+reconciliation.
 
 ## Payload and acknowledgement
 
@@ -62,6 +78,13 @@ The repository's current foundation creates `PlatformOrderImport` only and
 marks `order_creation.status` as `deferred`
 (`src/modules/platformIntegrations/magento/magento-order-ingestion.service.ts:79-128`).
 Canonical import and inventory effects are future, separately approved phases.
+
+The extension's semantic event is emitted only after a durable local order
+commit and is transported asynchronously from the outbox. Magento order
+placement performs zero outbound network I/O to Shipmastr. A Magento order
+originally created through Shipmastr Checkout must later be recognized as
+confirmation/status synchronization and must not be imported as a second new
+order; implementing that compatibility behavior is outside H2B-1.
 
 Queued deliveries retain a key-version reference so a reviewed rotation can
 verify already-queued records; no secret is copied into the outbox. Disable or

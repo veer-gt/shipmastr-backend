@@ -20,7 +20,7 @@ Sources were accessed 2026-07-16.
 
 | Item | Initial contract |
 | --- | --- |
-| Topic allowlist | `orders/create`, `orders/update` |
+| Topic allowlist | `orders/create`, `orders/updated` |
 | Required evidence | `X-Shopify-Topic`, `X-Shopify-Hmac-Sha256`, `X-Shopify-Shop-Domain`, `X-Shopify-Webhook-Id`; retain event id where present for safe dedupe metadata |
 | Verification | Base64 HMAC over raw bytes with the connection's current or still-valid previous secret |
 | Timestamp | `X-Shopify-Triggered-At` is useful metadata only; it is not treated as a cryptographic freshness proof. Replay defense is persistent delivery-id dedupe. |
@@ -42,13 +42,32 @@ Sources were accessed 2026-07-16.
 | Source uncertainty | Exact WooCommerce retry/backoff timing and deployment-specific header behavior require primary-source and compatibility testing before implementation. |
 | Reference | [WooCommerce REST API webhooks](https://developer.woocommerce.com/docs/apis/rest-api/v2/webhooks) |
 
+Some WooCommerce versions, extensions, or store configurations may emit
+`order.created` and `order.updated` close together for one newly created order.
+Shipmastr must tolerate this compatibility behavior without treating it as a
+universal provider guarantee. Delivery idempotency is
+`provider + connectionId + deliveryId`; external-order import idempotency is
+`merchantId + connectionId + externalOrderId`. `order.created` creates or
+initializes one external-order import aggregate, while `order.updated` upserts
+or merges into it. If updated arrives first, it creates or updates a
+provisional aggregate; a later created converges on that aggregate, and
+deterministic precedence prevents stale accepted state from overwriting newer
+state. Both delivery records remain separately auditable, but only one
+external-order aggregate exists and no event mutates inventory.
+
+Required future tests cover created→updated, updated→created, concurrent
+created/updated, replay of either delivery, distinct delivery IDs for one
+external order, identical external IDs across connections and merchants, one
+aggregate/no duplicate canonical order, both sanitized delivery references,
+and no inventory effect.
+
 ## Magento / Adobe Commerce
 
 | Item | Initial contract |
 | --- | --- |
 | Profile | `SHIPMASTR_MAGENTO_EXTENSION_V1` |
-| Initial topics | `sales_order_place_after`, `sales_order_save_after` |
-| Required evidence | `X-Magento-Topic`, `X-Magento-Event`, `X-Magento-Webhook-Id`, `X-Magento-Signature` |
+| Initial topics | `shipmastr.order.committed.v1` |
+| Required evidence | `X-Magento-Topic: shipmastr.order.committed.v1`, `X-Magento-Event`, `X-Magento-Webhook-Id`, `X-Magento-Signature` |
 | Verification | Base64 HMAC-SHA256 over raw bytes; extension owns local outbox/worker and must not make a synchronous provider-to-Shipmastr call during the originating Commerce transaction |
 | Body and delivery | Deterministic serialization, unique delivery id, bounded retry/backoff, and dead-letter state are extension responsibilities. Secret rotation must preserve the key version needed for queued deliveries; disable/uninstall stops new sends and leaves evidence for reconciliation. |
 | Registration/runtime allowlists | Installation enables only the two profile topics; runtime rejects all other topics. Registration is an explicit extension/configuration step, never an implicit Shipmastr provider write. |
@@ -59,6 +78,9 @@ Adobe native Webhooks are synchronous and can affect an originating Commerce
 operation; Adobe I/O Events are a separate asynchronous delivery path. Both
 are deferred or a separate sub-phase rather than silently treated as the
 Shipmastr extension protocol.
+
+The existing `sales_order_place_after` and `sales_order_save_after` values are
+legacy/internal foundation candidates only, not public H2B topics.
 
 ## Adobe Commerce profiles (separate from the extension profile)
 

@@ -14,6 +14,10 @@ production state is changed by this document.
   platform-webhook.service.ts:433-497`).
 - Define the reviewed provider byte limits, exact Shopify retry behavior, HMAC
   canonicalization, and redaction tests.
+- Freeze the initial runtime allowlists as Shopify `orders/create` and
+  `orders/updated`, WooCommerce `order.created` and `order.updated`, and
+  Shipmastr Magento `shipmastr.order.committed.v1`. The internal Magento hook
+  remains `TBD_AFTER_MAGENTO_EXTENSION_EVENT_AUDIT`.
 - Add tests for unknown identifier, cross-tenant identifier, disabled/revoked
   credential, replay, concurrent delivery, chunked body overflow, oversized
   `Content-Length`, malformed topic, and secret/PII leakage.
@@ -94,6 +98,10 @@ The implementation gate must include, at minimum:
   secrets, wrong tenant, platform mismatch, unknown/disabled/stale identifier;
 - topics: each approved order topic plus inventory/product/customer/fulfilment
   and malformed topics, all unsupported events producing no import or queue;
+- middleware ordering: disabled prefix 404 with no body consumption, global
+  parser/verify callback, provider-router construction, identifier/credential/
+  database/queue/telemetry/inventory dependency; enabled route before the
+  global parser with declared and streaming byte caps;
 - dedupe: duplicate and concurrent delivery, crash before/after reservation,
   crash after enqueue, retry, and retention expiry;
 - data safety: no secret, authorization, buyer PII, raw body, inventory FK,

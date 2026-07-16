@@ -3,6 +3,12 @@
 H2B public provider ingress is an event-admission and import-preparation
 boundary. It is not an inventory or order-authority boundary.
 
+The initial provider allowlists are Shopify `orders/create` and
+`orders/updated`, WooCommerce `order.created` and `order.updated`, and
+Shipmastr Magento Extension V1 `shipmastr.order.committed.v1`. The internal
+Magento hook is `TBD_AFTER_MAGENTO_EXTENSION_EVENT_AUDIT`; legacy Magento hook
+names are not public protocol topics.
+
 ## Existing repository evidence
 
 `prisma/schema.prisma:1853-1875` defines `PlatformConnection` and its

@@ -77,6 +77,36 @@ not a safe place for raw provider bodies or signature material. The future
 route must install redaction and safe error mapping before any H2B request is
 logged.
 
+## Exact pre-parser middleware order
+
+The reserved prefix is `/api/public/provider-webhooks` and must be handled
+before the global JSON parser. Security middleware that does not read bodies
+may run first only when it cannot log raw H2B headers, signatures, or bodies.
+
+When `H2B_PUBLIC_PROVIDER_INGRESS_ENABLED=false`, install only a constant-time
+prefix 404 guard. This guard is not the provider router: it does not read or
+buffer a body, parse JSON, execute `express.json` or its raw-body verify
+callback, import/construct/mount the provider router, resolve an identifier,
+look up a connection, resolve/decrypt a credential, verify a signature or
+topic, access the database, write telemetry, reserve dedupe state, enqueue
+work, or invoke inventory logic. Route absence is structural and zero H2B
+business dependencies are mounted while disabled.
+
+When the flag is true, mount the bounded raw-byte H2B router at this same
+pre-parser position. It rejects oversized declared `Content-Length` before
+buffering, independently enforces a streaming byte ceiling for absent,
+false, malformed, or chunked lengths, aborts immediately after crossing the
+ceiling, verifies HMAC over exact bounded bytes, discards those bytes after
+admission, and never forwards the request into the global JSON parser. Mount
+the existing `express.json({ limit: "256kb" })` only after reserved-prefix
+handling for all remaining API routes. Disabling H2B therefore cannot rely on
+a handler check that runs after body parsing.
+
+Required future tests use spies or direct assertions to prove the disabled
+guard invokes none of: request-body data consumption, global parser or verify
+callback, provider-router factory, identifier/connection/credential service,
+database client, queue publisher, telemetry writer, or inventory service.
+
 ## Proposed request flow
 
 1. Route selection is gated by the flag and a dedicated provider ingress
@@ -146,9 +176,9 @@ The initial allowlists are deliberately narrow:
 
 | Provider | Initial topics | Signature / delivery evidence |
 | --- | --- | --- |
-| Shopify | `orders/create`, `orders/update` | `X-Shopify-Topic`, `X-Shopify-Hmac-Sha256`, `X-Shopify-Shop-Domain`, `X-Shopify-Webhook-Id` |
+| Shopify | `orders/create`, `orders/updated` | `X-Shopify-Topic`, `X-Shopify-Hmac-Sha256`, `X-Shopify-Shop-Domain`, `X-Shopify-Webhook-Id` |
 | WooCommerce | `order.created`, `order.updated` | `X-WC-Webhook-Topic` or resource/event, `X-WC-Webhook-Signature`, delivery id |
-| Magento extension profile | `sales_order_place_after`, `sales_order_save_after` | `X-Magento-Topic`, `X-Magento-Event`, `X-Magento-Webhook-Id`, `X-Magento-Signature` |
+| Magento extension profile | `shipmastr.order.committed.v1` | `X-Magento-Topic`, `X-Magento-Event`, `X-Magento-Webhook-Id`, `X-Magento-Signature` |
 
 Shopify's delivery contract documents the topic, base64 HMAC, shop domain,
 API version, delivery id, and event id. See the [Shopify delivery
@@ -161,13 +191,32 @@ API](https://developer.woocommerce.com/docs/apis/rest-api/v2/webhooks)
 (accessed 2026-07-16). Exact Shopify retry/backoff numbers are not fixed here;
 they require provider-contract verification before implementation.
 
-The existing Magento foundation requires the `X-Magento-*` headers and
-base64 HMAC (`src/modules/platformIntegrations/magento/
-magento-webhook-validation.ts:4-9`). It currently creates only a
-`PlatformOrderImport` with `order_creation.status: "deferred"`
-(`magento-order-ingestion.service.ts:79-128`). It is not an Adobe-native
-webhook implementation. Adobe Commerce's synchronous Webhooks and asynchronous
-I/O Events are separate products; see [Adobe Commerce
+WooCommerce installations may emit `order.created` and `order.updated` close
+together for one newly created order. This is compatibility behavior to
+tolerate, not a universal provider guarantee. Delivery idempotency is scoped
+to `provider + connectionId + deliveryId`; external-order import idempotency is
+scoped to `merchantId + connectionId + externalOrderId`. The first event
+creates or initializes one import aggregate; later updates upsert that same
+aggregate. An update arriving first creates a provisional aggregate, and a
+later create converges on it without duplication. Deterministic version/event
+ordering prevents stale accepted state from overwriting newer state. Both
+deliveries remain separately auditable and neither mutates inventory. The
+required tests cover created→updated, updated→created, concurrency, replay,
+distinct delivery IDs for one order, same external ID across connections and
+merchants, one aggregate/no duplicate canonical order, retained sanitized
+delivery references, and no inventory effect.
+
+The existing Magento foundation currently recognizes
+`sales_order_place_after` and `sales_order_save_after` as legacy/internal
+foundation values only (`src/modules/platformIntegrations/magento/
+magento-webhook-validation.ts:4-9`). They are not approved public H2B topics.
+The first public Shipmastr semantic event is `shipmastr.order.committed.v1`,
+emitted after a durable local order commit and transported asynchronously from
+the extension outbox. It is stable across internal Magento hook changes and
+unrelated to Adobe universal webhook contracts. The existing code creates only
+a `PlatformOrderImport` with `order_creation.status: "deferred"`
+(`magento-order-ingestion.service.ts:79-128`). Adobe Commerce's synchronous
+Webhooks and asynchronous I/O Events are separate products; see [Adobe Commerce
 Webhooks](https://developer.adobe.com/commerce/extensibility/webhooks/), [I/O
 Events](https://developer.adobe.com/commerce/extensibility/events/), and
 [consume events](https://developer.adobe.com/commerce/extensibility/events/consume-events)
