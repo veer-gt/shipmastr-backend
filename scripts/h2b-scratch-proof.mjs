@@ -1,7 +1,6 @@
 import assert from "node:assert/strict";
 import { createHmac, randomBytes } from "node:crypto";
 import http from "node:http";
-import express from "express";
 
 const databaseUrl = process.env.DATABASE_URL ?? "";
 const parsedDatabaseUrl = new URL(databaseUrl);
@@ -12,7 +11,7 @@ if (!/^shipmastr_scratch_h2b2_[a-z0-9_]+$/.test(scratchName)
 }
 
 const { prisma } = await import("../dist/lib/prisma.js");
-const { h2bPublicRouter } = await import("../dist/modules/h2b/h2b-public.routes.js");
+const { createApp } = await import("../dist/server.js");
 const { createH2BEndpoint, rotateH2BEndpoint, revokeH2BEndpoint } = await import("../dist/modules/h2b/h2b-endpoint.service.js");
 const { runH2BOutboxOnce } = await import("../dist/modules/h2b/h2b-worker.js");
 const { configurePlatformWebhookCredential, rotatePlatformWebhookCredential } = await import("../dist/modules/credentialVault/platform-webhook-credential.service.js");
@@ -51,10 +50,11 @@ function request(server, path, headers, body, { chunked = false } = {}) {
 }
 
 function fixture(provider, topic, externalOrderId, secret) {
+  const total = provider === "SHOPIFY" ? "598.94" : provider === "WOOCOMMERCE" ? "1499.00" : "2500.50";
   const payload = JSON.stringify({
     id: externalOrderId,
     name: `#${externalOrderId}`,
-    total_price: "1499",
+    total_price: total,
     currency: "INR",
     updated_at: "2026-07-16T12:00:00Z",
     customer: { email: "buyer@example.invalid", phone: "0000000000" },
@@ -109,7 +109,7 @@ async function createConnection(merchantId, platform) {
   const endpoint = await createH2BEndpoint(merchantId, connection.id);
   assert.equal(endpoint.rawEndpointReturned, true);
   assert.equal(typeof endpoint.endpoint, "string");
-  assert.equal(endpoint.endpoint.length, 43);
+  assert.equal(endpoint.endpoint.length, 47);
   assert.equal(JSON.stringify(endpoint.status).includes(endpoint.endpoint), false);
   createdEndpoints.push({ merchantId, connectionId: connection.id, token: endpoint.endpoint });
   return { connection, endpoint: endpoint.endpoint };
@@ -124,9 +124,7 @@ async function countFor(merchantId, connectionId) {
   return { admissions, outboxes, aggregates };
 }
 
-const app = express();
-app.use("/api/public/provider-webhooks", h2bPublicRouter);
-app.use((error, _request, response, _next) => response.status(error?.status ?? 500).json({ error: error?.message ?? "H2B_SAFE_ERROR" }));
+const app = await createApp({ h2bEnabled: true });
 const server = http.createServer(app);
 await new Promise((resolve) => server.listen(0, "127.0.0.1", resolve));
 
@@ -163,12 +161,23 @@ try {
   const afterRace = await countFor(merchantA.id, shopifyId);
   assert.equal(afterRace.admissions - beforeRace.admissions, 1);
   assert.equal(afterRace.outboxes - beforeRace.outboxes, 1);
+  const collisionPayload = JSON.stringify({ id: "collision-order", total_price: "1.00", currency: "INR" });
+  const collisionHeaders = { ...raced.headers, "x-shopify-hmac-sha256": hmac(generatedSecrets.get(shopifyId).current, collisionPayload) };
+  assert.equal((await request(server, shopifyPath, collisionHeaders, collisionPayload)).status, 409);
+  const afterCollision = await countFor(merchantA.id, shopifyId);
+  assert.deepEqual(afterCollision, afterRace);
 
   const chunked = fixture("SHOPIFY", "orders/updated", "chunked-order", generatedSecrets.get(shopifyId).current);
   assert.equal((await request(server, shopifyPath, chunked.headers, chunked.payload, { chunked: true })).status, 202);
   const oversizedBody = JSON.stringify({ id: "oversized", padding: "x".repeat(262_144) });
   const oversizedHeaders = { "x-shopify-topic": "orders/create", "x-shopify-shop-domain": "scratch.example", "x-shopify-webhook-id": "oversized", "x-shopify-hmac-sha256": hmac(generatedSecrets.get(shopifyId).current, oversizedBody) };
   assert.equal((await request(server, shopifyPath, oversizedHeaders, oversizedBody)).status, 413);
+  const malformed = await request(server, "/api/public/provider-webhooks/not-an-endpoint", {}, "not-json");
+  assert.equal(malformed.status, 404);
+  assert.deepEqual(JSON.parse(malformed.body), { error: "H2B_ROUTE_NOT_FOUND" });
+  const unknownToken = `shp_${randomBytes(32).toString("base64url")}`;
+  const unknown = await request(server, `/api/public/provider-webhooks/${unknownToken}`, raced.headers, raced.payload);
+  assert.equal(unknown.status, 404);
 
   const wrongTenant = fixture("SHOPIFY", "orders/create", "wrong-tenant", generatedSecrets.get(fixtureB.connection.id).current);
   assert.equal((await request(server, shopifyPath, wrongTenant.headers, wrongTenant.payload)).status, 401);
@@ -206,6 +215,19 @@ try {
   // The fixture helper prefixes the provider name in its synthetic order ID.
   const wooAggregateCount = await prisma.h2BExternalOrderAggregate.count({ where: { merchantId: merchantA.id, connectionId: wooId, externalOrderId: "woocommerce-order-1" } });
   assert.equal(wooAggregateCount, 1);
+  const wooAggregate = await prisma.h2BExternalOrderAggregate.findFirst({ where: { merchantId: merchantA.id, connectionId: wooId, externalOrderId: "woocommerce-order-1" }, select: { safeState: true } });
+  assert.equal(wooAggregate?.safeState && typeof wooAggregate.safeState === "object" && wooAggregate.safeState.totalMinor, "149900");
+
+  const rollbackFixture = fixture("WOOCOMMERCE", "order.created", "rollback-trigger", generatedSecrets.get(wooId).current);
+  const rollbackPath = `/api/public/provider-webhooks/${fixturesA.WOOCOMMERCE.endpoint}`;
+  const beforeRollback = await countFor(merchantA.id, wooId);
+  await prisma.$executeRawUnsafe(`CREATE OR REPLACE FUNCTION h2b_scratch_fail_outbox() RETURNS trigger AS $$ BEGIN IF NEW.envelope->>'externalOrderId' = 'rollback-trigger' THEN RAISE EXCEPTION 'H2B_SCRATCH_OUTBOX_FAILURE'; END IF; RETURN NEW; END; $$ LANGUAGE plpgsql`);
+  await prisma.$executeRawUnsafe(`CREATE TRIGGER h2b_scratch_fail_outbox BEFORE INSERT ON h2b_webhook_outbox FOR EACH ROW EXECUTE FUNCTION h2b_scratch_fail_outbox()`);
+  assert.equal((await request(server, rollbackPath, rollbackFixture.headers, rollbackFixture.payload)).status, 500);
+  assert.deepEqual(await countFor(merchantA.id, wooId), beforeRollback);
+  await prisma.$executeRawUnsafe(`DROP TRIGGER h2b_scratch_fail_outbox ON h2b_webhook_outbox`);
+  await prisma.$executeRawUnsafe(`DROP FUNCTION h2b_scratch_fail_outbox()`);
+  assert.equal((await request(server, rollbackPath, rollbackFixture.headers, rollbackFixture.payload)).status, 202);
 
   let rolledBack = false;
   try {
@@ -226,6 +248,8 @@ try {
   console.log(JSON.stringify({ scratch: "PASS", merchants: 2, providers: 3, duplicateRace: "PASS", rollback: "PASS", leakage: "PASS", worker: "PASS" }));
 } finally {
   server.close();
+  await prisma.$executeRawUnsafe(`DROP TRIGGER IF EXISTS h2b_scratch_fail_outbox ON h2b_webhook_outbox`);
+  await prisma.$executeRawUnsafe(`DROP FUNCTION IF EXISTS h2b_scratch_fail_outbox()`);
   for (const connectionId of createdConnections) {
     await prisma.h2BWebhookOutbox.deleteMany({ where: { connectionId } });
     await prisma.h2BWebhookAdmission.deleteMany({ where: { connectionId } });

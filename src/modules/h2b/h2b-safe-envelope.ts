@@ -1,5 +1,5 @@
 import { HttpError } from "../../lib/httpError.js";
-import type { H2BProvider } from "./h2b.types.js";
+import { decimalMajorToMinor, type H2BProvider } from "./h2b.types.js";
 
 type RecordValue = Record<string, unknown>;
 
@@ -20,6 +20,22 @@ function integerValue(value: unknown, max = 1_000_000_000): number | null {
   const numeric = typeof value === "number" ? value : Number(value);
   if (!Number.isSafeInteger(numeric) || numeric < 0 || numeric > max) throw new HttpError(400, "H2B_ENVELOPE_NUMBER_INVALID");
   return numeric;
+}
+
+function boundedStructure(value: unknown, depth = 0, scalars = { count: 0 }): void {
+  if (depth > 10) throw new HttpError(400, "H2B_JSON_DEPTH_TOO_LARGE");
+  if (value && typeof value === "object") {
+    if (Array.isArray(value)) {
+      if (value.length > 100) throw new HttpError(400, "H2B_ENVELOPE_ARRAY_TOO_LARGE");
+      for (const item of value) boundedStructure(item, depth + 1, scalars);
+    } else {
+      for (const item of Object.values(value as Record<string, unknown>)) boundedStructure(item, depth + 1, scalars);
+    }
+    return;
+  }
+  scalars.count += 1;
+  if (scalars.count > 1000) throw new HttpError(400, "H2B_JSON_SCALAR_COUNT_TOO_LARGE");
+  if (typeof value === "string" && value.length > 2048) throw new HttpError(400, "H2B_ENVELOPE_FIELD_TOO_LONG");
 }
 
 function firstString(source: RecordValue, fields: string[]) {
@@ -45,6 +61,7 @@ function lineItems(source: RecordValue) {
 }
 
 export function extractH2BSafeEnvelope(provider: H2BProvider, topic: string, payload: unknown) {
+  boundedStructure(payload);
   const source = record(payload);
   const externalOrderId = firstString(source, provider === "MAGENTO"
     ? ["entity_id", "id", "increment_id"]
@@ -62,7 +79,15 @@ export function extractH2BSafeEnvelope(provider: H2BProvider, topic: string, pay
     orderStatus: firstString(source, ["status", "state"]),
     paymentStatus: firstString(source, ["financial_status", "payment_status"]),
     fulfilmentStatus: firstString(source, ["fulfillment_status", "fulfilment_status"]),
-    totalMinor: integerValue(total, Number.MAX_SAFE_INTEGER),
+    totalMinor: total === undefined || total === null || total === ""
+      ? null
+      : (() => {
+        try {
+          return decimalMajorToMinor(total, firstString(source, ["currency", "currency_code"]) ?? "");
+        } catch (error) {
+          throw new HttpError(400, error instanceof Error ? error.message : "H2B_TOTAL_INVALID");
+        }
+      })(),
     lineItems: lineItems(source)
   };
   const encoded = JSON.stringify(safeEnvelope);

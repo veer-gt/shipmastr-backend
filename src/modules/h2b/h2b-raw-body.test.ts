@@ -6,7 +6,9 @@ import { readH2BRawBody } from "./h2b-raw-body.js";
 class FakeRequest extends EventEmitter {
   headers: Record<string, string> = {};
   paused = false;
+  resumed = false;
   pause() { this.paused = true; }
+  resume() { this.resumed = true; }
 }
 
 test("H2B raw reader accepts the exact byte limit", async () => {
@@ -17,7 +19,7 @@ test("H2B raw reader accepts the exact byte limit", async () => {
   assert.equal((await pending).toString(), "abcd");
 });
 
-test("H2B raw reader rejects one streamed byte over the limit and pauses", async () => {
+test("H2B raw reader rejects one streamed byte over the limit and drains", async () => {
   const request = new FakeRequest();
   const pending = readH2BRawBody(request as never, 4);
   request.emit("data", Buffer.from("abcde"));
@@ -26,7 +28,7 @@ test("H2B raw reader rejects one streamed byte over the limit and pauses", async
     assert.equal(error.message, "H2B_PAYLOAD_TOO_LARGE");
     return true;
   });
-  assert.equal(request.paused, true);
+  assert.equal(request.resumed, true);
 });
 
 test("H2B raw reader rejects a declared oversized body before listeners are attached", async () => {

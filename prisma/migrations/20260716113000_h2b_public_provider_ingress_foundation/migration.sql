@@ -3,7 +3,8 @@
 -- local scratch proof until a later deployment review.
 CREATE TYPE "H2BEndpointStatus" AS ENUM ('ACTIVE', 'REVOKED');
 CREATE TYPE "H2BAdmissionStatus" AS ENUM ('PENDING', 'ACCEPTED', 'PROCESSED', 'FAILED');
-CREATE TYPE "H2BOutboxStatus" AS ENUM ('PENDING', 'CLAIMED', 'PROCESSED', 'FAILED', 'DEAD_LETTER');
+CREATE TYPE "H2BOutboxStatus" AS ENUM ('PENDING', 'CLAIMED', 'PROCESSING', 'PROCESSED', 'FAILED', 'DEAD_LETTER');
+CREATE SEQUENCE "h2b_webhook_admissions_ingestion_sequence_seq";
 
 CREATE TABLE "h2b_connection_endpoints" (
     "id" TEXT NOT NULL,
@@ -26,6 +27,21 @@ CREATE UNIQUE INDEX "h2b_connection_endpoints_current_digest_key" ON "h2b_connec
 CREATE INDEX "h2b_connection_endpoints_merchant_id_status_idx" ON "h2b_connection_endpoints"("merchant_id", "status");
 CREATE INDEX "h2b_connection_endpoints_merchant_id_connection_id_idx" ON "h2b_connection_endpoints"("merchant_id", "connection_id");
 CREATE INDEX "h2b_connection_endpoints_previous_digest_idx" ON "h2b_connection_endpoints"("previous_digest");
+CREATE UNIQUE INDEX "h2b_connection_endpoints_previous_digest_key" ON "h2b_connection_endpoints"("previous_digest");
+CREATE OR REPLACE FUNCTION h2b_enforce_global_digest_uniqueness() RETURNS trigger AS $$
+BEGIN
+  IF EXISTS (SELECT 1 FROM "h2b_connection_endpoints" e WHERE e.id <> NEW.id AND (e.current_digest = NEW.current_digest OR e.previous_digest = NEW.current_digest OR e.current_digest = NEW.previous_digest OR e.previous_digest = NEW.previous_digest)) THEN
+    RAISE EXCEPTION 'H2B_ENDPOINT_DIGEST_COLLISION';
+  END IF;
+  IF NEW.previous_digest IS NOT NULL AND NEW.previous_digest = NEW.current_digest THEN
+    RAISE EXCEPTION 'H2B_ENDPOINT_DIGEST_COLLISION';
+  END IF;
+  RETURN NEW;
+END;
+$$ LANGUAGE plpgsql;
+CREATE CONSTRAINT TRIGGER h2b_endpoint_digest_collision_guard
+AFTER INSERT OR UPDATE OF current_digest, previous_digest ON "h2b_connection_endpoints"
+DEFERRABLE INITIALLY IMMEDIATE FOR EACH ROW EXECUTE FUNCTION h2b_enforce_global_digest_uniqueness();
 ALTER TABLE "h2b_connection_endpoints" ADD CONSTRAINT "h2b_connection_endpoints_merchant_id_fkey" FOREIGN KEY ("merchant_id") REFERENCES "Merchant"("id") ON DELETE CASCADE ON UPDATE CASCADE;
 ALTER TABLE "h2b_connection_endpoints" ADD CONSTRAINT "h2b_connection_endpoints_connection_id_fkey" FOREIGN KEY ("connection_id") REFERENCES "platform_connections"("id") ON DELETE CASCADE ON UPDATE CASCADE;
 
@@ -46,9 +62,11 @@ CREATE TABLE "h2b_webhook_admissions" (
     "processed_at" TIMESTAMP(3),
     "created_at" TIMESTAMP(3) NOT NULL DEFAULT CURRENT_TIMESTAMP,
     "updated_at" TIMESTAMP(3) NOT NULL,
+    "ingestion_sequence" BIGINT NOT NULL DEFAULT nextval('h2b_webhook_admissions_ingestion_sequence_seq'),
     CONSTRAINT "h2b_webhook_admissions_pkey" PRIMARY KEY ("id")
 );
 CREATE UNIQUE INDEX "h2b_webhook_admissions_platform_connection_id_delivery_id_key" ON "h2b_webhook_admissions"("platform", "connection_id", "delivery_id");
+CREATE UNIQUE INDEX "h2b_webhook_admissions_ingestion_sequence_key" ON "h2b_webhook_admissions"("ingestion_sequence");
 CREATE INDEX "h2b_webhook_admissions_merchant_id_status_idx" ON "h2b_webhook_admissions"("merchant_id", "status");
 CREATE INDEX "h2b_webhook_admissions_connection_id_received_at_idx" ON "h2b_webhook_admissions"("connection_id", "received_at");
 ALTER TABLE "h2b_webhook_admissions" ADD CONSTRAINT "h2b_webhook_admissions_merchant_id_fkey" FOREIGN KEY ("merchant_id") REFERENCES "Merchant"("id") ON DELETE CASCADE ON UPDATE CASCADE;
@@ -64,6 +82,7 @@ CREATE TABLE "h2b_webhook_outbox" (
     "envelope" JSONB NOT NULL,
     "status" "H2BOutboxStatus" NOT NULL DEFAULT 'PENDING',
     "attempt_count" INTEGER NOT NULL DEFAULT 0,
+    "claim_version" BIGINT NOT NULL DEFAULT 0,
     "claimed_at" TIMESTAMP(3),
     "lease_until" TIMESTAMP(3),
     "next_attempt_at" TIMESTAMP(3),
@@ -91,6 +110,7 @@ CREATE TABLE "h2b_external_order_aggregates" (
     "safe_state" JSONB NOT NULL,
     "latest_sequence" BIGINT NOT NULL DEFAULT 0,
     "latest_event_at" TIMESTAMP(3),
+    "latest_topic" TEXT,
     "created_at" TIMESTAMP(3) NOT NULL DEFAULT CURRENT_TIMESTAMP,
     "updated_at" TIMESTAMP(3) NOT NULL,
     CONSTRAINT "h2b_external_order_aggregates_pkey" PRIMARY KEY ("id")

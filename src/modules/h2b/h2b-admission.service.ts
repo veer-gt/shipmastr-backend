@@ -84,12 +84,14 @@ export type H2BAdmissionResult = {
 
 export async function admitH2BWebhook(input: {
   endpointToken: string;
+  endpoint?: Awaited<ReturnType<typeof resolveH2BEndpoint>>;
   headers: Record<string, unknown>;
   rawBody: Buffer;
   client?: Db;
 }): Promise<H2BAdmissionResult> {
   const client = input.client ?? prisma;
-  const endpoint = await resolveH2BEndpoint(input.endpointToken, client);
+  const endpoint = input.endpoint;
+  if (!endpoint) throw new HttpError(500, "H2B_ENDPOINT_SCOPE_REQUIRED");
   const provider = providerFromPlatform(endpoint.platform);
   const topic = topicForProvider(provider, input.headers);
   const deliveryId = deliveryIdForProvider(provider, input.headers);
@@ -158,6 +160,9 @@ export async function admitH2BWebhook(input: {
       }
     });
     if (!existing) throw new HttpError(500, "H2B_ADMISSION_PERSISTENCE_FAILED");
+    if (existing.merchantId !== endpoint.merchantId || existing.platform !== endpoint.platform || existing.connectionId !== endpoint.connectionId || existing.deliveryId !== deliveryId || existing.topic !== topic || existing.payloadSha256 !== payloadSha256) {
+      throw new HttpError(409, "H2B_DELIVERY_ID_COLLISION");
+    }
     return {
       provider,
       topic,

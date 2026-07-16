@@ -14,7 +14,11 @@ export async function readH2BRawBody(request: IncomingMessage, limitBytes: numbe
     const fail = (error: Error) => {
       if (settled) return;
       settled = true;
-      request.pause();
+      request.removeAllListeners("data");
+      request.resume?.();
+      if (error instanceof HttpError && error.status === 413) {
+        try { request.socket?.setTimeout(5_000); } catch { /* safe transport cleanup */ }
+      }
       reject(error);
     };
     request.on("data", (chunk: Buffer | string) => {

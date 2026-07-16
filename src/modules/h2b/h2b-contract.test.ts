@@ -1,7 +1,10 @@
 import assert from "node:assert/strict";
+import { readFile } from "node:fs/promises";
+import { dirname, resolve } from "node:path";
+import { fileURLToPath } from "node:url";
 import test from "node:test";
 import { extractH2BSafeEnvelope } from "./h2b-safe-envelope.js";
-import { H2B_INITIAL_TOPICS, H2B_MAGENTO_INTERNAL_EVENT_HOOK, H2B_MAGENTO_TOPIC, topicForProvider } from "./h2b.types.js";
+import { decimalMajorToMinor, endpointParts, H2B_INITIAL_TOPICS, H2B_MAGENTO_INTERNAL_EVENT_HOOK, H2B_MAGENTO_TOPIC, topicForProvider } from "./h2b.types.js";
 import { h2bEndpointFingerprint } from "./h2b-endpoint.service.js";
 import { allowH2BRequest, h2bRateLimitKey, resetH2BRateLimitForTests } from "./h2b-rate-limit.js";
 
@@ -40,4 +43,32 @@ test("endpoint fingerprint is fixed length and rate keys are pseudonymous", () =
   for (let index = 0; index < 60; index += 1) assert.equal(allowH2BRequest(fingerprint, "127.0.0.1", 1_000), true);
   assert.equal(allowH2BRequest(fingerprint, "127.0.0.1", 1_000), false);
   resetH2BRateLimitForTests();
+});
+
+test("strict decimal major-unit conversion uses reviewed currency exponents", () => {
+  assert.equal(decimalMajorToMinor("598.94", "INR"), "59894");
+  assert.equal(decimalMajorToMinor("1499.00", "INR"), "149900");
+  assert.equal(decimalMajorToMinor("2500.50", "INR"), "250050");
+  assert.equal(decimalMajorToMinor("0", "EUR"), "0");
+  assert.equal(decimalMajorToMinor("2500", "JPY"), "2500");
+  assert.equal(decimalMajorToMinor("10.125", "KWD"), "10125");
+  for (const [value, code] of [["1.001", "INR"], ["-1", "INR"], ["1e2", "INR"], ["01", "INR"], ["1", "ZZZ"]] as const) assert.throws(() => decimalMajorToMinor(value, code));
+  assert.throws(() => decimalMajorToMinor(1.5, "INR"));
+  assert.throws(() => decimalMajorToMinor("9".repeat(40), "INR"));
+});
+
+test("provider hints are routing-only and reject near-prefix tokens", () => {
+  const token = `shp_${"A".repeat(43)}`;
+  assert.equal(endpointParts(token)?.provider, "SHOPIFY");
+  assert.equal(endpointParts(`shp-${"A".repeat(43)}`), null);
+  assert.equal(endpointParts(`shp_${"A".repeat(42)}!`), null);
+  assert.equal(endpointParts(`shp_${"A".repeat(43)}_evil`), null);
+  assert.equal(endpointParts(`xyz_${"A".repeat(43)}`), null);
+});
+
+test("worker fencing and sequence fields are part of every completion path", async () => {
+  const worker = await readFile(resolve(dirname(fileURLToPath(import.meta.url)), "h2b-worker.ts").replace(/dist[\\/]modules[\\/]h2b/, "src/modules/h2b"), "utf8").catch(() => readFile(resolve(dirname(fileURLToPath(import.meta.url)), "h2b-worker.js"), "utf8"));
+  assert.match(worker, /claimVersion/);
+  assert.match(worker, /ingestionSequence/);
+  assert.match(worker, /status: \{ in: \[H2BOutboxStatus\.CLAIMED, H2BOutboxStatus\.PROCESSING\] \}/);
 });

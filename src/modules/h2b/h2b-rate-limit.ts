@@ -22,13 +22,13 @@ function prune(now: number) {
   for (const [key] of oldest) buckets.delete(key);
 }
 
-export function h2bRateLimitKey(endpointFingerprint: string | null, sourceAddress: string) {
-  return `${endpointFingerprint ?? "unknown"}:${pseudonym(sourceAddress || "unknown")}`;
+export function h2bRateLimitKey(endpointFingerprint: string | null, sourceAddress: string, providerHint = "unknown") {
+  return `${providerHint}:${endpointFingerprint ?? "unknown"}:${pseudonym(sourceAddress || "unknown")}`;
 }
 
-export function allowH2BRequest(endpointFingerprint: string | null, sourceAddress: string, now = Date.now()) {
+export function allowH2BRequest(endpointFingerprint: string | null, sourceAddress: string, now = Date.now(), providerHint = "unknown") {
   prune(now);
-  const key = h2bRateLimitKey(endpointFingerprint, sourceAddress);
+  const key = h2bRateLimitKey(endpointFingerprint, sourceAddress, providerHint);
   const current = buckets.get(key);
   if (!current || now - current.startedAt >= WINDOW_MS) {
     buckets.set(key, { startedAt: now, attempts: 1 });

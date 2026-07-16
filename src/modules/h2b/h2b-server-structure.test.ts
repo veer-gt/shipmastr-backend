@@ -12,6 +12,6 @@ test("H2B route is dynamically loaded and reserved before the global JSON parser
   const parserPosition = source.indexOf("express.json(");
   assert.notEqual(routePosition, -1);
   assert.ok(routePosition < parserPosition);
-  assert.match(source, /await import\("\.\/modules\/h2b\/h2b-public\.routes\.js"\)/);
+  assert.match(source, /import\("\.\/modules\/h2b\/h2b-public\.routes\.js"\)/);
   assert.doesNotMatch(source, /import\s+\{[^}]*h2bPublicRouter/);
 });

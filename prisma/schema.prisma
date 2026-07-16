@@ -806,6 +806,7 @@ enum H2BAdmissionStatus {
 enum H2BOutboxStatus {
   PENDING
   CLAIMED
+  PROCESSING
   PROCESSED
   FAILED
   DEAD_LETTER
@@ -1921,6 +1922,7 @@ model H2BConnectionEndpoint {
   merchant   Merchant           @relation(fields: [merchantId], references: [id], onDelete: Cascade)
   connection PlatformConnection @relation(fields: [connectionId], references: [id], onDelete: Cascade)
 
+  @@unique([previousDigest])
   @@index([merchantId, status])
   @@index([merchantId, connectionId])
   @@index([previousDigest])
@@ -1928,22 +1930,23 @@ model H2BConnectionEndpoint {
 }
 
 model H2BWebhookAdmission {
-  id            String             @id @default(cuid())
-  merchantId    String             @map("merchant_id")
-  connectionId  String             @map("connection_id")
-  platform      StorePlatform
-  topic         String
-  deliveryId    String             @map("delivery_id")
-  payloadSha256 String             @map("payload_sha256")
-  safeEnvelope  Json               @map("safe_envelope")
-  status        H2BAdmissionStatus @default(PENDING)
-  failureClass  String?            @map("failure_class")
-  duplicate     Boolean            @default(false)
-  receivedAt    DateTime           @default(now()) @map("received_at")
-  acceptedAt    DateTime?          @map("accepted_at")
-  processedAt   DateTime?          @map("processed_at")
-  createdAt     DateTime           @default(now()) @map("created_at")
-  updatedAt     DateTime           @default(now()) @updatedAt @map("updated_at")
+  id                String             @id @default(cuid())
+  merchantId        String             @map("merchant_id")
+  connectionId      String             @map("connection_id")
+  platform          StorePlatform
+  topic             String
+  deliveryId        String             @map("delivery_id")
+  payloadSha256     String             @map("payload_sha256")
+  safeEnvelope      Json               @map("safe_envelope")
+  status            H2BAdmissionStatus @default(PENDING)
+  failureClass      String?            @map("failure_class")
+  duplicate         Boolean            @default(false)
+  receivedAt        DateTime           @default(now()) @map("received_at")
+  acceptedAt        DateTime?          @map("accepted_at")
+  processedAt       DateTime?          @map("processed_at")
+  createdAt         DateTime           @default(now()) @map("created_at")
+  updatedAt         DateTime           @default(now()) @updatedAt @map("updated_at")
+  ingestionSequence BigInt             @unique @default(autoincrement()) @map("ingestion_sequence")
 
   merchant   Merchant           @relation(fields: [merchantId], references: [id], onDelete: Cascade)
   connection PlatformConnection @relation(fields: [connectionId], references: [id], onDelete: Cascade)
@@ -1965,6 +1968,7 @@ model H2BWebhookOutbox {
   envelope      Json
   status        H2BOutboxStatus @default(PENDING)
   attemptCount  Int             @default(0) @map("attempt_count")
+  claimVersion  BigInt          @default(0) @map("claim_version")
   claimedAt     DateTime?       @map("claimed_at")
   leaseUntil    DateTime?       @map("lease_until")
   nextAttemptAt DateTime?       @map("next_attempt_at")
@@ -1993,6 +1997,7 @@ model H2BExternalOrderAggregate {
   safeState         Json          @map("safe_state")
   latestSequence    BigInt        @default(0) @map("latest_sequence")
   latestEventAt     DateTime?     @map("latest_event_at")
+  latestTopic       String?       @map("latest_topic")
   createdAt         DateTime      @default(now()) @map("created_at")
   updatedAt         DateTime      @default(now()) @updatedAt @map("updated_at")
 
