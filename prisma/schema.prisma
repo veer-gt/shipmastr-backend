@@ -791,6 +791,32 @@ enum PlatformCredentialPurpose {
   PLATFORM_WEBHOOK_SIGNATURE
 }
 
+enum H2BEndpointStatus {
+  ACTIVE
+  REVOKED
+}
+
+enum H2BEndpointTokenRole {
+  CURRENT
+  PREVIOUS
+}
+
+enum H2BAdmissionStatus {
+  PENDING
+  ACCEPTED
+  PROCESSED
+  FAILED
+}
+
+enum H2BOutboxStatus {
+  PENDING
+  CLAIMED
+  PROCESSING
+  PROCESSED
+  FAILED
+  DEAD_LETTER
+}
+
 enum PlatformHealthCheckStatus {
   HEALTHY
   DEGRADED
@@ -979,31 +1005,35 @@ model Merchant {
   createdAt           DateTime                     @default(now())
   updatedAt           DateTime                     @updatedAt
 
-  users                    User[]
-  leads                    Lead[]
-  firstShipmentRequests    FirstShipmentRequest[]
-  orders                   Order[]
-  orderImportBatches       OrderImportBatch[]
-  auditLogs                AuditLog[]
-  securityFixtureTenants   SecurityFixtureTenant[]   @relation("SecurityFixtureMerchant")
-  gstinRecords             MerchantGstinRecord[]
-  pickupPoints             MerchantPickupPoint[]
-  warehouses               MerchantWarehouse[]
-  customers                MerchantCustomer[]
-  domains                  MerchantDomain[]
-  storefronts              Storefront[]
-  storefrontAssets         StorefrontAsset[]
-  storefrontProducts       StorefrontProduct[]
-  checkoutRulesVersions    CheckoutRulesVersion[]
-  checkoutSettings         CheckoutMerchantSetting?
-  checkoutQuotes           CheckoutQuote[]
-  checkoutOrders           CheckoutOrder[]
-  checkoutPayments         CheckoutPayment[]
-  checkoutAccountingEvents CheckoutAccountingEvent[]
-  checkoutIdempotencyKeys  CheckoutIdempotencyKey[]
-  checkoutAddressSessions  CheckoutAddressSession[]
-  checkoutAuditLogs        CheckoutAuditLog[]
-  domainProvisioningEvents DomainProvisioningEvent[]
+  users                      User[]
+  leads                      Lead[]
+  firstShipmentRequests      FirstShipmentRequest[]
+  orders                     Order[]
+  orderImportBatches         OrderImportBatch[]
+  auditLogs                  AuditLog[]
+  securityFixtureTenants     SecurityFixtureTenant[]     @relation("SecurityFixtureMerchant")
+  gstinRecords               MerchantGstinRecord[]
+  pickupPoints               MerchantPickupPoint[]
+  warehouses                 MerchantWarehouse[]
+  customers                  MerchantCustomer[]
+  domains                    MerchantDomain[]
+  storefronts                Storefront[]
+  storefrontAssets           StorefrontAsset[]
+  storefrontProducts         StorefrontProduct[]
+  checkoutRulesVersions      CheckoutRulesVersion[]
+  checkoutSettings           CheckoutMerchantSetting?
+  checkoutQuotes             CheckoutQuote[]
+  checkoutOrders             CheckoutOrder[]
+  checkoutPayments           CheckoutPayment[]
+  checkoutAccountingEvents   CheckoutAccountingEvent[]
+  checkoutIdempotencyKeys    CheckoutIdempotencyKey[]
+  checkoutAddressSessions    CheckoutAddressSession[]
+  checkoutAuditLogs          CheckoutAuditLog[]
+  domainProvisioningEvents   DomainProvisioningEvent[]
+  h2bEndpoints               H2BConnectionEndpoint[]
+  h2bAdmissions              H2BWebhookAdmission[]
+  h2bOutboxes                H2BWebhookOutbox[]
+  h2bExternalOrderAggregates H2BExternalOrderAggregate[]
 
   @@index([adminStatus])
   @@index([onboardingStatus])
@@ -1851,28 +1881,177 @@ model WebhookEventOutbox {
 }
 
 model PlatformConnection {
-  id                 String                      @id @default(cuid())
-  merchantId         String                      @map("merchant_id")
-  platform           StorePlatform
-  storeName          String?                     @map("store_name")
-  storeUrl           String                      @map("store_url")
-  status             PlatformConnectionStatus    @default(DRAFT)
-  syncDirection      PlatformSyncDirection       @default(IMPORT_ONLY) @map("sync_direction")
-  credentialsRef     String?                     @map("credentials_ref")
-  credentialsMeta    Json?                       @map("credentials_meta")
-  lastOrderImportAt  DateTime?                   @map("last_order_import_at")
-  lastTrackingSyncAt DateTime?                   @map("last_tracking_sync_at")
-  lastErrorCode      String?                     @map("last_error_code")
-  lastErrorMessage   String?                     @map("last_error_message")
-  disabledAt         DateTime?                   @map("disabled_at")
-  createdAt          DateTime                    @default(now()) @map("created_at")
-  updatedAt          DateTime                    @default(now()) @updatedAt @map("updated_at")
-  webhookCredentials PlatformWebhookCredential[]
+  id                         String                      @id @default(cuid())
+  merchantId                 String                      @map("merchant_id")
+  platform                   StorePlatform
+  storeName                  String?                     @map("store_name")
+  storeUrl                   String                      @map("store_url")
+  status                     PlatformConnectionStatus    @default(DRAFT)
+  syncDirection              PlatformSyncDirection       @default(IMPORT_ONLY) @map("sync_direction")
+  credentialsRef             String?                     @map("credentials_ref")
+  credentialsMeta            Json?                       @map("credentials_meta")
+  lastOrderImportAt          DateTime?                   @map("last_order_import_at")
+  lastTrackingSyncAt         DateTime?                   @map("last_tracking_sync_at")
+  lastErrorCode              String?                     @map("last_error_code")
+  lastErrorMessage           String?                     @map("last_error_message")
+  disabledAt                 DateTime?                   @map("disabled_at")
+  createdAt                  DateTime                    @default(now()) @map("created_at")
+  updatedAt                  DateTime                    @default(now()) @updatedAt @map("updated_at")
+  webhookCredentials         PlatformWebhookCredential[]
+  h2bEndpoint                H2BConnectionEndpoint?
+  h2bAdmissions              H2BWebhookAdmission[]
+  h2bOutboxes                H2BWebhookOutbox[]
+  h2bExternalOrderAggregates H2BExternalOrderAggregate[]
 
   @@index([merchantId, status])
   @@index([merchantId, platform])
   @@index([merchantId, createdAt])
   @@map("platform_connections")
+}
+
+model H2BConnectionEndpoint {
+  id           String            @id @default(cuid())
+  merchantId   String            @map("merchant_id")
+  connectionId String            @unique @map("connection_id")
+  platform     StorePlatform
+  status       H2BEndpointStatus @default(ACTIVE)
+  generation   Int               @default(1)
+  revokedAt    DateTime?         @map("revoked_at")
+  createdAt    DateTime          @default(now()) @map("created_at")
+  updatedAt    DateTime          @default(now()) @updatedAt @map("updated_at")
+
+  merchant   Merchant                     @relation(fields: [merchantId], references: [id], onDelete: Cascade)
+  connection PlatformConnection           @relation(fields: [connectionId], references: [id], onDelete: Cascade)
+  tokens     H2BConnectionEndpointToken[]
+
+  @@index([merchantId, status])
+  @@index([merchantId, connectionId])
+  @@map("h2b_connection_endpoints")
+}
+
+model H2BConnectionEndpointToken {
+  id              String               @id @default(cuid())
+  endpointId      String               @map("endpoint_id")
+  digest          String               @unique
+  role            H2BEndpointTokenRole
+  platform        StorePlatform
+  generation      Int
+  activatedAt     DateTime             @map("activated_at")
+  validUntil      DateTime?            @map("valid_until")
+  revokedAt       DateTime?            @map("revoked_at")
+  safeFingerprint String               @map("safe_fingerprint")
+  createdAt       DateTime             @default(now()) @map("created_at")
+  updatedAt       DateTime             @default(now()) @updatedAt @map("updated_at")
+
+  endpoint H2BConnectionEndpoint @relation(fields: [endpointId], references: [id], onDelete: Cascade)
+
+  @@unique([endpointId, role])
+  @@index([endpointId, role, revokedAt])
+  @@map("h2b_connection_endpoint_tokens")
+}
+
+model H2BWebhookAdmission {
+  id                String             @id @default(cuid())
+  merchantId        String             @map("merchant_id")
+  connectionId      String             @map("connection_id")
+  platform          StorePlatform
+  topic             String
+  deliveryId        String             @map("delivery_id")
+  payloadSha256     String             @map("payload_sha256")
+  safeEnvelope      Json               @map("safe_envelope")
+  status            H2BAdmissionStatus @default(PENDING)
+  failureClass      String?            @map("failure_class")
+  duplicate         Boolean            @default(false)
+  receivedAt        DateTime           @default(now()) @map("received_at")
+  acceptedAt        DateTime?          @map("accepted_at")
+  processedAt       DateTime?          @map("processed_at")
+  createdAt         DateTime           @default(now()) @map("created_at")
+  updatedAt         DateTime           @default(now()) @updatedAt @map("updated_at")
+  ingestionSequence BigInt             @unique @default(autoincrement()) @map("ingestion_sequence")
+
+  merchant                        Merchant                            @relation(fields: [merchantId], references: [id], onDelete: Cascade)
+  connection                      PlatformConnection                  @relation(fields: [connectionId], references: [id], onDelete: Cascade)
+  outbox                          H2BWebhookOutbox?
+  externalOrderAdmissionReference H2BExternalOrderAdmissionReference?
+
+  @@unique([platform, connectionId, deliveryId])
+  @@index([merchantId, status])
+  @@index([connectionId, receivedAt])
+  @@map("h2b_webhook_admissions")
+}
+
+model H2BWebhookOutbox {
+  id            String          @id @default(cuid())
+  admissionId   String          @unique @map("admission_id")
+  merchantId    String          @map("merchant_id")
+  connectionId  String          @map("connection_id")
+  platform      StorePlatform
+  topic         String
+  envelope      Json
+  status        H2BOutboxStatus @default(PENDING)
+  attemptCount  Int             @default(0) @map("attempt_count")
+  claimVersion  BigInt          @default(0) @map("claim_version")
+  claimedAt     DateTime?       @map("claimed_at")
+  leaseUntil    DateTime?       @map("lease_until")
+  nextAttemptAt DateTime?       @map("next_attempt_at")
+  processedAt   DateTime?       @map("processed_at")
+  failedAt      DateTime?       @map("failed_at")
+  failureClass  String?         @map("failure_class")
+  createdAt     DateTime        @default(now()) @map("created_at")
+  updatedAt     DateTime        @default(now()) @updatedAt @map("updated_at")
+
+  admission  H2BWebhookAdmission @relation(fields: [admissionId], references: [id], onDelete: Cascade)
+  merchant   Merchant            @relation(fields: [merchantId], references: [id], onDelete: Cascade)
+  connection PlatformConnection  @relation(fields: [connectionId], references: [id], onDelete: Cascade)
+
+  @@index([merchantId, status, nextAttemptAt])
+  @@index([connectionId, createdAt])
+  @@map("h2b_webhook_outbox")
+}
+
+model H2BExternalOrderAggregate {
+  id                   String        @id @default(cuid())
+  merchantId           String        @map("merchant_id")
+  connectionId         String        @map("connection_id")
+  platform             StorePlatform
+  externalOrderId      String        @map("external_order_id")
+  externalOrderName    String?       @map("external_order_name")
+  createState          Json?         @map("create_state")
+  updateState          Json?         @map("update_state")
+  safeState            Json          @map("safe_state")
+  latestCreateSequence BigInt        @default(0) @map("latest_create_sequence")
+  latestUpdateSequence BigInt        @default(0) @map("latest_update_sequence")
+  latestSeenSequence   BigInt        @default(0) @map("latest_seen_sequence")
+  latestEventAt        DateTime?     @map("latest_event_at")
+  latestTopic          String?       @map("latest_topic")
+  createdAt            DateTime      @default(now()) @map("created_at")
+  updatedAt            DateTime      @default(now()) @updatedAt @map("updated_at")
+
+  merchant            Merchant                             @relation(fields: [merchantId], references: [id], onDelete: Cascade)
+  connection          PlatformConnection                   @relation(fields: [connectionId], references: [id], onDelete: Cascade)
+  admissionReferences H2BExternalOrderAdmissionReference[]
+
+  @@unique([merchantId, connectionId, externalOrderId])
+  @@index([merchantId, platform])
+  @@index([connectionId, externalOrderId])
+  @@map("h2b_external_order_aggregates")
+}
+
+model H2BExternalOrderAdmissionReference {
+  id                String   @id @default(cuid())
+  aggregateId       String   @map("aggregate_id")
+  admissionId       String   @unique @map("admission_id")
+  ingestionSequence BigInt   @map("ingestion_sequence")
+  topic             String
+  createdAt         DateTime @default(now()) @map("created_at")
+
+  aggregate H2BExternalOrderAggregate @relation(fields: [aggregateId], references: [id], onDelete: Cascade)
+  admission H2BWebhookAdmission       @relation(fields: [admissionId], references: [id], onDelete: Cascade)
+
+  @@unique([aggregateId, admissionId])
+  @@index([aggregateId])
+  @@index([aggregateId, ingestionSequence])
+  @@map("h2b_external_order_admission_references")
 }
 
 model PlatformWebhookCredential {
