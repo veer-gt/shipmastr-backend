@@ -26,12 +26,13 @@ provider-wide webhook limits:
 | --- | ---: | --- |
 | Shopify | 262,144 bytes | Conservative Shipmastr cap; Shopify's delivery contract documents raw JSON/HMAC but does not publish a webhook request-body maximum in the reviewed source. |
 | WooCommerce | 262,144 bytes | Conservative Shipmastr cap; the reviewed WooCommerce webhook guide documents delivery and retry behavior but no request-body maximum. |
-| Shipmastr Magento Extension V1 | 65,536 bytes | Matches Adobe Commerce's documented 64 KB event-size limitation; this is the cap used for the dormant extension contract. |
+| Shipmastr Magento Extension V1 | 65,536 bytes | Conservative Shipmastr admission limit for SHIPMASTR_MAGENTO_EXTENSION_V1. This custom extension protocol is controlled by Shipmastr and does not inherit Adobe Commerce Webhooks, Adobe I/O Events or Adobe Experience Platform payload limits. |
 
-Sources reviewed 2026-07-16: Shopify [webhook delivery structure](https://shopify.dev/docs/apps/build/webhooks/delivery-structure),
-WooCommerce [webhooks](https://woocommerce.com/document/webhooks/), and Adobe
-Commerce [event size limitation](https://developer.adobe.com/commerce/extensibility/_includes/event-size-limitation).
-The body-reader tests cover declared oversize, exact limit, one byte over,
+Sources reviewed 2026-07-16: Shopify [webhook delivery structure](https://shopify.dev/docs/apps/build/webhooks/delivery-structure)
+and WooCommerce [webhooks](https://woocommerce.com/document/webhooks/). The
+Magento value is an internal Shipmastr policy; it is not an official Adobe
+Commerce, Adobe I/O Events, or Adobe Experience Platform payload limit. The
+body-reader tests cover declared oversize, exact limit, one byte over,
 chunked input, and the no-listener-before-declared-rejection path.
 
 ## Endpoint lifecycle
