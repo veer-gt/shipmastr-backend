@@ -44,6 +44,33 @@ platform-webhook.service.ts:71-82` currently finds a connection with both
 `id` and `merchantId`; H2B must preserve that ownership invariant after
 resolving its opaque public identifier.
 
+The current topology is:
+
+| Mount | Current routes | Protection / scope |
+| --- | --- | --- |
+| `/api/shipping` | platform connections, credential management, Shopify/WooCommerce/Magento ingestion, event list/detail, and dry-run import staging | `requireJwtAuth` at `src/routes/index.ts:140`; merchant comes from the verified JWT |
+| `/api/shipping/seller-api` | seller API | its own seller API-key middleware at `src/routes/index.ts:139` |
+| `/api/admin` | connection administration and security-fixture routes | admin/master-admin middleware at `src/routes/index.ts:75-96` |
+| `/api/webhooks` | existing generic webhook router | separate router at `src/routes/index.ts:152`; not H2B public ingress |
+
+`src/modules/platformIntegrations/platform-integrations.routes.ts:94-135`
+contains the authenticated platform-connection create/list/detail/disable and
+health paths. `platform-webhook-ingestion.routes.ts:67-82` contains the
+authenticated event list/detail and stage-import paths. None of these routes
+is a public provider callback.
+
+H2A credential ownership is explicit: `PlatformConnection` is keyed by its
+merchant owner (`prisma/schema.prisma:1853-1875`), while
+`PlatformWebhookCredential` is unique by connection and purpose
+(`:1878-1904`). Encryption AAD binds merchant, connection, platform, and
+`PLATFORM_WEBHOOK_SIGNATURE` in
+`src/modules/credentialVault/platform-webhook-credential.crypto.ts:54-61`.
+`platform-webhook-credential.service.ts:289-326` resolves only the owned,
+enabled connection and decrypts current plus an unexpired previous secret;
+revoked, disabled, mismatched, missing, or expired candidates are rejected.
+There is no global fallback. Safe status responses expose booleans/status and
+dates only (`:100-117`); a tenant mismatch is not disclosed.
+
 The current global request logger (`src/server.ts:50`) and error handler
 (`src/server.ts:77`, implementation in `src/middleware/errorHandler.ts`) are
 not a safe place for raw provider bodies or signature material. The future
@@ -84,6 +111,34 @@ platform-webhook.service.ts:433-497`). The schema has a unique
 `[merchantId, dedupeKey]` constraint, but the check/create sequence is not an
 atomic reservation. This is a required design gap before public ingress is
 implemented.
+
+The current event row stores a safe summary, warnings, errors, event hash,
+external delivery id, and import-job references (`prisma/schema.prisma:2170-2195`).
+The current serializer removes unsafe keys/strings and marks raw payload and
+headers as absent (`src/modules/platformIntegrations/webhookIngestion/
+platform-webhook.serializer.ts:5-22,24-73`). Rejected or unknown events are
+recorded only as sanitized status metadata by the current foundation; H2B must
+not persist raw bodies, authorization, signatures, credentials, buyer PII, or
+provider payloads. Stage-import creates a DRY_RUN import job only after a
+verified event (`platform-webhook.service.ts:499-606`).
+
+The recommended public URL shape is
+`/api/public/provider-webhooks/{opaqueConnectionEndpoint}`. The final path
+segment is a high-entropy, non-enumerable routing hint whose digest is bound to
+exactly one `PlatformConnection`; provider is inferred from that connection,
+not trusted from a caller field. The HMAC credential authenticates the request.
+An unknown, stale, disabled, revoked, or platform-mismatched identifier has a
+stable safe response and performs no cross-tenant lookup.
+
+The admission state machine is `PENDING -> ACCEPTED -> PROCESSED` with
+`FAILED` and `DUPLICATE` terminal outcomes. The reservation key is scoped by
+merchant, connection, provider topic, and delivery id (event hash only as a
+documented fallback). A transaction must reserve the key and enqueue an
+outbox item atomically. Crash before reservation is retryable; crash after
+reservation leaves a pending item for a worker; duplicate delivery returns a
+safe duplicate acknowledgement without a second business action. Retention
+is a provider-reviewed policy decision and must cover the provider replay
+window; it is not an unsigned timestamp guarantee.
 
 ## Provider profiles and first topics
 
@@ -136,6 +191,25 @@ separate future sub-phase.
   (`:418-430`).
 - Add provider-specific metrics with redacted identifiers, admission status,
   latency, queue outcome, and retry/DLQ counts only.
+
+The current limiter is global (240 requests per 60 seconds). H2B needs
+additional provider-, endpoint-identifier-, source-network-, size-,
+signature-failure-, and unknown-identifier controls. Responses must be stable
+enough to avoid provider retry storms without acknowledging unverified business
+processing as successful.
+
+## Required approval evidence
+
+Before a canary is approved, evidence must show flag-off route absence, exact
+route matching, pre-buffer size rejection (including chunked and misleading
+lengths), current/previous HMAC behavior, ownership/disable/revoke isolation,
+atomic concurrent dedupe, safe acknowledgement/enqueue, complete log/response
+redaction, and no synchronous business or provider mutation. Before staging
+activation, repeat those checks on the exact pinned digest with synthetic
+fixtures, a verified rollback digest, health/auth smoke, and a bounded
+observation window. Before production promotion, add a reviewed production
+flag/digest/rollback record, provider-contract sign-off, no-secrets leakage
+scan, and an explicit owner approval; no public registration is implicit.
 
 ## Cloud Run deployment boundary
 

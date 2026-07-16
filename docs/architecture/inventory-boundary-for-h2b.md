@@ -31,6 +31,14 @@ new H2B inventory authorities. `OrderDataSignals.skuId` is a nullable signal,
 not an inventory foreign key. H2B must not add a relation to any of these
 models in its first ingress phase.
 
+The location roles remain unchanged: `MerchantWarehouse` is the future
+physical-stock anchor, `MerchantPickupPoint` is merchant compliance and
+approved pickup identity, and `PickupLocation` is a seller/courier operational
+projection. External event metadata may retain platform, external product and
+variant ids, external SKU, and quantity, but `StorefrontProduct` is not a
+canonical physical SKU and `externalSku` is not an inventory foreign key.
+H2B creates no new relationship among these models.
+
 ## Required future persistence
 
 MIGRATION_REQUIRED: YES. A public endpoint needs an opaque identifier digest
@@ -58,3 +66,10 @@ Every row and job must carry the resolved merchant and connection scope from
 the opaque identifier. A caller never supplies a merchant scope. Credential
 selection follows the existing H2A vault context rules in
 `src/modules/credentialVault/platform-webhook-credential.service.ts:289-326`.
+
+The future admission transaction must atomically persist its reservation and
+outbox item. The asynchronous worker may normalize, import-preview, retry, and
+dead-letter an event; it may not create canonical inventory, reserve/deduct or
+restock stock, create suppliers or purchase documents, transfer warehouse
+stock, or mutate order/checkout/payment/wallet/ledger/settlement state. A
+separate approved contract is required for every such effect.

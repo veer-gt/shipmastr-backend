@@ -50,6 +50,11 @@ Canary traffic is zero until the owner reviews the evidence. If a canary must
 be exercised, invoke only through the explicit private/test identity path; do
 not register a provider callback or publish the custom domain.
 
+After proof, delete or disable the canary route/service and revoke synthetic
+fixtures unless a separately approved staging observation requires retention.
+The public H2B service is never made public merely because a revision has zero
+traffic or an unadvertised URL.
+
 ## Gate 2: guarded promotion
 
 Promotion requires the exact digest to be rechecked, a rollback revision to be
@@ -62,6 +67,44 @@ endpoint disabled.
 The first public provider registration is a separately approved action after
 the observation window. Registration must be per connection, HTTPS only, and
 use the opaque identifier. It is not part of application deployment.
+
+## Dormant staging and production packages
+
+The dormant staging revision uses the exact reviewed digest,
+`H2B_PUBLIC_PROVIDER_INGRESS_ENABLED=false`, no H2B route mount, zero traffic,
+and no traffic tag. Control-plane verification does not make it private; the
+service remains protected by service-level ingress and IAM. Activation requires
+the canary evidence, exact digest, rollback digest, one guarded promotion,
+immediate provider security smoke, and automatic restoration on failure.
+
+Production is a separate package: prepare a no-traffic revision with the flag
+false, verify the exact digest and rollback revision, obtain explicit approval,
+promote once, run security smoke and an observation window, and roll back on
+any failed condition. Production remains unchanged by this plan.
+
+## Required test matrix
+
+The implementation gate must include, at minimum:
+
+- flag disabled: 404 and structurally absent route with no parser, body,
+  lookup, decrypt, database, queue, telemetry, or inventory activity;
+- request size: oversized, absent, misleading, chunked, exact-boundary, and
+  one-byte-over-cap bodies, with no fragments logged;
+- authentication/isolation: valid/invalid/current/previous/expired/revoked
+  secrets, wrong tenant, platform mismatch, unknown/disabled/stale identifier;
+- topics: each approved order topic plus inventory/product/customer/fulfilment
+  and malformed topics, all unsupported events producing no import or queue;
+- dedupe: duplicate and concurrent delivery, crash before/after reservation,
+  crash after enqueue, retry, and retention expiry;
+- data safety: no secret, authorization, buyer PII, raw body, inventory FK,
+  warehouse mutation, or provider payload leakage;
+- Magento: zero checkout-time network calls, DNS/timeout/5xx/rate-limit
+  isolation, worker retry/DLQ, duplicate delivery-id reuse, reconciliation,
+  rotation of queued deliveries, disable/uninstall, and no inventory topics.
+
+The evidence must record only sanitized test names, statuses, stable error
+classes, digest/revision identifiers, route/flag assertions, and bounded
+timings. It must not contain credentials, raw bodies, tokens, or buyer data.
 
 ## Rollback
 

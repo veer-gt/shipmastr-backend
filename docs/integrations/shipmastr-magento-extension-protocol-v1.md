@@ -20,6 +20,17 @@ metadata. It must not log or persist the HMAC secret, Authorization header,
 raw credentials, or unredacted provider payload. Retry and backoff are owned by
 the local worker; the event is dead-lettered after the reviewed limit.
 
+The required flow is:
+
+`Magento order committed -> local extension outbox entry -> checkout request
+completes -> background worker/cron -> deterministic serialization -> HMAC over
+exact bytes -> Shipmastr delivery -> bounded retries -> dead-letter state`.
+
+Supported sender modes are `MAGENTO_MESSAGE_QUEUE`,
+`DATABASE_OUTBOX_CRON`, and `DISABLED_MANUAL_IMPORT`. The order hook must make
+zero outbound network calls to Shipmastr. A timeout, DNS failure, 5xx, or rate
+limit in the worker must never fail or delay checkout.
+
 ## Header and signature contract
 
 For the initial profile, the worker sends:
@@ -51,6 +62,20 @@ The repository's current foundation creates `PlatformOrderImport` only and
 marks `order_creation.status` as `deferred`
 (`src/modules/platformIntegrations/magento/magento-order-ingestion.service.ts:79-128`).
 Canonical import and inventory effects are future, separately approved phases.
+
+Queued deliveries retain a key-version reference so a reviewed rotation can
+verify already-queued records; no secret is copied into the outbox. Disable or
+uninstall stops new sends, preserves sanitized delivery evidence, and leaves
+manual import as the explicit fallback. A reconciliation job scans recent
+committed orders for missing delivery records and idempotently creates the
+missing outbox entries. Duplicate extension events reuse the delivery id.
+
+Installation/registration is an explicit extension configuration action that
+binds one Magento store to one Shipmastr connection-specific opaque endpoint.
+It is not an application-side provider registration and must be separately
+approved. The sender must support bounded retries and a dead-letter queue, but
+the exact numeric retry limit is a reviewed extension policy rather than an
+assumption about Adobe or Magento.
 
 ## Adobe relationship
 
