@@ -21,7 +21,7 @@ async function claimOne(client: Db, now: Date, leaseUntil: Date): Promise<Claime
       { status: H2BOutboxStatus.PROCESSING, leaseUntil: { lt: now } }
     ] }, orderBy: { createdAt: "asc" }, include: { admission: true } });
     if (!candidate) return null;
-    const updated = await tx.h2BWebhookOutbox.updateMany({ where: { id: candidate.id, status: candidate.status, ...([H2BOutboxStatus.CLAIMED, H2BOutboxStatus.PROCESSING].includes(candidate.status) ? { leaseUntil: { lt: now } } : {}) }, data: { status: H2BOutboxStatus.CLAIMED, claimedAt: now, leaseUntil, attemptCount: { increment: 1 }, claimVersion: { increment: 1 } } });
+    const updated = await tx.h2BWebhookOutbox.updateMany({ where: { id: candidate.id, status: candidate.status, ...(candidate.status === H2BOutboxStatus.CLAIMED || candidate.status === H2BOutboxStatus.PROCESSING ? { leaseUntil: { lt: now } } : {}) }, data: { status: H2BOutboxStatus.CLAIMED, claimedAt: now, leaseUntil, attemptCount: { increment: 1 }, claimVersion: { increment: 1 } } });
     if (updated.count !== 1) return null;
     return tx.h2BWebhookOutbox.findUnique({ where: { id: candidate.id }, include: { admission: true } }) as Promise<Claimed>;
   });
