@@ -70,7 +70,7 @@ and no inventory effect.
 | Required evidence | `X-Magento-Topic: shipmastr.order.committed.v1`, `X-Magento-Event`, `X-Magento-Webhook-Id`, `X-Magento-Signature` |
 | Verification | Base64 HMAC-SHA256 over raw bytes; extension owns local outbox/worker and must not make a synchronous provider-to-Shipmastr call during the originating Commerce transaction |
 | Body and delivery | Deterministic serialization, unique delivery id, bounded retry/backoff, and dead-letter state are extension responsibilities. Secret rotation must preserve the key version needed for queued deliveries; disable/uninstall stops new sends and leaves evidence for reconciliation. |
-| Registration/runtime allowlists | Installation enables only the two profile topics; runtime rejects all other topics. Registration is an explicit extension/configuration step, never an implicit Shipmastr provider write. |
+| Registration/runtime allowlists | Installation enables only the single initial profile topic; runtime rejects all other topics. Registration is an explicit extension/configuration step, never an implicit Shipmastr provider write. |
 | Current repository status | Validation and `PlatformOrderImport` foundation exist; a Shipmastr Magento extension, outbox, and worker are not present. Full order creation remains deferred. |
 | Reference | Adobe [Webhooks](https://developer.adobe.com/commerce/extensibility/webhooks/), [I/O Events](https://developer.adobe.com/commerce/extensibility/events/), [consume events](https://developer.adobe.com/commerce/extensibility/events/consume-events) |
 
