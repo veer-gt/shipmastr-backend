@@ -69,6 +69,13 @@ test("provider hints are routing-only and reject near-prefix tokens", () => {
   assert.equal(endpointParts(`xyz_${"A".repeat(43)}`), null);
 });
 
+test("unknown endpoint resolution precedes admission and provider-side services", async () => {
+  const routes = await readFile(resolve(dirname(fileURLToPath(import.meta.url)), "h2b-public.routes.ts").replace(/dist[\\/]modules[\\/]h2b/, "src/modules/h2b"), "utf8").catch(() => readFile(resolve(dirname(fileURLToPath(import.meta.url)), "h2b-public.routes.js"), "utf8"));
+  assert.ok(routes.lastIndexOf("await resolveH2BEndpoint") < routes.lastIndexOf("await admitH2BWebhook"));
+  assert.equal(routes.includes("credentialVault"), false);
+  assert.equal(routes.includes("inventory"), false);
+});
+
 test("worker fencing and sequence fields are part of every completion path", async () => {
   const worker = await readFile(resolve(dirname(fileURLToPath(import.meta.url)), "h2b-worker.ts").replace(/dist[\\/]modules[\\/]h2b/, "src/modules/h2b"), "utf8").catch(() => readFile(resolve(dirname(fileURLToPath(import.meta.url)), "h2b-worker.js"), "utf8"));
   assert.match(worker, /claimVersion/);

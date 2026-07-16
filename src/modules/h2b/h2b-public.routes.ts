@@ -2,7 +2,7 @@ import { Router, type Request, type Response } from "express";
 import { env } from "../../config/env.js";
 import { readH2BRawBody } from "./h2b-raw-body.js";
 import { admitH2BWebhook } from "./h2b-admission.service.js";
-import { endpointParts, H2B_ABSOLUTE_BODY_LIMIT_BYTES, H2B_PUBLIC_ROUTE_PREFIX, providerFromPlatform, providerFromHint, type H2BProvider } from "./h2b.types.js";
+import { endpointParts, H2B_ABSOLUTE_BODY_LIMIT_BYTES, H2B_PUBLIC_ROUTE_PREFIX, providerFromHint, providerFromPlatform, type H2BProvider } from "./h2b.types.js";
 import { resolveH2BEndpoint } from "./h2b-endpoint.service.js";
 import { allowH2BRequest } from "./h2b-rate-limit.js";
 import { HttpError } from "../../lib/httpError.js";
@@ -31,10 +31,12 @@ export const h2bTerminalPrefixGuard = safe404;
 
 h2bPublicRouter.post("/:opaqueConnectionEndpoint", async (req, res) => {
   const endpointToken = routeParam(req.params.opaqueConnectionEndpoint);
+  const sourceAddress = req.socket.remoteAddress ?? "unknown";
+  const providerHint = endpointToken.slice(0, 3);
+  const rateProvider = providerFromHint(providerHint) ? providerHint : "unknown";
+  if (!allowH2BRequest(null, sourceAddress, Date.now(), rateProvider)) return res.status(429).json({ error: "H2B_RATE_LIMITED" });
   const parts = endpointParts(endpointToken);
   if (!parts) return safe404(req, res);
-  const sourceAddress = req.socket.remoteAddress ?? "unknown";
-  if (!allowH2BRequest(null, sourceAddress, Date.now(), parts.provider)) return res.status(429).json({ error: "H2B_RATE_LIMITED" });
   boundHeaders(req, parts.provider);
   const declared = header(req, "content-length");
   const limit = limitForProvider(parts.provider);

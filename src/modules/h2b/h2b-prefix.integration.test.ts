@@ -2,6 +2,7 @@ import assert from "node:assert/strict";
 import http from "node:http";
 import test from "node:test";
 import { createApp } from "../../server.js";
+import { allowH2BRequest, resetH2BRateLimitForTests } from "./h2b-rate-limit.js";
 
 async function request(app: any, method: string, path: string, body = "not-json", chunked = false) {
   const server = http.createServer(app);
@@ -43,4 +44,15 @@ test("H2B enabled malformed and near-prefix paths have the same safe terminal re
   const validShape = `/api/public/provider-webhooks/shp_${"A".repeat(43)}`;
   assert.equal((await request(app, "POST", validShape, "x".repeat(262_145))).status, 413);
   assert.equal((await request(app, "POST", validShape, "x".repeat(262_145), true)).status, 413);
+});
+
+test("unknown valid endpoints share the malformed safe response and pre-resolution abuse control", async () => {
+  resetH2BRateLimitForTests();
+  const malformed = allowH2BRequest(null, "198.51.100.10", 10_000, "unknown");
+  const unknown = allowH2BRequest(null, "198.51.100.10", 10_000, "shp");
+  assert.equal(malformed, true);
+  assert.equal(unknown, true);
+  for (let attempt = 1; attempt < 60; attempt += 1) assert.equal(allowH2BRequest(null, "198.51.100.10", 10_000, "unknown"), true);
+  assert.equal(allowH2BRequest(null, "198.51.100.10", 10_000, "unknown"), false);
+  resetH2BRateLimitForTests();
 });

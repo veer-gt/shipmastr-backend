@@ -194,6 +194,7 @@ try {
   const beforeUnknown = await countFor(merchantA.id, shopifyId);
   const unknown = await request(server, `/api/public/provider-webhooks/${unknownToken}`, raced.headers, raced.payload);
   assert.equal(unknown.status, 404);
+  assert.deepEqual(JSON.parse(unknown.body), JSON.parse(malformed.body));
   assert.deepEqual(await countFor(merchantA.id, shopifyId), beforeUnknown);
 
   const wrongTenant = fixture("SHOPIFY", "orders/create", "wrong-tenant", generatedSecrets.get(fixtureB.connection.id).current);
