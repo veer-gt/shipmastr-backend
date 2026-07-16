@@ -116,16 +116,26 @@ the millisecond receive timestamp.
 
 `H2BExternalOrderAggregate` stores separate nullable `createState` and
 `updateState` JSON values, `latestCreateSequence`, `latestUpdateSequence`,
-`latestSeenSequence`, `latestTopic`, and a bounded unique `admissionIds` array.
+`latestSeenSequence`, `latestTopic`, and no admission-ID array. Processed
+admissions are normalized into `H2BExternalOrderAdmissionReference` rows with
+bounded identifiers and metadata, unique `(aggregateId, admissionId)` and
+unique `admissionId` constraints, plus aggregate/sequence indexes. Reference
+rows are retained historically rather than silently truncated; each row and
+the aggregate row remain bounded regardless of event count. References cascade
+when an aggregate or its admission is deleted, and `safeState` never contains
+admission IDs.
 Create-like topics are Shopify `orders/create`, WooCommerce `order.created`,
 and the Magento semantic topic; update-like topics are Shopify
 `orders/updated` and WooCommerce `order.updated`. Same-class state advances
 only for a greater ingestion sequence. Final state is a deterministic
 null-safe merge of create state followed by update state, so a late create
 cannot erase populated update fields and older updates cannot overwrite newer
-updates. Aggregate acquisition is an atomic `INSERT ... ON CONFLICT DO
-NOTHING` followed by a row lock. Sanitized admission references are unioned
-exactly once.
+updates. `externalOrderName` is projected from that same merged state: a
+non-null update name wins, otherwise a non-null create name wins, and null
+never erases a populated name. Aggregate acquisition is an atomic `INSERT ...
+ON CONFLICT DO NOTHING` followed by a row lock. Each processed admission is
+inserted into the normalized reference table with `ON CONFLICT DO NOTHING` in
+the same fenced transaction.
 
 Expired claims are recoverable. The worker only updates the H2B import-preparation state and never creates canonical
 Shipmastr orders, shipments, inventory records, provider calls, checkout,
@@ -141,7 +151,7 @@ foundation, not canonical-order creation.
 ## Scratch proof procedure
 
 The proof uses one uniquely named local PostgreSQL database matching
-`shipmastr_scratch_h2b2_concurrency_<random>_<UTC timestamp>`, applies every migration from zero, and
+`shipmastr_scratch_h2b2_final3_<random>_<UTC timestamp>`, applies every migration from zero, and
 rejects non-loopback or non-scratch `DATABASE_URL` values. It creates two
 synthetic merchants and Shopify/WooCommerce/Magento connections, encrypts
 fixture credentials in memory, exercises the loopback router with raw HTTP,
@@ -153,9 +163,13 @@ uniqueness conflicts, concurrent endpoint operations,
 exact/oversize/chunked body handling before endpoint lookup, a 16-request
 duplicate race and delivery collision, transaction rollback/retry, lease
 recovery, two-worker ownership, stale-claim fencing, retryable and terminal
-failure states, 50 concurrent initial aggregate races, Woo created/updated
-convergence permutations, same-millisecond events, cross-connection and
-cross-tenant rejection, and safe-envelope leakage checks. The runner prints
+failure states, normalized admission references including a 101-row retention
+proof and foreign-key lifecycle checks, 50 concurrent initial aggregate races,
+Woo created/updated convergence permutations, explicitly forced
+`FORCED_FORWARD_SEQUENTIAL` and `FORCED_REVERSE_SEQUENTIAL` processing, a
+separately labelled `PARALLEL_CONCURRENT_RACE`, deterministic
+`externalOrderName` projections, same-millisecond events, cross-connection
+and cross-tenant rejection, and safe-envelope leakage checks. The runner prints
 only aggregate PASS counts and never prints generated secrets or endpoint
 tokens. The scratch database is dropped after the proof and checked absent.
 

@@ -5,7 +5,7 @@ import http from "node:http";
 const databaseUrl = process.env.DATABASE_URL ?? "";
 const parsedDatabaseUrl = new URL(databaseUrl);
 const scratchName = decodeURIComponent(parsedDatabaseUrl.pathname.slice(1));
-if (!/^shipmastr_scratch_h2b2_[a-z0-9_]+$/.test(scratchName)
+if (!/^shipmastr_scratch_h2b2_final3_[a-z0-9_]+$/.test(scratchName)
   || !["127.0.0.1", "localhost"].includes(parsedDatabaseUrl.hostname)) {
   throw new Error("H2B_SCRATCH_DATABASE_GUARD_FAILED");
 }
@@ -373,53 +373,134 @@ try {
   assert.equal((await prisma.h2BWebhookOutbox.findUnique({ where: { admissionId: terminalAdmission.id }, select: { status: true } }))?.status, "DEAD_LETTER");
 
   const convergenceConnection = await createBareConnection(merchantA.id, "WOOCOMMERCE");
-  async function processPair(externalOrderId, first, second, processOrder = "parallel") {
+  async function assertProcessed(admissionId) {
+    assert.equal((await prisma.h2BWebhookAdmission.findUnique({ where: { id: admissionId }, select: { status: true } }))?.status, "PROCESSED");
+    assert.equal((await prisma.h2BWebhookOutbox.findUnique({ where: { admissionId }, select: { status: true } }))?.status, "PROCESSED");
+  }
+
+  async function processPair(externalOrderId, first, second, processMode = "PARALLEL_CONCURRENT_RACE") {
     const receivedAt = new Date("2026-07-16T12:00:00.000Z");
     const firstAdmission = await createPendingEvent(merchantA.id, convergenceConnection.id, "WOOCOMMERCE", first.topic, externalOrderId, first.fields, receivedAt);
     const secondAdmission = await createPendingEvent(merchantA.id, convergenceConnection.id, "WOOCOMMERCE", second.topic, externalOrderId, second.fields, receivedAt);
-    const [firstClaim, secondClaim] = await claimPair(new Date());
-    if (processOrder === "reverse") await Promise.all([processClaimedH2BOutbox(secondClaim), processClaimedH2BOutbox(firstClaim)]);
-    else await Promise.all([processClaimedH2BOutbox(firstClaim), processClaimedH2BOutbox(secondClaim)]);
+    const claims = await claimPair(new Date());
+    const firstClaim = claims.find((claim) => claim.admissionId === firstAdmission.id);
+    const secondClaim = claims.find((claim) => claim.admissionId === secondAdmission.id);
+    assert.ok(firstClaim && secondClaim);
+    if (processMode === "FORCED_FORWARD_SEQUENTIAL") {
+      assert.equal(await processClaimedH2BOutbox(firstClaim), "PROCESSED");
+      await assertProcessed(firstAdmission.id);
+      assert.equal(await processClaimedH2BOutbox(secondClaim), "PROCESSED");
+      await assertProcessed(secondAdmission.id);
+    } else if (processMode === "FORCED_REVERSE_SEQUENTIAL") {
+      assert.equal(await processClaimedH2BOutbox(secondClaim), "PROCESSED");
+      await assertProcessed(secondAdmission.id);
+      assert.equal(await processClaimedH2BOutbox(firstClaim), "PROCESSED");
+      await assertProcessed(firstAdmission.id);
+    } else {
+      assert.equal(processMode, "PARALLEL_CONCURRENT_RACE");
+      const results = await Promise.all([processClaimedH2BOutbox(firstClaim), processClaimedH2BOutbox(secondClaim)]);
+      assert.deepEqual(results.sort(), ["PROCESSED", "PROCESSED"]);
+      await assertProcessed(firstAdmission.id);
+      await assertProcessed(secondAdmission.id);
+    }
     const aggregate = await prisma.h2BExternalOrderAggregate.findUnique({ where: { merchantId_connectionId_externalOrderId: { merchantId: merchantA.id, connectionId: convergenceConnection.id, externalOrderId } } });
     assert.ok(aggregate);
-    assert.equal(aggregate.admissionIds.length, 2);
-    assert.equal(new Set(aggregate.admissionIds).size, 2);
+    assert.equal("admissionIds" in aggregate, false);
+    assert.equal(JSON.stringify(aggregate.safeState).includes("admissionIds"), false);
+    assert.equal(await prisma.h2BExternalOrderAdmissionReference.count({ where: { aggregateId: aggregate.id } }), 2);
+    assert.equal(await prisma.h2BExternalOrderAdmissionReference.count({ where: { admissionId: { in: [firstAdmission.id, secondAdmission.id] } } }), 2);
     assert.equal(aggregate.latestSeenSequence, aggregate.latestUpdateSequence > aggregate.latestCreateSequence ? aggregate.latestUpdateSequence : aggregate.latestCreateSequence);
     assert.equal((await prisma.h2BWebhookAdmission.count({ where: { id: { in: [firstAdmission.id, secondAdmission.id] }, status: "PROCESSED" } })), 2);
-    return aggregate;
+    return { aggregate, firstAdmission, secondAdmission };
   }
-  const updateBeforeCreate = await processPair("woo-update-before-create", { topic: "order.updated", fields: { totalMinor: "800", updateOnly: "u" } }, { topic: "order.created", fields: { totalMinor: "700", createOnly: "c" } }, "reverse");
-  assert.equal(updateBeforeCreate.safeState.totalMinor, "800");
-  assert.equal(updateBeforeCreate.safeState.updateOnly, "u");
-  assert.equal(updateBeforeCreate.safeState.createOnly, "c");
-  const createBeforeUpdate = await processPair("woo-create-before-update", { topic: "order.created", fields: { totalMinor: "900", createOnly: "c2" } }, { topic: "order.updated", fields: { totalMinor: "950", updateOnly: "u2" } }, "reverse");
-  assert.equal(createBeforeUpdate.safeState.totalMinor, "950");
-  assert.equal(createBeforeUpdate.safeState.updateOnly, "u2");
-  assert.equal(createBeforeUpdate.safeState.createOnly, "c2");
-  const orderIndependentForward = await processPair("woo-order-independent-forward", { topic: "order.created", fields: { totalMinor: "990", stableCreate: "yes" } }, { topic: "order.updated", fields: { totalMinor: "995", stableUpdate: "yes" } }, "parallel");
-  const orderIndependentReverse = await processPair("woo-order-independent-reverse", { topic: "order.created", fields: { totalMinor: "990", stableCreate: "yes" } }, { topic: "order.updated", fields: { totalMinor: "995", stableUpdate: "yes" } }, "reverse");
-  assert.deepEqual({ totalMinor: orderIndependentForward.safeState.totalMinor, stableCreate: orderIndependentForward.safeState.stableCreate, stableUpdate: orderIndependentForward.safeState.stableUpdate }, { totalMinor: orderIndependentReverse.safeState.totalMinor, stableCreate: orderIndependentReverse.safeState.stableCreate, stableUpdate: orderIndependentReverse.safeState.stableUpdate });
-  const nullSafe = await processPair("woo-null-safe", { topic: "order.created", fields: { totalMinor: "1000", nested: { populated: "yes" } } }, { topic: "order.updated", fields: { totalMinor: null, nested: { populated: null, added: "yes" } } }, "parallel");
-  assert.equal(nullSafe.safeState.totalMinor, "1000");
-  assert.equal(nullSafe.safeState.nested.populated, "yes");
-  assert.equal(nullSafe.safeState.nested.added, "yes");
+  const forcedForward = await processPair("forced-forward-sequential", { topic: "order.created", fields: { externalOrderName: "#CREATE-NAME", totalMinor: "800", createOnly: "c", nested: { populated: "yes" } } }, { topic: "order.updated", fields: { externalOrderName: "#UPDATE-NAME", totalMinor: "900", updateOnly: "u", nested: { added: "yes" } } }, "FORCED_FORWARD_SEQUENTIAL");
+  const forcedReverse = await processPair("forced-reverse-sequential", { topic: "order.created", fields: { externalOrderName: "#CREATE-NAME", totalMinor: "800", createOnly: "c", nested: { populated: "yes" } } }, { topic: "order.updated", fields: { externalOrderName: "#UPDATE-NAME", totalMinor: "900", updateOnly: "u", nested: { added: "yes" } } }, "FORCED_REVERSE_SEQUENTIAL");
+  function normalizedProjection(result) {
+    const scrub = (value) => {
+      if (!value || typeof value !== "object" || Array.isArray(value)) return value;
+      const copy = { ...value };
+      delete copy.externalOrderId;
+      return Object.fromEntries(Object.entries(copy).map(([key, item]) => [key, scrub(item)]));
+    };
+    return { safeState: scrub(result.aggregate.safeState), createState: scrub(result.aggregate.createState), updateState: scrub(result.aggregate.updateState), externalOrderName: result.aggregate.externalOrderName };
+  }
+  assert.equal(forcedForward.aggregate.externalOrderName, "#UPDATE-NAME");
+  assert.equal(forcedReverse.aggregate.externalOrderName, "#UPDATE-NAME");
+  assert.deepEqual(normalizedProjection(forcedForward), normalizedProjection(forcedReverse));
+  assert.equal(forcedForward.aggregate.safeState.nested.populated, "yes");
+  assert.equal(forcedForward.aggregate.safeState.nested.added, "yes");
+
+  const updateBeforeCreate = await processPair("woo-update-before-create", { topic: "order.updated", fields: { externalOrderName: "#UPDATE-NAME", totalMinor: "800", updateOnly: "u" } }, { topic: "order.created", fields: { externalOrderName: "#CREATE-NAME", totalMinor: "700", createOnly: "c" } }, "FORCED_REVERSE_SEQUENTIAL");
+  assert.equal(updateBeforeCreate.aggregate.safeState.totalMinor, "800");
+  assert.equal(updateBeforeCreate.aggregate.safeState.updateOnly, "u");
+  assert.equal(updateBeforeCreate.aggregate.safeState.createOnly, "c");
+  assert.equal(updateBeforeCreate.aggregate.externalOrderName, "#UPDATE-NAME");
+  const createBeforeUpdate = await processPair("woo-create-before-update", { topic: "order.created", fields: { externalOrderName: "#CREATE-NAME", totalMinor: "900", createOnly: "c2" } }, { topic: "order.updated", fields: { externalOrderName: "#UPDATE-NAME", totalMinor: "950", updateOnly: "u2" } }, "FORCED_FORWARD_SEQUENTIAL");
+  assert.equal(createBeforeUpdate.aggregate.safeState.totalMinor, "950");
+  assert.equal(createBeforeUpdate.aggregate.safeState.updateOnly, "u2");
+  assert.equal(createBeforeUpdate.aggregate.safeState.createOnly, "c2");
+  assert.equal(createBeforeUpdate.aggregate.externalOrderName, "#UPDATE-NAME");
+  const orderIndependentForward = await processPair("woo-order-independent-forward", { topic: "order.created", fields: { externalOrderName: "#CREATE-NAME", totalMinor: "990", stableCreate: "yes" } }, { topic: "order.updated", fields: { externalOrderName: "#UPDATE-NAME", totalMinor: "995", stableUpdate: "yes" } }, "FORCED_FORWARD_SEQUENTIAL");
+  const orderIndependentReverse = await processPair("woo-order-independent-reverse", { topic: "order.created", fields: { externalOrderName: "#CREATE-NAME", totalMinor: "990", stableCreate: "yes" } }, { topic: "order.updated", fields: { externalOrderName: "#UPDATE-NAME", totalMinor: "995", stableUpdate: "yes" } }, "FORCED_REVERSE_SEQUENTIAL");
+  assert.deepEqual(normalizedProjection(orderIndependentForward), normalizedProjection(orderIndependentReverse));
+  const nullSafe = await processPair("woo-null-safe", { topic: "order.created", fields: { externalOrderName: "#CREATE-NAME", totalMinor: "1000", nested: { populated: "yes" } } }, { topic: "order.updated", fields: { externalOrderName: null, totalMinor: null, nested: { populated: null, added: "yes" } } }, "PARALLEL_CONCURRENT_RACE");
+  assert.equal(nullSafe.aggregate.safeState.totalMinor, "1000");
+  assert.equal(nullSafe.aggregate.safeState.nested.populated, "yes");
+  assert.equal(nullSafe.aggregate.safeState.nested.added, "yes");
+  assert.equal(nullSafe.aggregate.externalOrderName, "#CREATE-NAME");
 
   const olderUpdateAdmission = await createPendingEvent(merchantA.id, convergenceConnection.id, "WOOCOMMERCE", "order.updated", "woo-older-update", { totalMinor: "1100" });
   const newerUpdateAdmission = await createPendingEvent(merchantA.id, convergenceConnection.id, "WOOCOMMERCE", "order.updated", "woo-older-update", { totalMinor: "1200" });
-  const [olderClaim, newerClaim] = await claimPair(new Date());
+  const olderNewerClaims = await claimPair(new Date());
+  const olderClaim = olderNewerClaims.find((claim) => claim.admissionId === olderUpdateAdmission.id);
+  const newerClaim = olderNewerClaims.find((claim) => claim.admissionId === newerUpdateAdmission.id);
+  assert.ok(olderClaim && newerClaim);
   await processClaimedH2BOutbox(newerClaim);
   await processClaimedH2BOutbox(olderClaim);
   const updateAggregate = await prisma.h2BExternalOrderAggregate.findUnique({ where: { merchantId_connectionId_externalOrderId: { merchantId: merchantA.id, connectionId: convergenceConnection.id, externalOrderId: "woo-older-update" } } });
   assert.equal(updateAggregate?.safeState.totalMinor, "1200");
-  assert.equal(updateAggregate?.admissionIds.length, 2);
+  assert.equal(await prisma.h2BExternalOrderAdmissionReference.count({ where: { aggregateId: updateAggregate.id } }), 2);
   assert.equal((await prisma.h2BWebhookAdmission.count({ where: { id: { in: [olderUpdateAdmission.id, newerUpdateAdmission.id] }, status: "PROCESSED" } })), 2);
 
   let concurrentInitialAggregatePasses = 0;
   for (let iteration = 0; iteration < 50; iteration += 1) {
-    const aggregate = await processPair(`woo-concurrent-${iteration}`, { topic: "order.created", fields: { totalMinor: "1300" } }, { topic: "order.updated", fields: { totalMinor: "1350" } }, "parallel");
-    assert.equal(aggregate.safeState.totalMinor, "1350");
+    const aggregate = await processPair(`woo-concurrent-${iteration}`, { topic: "order.created", fields: { totalMinor: "1300" } }, { topic: "order.updated", fields: { totalMinor: "1350" } }, "PARALLEL_CONCURRENT_RACE");
+    assert.equal(aggregate.aggregate.safeState.totalMinor, "1350");
     concurrentInitialAggregatePasses += 1;
   }
+
+  const referenceGrowthId = "woo-reference-growth";
+  let referenceGrowthAggregate;
+  for (let iteration = 0; iteration < 101; iteration += 1) {
+    const admission = await createPendingEvent(merchantA.id, convergenceConnection.id, "WOOCOMMERCE", "order.updated", referenceGrowthId, { externalOrderName: "#UPDATE-NAME", totalMinor: "1400" }, new Date("2026-07-16T12:01:00.000Z"));
+    const claim = await claimOneH2BOutbox(prisma, new Date());
+    assert.ok(claim);
+    assert.equal(await processClaimedH2BOutbox(claim), "PROCESSED");
+    await assertProcessed(admission.id);
+    referenceGrowthAggregate = await prisma.h2BExternalOrderAggregate.findUnique({ where: { merchantId_connectionId_externalOrderId: { merchantId: merchantA.id, connectionId: convergenceConnection.id, externalOrderId: referenceGrowthId } } });
+    assert.ok(referenceGrowthAggregate);
+  }
+  assert.equal("admissionIds" in referenceGrowthAggregate, false);
+  assert.equal(JSON.stringify(referenceGrowthAggregate.safeState).includes("admissionIds"), false);
+  assert.equal(await prisma.h2BExternalOrderAdmissionReference.count({ where: { aggregateId: referenceGrowthAggregate.id } }), 101);
+  const replayClaim = await prisma.h2BWebhookOutbox.findFirst({ where: { admission: { merchantId: merchantA.id, connectionId: convergenceConnection.id, deliveryId: { startsWith: `${fixtureMarker}-${referenceGrowthId}` } } }, include: { admission: true } });
+  assert.ok(replayClaim);
+  assert.equal(await processClaimedH2BOutbox({ ...replayClaim, claimVersion: replayClaim.claimVersion }), "FENCED");
+  assert.equal(await prisma.h2BExternalOrderAdmissionReference.count({ where: { aggregateId: referenceGrowthAggregate.id } }), 101);
+
+  const aggregateCascade = await processPair("reference-cascade", { topic: "order.created", fields: { externalOrderName: "#CREATE-NAME", totalMinor: "1500" } }, { topic: "order.updated", fields: { externalOrderName: "#UPDATE-NAME", totalMinor: "1550" } }, "FORCED_FORWARD_SEQUENTIAL");
+  assert.equal(await prisma.h2BExternalOrderAdmissionReference.count({ where: { aggregateId: aggregateCascade.aggregate.id } }), 2);
+  await prisma.h2BExternalOrderAggregate.delete({ where: { id: aggregateCascade.aggregate.id } });
+  assert.equal(await prisma.h2BExternalOrderAdmissionReference.count({ where: { aggregateId: aggregateCascade.aggregate.id } }), 0);
+  const admissionCascade = await createPendingEvent(merchantA.id, convergenceConnection.id, "WOOCOMMERCE", "order.created", "admission-cascade", { externalOrderName: "#CREATE-NAME", totalMinor: "1600" });
+  const admissionCascadeClaim = await claimOneH2BOutbox(prisma, new Date());
+  assert.ok(admissionCascadeClaim);
+  assert.equal(await processClaimedH2BOutbox(admissionCascadeClaim), "PROCESSED");
+  const admissionCascadeAggregate = await prisma.h2BExternalOrderAggregate.findUnique({ where: { merchantId_connectionId_externalOrderId: { merchantId: merchantA.id, connectionId: convergenceConnection.id, externalOrderId: "admission-cascade" } } });
+  assert.ok(admissionCascadeAggregate);
+  assert.equal(await prisma.h2BExternalOrderAdmissionReference.count({ where: { admissionId: admissionCascade.id } }), 1);
+  await prisma.h2BWebhookAdmission.delete({ where: { id: admissionCascade.id } });
+  assert.equal(await prisma.h2BExternalOrderAdmissionReference.count({ where: { admissionId: admissionCascade.id } }), 0);
 
   const secondConnection = await createBareConnection(merchantA.id, "WOOCOMMERCE");
   const merchantBConnection = await createBareConnection(merchantB.id, "WOOCOMMERCE");
@@ -457,7 +538,7 @@ try {
   const serialized = JSON.stringify(persisted);
   for (const forbidden of ["buyer@example.invalid", "0000000000", "private address", generatedSecrets.get(wooId).current]) assert.equal(serialized.includes(forbidden), false);
   resetH2BRateLimitForTests();
-  console.log(JSON.stringify({ scratch: "PASS", merchants: 2, providers: 3, duplicateRace: "PASS", endpointConcurrency: "PASS", rotateRevokeRaceIterations: rotateRevokePasses, concurrentInitialAggregateIterations: concurrentInitialAggregatePasses, tokenUniqueness: "PASS", rollback: "PASS", leakage: "PASS", worker: "PASS", staleWorker: "FENCED", retryableFailure: "ACCEPTED", retrySuccess: "PROCESSED", terminalFailure: "FAILED" }));
+  console.log(JSON.stringify({ scratch: "PASS", merchants: 2, providers: 3, duplicateRace: "PASS", endpointConcurrency: "PASS", rotateRevokeRaceIterations: rotateRevokePasses, concurrentInitialAggregateIterations: concurrentInitialAggregatePasses, forcedForwardSequential: "PASS", forcedReverseSequential: "PASS", parallelConcurrentRace: "PASS", normalizedOrderIndependent: "PASS", externalOrderName: "PASS", admissionReferences: "PASS", referenceRows: 101, referenceIdempotency: "PASS", referenceForeignKeys: "PASS", tokenUniqueness: "PASS", rollback: "PASS", leakage: "PASS", worker: "PASS", staleWorker: "FENCED", retryableFailure: "ACCEPTED", retrySuccess: "PROCESSED", terminalFailure: "FAILED" }));
 } finally {
   server.close();
   await prisma.$executeRawUnsafe(`DROP TRIGGER IF EXISTS h2b_scratch_fail_outbox ON h2b_webhook_outbox`);

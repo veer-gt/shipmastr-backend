@@ -78,8 +78,8 @@ export async function failClaimedH2BOutbox(claimed: ClaimedH2BOutbox, failureCla
 
 async function lockAggregate(tx: Prisma.TransactionClient, claimed: ClaimedH2BOutbox, externalOrderId: string) {
   await tx.$executeRaw`
-    INSERT INTO "h2b_external_order_aggregates" (id, merchant_id, connection_id, platform, external_order_id, safe_state, admission_ids, latest_create_sequence, latest_update_sequence, latest_seen_sequence, created_at, updated_at)
-    VALUES (${`h2b_${claimed.merchantId}_${claimed.connectionId}_${externalOrderId}`}, ${claimed.merchantId}, ${claimed.connectionId}, ${claimed.platform}::"StorePlatform", ${externalOrderId}, '{}'::jsonb, ARRAY[]::text[], 0, 0, 0, CURRENT_TIMESTAMP, CURRENT_TIMESTAMP)
+    INSERT INTO "h2b_external_order_aggregates" (id, merchant_id, connection_id, platform, external_order_id, safe_state, latest_create_sequence, latest_update_sequence, latest_seen_sequence, created_at, updated_at)
+    VALUES (${`h2b_${claimed.merchantId}_${claimed.connectionId}_${externalOrderId}`}, ${claimed.merchantId}, ${claimed.connectionId}, ${claimed.platform}::"StorePlatform", ${externalOrderId}, '{}'::jsonb, 0, 0, 0, CURRENT_TIMESTAMP, CURRENT_TIMESTAMP)
     ON CONFLICT (merchant_id, connection_id, external_order_id) DO NOTHING
   `;
   const locked = await tx.$queryRaw<Array<{ id: string }>>`
@@ -103,24 +103,26 @@ export async function processClaimedH2BOutbox(claimed: ClaimedH2BOutbox, client:
     const sequence = claimed.admission.ingestionSequence;
     const createState = asRecord(current.createState);
     const updateState = asRecord(current.updateState);
-    const nextRefs = [...new Set([...current.admissionIds, claimed.admissionId])];
     let nextCreate = createState;
     let nextUpdate = updateState;
     if (isCreateTopic(claimed.topic) && sequence > current.latestCreateSequence) nextCreate = mergeNonNull(createState, envelope);
     if (isUpdateTopic(claimed.topic) && sequence > current.latestUpdateSequence) nextUpdate = mergeNonNull(updateState, envelope);
     const latestSeen = sequence > current.latestSeenSequence ? sequence : current.latestSeenSequence;
     const safeState = mergeNonNull(nextCreate, nextUpdate);
+    await tx.h2BExternalOrderAdmissionReference.createMany({
+      data: [{ aggregateId: current.id, admissionId: claimed.admissionId, ingestionSequence: sequence, topic: claimed.topic }],
+      skipDuplicates: true
+    });
     const updateData: Prisma.H2BExternalOrderAggregateUpdateInput = {
       createState: nextCreate as Prisma.InputJsonValue,
       updateState: nextUpdate as Prisma.InputJsonValue,
-      safeState: { ...safeState, admissionIds: nextRefs } as Prisma.InputJsonValue,
-      admissionIds: nextRefs,
+      safeState: safeState as Prisma.InputJsonValue,
       latestCreateSequence: isCreateTopic(claimed.topic) && sequence > current.latestCreateSequence ? sequence : current.latestCreateSequence,
       latestUpdateSequence: isUpdateTopic(claimed.topic) && sequence > current.latestUpdateSequence ? sequence : current.latestUpdateSequence,
       latestSeenSequence: latestSeen,
       latestEventAt: sequence === latestSeen ? claimed.admission.receivedAt : current.latestEventAt,
       latestTopic: sequence === latestSeen ? claimed.topic : current.latestTopic,
-      externalOrderName: typeof envelope.externalOrderName === "string" ? envelope.externalOrderName : current.externalOrderName
+      externalOrderName: typeof safeState.externalOrderName === "string" ? safeState.externalOrderName : null
     };
     await tx.h2BExternalOrderAggregate.update({ where: { id: current.id }, data: updateData });
     const outbox = await tx.h2BWebhookOutbox.updateMany({ where: { id: claimed.id, status: H2BOutboxStatus.PROCESSING, claimVersion: claimed.claimVersion }, data: { status: H2BOutboxStatus.PROCESSED, processedAt: new Date(), leaseUntil: null } });

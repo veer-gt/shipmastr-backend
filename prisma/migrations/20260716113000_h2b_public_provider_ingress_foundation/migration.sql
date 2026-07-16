@@ -110,7 +110,6 @@ CREATE TABLE "h2b_external_order_aggregates" (
     "create_state" JSONB,
     "update_state" JSONB,
     "safe_state" JSONB NOT NULL,
-    "admission_ids" TEXT[] NOT NULL DEFAULT ARRAY[]::TEXT[],
     "latest_create_sequence" BIGINT NOT NULL DEFAULT 0,
     "latest_update_sequence" BIGINT NOT NULL DEFAULT 0,
     "latest_seen_sequence" BIGINT NOT NULL DEFAULT 0,
@@ -125,3 +124,19 @@ CREATE INDEX "h2b_external_order_aggregates_merchant_id_platform_idx" ON "h2b_ex
 CREATE INDEX "h2b_external_order_aggregates_connection_id_external_order_id_idx" ON "h2b_external_order_aggregates"("connection_id", "external_order_id");
 ALTER TABLE "h2b_external_order_aggregates" ADD CONSTRAINT "h2b_external_order_aggregates_merchant_id_fkey" FOREIGN KEY ("merchant_id") REFERENCES "Merchant"("id") ON DELETE CASCADE ON UPDATE CASCADE;
 ALTER TABLE "h2b_external_order_aggregates" ADD CONSTRAINT "h2b_external_order_aggregates_connection_id_fkey" FOREIGN KEY ("connection_id") REFERENCES "platform_connections"("id") ON DELETE CASCADE ON UPDATE CASCADE;
+
+CREATE TABLE "h2b_external_order_admission_references" (
+    "id" TEXT NOT NULL,
+    "aggregate_id" TEXT NOT NULL,
+    "admission_id" TEXT NOT NULL,
+    "ingestion_sequence" BIGINT NOT NULL,
+    "topic" TEXT NOT NULL,
+    "created_at" TIMESTAMP(3) NOT NULL DEFAULT CURRENT_TIMESTAMP,
+    CONSTRAINT "h2b_external_order_admission_references_pkey" PRIMARY KEY ("id")
+);
+CREATE UNIQUE INDEX "h2b_external_order_admission_references_admission_id_key" ON "h2b_external_order_admission_references"("admission_id");
+CREATE UNIQUE INDEX "h2b_external_order_admission_references_aggregate_id_admission_id_key" ON "h2b_external_order_admission_references"("aggregate_id", "admission_id");
+CREATE INDEX "h2b_external_order_admission_references_aggregate_id_idx" ON "h2b_external_order_admission_references"("aggregate_id");
+CREATE INDEX "h2b_external_order_admission_references_aggregate_id_ingestion_sequence_idx" ON "h2b_external_order_admission_references"("aggregate_id", "ingestion_sequence");
+ALTER TABLE "h2b_external_order_admission_references" ADD CONSTRAINT "h2b_external_order_admission_references_aggregate_id_fkey" FOREIGN KEY ("aggregate_id") REFERENCES "h2b_external_order_aggregates"("id") ON DELETE CASCADE ON UPDATE CASCADE;
+ALTER TABLE "h2b_external_order_admission_references" ADD CONSTRAINT "h2b_external_order_admission_references_admission_id_fkey" FOREIGN KEY ("admission_id") REFERENCES "h2b_webhook_admissions"("id") ON DELETE CASCADE ON UPDATE CASCADE;

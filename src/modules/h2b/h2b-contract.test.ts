@@ -95,3 +95,24 @@ test("worker fencing and sequence fields are part of every completion path", asy
   assert.match(worker, /status: H2BOutboxStatus\.PROCESSED/);
   assert.match(worker, /H2BOutboxStatus\.DEAD_LETTER/);
 });
+
+test("admission references and deterministic order-name proofs are explicit", async () => {
+  const schema = await readFile(resolve(dirname(fileURLToPath(import.meta.url)), "../../../prisma/schema.prisma"), "utf8");
+  const migration = await readFile(resolve(dirname(fileURLToPath(import.meta.url)), "../../../prisma/migrations/20260716113000_h2b_public_provider_ingress_foundation/migration.sql"), "utf8");
+  const worker = await readFile(resolve(dirname(fileURLToPath(import.meta.url)), "h2b-worker.ts").replace(/dist[\\/]modules[\\/]h2b/, "src/modules/h2b"), "utf8").catch(() => readFile(resolve(dirname(fileURLToPath(import.meta.url)), "h2b-worker.js"), "utf8"));
+  const proof = await readFile(resolve(dirname(fileURLToPath(import.meta.url)), "../../../scripts/h2b-scratch-proof.mjs"), "utf8");
+  assert.match(schema, /model H2BExternalOrderAdmissionReference/);
+  assert.match(schema, /admissionReferences\s+H2BExternalOrderAdmissionReference\[\]/);
+  assert.equal(schema.includes("admissionIds         String[]"), false);
+  assert.match(migration, /CREATE TABLE "h2b_external_order_admission_references"/);
+  assert.match(migration, /h2b_external_order_admission_references_admission_id_key/);
+  assert.equal(migration.includes('"admission_ids"'), false);
+  assert.match(worker, /h2BExternalOrderAdmissionReference\.createMany/);
+  assert.match(worker, /externalOrderName: typeof safeState\.externalOrderName/);
+  assert.equal(worker.includes("admissionIds"), false);
+  assert.match(proof, /FORCED_FORWARD_SEQUENTIAL/);
+  assert.match(proof, /FORCED_REVERSE_SEQUENTIAL/);
+  assert.match(proof, /PARALLEL_CONCURRENT_RACE/);
+  assert.match(proof, /#CREATE-NAME/);
+  assert.match(proof, /#UPDATE-NAME/);
+});

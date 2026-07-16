@@ -1969,9 +1969,10 @@ model H2BWebhookAdmission {
   updatedAt         DateTime           @default(now()) @updatedAt @map("updated_at")
   ingestionSequence BigInt             @unique @default(autoincrement()) @map("ingestion_sequence")
 
-  merchant   Merchant           @relation(fields: [merchantId], references: [id], onDelete: Cascade)
-  connection PlatformConnection @relation(fields: [connectionId], references: [id], onDelete: Cascade)
-  outbox     H2BWebhookOutbox?
+  merchant                        Merchant                            @relation(fields: [merchantId], references: [id], onDelete: Cascade)
+  connection                      PlatformConnection                  @relation(fields: [connectionId], references: [id], onDelete: Cascade)
+  outbox                          H2BWebhookOutbox?
+  externalOrderAdmissionReference H2BExternalOrderAdmissionReference?
 
   @@unique([platform, connectionId, deliveryId])
   @@index([merchantId, status])
@@ -2018,7 +2019,6 @@ model H2BExternalOrderAggregate {
   createState          Json?         @map("create_state")
   updateState          Json?         @map("update_state")
   safeState            Json          @map("safe_state")
-  admissionIds         String[]      @default([]) @map("admission_ids")
   latestCreateSequence BigInt        @default(0) @map("latest_create_sequence")
   latestUpdateSequence BigInt        @default(0) @map("latest_update_sequence")
   latestSeenSequence   BigInt        @default(0) @map("latest_seen_sequence")
@@ -2027,13 +2027,31 @@ model H2BExternalOrderAggregate {
   createdAt            DateTime      @default(now()) @map("created_at")
   updatedAt            DateTime      @default(now()) @updatedAt @map("updated_at")
 
-  merchant   Merchant           @relation(fields: [merchantId], references: [id], onDelete: Cascade)
-  connection PlatformConnection @relation(fields: [connectionId], references: [id], onDelete: Cascade)
+  merchant            Merchant                             @relation(fields: [merchantId], references: [id], onDelete: Cascade)
+  connection          PlatformConnection                   @relation(fields: [connectionId], references: [id], onDelete: Cascade)
+  admissionReferences H2BExternalOrderAdmissionReference[]
 
   @@unique([merchantId, connectionId, externalOrderId])
   @@index([merchantId, platform])
   @@index([connectionId, externalOrderId])
   @@map("h2b_external_order_aggregates")
+}
+
+model H2BExternalOrderAdmissionReference {
+  id                String   @id @default(cuid())
+  aggregateId       String   @map("aggregate_id")
+  admissionId       String   @unique @map("admission_id")
+  ingestionSequence BigInt   @map("ingestion_sequence")
+  topic             String
+  createdAt         DateTime @default(now()) @map("created_at")
+
+  aggregate H2BExternalOrderAggregate @relation(fields: [aggregateId], references: [id], onDelete: Cascade)
+  admission H2BWebhookAdmission       @relation(fields: [admissionId], references: [id], onDelete: Cascade)
+
+  @@unique([aggregateId, admissionId])
+  @@index([aggregateId])
+  @@index([aggregateId, ingestionSequence])
+  @@map("h2b_external_order_admission_references")
 }
 
 model PlatformWebhookCredential {
