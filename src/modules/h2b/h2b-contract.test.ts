@@ -76,9 +76,22 @@ test("unknown endpoint resolution precedes admission and provider-side services"
   assert.equal(routes.includes("inventory"), false);
 });
 
+test("endpoint token rows provide global digest uniqueness without cross-column triggers", async () => {
+  const schema = await readFile(resolve(dirname(fileURLToPath(import.meta.url)), "../../../prisma/schema.prisma"), "utf8");
+  const migration = await readFile(resolve(dirname(fileURLToPath(import.meta.url)), "../../../prisma/migrations/20260716113000_h2b_public_provider_ingress_foundation/migration.sql"), "utf8");
+  assert.match(schema, /model H2BConnectionEndpointToken/);
+  assert.match(schema, /digest\s+String\s+@unique/);
+  assert.match(schema, /@@unique\(\[endpointId, role\]\)/);
+  assert.match(migration, /CREATE UNIQUE INDEX "h2b_connection_endpoint_tokens_digest_key"/);
+  assert.equal(migration.includes("CREATE CONSTRAINT TRIGGER"), false);
+});
+
 test("worker fencing and sequence fields are part of every completion path", async () => {
   const worker = await readFile(resolve(dirname(fileURLToPath(import.meta.url)), "h2b-worker.ts").replace(/dist[\\/]modules[\\/]h2b/, "src/modules/h2b"), "utf8").catch(() => readFile(resolve(dirname(fileURLToPath(import.meta.url)), "h2b-worker.js"), "utf8"));
   assert.match(worker, /claimVersion/);
   assert.match(worker, /ingestionSequence/);
-  assert.match(worker, /status: \{ in: \[H2BOutboxStatus\.CLAIMED, H2BOutboxStatus\.PROCESSING\] \}/);
+  assert.match(worker, /FOR UPDATE SKIP LOCKED/);
+  assert.match(worker, /status: H2BOutboxStatus\.PROCESSING/);
+  assert.match(worker, /status: H2BOutboxStatus\.PROCESSED/);
+  assert.match(worker, /H2BOutboxStatus\.DEAD_LETTER/);
 });

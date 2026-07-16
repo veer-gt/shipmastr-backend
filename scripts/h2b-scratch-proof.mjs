@@ -1,5 +1,5 @@
 import assert from "node:assert/strict";
-import { createHmac, randomBytes } from "node:crypto";
+import { createHash, createHmac, randomBytes } from "node:crypto";
 import http from "node:http";
 
 const databaseUrl = process.env.DATABASE_URL ?? "";
@@ -12,8 +12,8 @@ if (!/^shipmastr_scratch_h2b2_[a-z0-9_]+$/.test(scratchName)
 
 const { prisma } = await import("../dist/lib/prisma.js");
 const { createApp } = await import("../dist/server.js");
-const { createH2BEndpoint, resolveH2BEndpoint, rotateH2BEndpoint, revokeH2BEndpoint } = await import("../dist/modules/h2b/h2b-endpoint.service.js");
-const { runH2BOutboxOnce } = await import("../dist/modules/h2b/h2b-worker.js");
+const { createH2BEndpoint, getH2BEndpointStatus, resolveH2BEndpoint, rotateH2BEndpoint, revokeH2BEndpoint } = await import("../dist/modules/h2b/h2b-endpoint.service.js");
+const { claimOneH2BOutbox, failClaimedH2BOutbox, processClaimedH2BOutbox, runH2BOutboxOnce } = await import("../dist/modules/h2b/h2b-worker.js");
 const { configurePlatformWebhookCredential, rotatePlatformWebhookCredential } = await import("../dist/modules/credentialVault/platform-webhook-credential.service.js");
 const { PLATFORM_WEBHOOK_SIGNATURE_PURPOSE } = await import("../dist/modules/credentialVault/platform-webhook-credential.crypto.js");
 const { resetH2BRateLimitForTests } = await import("../dist/modules/h2b/h2b-rate-limit.js");
@@ -124,6 +124,30 @@ async function countFor(merchantId, connectionId) {
   return { admissions, outboxes, aggregates };
 }
 
+async function createBareConnection(merchantId, platform = "SHOPIFY", status = "ACTIVE") {
+  const connection = await prisma.platformConnection.create({ data: {
+    merchantId, platform, storeName: `${fixtureMarker}-${platform}-BARE`, storeUrl: `https://${fixtureMarker.toLowerCase()}.example/bare`, status, syncDirection: "IMPORT_ONLY"
+  } });
+  createdConnections.push(connection.id);
+  return connection;
+}
+
+async function createPendingEvent(merchantId, connectionId, platform, topic, externalOrderId, fields, receivedAt = new Date()) {
+  const envelope = { externalOrderId, externalOrderName: `#${externalOrderId}`, ...fields };
+  const admission = await prisma.h2BWebhookAdmission.create({ data: {
+    merchantId, connectionId, platform, topic, deliveryId: `${fixtureMarker}-${externalOrderId}-${randomBytes(4).toString("hex")}`,
+    payloadSha256: `${fixtureMarker}-${externalOrderId}-${randomBytes(4).toString("hex")}`, safeEnvelope: envelope, status: "ACCEPTED", acceptedAt: receivedAt, receivedAt
+  } });
+  await prisma.h2BWebhookOutbox.create({ data: { admissionId: admission.id, merchantId, connectionId, platform, topic, envelope, status: "PENDING" } });
+  return admission;
+}
+
+async function claimPair(now = new Date()) {
+  const [first, second] = await Promise.all([claimOneH2BOutbox(prisma, now), claimOneH2BOutbox(prisma, now)]);
+  assert.ok(first && second);
+  return [first, second];
+}
+
 const app = await createApp({ h2bEnabled: true });
 const server = http.createServer(app);
 await new Promise((resolve) => server.listen(0, "127.0.0.1", resolve));
@@ -151,6 +175,76 @@ try {
   await resolveH2BEndpoint(concurrentRotatedEndpoint);
   await revokeH2BEndpoint(merchantA.id, concurrentConnection.id);
   assert.equal((await prisma.h2BConnectionEndpoint.findUnique({ where: { connectionId: concurrentConnection.id }, select: { status: true } }))?.status, "REVOKED");
+
+  const rejectedConnections = [];
+  for (const status of ["DRAFT", "ERROR", "DISABLED"]) {
+    const rejected = await createBareConnection(merchantA.id, "SHOPIFY", status);
+    rejectedConnections.push(rejected.id);
+    await assert.rejects(() => createH2BEndpoint(merchantA.id, rejected.id), (error) => error?.status === 409);
+    await assert.rejects(() => rotateH2BEndpoint(merchantA.id, rejected.id), (error) => error?.status === 409);
+  }
+
+  for (const status of ["DRAFT", "ERROR", "DISABLED"]) {
+    const statusConnection = await createBareConnection(merchantA.id);
+    await createH2BEndpoint(merchantA.id, statusConnection.id);
+    await prisma.platformConnection.update({ where: { id: statusConnection.id }, data: { status } });
+    assert.equal((await getH2BEndpointStatus(merchantA.id, statusConnection.id))?.status, "ACTIVE");
+    assert.equal((await revokeH2BEndpoint(merchantA.id, statusConnection.id))?.status, "REVOKED");
+  }
+
+  const lifecycleFixture = await createConnection(merchantA.id, "SHOPIFY");
+  const lifecycleRotated = await rotateH2BEndpoint(merchantA.id, lifecycleFixture.connection.id);
+  await prisma.platformConnection.update({ where: { id: lifecycleFixture.connection.id }, data: { status: "DISABLED" } });
+  const disabledStatus = await getH2BEndpointStatus(merchantA.id, lifecycleFixture.connection.id);
+  assert.equal(disabledStatus?.status, "ACTIVE");
+  const disabledRevoke = await revokeH2BEndpoint(merchantA.id, lifecycleFixture.connection.id);
+  assert.equal(disabledRevoke?.status, "REVOKED");
+  await prisma.platformConnection.update({ where: { id: lifecycleFixture.connection.id }, data: { status: "ACTIVE" } });
+  assert.equal((await getH2BEndpointStatus(merchantA.id, lifecycleFixture.connection.id))?.status, "REVOKED");
+  const lifecycleBefore = await countFor(merchantA.id, lifecycleFixture.connection.id);
+  for (const token of [lifecycleFixture.endpoint, lifecycleRotated.endpoint]) {
+    const reenableFixture = fixture("SHOPIFY", "orders/create", `reenable-${token.length}`, generatedSecrets.get(lifecycleFixture.connection.id).current);
+    const safe404 = await request(server, `/api/public/provider-webhooks/${token}`, reenableFixture.headers, reenableFixture.payload);
+    assert.equal(safe404.status, 404);
+    assert.deepEqual(JSON.parse(safe404.body), { error: "H2B_ROUTE_NOT_FOUND" });
+  }
+  assert.deepEqual(await countFor(merchantA.id, lifecycleFixture.connection.id), lifecycleBefore);
+
+  let rotateRevokePasses = 0;
+  for (let iteration = 0; iteration < 50; iteration += 1) {
+    const raceConnection = await createBareConnection(merchantA.id);
+    const raceEndpoint = await createH2BEndpoint(merchantA.id, raceConnection.id);
+    const [rotated, revoked] = await Promise.allSettled([
+      rotateH2BEndpoint(merchantA.id, raceConnection.id),
+      revokeH2BEndpoint(merchantA.id, raceConnection.id)
+    ]);
+    assert.equal(revoked.status, "fulfilled");
+    const row = await prisma.h2BConnectionEndpoint.findUnique({ where: { connectionId: raceConnection.id }, include: { tokens: true } });
+    assert.equal(row?.status, "REVOKED");
+    assert.equal(row?.tokens.filter((token) => !token.revokedAt && (!token.validUntil || token.validUntil > new Date())).length, 0);
+    for (const token of [raceEndpoint.endpoint, rotated.status === "fulfilled" ? rotated.value.endpoint : null].filter((value) => value)) {
+      await assert.rejects(() => resolveH2BEndpoint(token), (error) => error?.status === 404);
+    }
+    assert.deepEqual(await countFor(merchantA.id, raceConnection.id), { admissions: 0, outboxes: 0, aggregates: 0 });
+    rotateRevokePasses += 1;
+  }
+
+  const tokenOwner = await prisma.h2BConnectionEndpoint.findUnique({ where: { connectionId: fixturesA.SHOPIFY.connection.id }, include: { tokens: true } });
+  const tokenOwnerCurrent = tokenOwner.tokens.find((token) => token.role === "CURRENT");
+  assert.ok(tokenOwnerCurrent);
+  const uniquenessConnectionA = await createBareConnection(merchantA.id);
+  const uniquenessConnectionB = await createBareConnection(merchantA.id);
+  const uniquenessEndpointA = await createH2BEndpoint(merchantA.id, uniquenessConnectionA.id);
+  const uniquenessEndpointB = await createH2BEndpoint(merchantA.id, uniquenessConnectionB.id);
+  const endpointA = await prisma.h2BConnectionEndpoint.findUnique({ where: { connectionId: uniquenessConnectionA.id }, include: { tokens: true } });
+  const endpointB = await prisma.h2BConnectionEndpoint.findUnique({ where: { connectionId: uniquenessConnectionB.id }, include: { tokens: true } });
+  assert.ok(endpointA && endpointB);
+  await assert.rejects(() => prisma.h2BConnectionEndpointToken.update({ where: { id: endpointB.tokens.find((token) => token.role === "CURRENT").id }, data: { digest: tokenOwnerCurrent.digest } }));
+  await assert.rejects(() => prisma.h2BConnectionEndpointToken.create({ data: { endpointId: endpointB.id, digest: tokenOwnerCurrent.digest, role: "PREVIOUS", platform: "SHOPIFY", generation: 1, activatedAt: new Date(), safeFingerprint: tokenOwnerCurrent.safeFingerprint } }));
+  const concurrentDigest = createHash("sha256").update(`${fixtureMarker}-concurrent-digest`).digest("hex");
+  const conflicting = await Promise.allSettled([endpointA, endpointB].map((endpoint) => prisma.h2BConnectionEndpointToken.create({ data: { endpointId: endpoint.id, digest: concurrentDigest, role: "PREVIOUS", platform: "SHOPIFY", generation: 1, activatedAt: new Date(), safeFingerprint: concurrentDigest.slice(0, 16) } })));
+  assert.equal(conflicting.filter((result) => result.status === "fulfilled").length, 1);
+  assert.equal(conflicting.filter((result) => result.status === "rejected").length, 1);
 
   for (const [provider, topic] of [["SHOPIFY", "orders/create"], ["WOOCOMMERCE", "order.created"], ["MAGENTO", "shipmastr.order.committed.v1"]]) {
     const connectionId = fixturesA[provider].connection.id;
@@ -206,7 +300,7 @@ try {
   fixturesA.SHOPIFY.endpoint = rotatedEndpoint.endpoint;
   const rotatedPayload = fixture("SHOPIFY", "orders/create", "rotated-endpoint", generatedSecrets.get(shopifyId).current);
   assert.equal((await request(server, `/api/public/provider-webhooks/${oldEndpoint}`, rotatedPayload.headers, rotatedPayload.payload)).status, 202);
-  await prisma.h2BConnectionEndpoint.update({ where: { connectionId: shopifyId }, data: { previousValidUntil: new Date(0) } });
+  await prisma.h2BConnectionEndpointToken.updateMany({ where: { endpoint: { connectionId: shopifyId }, role: "PREVIOUS" }, data: { validUntil: new Date(0) } });
   assert.equal((await request(server, `/api/public/provider-webhooks/${oldEndpoint}`, rotatedPayload.headers, rotatedPayload.payload)).status, 404);
   await revokeH2BEndpoint(merchantA.id, shopifyId);
   assert.equal((await request(server, `/api/public/provider-webhooks/${rotatedEndpoint.endpoint}`, rotatedPayload.headers, rotatedPayload.payload)).status, 404);
@@ -236,6 +330,106 @@ try {
   const wooAggregate = await prisma.h2BExternalOrderAggregate.findFirst({ where: { merchantId: merchantA.id, connectionId: wooId, externalOrderId: "woocommerce-order-1" }, select: { safeState: true } });
   assert.equal(wooAggregate?.safeState && typeof wooAggregate.safeState === "object" && wooAggregate.safeState.totalMinor, "149900");
 
+  const workerConnection = await createBareConnection(merchantA.id, "SHOPIFY");
+  const staleAdmission = await createPendingEvent(merchantA.id, workerConnection.id, "SHOPIFY", "orders/create", "stale-worker", { totalMinor: "100" });
+  const staleA = await claimOneH2BOutbox(prisma, new Date());
+  assert.ok(staleA);
+  await prisma.h2BWebhookOutbox.update({ where: { id: staleA.id }, data: { leaseUntil: new Date(0) } });
+  const staleB = await claimOneH2BOutbox(prisma, new Date());
+  assert.ok(staleB && staleB.claimVersion > staleA.claimVersion);
+  assert.equal(await processClaimedH2BOutbox(staleB), "PROCESSED");
+  const staleBefore = await countFor(merchantA.id, workerConnection.id);
+  assert.equal(await processClaimedH2BOutbox(staleA), "FENCED");
+  assert.equal(await failClaimedH2BOutbox(staleA, "STALE_FAILURE"), "FENCED");
+  assert.deepEqual(await countFor(merchantA.id, workerConnection.id), staleBefore);
+  assert.equal((await prisma.h2BWebhookAdmission.findUnique({ where: { id: staleAdmission.id }, select: { status: true } }))?.status, "PROCESSED");
+
+  const ownerAdmission = await createPendingEvent(merchantA.id, workerConnection.id, "SHOPIFY", "orders/create", "single-owner", { totalMinor: "200" });
+  const [ownerA, ownerB] = await Promise.all([claimOneH2BOutbox(prisma, new Date()), claimOneH2BOutbox(prisma, new Date())]);
+  assert.equal([ownerA, ownerB].filter(Boolean).length, 1);
+  const owner = ownerA ?? ownerB;
+  assert.ok(owner);
+  assert.equal(await processClaimedH2BOutbox(owner), "PROCESSED");
+  assert.equal((await prisma.h2BExternalOrderAggregate.count({ where: { merchantId: merchantA.id, connectionId: workerConnection.id, externalOrderId: "single-owner" } })), 1);
+  assert.equal((await prisma.h2BWebhookAdmission.findUnique({ where: { id: ownerAdmission.id }, select: { status: true } }))?.status, "PROCESSED");
+
+  const retryAdmission = await createPendingEvent(merchantA.id, workerConnection.id, "SHOPIFY", "orders/create", "retryable", { totalMinor: "300" });
+  const retryClaim = await claimOneH2BOutbox(prisma, new Date());
+  assert.ok(retryClaim);
+  assert.equal(await failClaimedH2BOutbox(retryClaim, "RETRYABLE_TEST"), "FAILED");
+  assert.equal((await prisma.h2BWebhookAdmission.findUnique({ where: { id: retryAdmission.id }, select: { status: true } }))?.status, "ACCEPTED");
+  await prisma.h2BWebhookOutbox.update({ where: { admissionId: retryAdmission.id }, data: { nextAttemptAt: new Date(0) } });
+  const retryClaim2 = await claimOneH2BOutbox(prisma, new Date());
+  assert.ok(retryClaim2);
+  assert.equal(await processClaimedH2BOutbox(retryClaim2), "PROCESSED");
+  assert.equal((await prisma.h2BWebhookAdmission.findUnique({ where: { id: retryAdmission.id }, select: { status: true } }))?.status, "PROCESSED");
+
+  const terminalAdmission = await createPendingEvent(merchantA.id, workerConnection.id, "SHOPIFY", "orders/create", "terminal", { totalMinor: "400" });
+  await prisma.h2BWebhookOutbox.update({ where: { admissionId: terminalAdmission.id }, data: { attemptCount: 4 } });
+  const terminalClaim = await claimOneH2BOutbox(prisma, new Date());
+  assert.ok(terminalClaim);
+  assert.equal(await failClaimedH2BOutbox(terminalClaim, "TERMINAL_TEST"), "DEAD_LETTER");
+  assert.equal((await prisma.h2BWebhookAdmission.findUnique({ where: { id: terminalAdmission.id }, select: { status: true } }))?.status, "FAILED");
+  assert.equal((await prisma.h2BWebhookOutbox.findUnique({ where: { admissionId: terminalAdmission.id }, select: { status: true } }))?.status, "DEAD_LETTER");
+
+  const convergenceConnection = await createBareConnection(merchantA.id, "WOOCOMMERCE");
+  async function processPair(externalOrderId, first, second, processOrder = "parallel") {
+    const receivedAt = new Date("2026-07-16T12:00:00.000Z");
+    const firstAdmission = await createPendingEvent(merchantA.id, convergenceConnection.id, "WOOCOMMERCE", first.topic, externalOrderId, first.fields, receivedAt);
+    const secondAdmission = await createPendingEvent(merchantA.id, convergenceConnection.id, "WOOCOMMERCE", second.topic, externalOrderId, second.fields, receivedAt);
+    const [firstClaim, secondClaim] = await claimPair(new Date());
+    if (processOrder === "reverse") await Promise.all([processClaimedH2BOutbox(secondClaim), processClaimedH2BOutbox(firstClaim)]);
+    else await Promise.all([processClaimedH2BOutbox(firstClaim), processClaimedH2BOutbox(secondClaim)]);
+    const aggregate = await prisma.h2BExternalOrderAggregate.findUnique({ where: { merchantId_connectionId_externalOrderId: { merchantId: merchantA.id, connectionId: convergenceConnection.id, externalOrderId } } });
+    assert.ok(aggregate);
+    assert.equal(aggregate.admissionIds.length, 2);
+    assert.equal(new Set(aggregate.admissionIds).size, 2);
+    assert.equal(aggregate.latestSeenSequence, aggregate.latestUpdateSequence > aggregate.latestCreateSequence ? aggregate.latestUpdateSequence : aggregate.latestCreateSequence);
+    assert.equal((await prisma.h2BWebhookAdmission.count({ where: { id: { in: [firstAdmission.id, secondAdmission.id] }, status: "PROCESSED" } })), 2);
+    return aggregate;
+  }
+  const updateBeforeCreate = await processPair("woo-update-before-create", { topic: "order.updated", fields: { totalMinor: "800", updateOnly: "u" } }, { topic: "order.created", fields: { totalMinor: "700", createOnly: "c" } }, "reverse");
+  assert.equal(updateBeforeCreate.safeState.totalMinor, "800");
+  assert.equal(updateBeforeCreate.safeState.updateOnly, "u");
+  assert.equal(updateBeforeCreate.safeState.createOnly, "c");
+  const createBeforeUpdate = await processPair("woo-create-before-update", { topic: "order.created", fields: { totalMinor: "900", createOnly: "c2" } }, { topic: "order.updated", fields: { totalMinor: "950", updateOnly: "u2" } }, "reverse");
+  assert.equal(createBeforeUpdate.safeState.totalMinor, "950");
+  assert.equal(createBeforeUpdate.safeState.updateOnly, "u2");
+  assert.equal(createBeforeUpdate.safeState.createOnly, "c2");
+  const orderIndependentForward = await processPair("woo-order-independent-forward", { topic: "order.created", fields: { totalMinor: "990", stableCreate: "yes" } }, { topic: "order.updated", fields: { totalMinor: "995", stableUpdate: "yes" } }, "parallel");
+  const orderIndependentReverse = await processPair("woo-order-independent-reverse", { topic: "order.created", fields: { totalMinor: "990", stableCreate: "yes" } }, { topic: "order.updated", fields: { totalMinor: "995", stableUpdate: "yes" } }, "reverse");
+  assert.deepEqual({ totalMinor: orderIndependentForward.safeState.totalMinor, stableCreate: orderIndependentForward.safeState.stableCreate, stableUpdate: orderIndependentForward.safeState.stableUpdate }, { totalMinor: orderIndependentReverse.safeState.totalMinor, stableCreate: orderIndependentReverse.safeState.stableCreate, stableUpdate: orderIndependentReverse.safeState.stableUpdate });
+  const nullSafe = await processPair("woo-null-safe", { topic: "order.created", fields: { totalMinor: "1000", nested: { populated: "yes" } } }, { topic: "order.updated", fields: { totalMinor: null, nested: { populated: null, added: "yes" } } }, "parallel");
+  assert.equal(nullSafe.safeState.totalMinor, "1000");
+  assert.equal(nullSafe.safeState.nested.populated, "yes");
+  assert.equal(nullSafe.safeState.nested.added, "yes");
+
+  const olderUpdateAdmission = await createPendingEvent(merchantA.id, convergenceConnection.id, "WOOCOMMERCE", "order.updated", "woo-older-update", { totalMinor: "1100" });
+  const newerUpdateAdmission = await createPendingEvent(merchantA.id, convergenceConnection.id, "WOOCOMMERCE", "order.updated", "woo-older-update", { totalMinor: "1200" });
+  const [olderClaim, newerClaim] = await claimPair(new Date());
+  await processClaimedH2BOutbox(newerClaim);
+  await processClaimedH2BOutbox(olderClaim);
+  const updateAggregate = await prisma.h2BExternalOrderAggregate.findUnique({ where: { merchantId_connectionId_externalOrderId: { merchantId: merchantA.id, connectionId: convergenceConnection.id, externalOrderId: "woo-older-update" } } });
+  assert.equal(updateAggregate?.safeState.totalMinor, "1200");
+  assert.equal(updateAggregate?.admissionIds.length, 2);
+  assert.equal((await prisma.h2BWebhookAdmission.count({ where: { id: { in: [olderUpdateAdmission.id, newerUpdateAdmission.id] }, status: "PROCESSED" } })), 2);
+
+  let concurrentInitialAggregatePasses = 0;
+  for (let iteration = 0; iteration < 50; iteration += 1) {
+    const aggregate = await processPair(`woo-concurrent-${iteration}`, { topic: "order.created", fields: { totalMinor: "1300" } }, { topic: "order.updated", fields: { totalMinor: "1350" } }, "parallel");
+    assert.equal(aggregate.safeState.totalMinor, "1350");
+    concurrentInitialAggregatePasses += 1;
+  }
+
+  const secondConnection = await createBareConnection(merchantA.id, "WOOCOMMERCE");
+  const merchantBConnection = await createBareConnection(merchantB.id, "WOOCOMMERCE");
+  const isolatedA = await createPendingEvent(merchantA.id, secondConnection.id, "WOOCOMMERCE", "order.created", "same-external", { totalMinor: "1400" });
+  const isolatedB = await createPendingEvent(merchantB.id, merchantBConnection.id, "WOOCOMMERCE", "order.created", "same-external", { totalMinor: "1500" });
+  const [isolatedClaimA, isolatedClaimB] = await claimPair(new Date());
+  await Promise.all([processClaimedH2BOutbox(isolatedClaimA), processClaimedH2BOutbox(isolatedClaimB)]);
+  assert.equal(await prisma.h2BExternalOrderAggregate.count({ where: { externalOrderId: "same-external" } }), 2);
+  assert.equal((await prisma.h2BWebhookAdmission.count({ where: { id: { in: [isolatedA.id, isolatedB.id] }, status: "PROCESSED" } })), 2);
+
   const rollbackFixture = fixture("WOOCOMMERCE", "order.created", "rollback-trigger", generatedSecrets.get(wooId).current);
   const rollbackPath = `/api/public/provider-webhooks/${fixturesA.WOOCOMMERCE.endpoint}`;
   const beforeRollback = await countFor(merchantA.id, wooId);
@@ -263,7 +457,7 @@ try {
   const serialized = JSON.stringify(persisted);
   for (const forbidden of ["buyer@example.invalid", "0000000000", "private address", generatedSecrets.get(wooId).current]) assert.equal(serialized.includes(forbidden), false);
   resetH2BRateLimitForTests();
-  console.log(JSON.stringify({ scratch: "PASS", merchants: 2, providers: 3, duplicateRace: "PASS", endpointConcurrency: "PASS", rollback: "PASS", leakage: "PASS", worker: "PASS" }));
+  console.log(JSON.stringify({ scratch: "PASS", merchants: 2, providers: 3, duplicateRace: "PASS", endpointConcurrency: "PASS", rotateRevokeRaceIterations: rotateRevokePasses, concurrentInitialAggregateIterations: concurrentInitialAggregatePasses, tokenUniqueness: "PASS", rollback: "PASS", leakage: "PASS", worker: "PASS", staleWorker: "FENCED", retryableFailure: "ACCEPTED", retrySuccess: "PROCESSED", terminalFailure: "FAILED" }));
 } finally {
   server.close();
   await prisma.$executeRawUnsafe(`DROP TRIGGER IF EXISTS h2b_scratch_fail_outbox ON h2b_webhook_outbox`);

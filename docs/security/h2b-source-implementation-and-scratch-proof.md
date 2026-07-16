@@ -48,17 +48,21 @@ admission service, which does not resolve it again.
 ## Endpoint lifecycle
 
 `H2BConnectionEndpoint` binds a `shp_`, `woo_`, or `mag_` provider-hint prefix
-and a 256-bit-plus base64url token to one
-merchant and one `PlatformConnection`. Only a SHA-256 digest is stored; the
-raw token is returned only from create/rotate. Status returns only provider,
-state, activation/grace timestamps, a short non-reversible fingerprint, and
-revocation state. Current and previous digests are supported for a bounded
-seven-day grace period, and revoke invalidates both immediately. Create,
-rotate, and public resolution require an ACTIVE connection; status and revoke
-remain available to the owner when a connection is DRAFT, ERROR or DISABLED.
-Re-enable does not undo a prior revoke. Authenticated merchant-scoped
-lifecycle routes create, read status, rotate, and revoke the endpoint without
-provider registration.
+and a 256-bit-plus base64url token to one merchant and one
+`PlatformConnection`. The endpoint row contains lifecycle state and a
+generation. Each current/previous token is a separate
+`H2BConnectionEndpointToken` row with a globally unique SHA-256 digest,
+explicit role, generation, bounded validity, revocation timestamp, and safe
+fingerprint. Raw tokens are returned only from create/rotate and are never
+persisted. The `(endpointId, role)` constraint permits one CURRENT and at most
+one PREVIOUS token; global digest uniqueness is enforced only by the token-row
+unique index and no cross-column trigger is used. Create/rotate/revoke lock the connection, endpoint, and
+token rows inside serializable transactions. Create, rotate, and public
+resolution require an ACTIVE connection; status and revoke remain available
+to the owner when a connection is DRAFT, ERROR or DISABLED. Revoke wins a
+rotate race and invalidates every token atomically. Re-enable does not undo a
+prior revoke. Authenticated merchant-scoped lifecycle routes create, read
+status, rotate, and revoke the endpoint without provider registration.
 
 The provider hint is untrusted routing syntax used only to select the
 pre-lookup byte/header cap. It is never authorization; persisted platform must
@@ -101,17 +105,29 @@ aggregate.
 
 ## Worker and convergence aggregate
 
-`H2BWebhookOutbox` is claimed transactionally with a lease, monotonically
-increasing claim version, and attempt count. Completion, retry, failure and
-admission updates require the exact claim version, so a stale worker is fenced
-before it can mutate an aggregate. `H2BWebhookAdmission` has a database
-generated monotonic `ingestionSequence` used for total ordering, not the
-millisecond receive timestamp. Created/updated topic precedence preserves
-accepted update fields when a late create arrives; sanitized admission
-references are unioned exactly once.
-Expired claims are recoverable. Transient failures remain retryable with a
-bounded backoff; after five attempts the item is `DEAD_LETTER`. The worker
-only updates the H2B import-preparation state and never creates canonical
+`H2BWebhookOutbox` is claimed with `FOR UPDATE SKIP LOCKED`, a lease,
+monotonically increasing `claimVersion`, and attempt count. Completion, retry,
+failure and admission updates require the exact claim version, so a stale
+worker is fenced before it can mutate an aggregate. Retryable failures leave
+the admission `ACCEPTED`; the fifth failed attempt moves the outbox to
+`DEAD_LETTER` and the admission to `FAILED`. `H2BWebhookAdmission` has a
+database-generated monotonic `ingestionSequence` used for total ordering, not
+the millisecond receive timestamp.
+
+`H2BExternalOrderAggregate` stores separate nullable `createState` and
+`updateState` JSON values, `latestCreateSequence`, `latestUpdateSequence`,
+`latestSeenSequence`, `latestTopic`, and a bounded unique `admissionIds` array.
+Create-like topics are Shopify `orders/create`, WooCommerce `order.created`,
+and the Magento semantic topic; update-like topics are Shopify
+`orders/updated` and WooCommerce `order.updated`. Same-class state advances
+only for a greater ingestion sequence. Final state is a deterministic
+null-safe merge of create state followed by update state, so a late create
+cannot erase populated update fields and older updates cannot overwrite newer
+updates. Aggregate acquisition is an atomic `INSERT ... ON CONFLICT DO
+NOTHING` followed by a row lock. Sanitized admission references are unioned
+exactly once.
+
+Expired claims are recoverable. The worker only updates the H2B import-preparation state and never creates canonical
 Shipmastr orders, shipments, inventory records, provider calls, checkout,
 payment, wallet, ledger, or settlement state.
 
@@ -125,25 +141,36 @@ foundation, not canonical-order creation.
 ## Scratch proof procedure
 
 The proof uses one uniquely named local PostgreSQL database matching
-`shipmastr_scratch_h2b2_<suffix>`, applies every migration from zero, and
+`shipmastr_scratch_h2b2_concurrency_<random>_<UTC timestamp>`, applies every migration from zero, and
 rejects non-loopback or non-scratch `DATABASE_URL` values. It creates two
 synthetic merchants and Shopify/WooCommerce/Magento connections, encrypts
 fixture credentials in memory, exercises the loopback router with raw HTTP,
 and deletes every selected row before disconnecting. It covers provider HMACs,
 unsupported and forged topics, current/previous credential grace, endpoint
-rotation and revocation, active-state and disabled-revoke rules, concurrent
-endpoint operations, exact/oversize/chunked body handling before endpoint
-lookup, a 16-request duplicate race and delivery collision, transaction
-rollback/retry, lease recovery and claim fencing, Woo created/updated
-convergence in both orders, cross-tenant rejection, and safe-envelope leakage
-checks. The runner prints
+rotation and revocation, active-state and disabled-revoke rules, direct
+re-enable-after-revoke 404 checks, 50 revoke-wins races and token-row
+uniqueness conflicts, concurrent endpoint operations,
+exact/oversize/chunked body handling before endpoint lookup, a 16-request
+duplicate race and delivery collision, transaction rollback/retry, lease
+recovery, two-worker ownership, stale-claim fencing, retryable and terminal
+failure states, 50 concurrent initial aggregate races, Woo created/updated
+convergence permutations, same-millisecond events, cross-connection and
+cross-tenant rejection, and safe-envelope leakage checks. The runner prints
 only aggregate PASS counts and never prints generated secrets or endpoint
 tokens. The scratch database is dropped after the proof and checked absent.
 
 Focused source tests cover the disabled prefix, route ordering/dynamic import,
 raw-byte bounds, topic contracts, PII-free envelopes, endpoint fingerprints,
 and hashed limiter keys. Full backend tests and existing H2A/auth/security
-regressions remain part of the pre-PR validation.
+regressions remain part of the pre-PR validation. The amended full suite ran
+1,987 tests (1,979 passed, 6 failed, 2 skipped); the six failures exactly match
+the pre-existing baseline and are outside H2B: `does not expose the server
+geocoding key in frontend source`, `keeps the mock n8n workflow import free of
+real provider calls and provider secret names`, `returns go for controlled
+pilot only when gates and operations are ready`, `allows limited scope when
+allowlisted but approvals are incomplete`, `production readiness smoke passes
+by default without mutating production`, and `runbook doc exists and records
+hard-stop conditions`. No H2B test failed.
 
 ## Deferred items
 

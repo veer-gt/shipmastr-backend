@@ -796,6 +796,11 @@ enum H2BEndpointStatus {
   REVOKED
 }
 
+enum H2BEndpointTokenRole {
+  CURRENT
+  PREVIOUS
+}
+
 enum H2BAdmissionStatus {
   PENDING
   ACCEPTED
@@ -1905,28 +1910,44 @@ model PlatformConnection {
 }
 
 model H2BConnectionEndpoint {
-  id                 String            @id @default(cuid())
-  merchantId         String            @map("merchant_id")
-  connectionId       String            @unique @map("connection_id")
-  platform           StorePlatform
-  status             H2BEndpointStatus @default(ACTIVE)
-  currentDigest      String            @unique @map("current_digest")
-  currentActivatedAt DateTime          @map("current_activated_at")
-  previousDigest     String?           @map("previous_digest")
-  previousValidUntil DateTime?         @map("previous_valid_until")
-  safeFingerprint    String            @map("safe_fingerprint")
-  revokedAt          DateTime?         @map("revoked_at")
-  createdAt          DateTime          @default(now()) @map("created_at")
-  updatedAt          DateTime          @default(now()) @updatedAt @map("updated_at")
+  id           String            @id @default(cuid())
+  merchantId   String            @map("merchant_id")
+  connectionId String            @unique @map("connection_id")
+  platform     StorePlatform
+  status       H2BEndpointStatus @default(ACTIVE)
+  generation   Int               @default(1)
+  revokedAt    DateTime?         @map("revoked_at")
+  createdAt    DateTime          @default(now()) @map("created_at")
+  updatedAt    DateTime          @default(now()) @updatedAt @map("updated_at")
 
-  merchant   Merchant           @relation(fields: [merchantId], references: [id], onDelete: Cascade)
-  connection PlatformConnection @relation(fields: [connectionId], references: [id], onDelete: Cascade)
+  merchant   Merchant                     @relation(fields: [merchantId], references: [id], onDelete: Cascade)
+  connection PlatformConnection           @relation(fields: [connectionId], references: [id], onDelete: Cascade)
+  tokens     H2BConnectionEndpointToken[]
 
-  @@unique([previousDigest])
   @@index([merchantId, status])
   @@index([merchantId, connectionId])
-  @@index([previousDigest])
   @@map("h2b_connection_endpoints")
+}
+
+model H2BConnectionEndpointToken {
+  id              String               @id @default(cuid())
+  endpointId      String               @map("endpoint_id")
+  digest          String               @unique
+  role            H2BEndpointTokenRole
+  platform        StorePlatform
+  generation      Int
+  activatedAt     DateTime             @map("activated_at")
+  validUntil      DateTime?            @map("valid_until")
+  revokedAt       DateTime?            @map("revoked_at")
+  safeFingerprint String               @map("safe_fingerprint")
+  createdAt       DateTime             @default(now()) @map("created_at")
+  updatedAt       DateTime             @default(now()) @updatedAt @map("updated_at")
+
+  endpoint H2BConnectionEndpoint @relation(fields: [endpointId], references: [id], onDelete: Cascade)
+
+  @@unique([endpointId, role])
+  @@index([endpointId, role, revokedAt])
+  @@map("h2b_connection_endpoint_tokens")
 }
 
 model H2BWebhookAdmission {
@@ -1988,18 +2009,23 @@ model H2BWebhookOutbox {
 }
 
 model H2BExternalOrderAggregate {
-  id                String        @id @default(cuid())
-  merchantId        String        @map("merchant_id")
-  connectionId      String        @map("connection_id")
-  platform          StorePlatform
-  externalOrderId   String        @map("external_order_id")
-  externalOrderName String?       @map("external_order_name")
-  safeState         Json          @map("safe_state")
-  latestSequence    BigInt        @default(0) @map("latest_sequence")
-  latestEventAt     DateTime?     @map("latest_event_at")
-  latestTopic       String?       @map("latest_topic")
-  createdAt         DateTime      @default(now()) @map("created_at")
-  updatedAt         DateTime      @default(now()) @updatedAt @map("updated_at")
+  id                   String        @id @default(cuid())
+  merchantId           String        @map("merchant_id")
+  connectionId         String        @map("connection_id")
+  platform             StorePlatform
+  externalOrderId      String        @map("external_order_id")
+  externalOrderName    String?       @map("external_order_name")
+  createState          Json?         @map("create_state")
+  updateState          Json?         @map("update_state")
+  safeState            Json          @map("safe_state")
+  admissionIds         String[]      @default([]) @map("admission_ids")
+  latestCreateSequence BigInt        @default(0) @map("latest_create_sequence")
+  latestUpdateSequence BigInt        @default(0) @map("latest_update_sequence")
+  latestSeenSequence   BigInt        @default(0) @map("latest_seen_sequence")
+  latestEventAt        DateTime?     @map("latest_event_at")
+  latestTopic          String?       @map("latest_topic")
+  createdAt            DateTime      @default(now()) @map("created_at")
+  updatedAt            DateTime      @default(now()) @updatedAt @map("updated_at")
 
   merchant   Merchant           @relation(fields: [merchantId], references: [id], onDelete: Cascade)
   connection PlatformConnection @relation(fields: [connectionId], references: [id], onDelete: Cascade)

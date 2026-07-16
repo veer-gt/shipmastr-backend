@@ -2,6 +2,7 @@
 -- This migration is additive and must be applied only through the approved
 -- local scratch proof until a later deployment review.
 CREATE TYPE "H2BEndpointStatus" AS ENUM ('ACTIVE', 'REVOKED');
+CREATE TYPE "H2BEndpointTokenRole" AS ENUM ('CURRENT', 'PREVIOUS');
 CREATE TYPE "H2BAdmissionStatus" AS ENUM ('PENDING', 'ACCEPTED', 'PROCESSED', 'FAILED');
 CREATE TYPE "H2BOutboxStatus" AS ENUM ('PENDING', 'CLAIMED', 'PROCESSING', 'PROCESSED', 'FAILED', 'DEAD_LETTER');
 CREATE SEQUENCE "h2b_webhook_admissions_ingestion_sequence_seq";
@@ -12,38 +13,37 @@ CREATE TABLE "h2b_connection_endpoints" (
     "connection_id" TEXT NOT NULL,
     "platform" "StorePlatform" NOT NULL,
     "status" "H2BEndpointStatus" NOT NULL DEFAULT 'ACTIVE',
-    "current_digest" TEXT NOT NULL,
-    "current_activated_at" TIMESTAMP(3) NOT NULL,
-    "previous_digest" TEXT,
-    "previous_valid_until" TIMESTAMP(3),
-    "safe_fingerprint" TEXT NOT NULL,
+    "generation" INTEGER NOT NULL DEFAULT 1,
     "revoked_at" TIMESTAMP(3),
     "created_at" TIMESTAMP(3) NOT NULL DEFAULT CURRENT_TIMESTAMP,
     "updated_at" TIMESTAMP(3) NOT NULL,
     CONSTRAINT "h2b_connection_endpoints_pkey" PRIMARY KEY ("id")
 );
 CREATE UNIQUE INDEX "h2b_connection_endpoints_connection_id_key" ON "h2b_connection_endpoints"("connection_id");
-CREATE UNIQUE INDEX "h2b_connection_endpoints_current_digest_key" ON "h2b_connection_endpoints"("current_digest");
 CREATE INDEX "h2b_connection_endpoints_merchant_id_status_idx" ON "h2b_connection_endpoints"("merchant_id", "status");
 CREATE INDEX "h2b_connection_endpoints_merchant_id_connection_id_idx" ON "h2b_connection_endpoints"("merchant_id", "connection_id");
-CREATE INDEX "h2b_connection_endpoints_previous_digest_idx" ON "h2b_connection_endpoints"("previous_digest");
-CREATE UNIQUE INDEX "h2b_connection_endpoints_previous_digest_key" ON "h2b_connection_endpoints"("previous_digest");
-CREATE OR REPLACE FUNCTION h2b_enforce_global_digest_uniqueness() RETURNS trigger AS $$
-BEGIN
-  IF EXISTS (SELECT 1 FROM "h2b_connection_endpoints" e WHERE e.id <> NEW.id AND (e.current_digest = NEW.current_digest OR e.previous_digest = NEW.current_digest OR e.current_digest = NEW.previous_digest OR e.previous_digest = NEW.previous_digest)) THEN
-    RAISE EXCEPTION 'H2B_ENDPOINT_DIGEST_COLLISION';
-  END IF;
-  IF NEW.previous_digest IS NOT NULL AND NEW.previous_digest = NEW.current_digest THEN
-    RAISE EXCEPTION 'H2B_ENDPOINT_DIGEST_COLLISION';
-  END IF;
-  RETURN NEW;
-END;
-$$ LANGUAGE plpgsql;
-CREATE CONSTRAINT TRIGGER h2b_endpoint_digest_collision_guard
-AFTER INSERT OR UPDATE OF current_digest, previous_digest ON "h2b_connection_endpoints"
-DEFERRABLE INITIALLY IMMEDIATE FOR EACH ROW EXECUTE FUNCTION h2b_enforce_global_digest_uniqueness();
 ALTER TABLE "h2b_connection_endpoints" ADD CONSTRAINT "h2b_connection_endpoints_merchant_id_fkey" FOREIGN KEY ("merchant_id") REFERENCES "Merchant"("id") ON DELETE CASCADE ON UPDATE CASCADE;
 ALTER TABLE "h2b_connection_endpoints" ADD CONSTRAINT "h2b_connection_endpoints_connection_id_fkey" FOREIGN KEY ("connection_id") REFERENCES "platform_connections"("id") ON DELETE CASCADE ON UPDATE CASCADE;
+
+CREATE TABLE "h2b_connection_endpoint_tokens" (
+    "id" TEXT NOT NULL,
+    "endpoint_id" TEXT NOT NULL,
+    "digest" TEXT NOT NULL,
+    "role" "H2BEndpointTokenRole" NOT NULL,
+    "platform" "StorePlatform" NOT NULL,
+    "generation" INTEGER NOT NULL,
+    "activated_at" TIMESTAMP(3) NOT NULL,
+    "valid_until" TIMESTAMP(3),
+    "revoked_at" TIMESTAMP(3),
+    "safe_fingerprint" TEXT NOT NULL,
+    "created_at" TIMESTAMP(3) NOT NULL DEFAULT CURRENT_TIMESTAMP,
+    "updated_at" TIMESTAMP(3) NOT NULL,
+    CONSTRAINT "h2b_connection_endpoint_tokens_pkey" PRIMARY KEY ("id")
+);
+CREATE UNIQUE INDEX "h2b_connection_endpoint_tokens_digest_key" ON "h2b_connection_endpoint_tokens"("digest");
+CREATE UNIQUE INDEX "h2b_connection_endpoint_tokens_endpoint_id_role_key" ON "h2b_connection_endpoint_tokens"("endpoint_id", "role");
+CREATE INDEX "h2b_connection_endpoint_tokens_endpoint_id_role_revoked_at_idx" ON "h2b_connection_endpoint_tokens"("endpoint_id", "role", "revoked_at");
+ALTER TABLE "h2b_connection_endpoint_tokens" ADD CONSTRAINT "h2b_connection_endpoint_tokens_endpoint_id_fkey" FOREIGN KEY ("endpoint_id") REFERENCES "h2b_connection_endpoints"("id") ON DELETE CASCADE ON UPDATE CASCADE;
 
 CREATE TABLE "h2b_webhook_admissions" (
     "id" TEXT NOT NULL,
@@ -107,8 +107,13 @@ CREATE TABLE "h2b_external_order_aggregates" (
     "platform" "StorePlatform" NOT NULL,
     "external_order_id" TEXT NOT NULL,
     "external_order_name" TEXT,
+    "create_state" JSONB,
+    "update_state" JSONB,
     "safe_state" JSONB NOT NULL,
-    "latest_sequence" BIGINT NOT NULL DEFAULT 0,
+    "admission_ids" TEXT[] NOT NULL DEFAULT ARRAY[]::TEXT[],
+    "latest_create_sequence" BIGINT NOT NULL DEFAULT 0,
+    "latest_update_sequence" BIGINT NOT NULL DEFAULT 0,
+    "latest_seen_sequence" BIGINT NOT NULL DEFAULT 0,
     "latest_event_at" TIMESTAMP(3),
     "latest_topic" TEXT,
     "created_at" TIMESTAMP(3) NOT NULL DEFAULT CURRENT_TIMESTAMP,
