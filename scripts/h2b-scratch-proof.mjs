@@ -176,8 +176,10 @@ try {
   assert.equal(malformed.status, 404);
   assert.deepEqual(JSON.parse(malformed.body), { error: "H2B_ROUTE_NOT_FOUND" });
   const unknownToken = `shp_${randomBytes(32).toString("base64url")}`;
+  const beforeUnknown = await countFor(merchantA.id, shopifyId);
   const unknown = await request(server, `/api/public/provider-webhooks/${unknownToken}`, raced.headers, raced.payload);
   assert.equal(unknown.status, 404);
+  assert.deepEqual(await countFor(merchantA.id, shopifyId), beforeUnknown);
 
   const wrongTenant = fixture("SHOPIFY", "orders/create", "wrong-tenant", generatedSecrets.get(fixtureB.connection.id).current);
   assert.equal((await request(server, shopifyPath, wrongTenant.headers, wrongTenant.payload)).status, 401);

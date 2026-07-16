@@ -43,6 +43,9 @@ test("endpoint fingerprint is fixed length and rate keys are pseudonymous", () =
   for (let index = 0; index < 60; index += 1) assert.equal(allowH2BRequest(fingerprint, "127.0.0.1", 1_000), true);
   assert.equal(allowH2BRequest(fingerprint, "127.0.0.1", 1_000), false);
   resetH2BRateLimitForTests();
+  for (let index = 0; index < 60; index += 1) assert.equal(allowH2BRequest(null, "127.0.0.1", 2_000, "shp"), true);
+  assert.equal(allowH2BRequest(null, "127.0.0.1", 2_000, "shp"), false);
+  resetH2BRateLimitForTests();
 });
 
 test("strict decimal major-unit conversion uses reviewed currency exponents", () => {
