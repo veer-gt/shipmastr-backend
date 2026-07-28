@@ -6,7 +6,7 @@ set -f
 # This file validates authority and deployment inputs only.
 # It performs no deployment by itself and authorizes no load-balancer work.
 
-SHIPMASTR_GOVERNANCE_VERSION="3"
+SHIPMASTR_GOVERNANCE_VERSION="4"
 
 shipmastr_governance_fail() {
   echo "SHIPMASTR_DEPLOYMENT_BLOCKED=$1" >&2
@@ -282,11 +282,72 @@ shipmastr_governance_head_sha() {
   git -C "$repo_root" rev-parse HEAD
 }
 
+shipmastr_governance_is_canonical_backend_url() {
+  case "$1" in
+    https://github.com/veer-gt/shipmastr-backend|\
+    https://github.com/veer-gt/shipmastr-backend.git|\
+    git@github.com:veer-gt/shipmastr-backend.git|\
+    ssh://git@github.com/veer-gt/shipmastr-backend.git)
+      return 0
+      ;;
+    *)
+      return 1
+      ;;
+  esac
+}
+
+shipmastr_governance_validate_canonical_origin() {
+  local repo_root="$1"
+  local configured_origin
+  local effective_origin
+
+  set +e
+  configured_origin="$(
+    git -C "$repo_root" remote get-url origin 2>/dev/null
+  )"
+  local configured_status=$?
+  set -e
+
+  if [[ "$configured_status" -ne 0 || -z "$configured_origin" ]]; then
+    shipmastr_governance_fail "CANONICAL_BACKEND_ORIGIN_NOT_CONFIGURED"
+    return 1
+  fi
+
+  if ! shipmastr_governance_is_canonical_backend_url \
+    "$configured_origin"; then
+    shipmastr_governance_fail "BACKEND_ORIGIN_URL_NOT_CANONICAL"
+    return 1
+  fi
+
+  set +e
+  effective_origin="$(
+    git -C "$repo_root" ls-remote --get-url origin 2>/dev/null
+  )"
+  local effective_status=$?
+  set -e
+
+  if [[ "$effective_status" -ne 0 || -z "$effective_origin" ]]; then
+    shipmastr_governance_fail "BACKEND_EFFECTIVE_ORIGIN_NOT_RESOLVED"
+    return 1
+  fi
+
+  if ! shipmastr_governance_is_canonical_backend_url \
+    "$effective_origin"; then
+    shipmastr_governance_fail \
+      "BACKEND_ORIGIN_REWRITTEN_OR_NOT_CANONICAL"
+    return 1
+  fi
+}
+
 shipmastr_governance_remote_main_sha() {
   local repo_root="$1"
   local remote_output
   local remote_count
   local remote_sha
+
+  if ! shipmastr_governance_validate_canonical_origin     "$repo_root"; then
+    return 1
+  fi
 
   set +e
   remote_output="$(

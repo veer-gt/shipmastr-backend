@@ -87,3 +87,11 @@ authorization tests.
 - production resolves current remote `main` using `git ls-remote`;
 - staging service, migration jobs, database-name allowlist and production
   storefront bucket allowlist are fixed repository constants.
+
+## Canonical source and strict database allowlist
+
+- production remote-main verification requires the configured and effective
+  Git origin to resolve to the canonical Shipmastr backend repository;
+- Git `insteadOf` rewriting to a different repository is rejected;
+- the production database name must be an exact member of the fixed
+  allowlist; names merely containing `prod` or `production` are rejected.

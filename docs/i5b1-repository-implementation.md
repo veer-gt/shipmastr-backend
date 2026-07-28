@@ -54,3 +54,10 @@ commit.
 - production binds commit, digest, service and smoke results to that receipt;
 - production compares the approved commit to current remote GitHub `main`;
 - caller overrides cannot change sensitive service, job or allowlist targets.
+
+## Canonical origin and strict database enforcement
+
+- current remote `main` is accepted only from the canonical backend origin;
+- configured and effective Git URLs are both checked to detect rewrites;
+- production database selection is exact allowlist membership only;
+- semantic tests reject a deceptive `temporary_prod_copy` database name.

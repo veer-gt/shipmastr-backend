@@ -531,6 +531,94 @@ sensitive_deploy_targets_are_frozen() {
     "$SCRIPT_DIR/deployment-governance.sh"
 }
 
+
+canonical_origin_positive() {
+  shipmastr_governance_validate_canonical_origin "$REPO_ROOT"
+}
+
+canonical_origin_rejects_noncanonical_url() {
+  local temp_dir
+
+  temp_dir="$(mktemp -d)"
+  git -C "$temp_dir" init -q
+  git -C "$temp_dir" remote add \
+    origin \
+    'https://github.com/veer-gt/not-shipmastr-backend.git'
+
+  shipmastr_governance_validate_canonical_origin "$temp_dir"
+}
+
+canonical_origin_rejects_url_rewrite() {
+  local temp_dir
+
+  temp_dir="$(mktemp -d)"
+  git -C "$temp_dir" init -q
+  git -C "$temp_dir" remote add \
+    origin \
+    'https://github.com/veer-gt/shipmastr-backend.git'
+  git -C "$temp_dir" config \
+    'url.https://example.invalid/'.insteadOf \
+    'https://github.com/'
+
+  shipmastr_governance_validate_canonical_origin "$temp_dir"
+}
+
+production_database_allowlist_is_strict() {
+  node - "$SCRIPT_DIR/deploy-prod.sh" <<'JSTEST'
+const fs = require("node:fs");
+const { spawnSync } = require("node:child_process");
+
+const sourcePath = process.argv[2];
+const source = fs.readFileSync(sourcePath, "utf8");
+const startMarker = "node <<'NODE'\n";
+const endMarker = "\nNODE\n";
+
+const start = source.indexOf(startMarker);
+if (start < 0) {
+  process.exit(10);
+}
+
+const bodyStart = start + startMarker.length;
+const end = source.indexOf(endMarker, bodyStart);
+if (end < 0) {
+  process.exit(11);
+}
+
+const validator = source.slice(bodyStart, end);
+const allowlist = "shipmastr,shipmastr_prod,shipmastr_production";
+
+function run(databaseName) {
+  return spawnSync(
+    process.execPath,
+    ["-e", validator],
+    {
+      encoding: "utf8",
+      env: {
+        ...process.env,
+        DATABASE_URL_TO_VERIFY:
+          `postgresql://user:pass@localhost:5432/${databaseName}`,
+        PROD_DATABASE_NAME_ALLOWLIST: allowlist,
+      },
+    },
+  );
+}
+
+const exactAllowed = run("shipmastr_prod");
+if (exactAllowed.status !== 0) {
+  process.exit(12);
+}
+
+const deceptive = run("temporary_prod_copy");
+if (deceptive.status === 0) {
+  process.exit(13);
+}
+
+if (!deceptive.stderr.includes("DATABASE_NAME_NOT_ALLOWLISTED")) {
+  process.exit(14);
+}
+JSTEST
+}
+
 expect_pass staging_positive staging_positive
 expect_pass staging_prebuilt_positive staging_prebuilt_positive
 expect_fail staging_evidence_output_required staging_evidence_output_required
@@ -559,6 +647,10 @@ expect_pass implementation_files_removed implementation_files_removed
 expect_pass production_governance_has_no_test_hooks production_governance_has_no_test_hooks
 expect_pass implicit_public_access_flag_absent implicit_public_access_flag_absent
 expect_pass sensitive_deploy_targets_are_frozen sensitive_deploy_targets_are_frozen
+expect_pass canonical_origin_positive canonical_origin_positive
+expect_fail canonical_origin_rejects_noncanonical_url   canonical_origin_rejects_noncanonical_url
+expect_fail canonical_origin_rejects_url_rewrite   canonical_origin_rejects_url_rewrite
+expect_pass production_database_allowlist_is_strict   production_database_allowlist_is_strict
 
 echo "I5B1_GOVERNANCE_TEST_COUNT=$pass_count"
 echo "I5B1_GOVERNANCE_TESTS=PASS"

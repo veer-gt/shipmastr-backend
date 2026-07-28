@@ -145,7 +145,7 @@ if (/(staging|stage|dev|development|local|scratch|test|ci)/i.test(databaseName))
   process.exit(4);
 }
 
-if (!allowlist.includes(databaseName) && !/(prod|production)/i.test(databaseName)) {
+if (!allowlist.includes(databaseName)) {
   console.error("DATABASE_NAME_NOT_ALLOWLISTED");
   process.exit(5);
 }
