@@ -6,7 +6,7 @@ set -f
 # This file validates authority and deployment inputs only.
 # It performs no deployment by itself and authorizes no load-balancer work.
 
-SHIPMASTR_GOVERNANCE_VERSION="1"
+SHIPMASTR_GOVERNANCE_VERSION="2"
 
 shipmastr_governance_fail() {
   echo "SHIPMASTR_DEPLOYMENT_BLOCKED=$1" >&2
@@ -50,10 +50,6 @@ shipmastr_governance_assert_unset_or_equal() {
 
 shipmastr_governance_git_clean() {
   local repo_root="$1"
-  if [[ "${SHIPMASTR_GOVERNANCE_TEST_MODE:-}" == "1" ]]; then
-    [[ "${SHIPMASTR_TEST_REPO_CLEAN:-0}" == "1" ]]
-    return
-  fi
 
   [[ -z "$(
     git -C "$repo_root" status --porcelain=v1 --untracked-files=all
@@ -62,19 +58,11 @@ shipmastr_governance_git_clean() {
 
 shipmastr_governance_head_sha() {
   local repo_root="$1"
-  if [[ "${SHIPMASTR_GOVERNANCE_TEST_MODE:-}" == "1" ]]; then
-    printf '%s\n' "${SHIPMASTR_TEST_HEAD_SHA:-}"
-    return
-  fi
   git -C "$repo_root" rev-parse HEAD
 }
 
 shipmastr_governance_origin_main_sha() {
   local repo_root="$1"
-  if [[ "${SHIPMASTR_GOVERNANCE_TEST_MODE:-}" == "1" ]]; then
-    printf '%s\n' "${SHIPMASTR_TEST_ORIGIN_MAIN_SHA:-}"
-    return
-  fi
   git -C "$repo_root" rev-parse refs/remotes/origin/main
 }
 
@@ -82,12 +70,6 @@ shipmastr_governance_effective_identity() {
   local active_accounts
   local active_count
   local impersonated
-
-  if [[ "${SHIPMASTR_GOVERNANCE_TEST_MODE:-}" == "1" ]]; then
-    printf '%s
-' "${SHIPMASTR_TEST_EFFECTIVE_IDENTITY:-}"
-    return 0
-  fi
 
   if ! command -v gcloud >/dev/null 2>&1; then
     shipmastr_governance_fail "GCLOUD_NOT_FOUND"
@@ -103,8 +85,7 @@ shipmastr_governance_effective_identity() {
   )"
 
   active_count="$(
-    printf '%s
-' "$active_accounts" |
+    printf '%s\n' "$active_accounts" |
       awk 'NF { count += 1 } END { print count + 0 }'
   )"
 
@@ -121,11 +102,9 @@ shipmastr_governance_effective_identity() {
   )"
 
   if [[ -n "$impersonated" ]]; then
-    printf '%s
-' "$impersonated"
+    printf '%s\n' "$impersonated"
   else
-    printf '%s
-' "$active_accounts"
+    printf '%s\n' "$active_accounts"
   fi
 }
 

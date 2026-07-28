@@ -71,3 +71,10 @@ Repository gates reduce accidental and undocumented deployment paths.
 Complete environment isolation still depends on dedicated deployer/runtime
 identities, environment-specific secrets and databases, followed by negative
 authorization tests.
+
+## Test isolation
+
+- production governance version 2 contains no caller-controlled test mode;
+- `SHIPMASTR_GOVERNANCE_TEST_MODE` and every `SHIPMASTR_TEST_*` variable are
+  ignored because production code does not reference them;
+- offline tests replace shell functions only inside the test process.

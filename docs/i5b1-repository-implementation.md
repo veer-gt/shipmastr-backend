@@ -39,3 +39,10 @@ commit.
 - deployment logic now executes only after the guard in each governed wrapper;
 - spoofing the former `SHIPMASTR_GOVERNED_WRAPPER` variable is denied;
 - the prebuilt staging digest path is tested through the full wrapper.
+
+## Caller-controlled test-mode removal
+
+- all production test-mode branches were removed from the governance file;
+- production Git and GCP identity evidence is always read from real tools;
+- offline mocks now exist only inside `deployment-governance.test.sh`;
+- both real wrappers reject fabricated former test variables.
