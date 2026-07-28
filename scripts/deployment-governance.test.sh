@@ -202,7 +202,7 @@ expect_fail migration_wrong_identity migration_wrong_identity
 expect_fail migration_build_without_approval migration_build_without_approval
 
 
-staging_prebuilt_implementation_skips_build() {
+staging_prebuilt_wrapper_skips_build() {
   local temp_dir
   local gcloud_log
 
@@ -230,9 +230,17 @@ MOCK
 
   PATH="$temp_dir:$PATH" \
   SHIPMASTR_TEST_GCLOUD_LOG="$gcloud_log" \
-  SHIPMASTR_GOVERNED_WRAPPER=1 \
+  SHIPMASTR_GOVERNANCE_TEST_MODE=1 \
+  SHIPMASTR_TEST_REPO_CLEAN=1 \
+  SHIPMASTR_TEST_HEAD_SHA="$TEST_SHA" \
+  SHIPMASTR_TEST_ORIGIN_MAIN_SHA="$TEST_SHA" \
+  SHIPMASTR_APPROVED_COMMIT_SHA="$TEST_SHA" \
+  SHIPMASTR_PUBLIC_ACCESS_EXPECTATION=public \
+  SHIPMASTR_PUBLIC_ACCESS_APPROVAL='APPROVE RETAIN CURRENT PUBLIC INVOCATION STATE' \
+  SHIPMASTR_TEST_EFFECTIVE_IDENTITY='shipmastr-deployer-staging@shipmastr-core-prod.iam.gserviceaccount.com' \
+  SHIPMASTR_STAGING_DEPLOY_APPROVAL='APPROVE SHIPMASTR STAGING DEPLOY' \
   IMAGE_DIGEST="$TEST_DIGEST" \
-  /bin/bash "$SCRIPT_DIR/deploy-staging.implementation.sh" \
+  /bin/bash "$SCRIPT_DIR/deploy-staging.sh" \
     >/dev/null 2>&1
 
   if grep -Fq 'builds submit' "$gcloud_log"; then
@@ -250,28 +258,49 @@ MOCK
   rm -rf "$temp_dir"
 }
 
-expect_pass staging_prebuilt_implementation_skips_build staging_prebuilt_implementation_skips_build
+spoofed_wrapper_flag_hits_guard() {
+  local script_path="$1"
+  local output_file
 
-if /bin/bash "$SCRIPT_DIR/deploy-prod.implementation.sh" >/dev/null 2>&1; then
-  echo "TEST_FAILED_DIRECT_PRODUCTION_IMPLEMENTATION_ALLOWED" >&2
-  exit 1
-else
-  pass_count=$((pass_count + 1))
-fi
+  output_file="$(mktemp)"
 
-if /bin/bash "$SCRIPT_DIR/deploy-staging.implementation.sh" >/dev/null 2>&1; then
-  echo "TEST_FAILED_DIRECT_STAGING_IMPLEMENTATION_ALLOWED" >&2
-  exit 1
-else
-  pass_count=$((pass_count + 1))
-fi
+  if (
+    unset SHIPMASTR_APPROVED_COMMIT_SHA
+    unset GOOGLE_APPLICATION_CREDENTIALS
+
+    SHIPMASTR_GOVERNANCE_TEST_MODE=1 \
+    SHIPMASTR_TEST_REPO_CLEAN=1 \
+    SHIPMASTR_TEST_HEAD_SHA="$TEST_SHA" \
+    SHIPMASTR_GOVERNED_WRAPPER=1 \
+    /bin/bash "$script_path"
+  ) >"$output_file" 2>&1; then
+    rm -f "$output_file"
+    return 1
+  fi
+
+  grep -Fq \
+    'SHIPMASTR_DEPLOYMENT_BLOCKED=APPROVED_COMMIT_SHA_REQUIRED' \
+    "$output_file"
+
+  rm -f "$output_file"
+}
+
+implementation_files_removed() {
+  [[ ! -e "$SCRIPT_DIR/deploy-prod.implementation.sh" ]]
+  [[ ! -e "$SCRIPT_DIR/deploy-staging.implementation.sh" ]]
+}
+
+expect_pass staging_prebuilt_wrapper_skips_build staging_prebuilt_wrapper_skips_build
+expect_pass spoofed_staging_wrapper_flag_hits_guard \
+  spoofed_wrapper_flag_hits_guard "$SCRIPT_DIR/deploy-staging.sh"
+expect_pass spoofed_production_wrapper_flag_hits_guard \
+  spoofed_wrapper_flag_hits_guard "$SCRIPT_DIR/deploy-prod.sh"
+expect_pass implementation_files_removed implementation_files_removed
 
 if grep -R --line-number --fixed-strings \
   -- '--allow-unauthenticated' \
   "$SCRIPT_DIR/deploy-prod.sh" \
-  "$SCRIPT_DIR/deploy-prod.implementation.sh" \
   "$SCRIPT_DIR/deploy-staging.sh" \
-  "$SCRIPT_DIR/deploy-staging.implementation.sh" \
   >/dev/null; then
   echo "TEST_FAILED_IMPLICIT_PUBLIC_ACCESS_FLAG_REMAINS" >&2
   exit 1

@@ -7,9 +7,10 @@ this change.
 
 - `scripts/deploy-prod.sh` and `scripts/deploy-staging.sh` are the only
   supported application deployment entry points.
-- Their prior logic is preserved in non-directly-executable implementation
-  files.
-- Direct execution of implementation files fails closed.
+- Deployment logic remains inside those governed entry points after the
+  fail-closed guard.
+- No standalone implementation script or caller-controlled environment flag
+  can bypass the governance checks.
 - Production requires an immutable Artifact Registry image digest and proof
   that it matches the staging-tested digest.
 - Source must be clean and match an explicitly approved commit.

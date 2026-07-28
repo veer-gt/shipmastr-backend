@@ -4,12 +4,10 @@ This change is repository-only.
 
 ## Files
 
-- governed wrappers:
+- governed deployment entry points containing both the guard and the
+  deployment logic:
   - `scripts/deploy-prod.sh`
   - `scripts/deploy-staging.sh`
-- preserved deployment logic:
-  - `scripts/deploy-prod.implementation.sh`
-  - `scripts/deploy-staging.implementation.sh`
 - shared gate:
   - `scripts/deployment-governance.sh`
 - offline tests:
@@ -34,3 +32,10 @@ commit.
 - migration identity failures are explicitly returned;
 - an approved prebuilt staging digest skips `gcloud builds submit`;
 - negative identity and prebuilt-artifact tests cover both paths.
+
+## Direct-bypass removal
+
+- the standalone production and staging implementation scripts were removed;
+- deployment logic now executes only after the guard in each governed wrapper;
+- spoofing the former `SHIPMASTR_GOVERNED_WRAPPER` variable is denied;
+- the prebuilt staging digest path is tested through the full wrapper.
