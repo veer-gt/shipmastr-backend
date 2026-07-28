@@ -1,17 +1,31 @@
 #!/usr/bin/env bash
 set -euo pipefail
+set -f
+
+SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+source "$SCRIPT_DIR/deployment-governance.sh"
+
+[[ "$#" -eq 0 ]] || {
+  echo "SHIPMASTR_DEPLOYMENT_BLOCKED=ARGUMENTS_NOT_SUPPORTED" >&2
+  exit 64
+}
+
+shipmastr_deployment_guard production
+
+# Deployment logic intentionally remains in this governed entry point.
+# No caller-controlled environment variable can bypass the guard above.
 
 PROJECT_ID="${PROJECT_ID:-shipmastr-core-prod}"
 REGION="${REGION:-asia-south1}"
 SERVICE="${SERVICE:-shipmastr-api}"
-STAGING_SERVICE="${STAGING_SERVICE:-shipmastr-api-staging}"
+readonly STAGING_SERVICE="shipmastr-api-staging"
 ARTIFACT_REPOSITORY="${ARTIFACT_REPOSITORY:-shipmastr}"
 IMAGE_NAME="${IMAGE_NAME:-shipmastr-api}"
 SERVICE_ACCOUNT="${SERVICE_ACCOUNT:-shipmastr-runner@shipmastr-core-prod.iam.gserviceaccount.com}"
 CLOUD_SQL_INSTANCE="${CLOUD_SQL_INSTANCE:-shipmastr-core-prod:asia-south1:shipmastr-postgres}"
-MIGRATION_STATUS_JOB="${MIGRATION_STATUS_JOB:-shipmastr-prisma-migrate-status-prod}"
-PROD_DATABASE_URL_SECRET="${PROD_DATABASE_URL_SECRET:-DATABASE_URL}"
-PROD_DATABASE_NAME_ALLOWLIST="${PROD_DATABASE_NAME_ALLOWLIST:-shipmastr,shipmastr_prod,shipmastr_production}"
+readonly MIGRATION_STATUS_JOB="shipmastr-prisma-migrate-status-prod"
+readonly PROD_DATABASE_URL_SECRET="DATABASE_URL"
+readonly PROD_DATABASE_NAME_ALLOWLIST="shipmastr,shipmastr_prod,shipmastr_production"
 EMAIL_QUEUE_NAME="${EMAIL_QUEUE_NAME:-shipmastr-email-queue}"
 TASK_HANDLER_URL="${TASK_HANDLER_URL:-https://shipmastr-api-525178961393.asia-south1.run.app/v1/tasks/email/lead-notification}"
 EMAIL_FROM="${EMAIL_FROM:-noreply@shipmastr.com}"
@@ -23,7 +37,7 @@ STOREFRONT_ASSETS_GCS_BUCKET="${STOREFRONT_ASSETS_GCS_BUCKET:-}"
 STOREFRONT_ASSETS_GCS_PROJECT_ID="${STOREFRONT_ASSETS_GCS_PROJECT_ID:-${PROJECT_ID}}"
 STOREFRONT_ASSETS_CDN_HOST="${STOREFRONT_ASSETS_CDN_HOST:-assets.shipmastr.com}"
 STOREFRONT_ASSETS_GCS_SIGNING_SERVICE_ACCOUNT="${STOREFRONT_ASSETS_GCS_SIGNING_SERVICE_ACCOUNT:-${SERVICE_ACCOUNT}}"
-PROD_STOREFRONT_ASSETS_BUCKET_ALLOWLIST="${PROD_STOREFRONT_ASSETS_BUCKET_ALLOWLIST:-shipmastr-core-prod-storefront-assets}"
+readonly PROD_STOREFRONT_ASSETS_BUCKET_ALLOWLIST="shipmastr-core-prod-storefront-assets"
 DEPLOY_DRY_RUN="${DEPLOY_DRY_RUN:-0}"
 DEPLOY_NO_TRAFFIC="${DEPLOY_NO_TRAFFIC:-0}"
 DEPLOY_TAG="${DEPLOY_TAG:-storefront-prod-candidate}"
@@ -131,7 +145,7 @@ if (/(staging|stage|dev|development|local|scratch|test|ci)/i.test(databaseName))
   process.exit(4);
 }
 
-if (!allowlist.includes(databaseName) && !/(prod|production)/i.test(databaseName)) {
+if (!allowlist.includes(databaseName)) {
   console.error("DATABASE_NAME_NOT_ALLOWLISTED");
   process.exit(5);
 }
@@ -277,7 +291,6 @@ build_deploy_command() {
     --region "${REGION}"
     --image "${IMAGE_DIGEST}"
     --platform managed
-    --allow-unauthenticated
     --service-account "${SERVICE_ACCOUNT}"
     --add-cloudsql-instances "${CLOUD_SQL_INSTANCE}"
     --min-instances 1

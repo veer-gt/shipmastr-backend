@@ -1,3 +1,5 @@
+# I5B-1 governance: submit only through scripts/submit-migration-build.sh.
+# Building a migration image does not authorize migration execution.
 substitutions:
   _IMAGE: asia-south1-docker.pkg.dev/shipmastr-core-prod/shipmastr/shipmastr-api-migrate:manual
 

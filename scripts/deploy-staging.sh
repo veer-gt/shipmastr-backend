@@ -1,11 +1,25 @@
 #!/usr/bin/env bash
 set -euo pipefail
+set -f
+
+SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+source "$SCRIPT_DIR/deployment-governance.sh"
+
+[[ "$#" -eq 0 ]] || {
+  echo "SHIPMASTR_DEPLOYMENT_BLOCKED=ARGUMENTS_NOT_SUPPORTED" >&2
+  exit 64
+}
+
+shipmastr_deployment_guard staging
+
+# Deployment logic intentionally remains in this governed entry point.
+# No caller-controlled environment variable can bypass the guard above.
 
 PROJECT_ID="${PROJECT_ID:-shipmastr-core-prod}"
 REGION="${REGION:-asia-south1}"
 SERVICE="${SERVICE:-shipmastr-api-staging}"
 PROD_SERVICE="${PROD_SERVICE:-shipmastr-api}"
-MIGRATION_STATUS_JOB="${MIGRATION_STATUS_JOB:-shipmastr-prisma-migrate-status-staging}"
+readonly MIGRATION_STATUS_JOB="shipmastr-prisma-migrate-status-staging"
 ARTIFACT_REPOSITORY="${ARTIFACT_REPOSITORY:-shipmastr}"
 IMAGE_NAME="${IMAGE_NAME:-shipmastr-api}"
 SERVICE_ACCOUNT="${SERVICE_ACCOUNT:-shipmastr-runner@shipmastr-core-prod.iam.gserviceaccount.com}"
@@ -22,25 +36,30 @@ STOREFRONT_ASSETS_GCS_PROJECT_ID="${STOREFRONT_ASSETS_GCS_PROJECT_ID:-${PROJECT_
 STOREFRONT_ASSETS_CDN_HOST="${STOREFRONT_ASSETS_CDN_HOST:-assets.shipmastr.com}"
 STOREFRONT_ASSETS_GCS_SIGNING_SERVICE_ACCOUNT="${STOREFRONT_ASSETS_GCS_SIGNING_SERVICE_ACCOUNT:-${SERVICE_ACCOUNT}}"
 TAG="${TAG:-staging-$(date -u +%Y%m%d%H%M%S)}"
-
-IMAGE_URI="${REGION}-docker.pkg.dev/${PROJECT_ID}/${ARTIFACT_REPOSITORY}/${IMAGE_NAME}:${TAG}"
 IMAGE_BASE="${REGION}-docker.pkg.dev/${PROJECT_ID}/${ARTIFACT_REPOSITORY}/${IMAGE_NAME}"
 
-echo "Building backend image for staging: ${IMAGE_URI}"
-gcloud builds submit . \
-  --project "${PROJECT_ID}" \
-  --tag "${IMAGE_URI}"
+if [[ -n "${IMAGE_DIGEST:-}" ]]; then
+  echo "Using approved prebuilt staging image digest: ${IMAGE_DIGEST}"
+else
+  IMAGE_URI="${IMAGE_BASE}:${TAG}"
 
-DIGEST="$(gcloud artifacts docker images describe "${IMAGE_URI}" \
-  --project "${PROJECT_ID}" \
-  --format='value(image_summary.digest)')"
+  echo "Building backend image for staging: ${IMAGE_URI}"
+  gcloud builds submit . \
+    --project "${PROJECT_ID}" \
+    --tag "${IMAGE_URI}"
 
-if [[ -z "${DIGEST}" ]]; then
-  echo "Could not resolve image digest for ${IMAGE_URI}" >&2
-  exit 1
+  DIGEST="$(gcloud artifacts docker images describe "${IMAGE_URI}" \
+    --project "${PROJECT_ID}" \
+    --format='value(image_summary.digest)')"
+
+  if [[ -z "${DIGEST}" ]]; then
+    echo "Could not resolve image digest for ${IMAGE_URI}" >&2
+    exit 1
+  fi
+
+  IMAGE_DIGEST="${IMAGE_BASE}@${DIGEST}"
 fi
 
-IMAGE_DIGEST="${IMAGE_BASE}@${DIGEST}"
 echo "Deploying ${SERVICE} by immutable digest: ${IMAGE_DIGEST}"
 
 echo "Running staging Prisma migration status gate with ${IMAGE_DIGEST}"
@@ -70,7 +89,6 @@ gcloud run deploy "${SERVICE}" \
   --region "${REGION}" \
   --image "${IMAGE_DIGEST}" \
   --platform managed \
-  --allow-unauthenticated \
   --service-account "${SERVICE_ACCOUNT}" \
   --add-cloudsql-instances "${CLOUD_SQL_INSTANCE}" \
   --min-instances 0 \
@@ -94,4 +112,14 @@ curl -fsS "${SERVICE_URL}/api/health" >/dev/null
 # separate manual operator-approved test.
 
 echo "No-email staging smoke passed: /v1/health and /api/health returned success"
+
+STAGING_EVIDENCE_SHA256="$(
+  shipmastr_governance_write_staging_evidence \
+    "${SHIPMASTR_STAGING_EVIDENCE_OUTPUT}" \
+    "${SHIPMASTR_APPROVED_COMMIT_SHA}" \
+    "${IMAGE_DIGEST}"
+)"
+
 echo "Image digest ready for promotion: ${IMAGE_DIGEST}"
+echo "Staging evidence path: ${SHIPMASTR_STAGING_EVIDENCE_OUTPUT}"
+echo "Staging evidence SHA-256: ${STAGING_EVIDENCE_SHA256}"
