@@ -78,3 +78,12 @@ authorization tests.
 - `SHIPMASTR_GOVERNANCE_TEST_MODE` and every `SHIPMASTR_TEST_*` variable are
   ignored because production code does not reference them;
 - offline tests replace shell functions only inside the test process.
+
+## Staging evidence and fixed targets
+
+- staging writes an immutable evidence file only after migration status and
+  both health checks pass;
+- production verifies the evidence file hash and exact semantic contents;
+- production resolves current remote `main` using `git ls-remote`;
+- staging service, migration jobs, database-name allowlist and production
+  storefront bucket allowlist are fixed repository constants.

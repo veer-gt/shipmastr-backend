@@ -6,7 +6,7 @@ set -f
 # This file validates authority and deployment inputs only.
 # It performs no deployment by itself and authorizes no load-balancer work.
 
-SHIPMASTR_GOVERNANCE_VERSION="2"
+SHIPMASTR_GOVERNANCE_VERSION="3"
 
 shipmastr_governance_fail() {
   echo "SHIPMASTR_DEPLOYMENT_BLOCKED=$1" >&2
@@ -27,6 +27,227 @@ shipmastr_governance_is_sha256() {
 
 shipmastr_governance_is_image_digest() {
   [[ "$1" =~ ^asia-south1-docker\.pkg\.dev/shipmastr-core-prod/shipmastr/shipmastr-api@sha256:[0-9a-f]{64}$ ]]
+}
+
+shipmastr_governance_sha256_file() {
+  local path="$1"
+
+  if command -v shasum >/dev/null 2>&1; then
+    shasum -a 256 "$path" |
+      awk '{print $1}'
+    return
+  fi
+
+  if command -v sha256sum >/dev/null 2>&1; then
+    sha256sum "$path" |
+      awk '{print $1}'
+    return
+  fi
+
+  shipmastr_governance_fail "SHA256_TOOL_NOT_FOUND"
+  return 1
+}
+
+shipmastr_governance_validate_new_evidence_output() {
+  local output_path="$1"
+  local parent_dir
+  local repo_root
+
+  if [[ -z "$output_path" || "$output_path" != /* ]]; then
+    shipmastr_governance_fail \
+      "STAGING_EVIDENCE_OUTPUT_ABSOLUTE_PATH_REQUIRED"
+    return 1
+  fi
+
+  if [[ -e "$output_path" || -L "$output_path" ]]; then
+    shipmastr_governance_fail \
+      "STAGING_EVIDENCE_OUTPUT_MUST_NOT_ALREADY_EXIST"
+    return 1
+  fi
+
+  parent_dir="$(dirname "$output_path")"
+  if [[ ! -d "$parent_dir" || ! -w "$parent_dir" ]]; then
+    shipmastr_governance_fail \
+      "STAGING_EVIDENCE_OUTPUT_PARENT_NOT_WRITABLE"
+    return 1
+  fi
+
+  repo_root="$(shipmastr_governance_repo_root)"
+  case "$output_path" in
+    "$repo_root"|"$repo_root"/*)
+      shipmastr_governance_fail \
+        "STAGING_EVIDENCE_OUTPUT_MUST_BE_OUTSIDE_REPOSITORY"
+      return 1
+      ;;
+  esac
+}
+
+shipmastr_governance_write_staging_evidence() {
+  local output_path="$1"
+  local commit_sha="$2"
+  local image_digest="$3"
+  local temp_path
+  local created_utc
+  local evidence_sha
+
+  if ! shipmastr_governance_validate_new_evidence_output \
+    "$output_path"; then
+    return 1
+  fi
+
+  if ! shipmastr_governance_is_sha40 "$commit_sha"; then
+    shipmastr_governance_fail \
+      "STAGING_EVIDENCE_COMMIT_SHA_INVALID"
+    return 1
+  fi
+
+  if ! shipmastr_governance_is_image_digest "$image_digest"; then
+    shipmastr_governance_fail \
+      "STAGING_EVIDENCE_IMAGE_DIGEST_INVALID"
+    return 1
+  fi
+
+  temp_path="$(mktemp "${output_path}.tmp.XXXXXX")"
+  created_utc="$(date -u +%Y-%m-%dT%H:%M:%SZ)"
+
+  cat > "$temp_path" <<EOF
+evidence_type=SHIPMASTR_STAGING_DEPLOYMENT_EVIDENCE_V1
+project_id=shipmastr-core-prod
+region=asia-south1
+service=shipmastr-api-staging
+commit_sha=$commit_sha
+image_digest=$image_digest
+migration_status=PASS
+health_v1=PASS
+health_api=PASS
+public_access_mutation=disabled
+created_utc=$created_utc
+EOF
+
+  chmod 600 "$temp_path"
+  mv "$temp_path" "$output_path"
+
+  evidence_sha="$(
+    shipmastr_governance_sha256_file "$output_path"
+  )"
+
+  if ! shipmastr_governance_is_sha256 "$evidence_sha"; then
+    shipmastr_governance_fail \
+      "STAGING_EVIDENCE_SHA256_INVALID"
+    return 1
+  fi
+
+  printf '%s\n' "$evidence_sha"
+}
+
+shipmastr_governance_verify_staging_evidence() {
+  local evidence_path="$1"
+  local expected_sha="$2"
+  local expected_commit="$3"
+  local expected_digest="$4"
+  local actual_sha
+  local verify_status
+
+  if [[ -z "$evidence_path" || "$evidence_path" != /* ]]; then
+    shipmastr_governance_fail \
+      "STAGING_EVIDENCE_FILE_ABSOLUTE_PATH_REQUIRED"
+    return 1
+  fi
+
+  if [[ ! -f "$evidence_path" || -L "$evidence_path" ]]; then
+    shipmastr_governance_fail \
+      "STAGING_EVIDENCE_FILE_MISSING_OR_UNSAFE"
+    return 1
+  fi
+
+  if ! shipmastr_governance_is_sha256 "$expected_sha"; then
+    shipmastr_governance_fail \
+      "STAGING_EVIDENCE_SHA256_REQUIRED"
+    return 1
+  fi
+
+  actual_sha="$(
+    shipmastr_governance_sha256_file "$evidence_path"
+  )"
+
+  if [[ "$actual_sha" != "$expected_sha" ]]; then
+    shipmastr_governance_fail \
+      "STAGING_EVIDENCE_SHA256_MISMATCH"
+    return 1
+  fi
+
+  set +e
+  node - "$evidence_path" "$expected_commit" "$expected_digest" <<'NODE'
+const fs = require("node:fs");
+
+const [path, expectedCommit, expectedDigest] = process.argv.slice(2);
+const text = fs.readFileSync(path, "utf8");
+
+if (!text.endsWith("\n")) {
+  process.exit(2);
+}
+
+const lines = text.slice(0, -1).split("\n");
+const values = new Map();
+
+for (const line of lines) {
+  const separator = line.indexOf("=");
+  if (separator <= 0) {
+    process.exit(3);
+  }
+
+  const key = line.slice(0, separator);
+  const value = line.slice(separator + 1);
+
+  if (values.has(key)) {
+    process.exit(4);
+  }
+
+  values.set(key, value);
+}
+
+const expected = new Map([
+  ["evidence_type", "SHIPMASTR_STAGING_DEPLOYMENT_EVIDENCE_V1"],
+  ["project_id", "shipmastr-core-prod"],
+  ["region", "asia-south1"],
+  ["service", "shipmastr-api-staging"],
+  ["commit_sha", expectedCommit],
+  ["image_digest", expectedDigest],
+  ["migration_status", "PASS"],
+  ["health_v1", "PASS"],
+  ["health_api", "PASS"],
+  ["public_access_mutation", "disabled"],
+]);
+
+if (values.size !== expected.size + 1) {
+  process.exit(5);
+}
+
+for (const [key, value] of expected) {
+  if (values.get(key) !== value) {
+    process.exit(6);
+  }
+}
+
+const createdUtc = values.get("created_utc") || "";
+if (!/^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}Z$/.test(createdUtc)) {
+  process.exit(7);
+}
+
+for (const key of values.keys()) {
+  if (key !== "created_utc" && !expected.has(key)) {
+    process.exit(8);
+  }
+}
+NODE
+  verify_status=$?
+  set -e
+
+  if [[ "$verify_status" -ne 0 ]]; then
+    shipmastr_governance_fail \
+      "STAGING_EVIDENCE_SEMANTIC_VALIDATION_FAILED"
+    return 1
+  fi
 }
 
 shipmastr_governance_indirect_value() {
@@ -61,9 +282,49 @@ shipmastr_governance_head_sha() {
   git -C "$repo_root" rev-parse HEAD
 }
 
-shipmastr_governance_origin_main_sha() {
+shipmastr_governance_remote_main_sha() {
   local repo_root="$1"
-  git -C "$repo_root" rev-parse refs/remotes/origin/main
+  local remote_output
+  local remote_count
+  local remote_sha
+
+  set +e
+  remote_output="$(
+    git -C "$repo_root" ls-remote \
+      --exit-code \
+      origin \
+      refs/heads/main \
+      2>/dev/null
+  )"
+  local remote_status=$?
+  set -e
+
+  if [[ "$remote_status" -ne 0 || -z "$remote_output" ]]; then
+    shipmastr_governance_fail "REMOTE_MAIN_COULD_NOT_BE_RESOLVED"
+    return 1
+  fi
+
+  remote_count="$(
+    printf '%s\n' "$remote_output" |
+      awk 'NF { count += 1 } END { print count + 0 }'
+  )"
+
+  if [[ "$remote_count" != "1" ]]; then
+    shipmastr_governance_fail "REMOTE_MAIN_RESOLUTION_AMBIGUOUS"
+    return 1
+  fi
+
+  remote_sha="$(
+    printf '%s\n' "$remote_output" |
+      awk 'NF { print $1 }'
+  )"
+
+  if ! shipmastr_governance_is_sha40 "$remote_sha"; then
+    shipmastr_governance_fail "REMOTE_MAIN_SHA_INVALID"
+    return 1
+  fi
+
+  printf '%s\n' "$remote_sha"
 }
 
 shipmastr_governance_effective_identity() {
@@ -254,7 +515,7 @@ shipmastr_governance_validate_common() {
 shipmastr_deployment_guard() {
   local environment="$1"
   local repo_root
-  local origin_main_sha
+  local remote_main_sha
 
   case "$environment" in
     staging)
@@ -265,6 +526,11 @@ shipmastr_deployment_guard() {
       if [[ "${SHIPMASTR_STAGING_DEPLOY_APPROVAL:-}" != \
         "APPROVE SHIPMASTR STAGING DEPLOY" ]]; then
         shipmastr_governance_fail "STAGING_DEPLOY_APPROVAL_REQUIRED"
+        return 1
+      fi
+
+      if ! shipmastr_governance_validate_new_evidence_output \
+        "${SHIPMASTR_STAGING_EVIDENCE_OUTPUT:-}"; then
         return 1
       fi
 
@@ -308,17 +574,24 @@ shipmastr_deployment_guard() {
         return 1
       fi
 
-      if ! shipmastr_governance_is_sha256 \
-        "${SHIPMASTR_STAGING_EVIDENCE_SHA256:-}"; then
-        shipmastr_governance_fail "STAGING_EVIDENCE_SHA256_REQUIRED"
+      if ! shipmastr_governance_verify_staging_evidence \
+        "${SHIPMASTR_STAGING_EVIDENCE_FILE:-}" \
+        "${SHIPMASTR_STAGING_EVIDENCE_SHA256:-}" \
+        "${SHIPMASTR_APPROVED_COMMIT_SHA}" \
+        "${IMAGE_DIGEST}"; then
         return 1
       fi
 
       repo_root="$(shipmastr_governance_repo_root)"
-      origin_main_sha="$(shipmastr_governance_origin_main_sha "$repo_root")"
-      if [[ "$origin_main_sha" != "${SHIPMASTR_APPROVED_COMMIT_SHA}" ]]; then
+      if ! remote_main_sha="$(
+        shipmastr_governance_remote_main_sha "$repo_root"
+      )"; then
+        return 1
+      fi
+
+      if [[ "$remote_main_sha" != "${SHIPMASTR_APPROVED_COMMIT_SHA}" ]]; then
         shipmastr_governance_fail \
-          "PRODUCTION_COMMIT_MUST_EQUAL_ORIGIN_MAIN"
+          "PRODUCTION_COMMIT_MUST_EQUAL_CURRENT_REMOTE_MAIN"
         return 1
       fi
       ;;

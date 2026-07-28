@@ -19,7 +19,7 @@ PROJECT_ID="${PROJECT_ID:-shipmastr-core-prod}"
 REGION="${REGION:-asia-south1}"
 SERVICE="${SERVICE:-shipmastr-api-staging}"
 PROD_SERVICE="${PROD_SERVICE:-shipmastr-api}"
-MIGRATION_STATUS_JOB="${MIGRATION_STATUS_JOB:-shipmastr-prisma-migrate-status-staging}"
+readonly MIGRATION_STATUS_JOB="shipmastr-prisma-migrate-status-staging"
 ARTIFACT_REPOSITORY="${ARTIFACT_REPOSITORY:-shipmastr}"
 IMAGE_NAME="${IMAGE_NAME:-shipmastr-api}"
 SERVICE_ACCOUNT="${SERVICE_ACCOUNT:-shipmastr-runner@shipmastr-core-prod.iam.gserviceaccount.com}"
@@ -112,4 +112,14 @@ curl -fsS "${SERVICE_URL}/api/health" >/dev/null
 # separate manual operator-approved test.
 
 echo "No-email staging smoke passed: /v1/health and /api/health returned success"
+
+STAGING_EVIDENCE_SHA256="$(
+  shipmastr_governance_write_staging_evidence \
+    "${SHIPMASTR_STAGING_EVIDENCE_OUTPUT}" \
+    "${SHIPMASTR_APPROVED_COMMIT_SHA}" \
+    "${IMAGE_DIGEST}"
+)"
+
 echo "Image digest ready for promotion: ${IMAGE_DIGEST}"
+echo "Staging evidence path: ${SHIPMASTR_STAGING_EVIDENCE_OUTPUT}"
+echo "Staging evidence SHA-256: ${STAGING_EVIDENCE_SHA256}"

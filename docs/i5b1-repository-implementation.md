@@ -46,3 +46,11 @@ commit.
 - production Git and GCP identity evidence is always read from real tools;
 - offline mocks now exist only inside `deployment-governance.test.sh`;
 - both real wrappers reject fabricated former test variables.
+
+## Final target and evidence binding
+
+- staging produces a versioned, hashable evidence receipt after successful
+  migration-status and health gates;
+- production binds commit, digest, service and smoke results to that receipt;
+- production compares the approved commit to current remote GitHub `main`;
+- caller overrides cannot change sensitive service, job or allowlist targets.
