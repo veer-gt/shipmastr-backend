@@ -404,9 +404,16 @@ shipmastr_migration_build_guard() {
     return 1
   fi
 
-  effective_identity="$(shipmastr_governance_effective_identity)"
-  shipmastr_governance_validate_identity \
-    "$environment" "$effective_identity"
+  if ! effective_identity="$(
+    shipmastr_governance_effective_identity
+  )"; then
+    return 1
+  fi
+
+  if ! shipmastr_governance_validate_identity \
+    "$environment" "$effective_identity"; then
+    return 1
+  fi
 
   export PROJECT_ID="shipmastr-core-prod"
   export REGION="asia-south1"

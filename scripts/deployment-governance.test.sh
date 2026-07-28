@@ -66,6 +66,14 @@ staging_positive() {
   shipmastr_deployment_guard staging
 }
 
+staging_prebuilt_positive() {
+  base_env
+  export SHIPMASTR_TEST_EFFECTIVE_IDENTITY='shipmastr-deployer-staging@shipmastr-core-prod.iam.gserviceaccount.com'
+  export SHIPMASTR_STAGING_DEPLOY_APPROVAL='APPROVE SHIPMASTR STAGING DEPLOY'
+  export IMAGE_DIGEST="$TEST_DIGEST"
+  shipmastr_deployment_guard staging
+}
+
 staging_wrong_identity() {
   base_env
   export SHIPMASTR_TEST_EFFECTIVE_IDENTITY='shipmastr-deployer-prod@shipmastr-core-prod.iam.gserviceaccount.com'
@@ -164,6 +172,13 @@ migration_status_positive() {
   shipmastr_migration_build_guard status
 }
 
+migration_wrong_identity() {
+  base_env
+  export SHIPMASTR_TEST_EFFECTIVE_IDENTITY='shipmastr-deployer-staging@shipmastr-core-prod.iam.gserviceaccount.com'
+  export SHIPMASTR_MIGRATION_BUILD_APPROVAL='APPROVE SHIPMASTR MIGRATION STATUS IMAGE BUILD'
+  shipmastr_migration_build_guard status
+}
+
 migration_build_without_approval() {
   base_env
   export SHIPMASTR_TEST_EFFECTIVE_IDENTITY='shipmastr-deployer-prod@shipmastr-core-prod.iam.gserviceaccount.com'
@@ -171,6 +186,7 @@ migration_build_without_approval() {
 }
 
 expect_pass staging_positive staging_positive
+expect_pass staging_prebuilt_positive staging_prebuilt_positive
 expect_fail staging_wrong_identity staging_wrong_identity
 expect_fail staging_dirty staging_dirty
 expect_fail staging_legacy_target staging_legacy_target
@@ -182,7 +198,59 @@ expect_pass owner_with_break_glass owner_with_break_glass
 expect_fail key_file_rejected key_file_rejected
 expect_fail public_approval_required public_approval_required
 expect_pass migration_status_positive migration_status_positive
+expect_fail migration_wrong_identity migration_wrong_identity
 expect_fail migration_build_without_approval migration_build_without_approval
+
+
+staging_prebuilt_implementation_skips_build() {
+  local temp_dir
+  local gcloud_log
+
+  temp_dir="$(mktemp -d)"
+  gcloud_log="$temp_dir/gcloud.log"
+
+  cat > "$temp_dir/gcloud" <<'MOCK'
+#!/usr/bin/env bash
+set -euo pipefail
+printf '%s\n' "$*" >> "${SHIPMASTR_TEST_GCLOUD_LOG:?}"
+
+case "$*" in
+  "run services describe "*)
+    printf '%s\n' 'https://staging.example.invalid'
+    ;;
+esac
+MOCK
+
+  cat > "$temp_dir/curl" <<'MOCK'
+#!/usr/bin/env bash
+exit 0
+MOCK
+
+  chmod 700 "$temp_dir/gcloud" "$temp_dir/curl"
+
+  PATH="$temp_dir:$PATH" \
+  SHIPMASTR_TEST_GCLOUD_LOG="$gcloud_log" \
+  SHIPMASTR_GOVERNED_WRAPPER=1 \
+  IMAGE_DIGEST="$TEST_DIGEST" \
+  /bin/bash "$SCRIPT_DIR/deploy-staging.implementation.sh" \
+    >/dev/null 2>&1
+
+  if grep -Fq 'builds submit' "$gcloud_log"; then
+    rm -rf "$temp_dir"
+    return 1
+  fi
+
+  if grep -Fq 'artifacts docker images describe' "$gcloud_log"; then
+    rm -rf "$temp_dir"
+    return 1
+  fi
+
+  grep -Fq 'run deploy shipmastr-api-staging' "$gcloud_log"
+
+  rm -rf "$temp_dir"
+}
+
+expect_pass staging_prebuilt_implementation_skips_build staging_prebuilt_implementation_skips_build
 
 if /bin/bash "$SCRIPT_DIR/deploy-prod.implementation.sh" >/dev/null 2>&1; then
   echo "TEST_FAILED_DIRECT_PRODUCTION_IMPLEMENTATION_ALLOWED" >&2

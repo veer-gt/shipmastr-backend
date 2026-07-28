@@ -28,3 +28,9 @@ No Cloud Run deployment, IAM change, service-account creation, image build,
 database connection, migration, secret read, public-access change, GitHub
 push, pull request or load-balancer work is performed by this repository
 commit.
+
+## PR #100 correction
+
+- migration identity failures are explicitly returned;
+- an approved prebuilt staging digest skips `gcloud builds submit`;
+- negative identity and prebuilt-artifact tests cover both paths.

@@ -30,25 +30,30 @@ STOREFRONT_ASSETS_GCS_PROJECT_ID="${STOREFRONT_ASSETS_GCS_PROJECT_ID:-${PROJECT_
 STOREFRONT_ASSETS_CDN_HOST="${STOREFRONT_ASSETS_CDN_HOST:-assets.shipmastr.com}"
 STOREFRONT_ASSETS_GCS_SIGNING_SERVICE_ACCOUNT="${STOREFRONT_ASSETS_GCS_SIGNING_SERVICE_ACCOUNT:-${SERVICE_ACCOUNT}}"
 TAG="${TAG:-staging-$(date -u +%Y%m%d%H%M%S)}"
-
-IMAGE_URI="${REGION}-docker.pkg.dev/${PROJECT_ID}/${ARTIFACT_REPOSITORY}/${IMAGE_NAME}:${TAG}"
 IMAGE_BASE="${REGION}-docker.pkg.dev/${PROJECT_ID}/${ARTIFACT_REPOSITORY}/${IMAGE_NAME}"
 
-echo "Building backend image for staging: ${IMAGE_URI}"
-gcloud builds submit . \
-  --project "${PROJECT_ID}" \
-  --tag "${IMAGE_URI}"
+if [[ -n "${IMAGE_DIGEST:-}" ]]; then
+  echo "Using approved prebuilt staging image digest: ${IMAGE_DIGEST}"
+else
+  IMAGE_URI="${IMAGE_BASE}:${TAG}"
 
-DIGEST="$(gcloud artifacts docker images describe "${IMAGE_URI}" \
-  --project "${PROJECT_ID}" \
-  --format='value(image_summary.digest)')"
+  echo "Building backend image for staging: ${IMAGE_URI}"
+  gcloud builds submit . \
+    --project "${PROJECT_ID}" \
+    --tag "${IMAGE_URI}"
 
-if [[ -z "${DIGEST}" ]]; then
-  echo "Could not resolve image digest for ${IMAGE_URI}" >&2
-  exit 1
+  DIGEST="$(gcloud artifacts docker images describe "${IMAGE_URI}" \
+    --project "${PROJECT_ID}" \
+    --format='value(image_summary.digest)')"
+
+  if [[ -z "${DIGEST}" ]]; then
+    echo "Could not resolve image digest for ${IMAGE_URI}" >&2
+    exit 1
+  fi
+
+  IMAGE_DIGEST="${IMAGE_BASE}@${DIGEST}"
 fi
 
-IMAGE_DIGEST="${IMAGE_BASE}@${DIGEST}"
 echo "Deploying ${SERVICE} by immutable digest: ${IMAGE_DIGEST}"
 
 echo "Running staging Prisma migration status gate with ${IMAGE_DIGEST}"
