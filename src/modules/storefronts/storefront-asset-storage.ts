@@ -38,6 +38,7 @@ export interface StorefrontAssetStorageAdapter {
   headObject(input: { gcsPath: string }): Promise<StorefrontAssetHeadResult>;
   deleteObject(input: { gcsPath: string }): Promise<{ deleted: boolean }>;
   downloadForHashing(input: { gcsPath: string; maxBytes: number }): Promise<Buffer>;
+  overwriteObject(input: { gcsPath: string; contentType: string; bytes: Buffer }): Promise<{ bytes: number }>;
 }
 
 export type GcsStorefrontAssetRuntimeSignInput = {
@@ -85,6 +86,7 @@ export type GcsStorefrontAssetDeleteRequest = (input: {
   ok: boolean;
   status: number;
 }>;
+export type GcsStorefrontAssetOverwriteRequest = (input: { url: string; accessToken: string; gcsPath: string; contentType: string; bytes: Buffer }) => Promise<{ ok: boolean; status: number }>;
 export type GcsStorefrontAssetAuthClient = {
   getCredentials?: () => Promise<{ client_email?: string | null | undefined }>;
   getAccessToken?: GcsStorefrontAssetAccessTokenProvider;
@@ -297,6 +299,13 @@ async function defaultGcsDeleteRequest(input: Parameters<GcsStorefrontAssetDelet
   };
 }
 
+async function defaultGcsOverwriteRequest(input: Parameters<GcsStorefrontAssetOverwriteRequest>[0]) {
+  if (typeof fetch !== "function") throw new Error("STOREFRONT_ASSET_GCS_OVERWRITE_FETCH_UNAVAILABLE");
+  const body = input.bytes.buffer.slice(input.bytes.byteOffset, input.bytes.byteOffset + input.bytes.byteLength) as ArrayBuffer;
+  const response = await fetch(input.url, { method: "POST", headers: { authorization: `Bearer ${input.accessToken}`, "content-type": input.contentType }, body });
+  return { ok: response.ok, status: response.status };
+}
+
 function gcsObjectNotFound(error: unknown) {
   const candidate = error as { code?: number | string; name?: string; message?: string };
   return candidate.code === 404
@@ -333,6 +342,7 @@ export class GcsStorefrontAssetStorageAdapter implements StorefrontAssetStorageA
   private readonly metadataRequest: GcsStorefrontAssetMetadataRequest;
   private readonly downloadRequest: GcsStorefrontAssetDownloadRequest;
   private readonly deleteRequest: GcsStorefrontAssetDeleteRequest;
+  private readonly overwriteRequest: GcsStorefrontAssetOverwriteRequest;
   private readonly runtimeSigner?: GcsStorefrontAssetRuntimeSigner | undefined;
   private readonly serviceAccountEmailResolver: GcsStorefrontAssetServiceAccountEmailResolver;
 
@@ -347,6 +357,7 @@ export class GcsStorefrontAssetStorageAdapter implements StorefrontAssetStorageA
     metadataRequest?: GcsStorefrontAssetMetadataRequest | undefined;
     downloadRequest?: GcsStorefrontAssetDownloadRequest | undefined;
     deleteRequest?: GcsStorefrontAssetDeleteRequest | undefined;
+    overwriteRequest?: GcsStorefrontAssetOverwriteRequest | undefined;
     runtimeSigner?: GcsStorefrontAssetRuntimeSigner | undefined;
     serviceAccountEmailResolver?: GcsStorefrontAssetServiceAccountEmailResolver | undefined;
   }) {
@@ -359,6 +370,7 @@ export class GcsStorefrontAssetStorageAdapter implements StorefrontAssetStorageA
     this.metadataRequest = config.metadataRequest ?? defaultGcsMetadataRequest;
     this.downloadRequest = config.downloadRequest ?? defaultGcsDownloadRequest;
     this.deleteRequest = config.deleteRequest ?? defaultGcsDeleteRequest;
+    this.overwriteRequest = config.overwriteRequest ?? defaultGcsOverwriteRequest;
     this.runtimeSigner = config.runtimeSigner;
     this.serviceAccountEmailResolver = config.serviceAccountEmailResolver ?? resolveCloudRunServiceAccountEmail;
   }
@@ -385,6 +397,13 @@ export class GcsStorefrontAssetStorageAdapter implements StorefrontAssetStorageA
 
   private buildAuthenticatedDeleteUrl(gcsPath: string) {
     return `https://storage.googleapis.com/storage/v1/b/${encodeGcsComponent(this.bucketName)}/o/${encodeURIComponent(gcsPath)}`;
+  }
+
+  private buildAuthenticatedOverwriteUrl(gcsPath: string) {
+    const url = new URL(`https://storage.googleapis.com/upload/storage/v1/b/${encodeGcsComponent(this.bucketName)}/o`);
+    url.searchParams.set("uploadType", "media");
+    url.searchParams.set("name", gcsPath);
+    return url.toString();
   }
 
   private async resolveSigningServiceAccount() {
@@ -599,6 +618,24 @@ export class GcsStorefrontAssetStorageAdapter implements StorefrontAssetStorageA
       }
     }
   }
+
+  async overwriteObject(input: { gcsPath: string; contentType: string; bytes: Buffer }): Promise<{ bytes: number }> {
+    const contentType = normalizeStorefrontAssetContentType(input.contentType);
+    try {
+      await this.storage.bucket(this.bucketName).file(input.gcsPath).save(input.bytes, { resumable: false, contentType });
+      return { bytes: input.bytes.byteLength };
+    } catch (error) {
+      try {
+        const accessToken = await this.resolveRuntimeAccessToken();
+        const result = await this.overwriteRequest({ url: this.buildAuthenticatedOverwriteUrl(input.gcsPath), accessToken, gcsPath: input.gcsPath, contentType, bytes: input.bytes });
+        if (!result.ok) throw Object.assign(new Error(`STOREFRONT_ASSET_GCS_OVERWRITE_STATUS_${result.status}`), { code: result.status });
+        return { bytes: input.bytes.byteLength };
+      } catch (fallbackError) {
+        logger.error({ err: fallbackError, originalErr: error, bucket: this.bucketName }, "Failed to overwrite storefront asset object");
+        throw new HttpError(503, "STOREFRONT_ASSET_OVERWRITE_FAILED");
+      }
+    }
+  }
 }
 
 /** Used when STOREFRONT_ASSETS_GCS_BUCKET is not configured — fails closed, not silently. */
@@ -615,6 +652,7 @@ export class DisabledStorefrontAssetStorageAdapter implements StorefrontAssetSto
   async downloadForHashing(): Promise<Buffer> {
     throw new HttpError(503, "STOREFRONT_ASSET_STORAGE_DISABLED");
   }
+  async overwriteObject(_input: { gcsPath: string; contentType: string; bytes: Buffer }): Promise<{ bytes: number }> { throw new HttpError(503, "STOREFRONT_ASSET_STORAGE_DISABLED"); }
 }
 
 /** In-memory adapter for tests — no network, deterministic. */
@@ -660,6 +698,12 @@ export class InMemoryStorefrontAssetStorageAdapter implements StorefrontAssetSto
     if (object.bytes.byteLength > input.maxBytes) throw new HttpError(413, "STOREFRONT_ASSET_TOO_LARGE");
     return object.bytes;
   }
+  async overwriteObject(input: { gcsPath: string; contentType: string; bytes: Buffer }): Promise<{ bytes: number }> {
+    if (!this.objects.has(input.gcsPath)) throw new HttpError(404, "STOREFRONT_ASSET_NOT_FOUND");
+    this.objects.set(input.gcsPath, { bytes: Buffer.from(input.bytes), contentType: normalizeStorefrontAssetContentType(input.contentType), updatedAt: new Date() });
+    return { bytes: input.bytes.byteLength };
+  }
+  getObjectBytesForTests(gcsPath: string) { return this.objects.get(gcsPath)?.bytes; }
 }
 
 export type StorefrontAssetStorageEnvSource = {

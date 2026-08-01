@@ -2,11 +2,14 @@ import assert from "node:assert/strict";
 import { readFileSync } from "node:fs";
 import { describe, it } from "node:test";
 import { StorefrontAssetStatus } from "@prisma/client";
+import sharp from "sharp";
 import { HttpError } from "../../lib/httpError.js";
 import {
   GcsStorefrontAssetStorageAdapter,
+  DisabledStorefrontAssetStorageAdapter,
   InMemoryStorefrontAssetStorageAdapter,
   MAX_STOREFRONT_ASSET_BYTES,
+  sha256Hex,
   STOREFRONT_ASSET_UPLOAD_IF_GENERATION_MATCH,
   STOREFRONT_ASSET_UPLOAD_IF_GENERATION_MATCH_HEADER,
   STOREFRONT_ASSET_UPLOAD_LENGTH_RANGE,
@@ -454,6 +457,10 @@ async function createPendingStorefrontAsset(input: {
   });
   const asset = await input.client.storefrontAsset.findUnique({ where: { id: upload.assetId } });
   return { upload, asset };
+}
+
+async function storefrontImage(format: "jpeg" | "png" | "webp") {
+  return sharp({ create: { width: 3, height: 2, channels: 3, background: { r: 22, g: 44, b: 66 } } }).toFormat(format).toBuffer();
 }
 
 describe("internal storefront renderer lookup", () => {
@@ -1249,7 +1256,7 @@ describe("storefront asset signed-upload proof gates", () => {
   it("B7 rejects merchant A referencing merchant B ready asset", async () => {
     const { client, storage } = makeStorefrontAssetHarness();
     const { upload, asset } = await createPendingStorefrontAsset({ client, storage });
-    storage.seedObject(asset.gcsPath, Buffer.from("png"), "image/png");
+    storage.seedObject(asset.gcsPath, await storefrontImage("png"), "image/png");
     await confirmStorefrontAsset({ merchantId: "merchant_a", assetId: upload.assetId, client, storage });
 
     await assert.rejects(
@@ -1261,7 +1268,7 @@ describe("storefront asset signed-upload proof gates", () => {
   it("B8 treats double confirm as idempotent", async () => {
     const { client, storage } = makeStorefrontAssetHarness();
     const { upload, asset } = await createPendingStorefrontAsset({ client, storage });
-    storage.seedObject(asset.gcsPath, Buffer.from("png"), "image/png");
+    storage.seedObject(asset.gcsPath, await storefrontImage("png"), "image/png");
 
     const first = await confirmStorefrontAsset({ merchantId: "merchant_a", assetId: upload.assetId, client, storage });
     const second = await confirmStorefrontAsset({ merchantId: "merchant_a", assetId: upload.assetId, client, storage });
@@ -1270,6 +1277,202 @@ describe("storefront asset signed-upload proof gates", () => {
     assert.equal(second.id, upload.assetId);
     assert.equal(first.status, StorefrontAssetStatus.READY);
     assert.equal(second.status, StorefrontAssetStatus.READY);
+  });
+
+  it("sanitizes genuine JPEG, PNG and WebP uploads before marking them ready", async () => {
+    for (const [contentType, format] of [["image/jpeg", "jpeg"], ["image/png", "png"], ["image/webp", "webp"]] as const) {
+      const { client, storage } = makeStorefrontAssetHarness();
+      const { upload, asset } = await createPendingStorefrontAsset({ client, storage, contentType });
+      storage.seedObject(asset.gcsPath, await storefrontImage(format), contentType);
+      const ready = await confirmStorefrontAsset({ merchantId: "merchant_a", assetId: upload.assetId, client, storage });
+      const stored = storage.getObjectBytesForTests(asset.gcsPath)!;
+      const metadata = await sharp(stored).metadata();
+      assert.equal(ready.status, StorefrontAssetStatus.READY);
+      assert.equal(ready.mime, contentType);
+      assert.equal(ready.bytes, stored.byteLength);
+      assert.equal(metadata.format, format);
+      assert.equal(ready.width, 3);
+      assert.equal(ready.height, 2);
+    }
+  });
+
+  it("enforces the decoded pixel ceiling before marking uploaded images ready", async () => {
+    const withinLimit = makeStorefrontAssetHarness();
+    const within = await createPendingStorefrontAsset({
+      client: withinLimit.client,
+      storage: withinLimit.storage,
+      contentType: "image/png"
+    });
+    withinLimit.storage.seedObject(within.asset.gcsPath, await storefrontImage("png"), "image/png");
+
+    const ready = await confirmStorefrontAsset({
+      merchantId: "merchant_a",
+      assetId: within.upload.assetId,
+      client: withinLimit.client,
+      storage: withinLimit.storage
+    });
+
+    assert.equal(ready.status, StorefrontAssetStatus.READY);
+
+    const overLimit = makeStorefrontAssetHarness();
+    const oversized = await createPendingStorefrontAsset({
+      client: overLimit.client,
+      storage: overLimit.storage,
+      contentType: "image/png"
+    });
+    const oversizedBytes = await sharp({
+      create: {
+        width: 6_325,
+        height: 6_325,
+        channels: 3,
+        background: { r: 0, g: 0, b: 0 }
+      }
+    }).png().toBuffer();
+    assert.ok(oversizedBytes.byteLength < MAX_STOREFRONT_ASSET_BYTES);
+    overLimit.storage.seedObject(oversized.asset.gcsPath, oversizedBytes, "image/png");
+
+    await assert.rejects(
+      () => confirmStorefrontAsset({
+        merchantId: "merchant_a",
+        assetId: oversized.upload.assetId,
+        client: overLimit.client,
+        storage: overLimit.storage
+      }),
+      (error) => error instanceof HttpError
+        && error.status === 422
+        && error.message === "STOREFRONT_ASSET_INVALID_IMAGE"
+    );
+
+    assert.equal((await overLimit.storage.headObject({ gcsPath: oversized.asset.gcsPath })).exists, false);
+    const pending = overLimit.state.assets.find((asset) => asset.id === oversized.upload.assetId)!;
+    assert.equal(pending.status, StorefrontAssetStatus.PENDING);
+    assert.equal(pending.bytes, null);
+    assert.equal(pending.sha256, null);
+    assert.equal(pending.width, null);
+    assert.equal(pending.height, null);
+  });
+
+  it("hashes the overwritten sanitized bytes and deduplicates metadata-only JPEG variants", async () => {
+    const { client, storage, state } = makeStorefrontAssetHarness();
+    const first = await createPendingStorefrontAsset({ client, storage, contentType: "image/jpeg" });
+    const second = await createPendingStorefrontAsset({ client, storage, contentType: "image/jpeg" });
+    const base = { create: { width: 3, height: 2, channels: 3, background: { r: 22, g: 44, b: 66 } } } as const;
+    storage.seedObject(first.asset.gcsPath, await sharp(base).withMetadata({ exif: { IFD0: { Artist: "one" } } }).jpeg().toBuffer(), "image/jpeg");
+    storage.seedObject(second.asset.gcsPath, await sharp(base).withMetadata({ exif: { IFD0: { Artist: "two" } } }).jpeg().toBuffer(), "image/jpeg");
+    const ready = await confirmStorefrontAsset({ merchantId: "merchant_a", assetId: first.upload.assetId, client, storage });
+    const sanitized = storage.getObjectBytesForTests(first.asset.gcsPath)!;
+    assert.equal(state.assets.find((asset) => asset.id === first.upload.assetId)!.sha256, sha256Hex(sanitized));
+    const duplicate = await confirmStorefrontAsset({ merchantId: "merchant_a", assetId: second.upload.assetId, client, storage });
+    assert.equal(duplicate.id, ready.id);
+    assert.equal(state.assets.find((asset) => asset.id === second.upload.assetId)!.status, StorefrontAssetStatus.DELETED);
+    assert.equal((await storage.headObject({ gcsPath: second.asset.gcsPath })).exists, false);
+  });
+
+  it("applies JPEG orientation and strips EXIF metadata during sanitization", async () => {
+    const { client, storage } = makeStorefrontAssetHarness();
+    const { upload, asset } = await createPendingStorefrontAsset({ client, storage, contentType: "image/jpeg" });
+    const raw = await sharp({ create: { width: 2, height: 3, channels: 3, background: { r: 1, g: 2, b: 3 } } })
+      .withMetadata({ orientation: 6, exif: { IFD0: { Artist: "synthetic-gps-fixture" }, IFD3: { GPSLatitudeRef: "N", GPSLatitude: "12/1 34/1 56/1", GPSLongitudeRef: "E", GPSLongitude: "78/1 9/1 10/1" } } }).jpeg().toBuffer();
+    const rawMetadata = await sharp(raw).metadata();
+    assert.equal(rawMetadata.orientation, 6);
+    assert.ok(rawMetadata.exif?.length);
+    assert.ok(rawMetadata.exif!.includes(Buffer.from([0x25, 0x88])) || rawMetadata.exif!.includes(Buffer.from([0x88, 0x25])), "raw fixture must contain the GPS IFD pointer tag");
+    storage.seedObject(asset.gcsPath, raw, "image/jpeg");
+    const ready = await confirmStorefrontAsset({ merchantId: "merchant_a", assetId: upload.assetId, client, storage });
+    const metadata = await sharp(storage.getObjectBytesForTests(asset.gcsPath)!).metadata();
+    assert.equal(metadata.format, "jpeg");
+    assert.equal(metadata.exif, undefined);
+    assert.equal(metadata.orientation, undefined);
+    assert.deepEqual([ready.width, ready.height], [3, 2]);
+  });
+
+  it("rejects and deletes truncated and real-format-mismatched images", async () => {
+    const { client, storage } = makeStorefrontAssetHarness();
+    const first = await createPendingStorefrontAsset({ client, storage, contentType: "image/png" });
+    storage.seedObject(first.asset.gcsPath, (await storefrontImage("png")).subarray(0, 12), "image/png");
+    await assert.rejects(() => confirmStorefrontAsset({ merchantId: "merchant_a", assetId: first.upload.assetId, client, storage }), (error) => error instanceof HttpError && error.status === 422 && error.message === "STOREFRONT_ASSET_INVALID_IMAGE");
+    assert.equal((await storage.headObject({ gcsPath: first.asset.gcsPath })).exists, false);
+    const second = await createPendingStorefrontAsset({ client, storage, contentType: "image/png" });
+    storage.seedObject(second.asset.gcsPath, await storefrontImage("jpeg"), "image/png");
+    await assert.rejects(() => confirmStorefrontAsset({ merchantId: "merchant_a", assetId: second.upload.assetId, client, storage }), (error) => error instanceof HttpError && error.status === 422 && error.message === "STOREFRONT_ASSET_INVALID_IMAGE");
+  });
+
+  it("does not mark an asset ready when sanitizing overwrite fails", async () => {
+    const { client, storage, state } = makeStorefrontAssetHarness();
+    const { upload, asset } = await createPendingStorefrontAsset({ client, storage, contentType: "image/png" });
+    storage.seedObject(asset.gcsPath, await storefrontImage("png"), "image/png");
+    storage.overwriteObject = async () => { throw new HttpError(503, "STOREFRONT_ASSET_OVERWRITE_FAILED"); };
+    await assert.rejects(() => confirmStorefrontAsset({ merchantId: "merchant_a", assetId: upload.assetId, client, storage }), (error) => error instanceof HttpError && error.status === 503);
+    const pending = state.assets.find((candidate) => candidate.id === upload.assetId)!;
+    assert.equal(pending.status, StorefrontAssetStatus.PENDING);
+    assert.equal(pending.bytes, null);
+    assert.equal(pending.sha256, null);
+    assert.equal(pending.width, null);
+    assert.equal(pending.height, null);
+  });
+
+  it("overwrites the existing GCS object with exact sanitized bytes and MIME", async () => {
+    const calls: any[] = [];
+    const adapter = new GcsStorefrontAssetStorageAdapter({
+      bucket: "test-bucket", projectId: "test-project",
+      storage: { bucket: (bucket: string) => ({ file: (path: string) => ({ save: async (bytes: Buffer, options: unknown) => { calls.push({ bucket, path, bytes: Buffer.from(bytes), options }); } }) }) } as any
+    });
+    const bytes = Buffer.from([1, 2, 3, 4]);
+    assert.deepEqual(await adapter.overwriteObject({ gcsPath: "merchants/a/storefront/x.png", contentType: "image/png", bytes }), { bytes: 4 });
+    assert.equal(calls.length, 1);
+    assert.equal(calls[0].bucket, "test-bucket");
+    assert.equal(calls[0].path, "merchants/a/storefront/x.png");
+    assert.deepEqual(calls[0].bytes, bytes);
+    assert.equal(calls[0].options.contentType, "image/png");
+    assert.equal(Object.hasOwn(calls[0].options, "ifGenerationMatch"), false);
+  });
+
+  it("disabled storage adapter rejects sanitized-object overwrite", async () => {
+    const storage = new DisabledStorefrontAssetStorageAdapter();
+    await assert.rejects(
+      () => storage.overwriteObject({ gcsPath: "merchants/merchant_a/storefront/disabled-overwrite.jpg", contentType: "image/jpeg", bytes: Buffer.from([1, 2, 3]) }),
+      (error) => error instanceof HttpError && error.status === 503 && error.message === "STOREFRONT_ASSET_STORAGE_DISABLED"
+    );
+  });
+
+  it("authenticated overwrite fallback sends only the active sliced Buffer bytes", async () => {
+    const parent = Buffer.alloc(64, 0xaa);
+    const expected = Buffer.from([1, 2, 3, 4, 5]);
+    expected.copy(parent, 17);
+    const bytes = parent.subarray(17, 22);
+    const gcsPath = "merchants/a/storefront/x y+z.png";
+    const originalFetch = globalThis.fetch;
+    let captured: { url: string; init: RequestInit | undefined } | undefined;
+    globalThis.fetch = async (url, init) => { captured = { url: String(url), init }; return new Response("", { status: 200 }); };
+    try {
+      const adapter = new GcsStorefrontAssetStorageAdapter({
+        bucket: "test-bucket", projectId: "test-project", accessTokenProvider: async () => "token",
+        storage: { bucket: () => ({ file: () => ({ save: async () => { throw new Error("sdk unavailable"); } }) }) } as any
+      });
+      await adapter.overwriteObject({ gcsPath, contentType: "image/png", bytes });
+      assert.equal(captured!.init!.method, "POST");
+      const headers = new Headers(captured!.init!.headers);
+      assert.equal(headers.get("authorization"), "Bearer token");
+      assert.equal(headers.get("content-type"), "image/png");
+      const body = Buffer.from(await new Response(captured!.init!.body).arrayBuffer());
+      assert.equal(body.byteLength, 5);
+      assert.deepEqual(body, expected);
+      assert.equal(body.includes(0xaa), false);
+      const url = new URL(captured!.url);
+      assert.equal(url.origin, "https://storage.googleapis.com");
+      assert.equal(url.pathname, "/upload/storage/v1/b/test-bucket/o");
+      assert.equal(url.searchParams.get("uploadType"), "media");
+      assert.equal(url.searchParams.get("name"), gcsPath);
+      assert.match(captured!.url, /name=merchants%2Fa%2Fstorefront%2Fx\+y%2Bz\.png/);
+
+      globalThis.fetch = async () => new Response("", { status: 500 });
+      await assert.rejects(
+        () => adapter.overwriteObject({ gcsPath, contentType: "image/png", bytes }),
+        (error) => error instanceof HttpError
+          && error.status === 503
+          && error.message === "STOREFRONT_ASSET_OVERWRITE_FAILED"
+      );
+    } finally { globalThis.fetch = originalFetch; }
   });
 
   it("B9 sweeps pending assets older than 24h and leaves ready assets untouched", async () => {
