@@ -6,7 +6,7 @@ set -f
 # This file validates authority and deployment inputs only.
 # It performs no deployment by itself and authorizes no load-balancer work.
 
-SHIPMASTR_GOVERNANCE_VERSION="5"
+SHIPMASTR_GOVERNANCE_VERSION="6"
 
 shipmastr_governance_fail() {
   echo "SHIPMASTR_DEPLOYMENT_BLOCKED=$1" >&2
@@ -34,6 +34,102 @@ shipmastr_governance_is_staging_revision() {
 
   [[ "${#revision}" -le 63 && \
     "$revision" =~ ^shipmastr-api-staging-[a-z0-9]([a-z0-9-]*[a-z0-9])?$ ]]
+}
+
+shipmastr_governance_validate_cloud_run_traffic_tag() {
+  local service_name="${1:-}"
+  local traffic_tag="${2:-}"
+
+  if [[ -z "$service_name" || -z "$traffic_tag" || \
+    ! "$service_name" =~ ^[a-z]([a-z0-9-]*[a-z0-9])?$ || \
+    ! "$traffic_tag" =~ ^[a-z0-9]([a-z0-9-]*[a-z0-9])?$ || \
+    $(( ${#service_name} + ${#traffic_tag} )) -gt 46 ]]; then
+    shipmastr_governance_fail "CLOUD_RUN_TRAFFIC_TAG_INVALID"
+    return 1
+  fi
+}
+
+shipmastr_governance_format_pid_fragment() {
+  local process_id="${1:-}"
+  local fragment
+
+  if [[ ! "$process_id" =~ ^[0-9]+$ ]]; then
+    shipmastr_governance_fail "STAGING_PID_FRAGMENT_INVALID"
+    return 1
+  fi
+
+  if [[ "${#process_id}" -gt 5 ]]; then
+    fragment="${process_id: -5}"
+  else
+    fragment="$process_id"
+  fi
+  while [[ "${#fragment}" -gt 1 && "$fragment" == 0* ]]; do
+    fragment="${fragment#0}"
+  done
+
+  printf '%05d\n' "$fragment"
+}
+
+shipmastr_governance_validate_staging_generated_names() {
+  local service_name="${1:-}"
+  local commit_prefix="${2:-}"
+  local invocation_utc="${3:-}"
+  local pid_fragment="${4:-}"
+  local revision_suffix="${5:-}"
+  local candidate_tag="${6:-}"
+  local expected_revision_suffix
+  local expected_candidate_tag
+  local expected_revision
+
+  if [[ "$service_name" != "shipmastr-api-staging" || \
+    ! "$service_name" =~ ^[a-z]([a-z0-9-]*[a-z0-9])?$ ]]; then
+    shipmastr_governance_fail "STAGING_SERVICE_INVALID"
+    return 1
+  fi
+
+  if [[ ! "$commit_prefix" =~ ^[0-9a-f]{7}$ ]]; then
+    shipmastr_governance_fail "STAGING_COMMIT_PREFIX_INVALID"
+    return 1
+  fi
+
+  if [[ ! "$invocation_utc" =~ ^[0-9]{14}$ ]]; then
+    shipmastr_governance_fail "STAGING_INVOCATION_TIMESTAMP_INVALID"
+    return 1
+  fi
+
+  if [[ ! "$pid_fragment" =~ ^[0-9]{5}$ ]]; then
+    shipmastr_governance_fail "STAGING_PID_FRAGMENT_INVALID"
+    return 1
+  fi
+
+  expected_revision_suffix="sf-${commit_prefix}-${invocation_utc}-${pid_fragment}"
+  if [[ "$revision_suffix" != "$expected_revision_suffix" || \
+    ! "$revision_suffix" =~ ^sf-[0-9a-f]{7}-[0-9]{14}-[0-9]{5}$ ]]; then
+    shipmastr_governance_fail "STAGING_REVISION_SUFFIX_INVALID"
+    return 1
+  fi
+
+  expected_candidate_tag="c-${commit_prefix}-${invocation_utc:6:8}-${pid_fragment}"
+  if [[ "$candidate_tag" != "$expected_candidate_tag" || \
+    ! "$candidate_tag" =~ ^c-[0-9a-f]{7}-[0-9]{8}-[0-9]{5}$ ]]; then
+    shipmastr_governance_fail "STAGING_CANDIDATE_TAG_INVALID"
+    return 1
+  fi
+
+  expected_revision="${service_name}-${revision_suffix}"
+  if [[ "${#service_name}" -ne 21 || \
+    "${#candidate_tag}" -ne 24 || \
+    $(( ${#service_name} + ${#candidate_tag} )) -ne 45 || \
+    "${#revision_suffix}" -ne 31 || \
+    "${#expected_revision}" -ne 53 || \
+    "${#expected_revision}" -gt 63 ]]; then
+    shipmastr_governance_fail "STAGING_GENERATED_NAME_LENGTH_INVALID"
+    return 1
+  fi
+
+  shipmastr_governance_validate_cloud_run_traffic_tag \
+    "$service_name" \
+    "$candidate_tag"
 }
 
 shipmastr_governance_verify_secret_metadata() {

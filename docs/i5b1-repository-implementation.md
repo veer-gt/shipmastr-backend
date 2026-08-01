@@ -49,11 +49,27 @@ is performed by this repository change.
 
 ## Final target and evidence binding
 
-- staging generates a unique `sf-<commit7>-<UTC>-<pid>` revision suffix and
-  tag for each invocation and deploys it with `--no-traffic --format=json`;
+- staging captures `date -u +%Y%m%d%H%M%S` separately, requires a successful
+  command and exactly 14 numeric timestamp characters, and only then marks the
+  value readonly;
+- one validated five-digit PID fragment is derived without octal arithmetic by
+  zero-padding short PIDs or retaining the last five digits of longer PIDs;
+- that same PID fragment is used in the full unique
+  `sf-<commit7>-<YYYYMMDDHHMMSS>-<pid5>` revision suffix and the independent
+  bounded `c-<commit7>-<DDHHMMSS>-<pid5>` candidate tag, after which staging
+  deploys with `--no-traffic --format=json`;
+- the fixed 21-character staging service and 24-character generated tag have a
+  generated combined length of exactly 45, within Cloud Run's 46-character
+  limit; the suffix is 31 characters and the complete revision is exactly 53;
+- reusable validation requires the exact fixed service
+  `shipmastr-api-staging`, validates its syntax, rejects malformed timestamps,
+  PID fragments, suffixes and tags, and rejects a combined service/tag length
+  above 46 before the wrapper's first `gcloud` command;
+- the complete revision name also remains constrained below 63 characters;
 - the deploy result must report the exact expected revision, and repeated
   service/revision descriptions must bind that revision to the fixed service,
   Ready state, zero-percent tag and complete immutable digest;
+- exact tag-to-revision attribution remains mandatory before traffic can move;
 - the uniquely tagged candidate's direct
   `/v1/health` and `/api/health` results are verified before an explicit
   `--to-revisions REVISION=100` traffic operation;
@@ -106,3 +122,17 @@ is performed by this repository change.
 - configured and effective Git URLs are both checked to detect rewrites;
 - production database selection is exact allowlist membership only;
 - semantic tests reject a deceptive `temporary_prod_copy` database name.
+
+## Failed `366e154` release disposition
+
+- the digest built from source commit `366e154`,
+  `asia-south1-docker.pkg.dev/shipmastr-core-prod/shipmastr/shipmastr-api@sha256:de9bdfa364c30bea96385c60fb846220a118a8f2cd75ece418b5919272748c8f`,
+  is not promotable because the candidate deployment failed the Cloud Run
+  combined service/tag constraint;
+- the staging attempt was rejected before Cloud Run created the candidate
+  service revision: it created no candidate revision, created no candidate
+  tag, moved no staging traffic and created no V2 evidence;
+- previously active positive traffic remained 100% on
+  `shipmastr-api-staging-h2a-emailnorm-1eafee45`;
+- the next release requires a fresh build from the eventual correction merge
+  commit because the deployment scripts are copied into the image.
