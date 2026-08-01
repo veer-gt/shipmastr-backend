@@ -26,6 +26,7 @@ CLOUD_SQL_INSTANCE="${CLOUD_SQL_INSTANCE:-shipmastr-core-prod:asia-south1:shipma
 readonly MIGRATION_STATUS_JOB="shipmastr-prisma-migrate-status-prod"
 readonly PROD_DATABASE_URL_SECRET="DATABASE_URL"
 readonly PROD_DATABASE_NAME_ALLOWLIST="shipmastr,shipmastr_prod,shipmastr_production"
+readonly PROD_PLATFORM_CREDENTIAL_ENCRYPTION_SECRET="PLATFORM_CREDENTIAL_ENCRYPTION_KEY_PROD"
 EMAIL_QUEUE_NAME="${EMAIL_QUEUE_NAME:-shipmastr-email-queue}"
 TASK_HANDLER_URL="${TASK_HANDLER_URL:-https://shipmastr-api-525178961393.asia-south1.run.app/v1/tasks/email/lead-notification}"
 EMAIL_FROM="${EMAIL_FROM:-noreply@shipmastr.com}"
@@ -46,7 +47,7 @@ DEPLOY_TAG="${DEPLOY_TAG:-storefront-prod-candidate}"
 # render the command, or DEPLOY_NO_TRAFFIC=1 to create a tagged candidate for
 # smoke testing before any separately approved traffic shift.
 PROD_ENV_VARS="APP_ENV=production,GCP_PROJECT_ID=${PROJECT_ID},CLOUD_TASKS_LOCATION=${REGION},EMAIL_QUEUE_NAME=${EMAIL_QUEUE_NAME},TASK_HANDLER_URL=${TASK_HANDLER_URL},EMAIL_FROM=${EMAIL_FROM},EMAIL_FROM_NAME=${EMAIL_FROM_NAME},SMTP_REPLY_TO=${SMTP_REPLY_TO},ADMIN_EMAIL=${ADMIN_EMAIL},QUOTE_PRICE_SOURCE=${QUOTE_PRICE_SOURCE},STOREFRONT_ASSETS_GCS_BUCKET=${STOREFRONT_ASSETS_GCS_BUCKET},STOREFRONT_ASSETS_GCS_PROJECT_ID=${STOREFRONT_ASSETS_GCS_PROJECT_ID},STOREFRONT_ASSETS_CDN_HOST=${STOREFRONT_ASSETS_CDN_HOST},STOREFRONT_ASSETS_GCS_SIGNING_SERVICE_ACCOUNT=${STOREFRONT_ASSETS_GCS_SIGNING_SERVICE_ACCOUNT},ALLOW_CLOUDFLARE_ADMIN_MUTATIONS=true,ALLOW_APEX_DOMAIN_AUTOMATION=true,CLOUDFLARE_AUTH_MODE=api_token"
-PROD_SECRET_BINDINGS="DATABASE_URL=DATABASE_URL:latest,JWT_SECRET=JWT_SECRET:latest,APP_SECRET_PEPPER=APP_SECRET_PEPPER:latest,WEBHOOK_SECRET=WEBHOOK_SECRET:latest,ADDRESS_PHONE_PEPPER=ADDRESS_PHONE_PEPPER:latest,CHECKOUT_ADDRESS_SESSION_TOKEN_SECRET=CHECKOUT_ADDRESS_SESSION_TOKEN_SECRET:latest,SMTP_HOST=SMTP_HOST:latest,SMTP_PORT=SMTP_PORT:latest,SMTP_SECURE=SMTP_SECURE:latest,SMTP_USER=SMTP_USER:latest,SMTP_PASS=SMTP_PASS:latest,CLOUDFLARE_API_TOKEN=CLOUDFLARE_API_TOKEN:latest,CLOUDFLARE_ZONE_ID=CLOUDFLARE_ZONE_ID:latest"
+PROD_SECRET_BINDINGS="DATABASE_URL=DATABASE_URL:latest,JWT_SECRET=JWT_SECRET:latest,APP_SECRET_PEPPER=APP_SECRET_PEPPER:latest,WEBHOOK_SECRET=WEBHOOK_SECRET:latest,ADDRESS_PHONE_PEPPER=ADDRESS_PHONE_PEPPER:latest,CHECKOUT_ADDRESS_SESSION_TOKEN_SECRET=CHECKOUT_ADDRESS_SESSION_TOKEN_SECRET:latest,SMTP_HOST=SMTP_HOST:latest,SMTP_PORT=SMTP_PORT:latest,SMTP_SECURE=SMTP_SECURE:latest,SMTP_USER=SMTP_USER:latest,SMTP_PASS=SMTP_PASS:latest,CLOUDFLARE_API_TOKEN=CLOUDFLARE_API_TOKEN:latest,CLOUDFLARE_ZONE_ID=CLOUDFLARE_ZONE_ID:latest,PLATFORM_CREDENTIAL_ENCRYPTION_KEY=${PROD_PLATFORM_CREDENTIAL_ENCRYPTION_SECRET}:latest"
 
 quote_command() {
   local quoted=""
@@ -315,7 +316,7 @@ render_deploy_plan() {
   build_deploy_command
 
   echo "DEPLOY_DRY_RUN=1: no gcloud deploy, image build, traffic shift, DB mutation, or production write will run."
-  echo "Production gates preserved for real deploys: asset target guard, staging health check, migration status gate, immutable digest deploy."
+  echo "Production gates preserved for real deploys: production-labeled platform key metadata, asset target guard, staging health check, migration status gate, immutable digest deploy."
   if [[ "${DEPLOY_NO_TRAFFIC}" == "1" ]]; then
     echo "No-traffic candidate mode: ENABLED"
     echo "Traffic shift prevention: deploy command includes --no-traffic and --tag ${DEPLOY_TAG}."
@@ -348,6 +349,16 @@ print_service_traffic() {
 validate_deploy_mode_flags
 verify_checkout_dev_otp_not_set
 
+if [[ "${DEPLOY_DRY_RUN}" == "1" ]]; then
+  render_deploy_plan
+  exit 0
+fi
+
+shipmastr_governance_verify_secret_metadata \
+  "${PROJECT_ID}" \
+  "${PROD_PLATFORM_CREDENTIAL_ENCRYPTION_SECRET}" \
+  production
+
 if [[ "${PROD_MIGRATION_STATUS_DRY_RUN_ONLY:-}" == "1" ]]; then
   if [[ "${APPROVE_PRODUCTION_MIGRATION_STATUS_DRY_RUN:-}" != "APPROVE PRODUCTION MIGRATION STATUS DRY RUN" ]]; then
     echo "Refusing production migration status dry run without exact approval phrase." >&2
@@ -359,11 +370,6 @@ if [[ "${PROD_MIGRATION_STATUS_DRY_RUN_ONLY:-}" == "1" ]]; then
   fi
   run_production_migration_status_gate
   echo "Production migration status dry run passed; no deploy attempted."
-  exit 0
-fi
-
-if [[ "${DEPLOY_DRY_RUN}" == "1" ]]; then
-  render_deploy_plan
   exit 0
 fi
 
