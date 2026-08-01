@@ -16,6 +16,7 @@ import {
 
 const UPLOAD_URL_TTL_MS = 5 * 60 * 1000; // 5 minutes — plenty for a client to PUT one photo
 const ORPHAN_PENDING_ASSET_AGE_MS = 24 * 60 * 60 * 1000;
+const MAX_STOREFRONT_ASSET_PIXELS = 40_000_000;
 
 type DbClient = Prisma.TransactionClient | typeof prisma;
 
@@ -164,9 +165,15 @@ export async function confirmStorefrontAsset(input: ConfirmStorefrontAssetInput)
   let width: number | null = null;
   let height: number | null = null;
   try {
-    const metadata = await sharp(uploadedBytes, { failOn: "error" }).metadata();
+    const metadata = await sharp(uploadedBytes, {
+      failOn: "warning",
+      limitInputPixels: MAX_STOREFRONT_ASSET_PIXELS
+    }).metadata();
     if (metadata.format !== expectedFormat) throw new Error("STOREFRONT_ASSET_DECODED_FORMAT_MISMATCH");
-    const output = await sharp(uploadedBytes, { failOn: "error" }).rotate().toFormat(expectedFormat).toBuffer({ resolveWithObject: true });
+    const output = await sharp(uploadedBytes, {
+      failOn: "warning",
+      limitInputPixels: MAX_STOREFRONT_ASSET_PIXELS
+    }).rotate().toFormat(expectedFormat).toBuffer({ resolveWithObject: true });
     sanitized = output.data;
     width = output.info.width ?? null;
     height = output.info.height ?? null;

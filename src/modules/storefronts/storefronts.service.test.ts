@@ -1296,6 +1296,62 @@ describe("storefront asset signed-upload proof gates", () => {
     }
   });
 
+  it("enforces the decoded pixel ceiling before marking uploaded images ready", async () => {
+    const withinLimit = makeStorefrontAssetHarness();
+    const within = await createPendingStorefrontAsset({
+      client: withinLimit.client,
+      storage: withinLimit.storage,
+      contentType: "image/png"
+    });
+    withinLimit.storage.seedObject(within.asset.gcsPath, await storefrontImage("png"), "image/png");
+
+    const ready = await confirmStorefrontAsset({
+      merchantId: "merchant_a",
+      assetId: within.upload.assetId,
+      client: withinLimit.client,
+      storage: withinLimit.storage
+    });
+
+    assert.equal(ready.status, StorefrontAssetStatus.READY);
+
+    const overLimit = makeStorefrontAssetHarness();
+    const oversized = await createPendingStorefrontAsset({
+      client: overLimit.client,
+      storage: overLimit.storage,
+      contentType: "image/png"
+    });
+    const oversizedBytes = await sharp({
+      create: {
+        width: 6_325,
+        height: 6_325,
+        channels: 3,
+        background: { r: 0, g: 0, b: 0 }
+      }
+    }).png().toBuffer();
+    assert.ok(oversizedBytes.byteLength < MAX_STOREFRONT_ASSET_BYTES);
+    overLimit.storage.seedObject(oversized.asset.gcsPath, oversizedBytes, "image/png");
+
+    await assert.rejects(
+      () => confirmStorefrontAsset({
+        merchantId: "merchant_a",
+        assetId: oversized.upload.assetId,
+        client: overLimit.client,
+        storage: overLimit.storage
+      }),
+      (error) => error instanceof HttpError
+        && error.status === 422
+        && error.message === "STOREFRONT_ASSET_INVALID_IMAGE"
+    );
+
+    assert.equal((await overLimit.storage.headObject({ gcsPath: oversized.asset.gcsPath })).exists, false);
+    const pending = overLimit.state.assets.find((asset) => asset.id === oversized.upload.assetId)!;
+    assert.equal(pending.status, StorefrontAssetStatus.PENDING);
+    assert.equal(pending.bytes, null);
+    assert.equal(pending.sha256, null);
+    assert.equal(pending.width, null);
+    assert.equal(pending.height, null);
+  });
+
   it("hashes the overwritten sanitized bytes and deduplicates metadata-only JPEG variants", async () => {
     const { client, storage, state } = makeStorefrontAssetHarness();
     const first = await createPendingStorefrontAsset({ client, storage, contentType: "image/jpeg" });
@@ -1384,6 +1440,7 @@ describe("storefront asset signed-upload proof gates", () => {
     const expected = Buffer.from([1, 2, 3, 4, 5]);
     expected.copy(parent, 17);
     const bytes = parent.subarray(17, 22);
+    const gcsPath = "merchants/a/storefront/x y+z.png";
     const originalFetch = globalThis.fetch;
     let captured: { url: string; init: RequestInit | undefined } | undefined;
     globalThis.fetch = async (url, init) => { captured = { url: String(url), init }; return new Response("", { status: 200 }); };
@@ -1392,10 +1449,29 @@ describe("storefront asset signed-upload proof gates", () => {
         bucket: "test-bucket", projectId: "test-project", accessTokenProvider: async () => "token",
         storage: { bucket: () => ({ file: () => ({ save: async () => { throw new Error("sdk unavailable"); } }) }) } as any
       });
-      await adapter.overwriteObject({ gcsPath: "merchants/a/storefront/x.png", contentType: "image/png", bytes });
-      assert.equal(captured!.init!.headers instanceof Headers ? captured!.init!.headers.get("authorization") : (captured!.init!.headers as any).authorization, "Bearer token");
-      assert.deepEqual(Buffer.from(await new Response(captured!.init!.body).arrayBuffer()), expected);
-      assert.match(captured!.url, /uploadType=media/);
+      await adapter.overwriteObject({ gcsPath, contentType: "image/png", bytes });
+      assert.equal(captured!.init!.method, "POST");
+      const headers = new Headers(captured!.init!.headers);
+      assert.equal(headers.get("authorization"), "Bearer token");
+      assert.equal(headers.get("content-type"), "image/png");
+      const body = Buffer.from(await new Response(captured!.init!.body).arrayBuffer());
+      assert.equal(body.byteLength, 5);
+      assert.deepEqual(body, expected);
+      assert.equal(body.includes(0xaa), false);
+      const url = new URL(captured!.url);
+      assert.equal(url.origin, "https://storage.googleapis.com");
+      assert.equal(url.pathname, "/upload/storage/v1/b/test-bucket/o");
+      assert.equal(url.searchParams.get("uploadType"), "media");
+      assert.equal(url.searchParams.get("name"), gcsPath);
+      assert.match(captured!.url, /name=merchants%2Fa%2Fstorefront%2Fx\+y%2Bz\.png/);
+
+      globalThis.fetch = async () => new Response("", { status: 500 });
+      await assert.rejects(
+        () => adapter.overwriteObject({ gcsPath, contentType: "image/png", bytes }),
+        (error) => error instanceof HttpError
+          && error.status === 503
+          && error.message === "STOREFRONT_ASSET_OVERWRITE_FAILED"
+      );
     } finally { globalThis.fetch = originalFetch; }
   });
 

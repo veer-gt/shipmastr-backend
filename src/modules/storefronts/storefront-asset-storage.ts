@@ -302,7 +302,7 @@ async function defaultGcsDeleteRequest(input: Parameters<GcsStorefrontAssetDelet
 async function defaultGcsOverwriteRequest(input: Parameters<GcsStorefrontAssetOverwriteRequest>[0]) {
   if (typeof fetch !== "function") throw new Error("STOREFRONT_ASSET_GCS_OVERWRITE_FETCH_UNAVAILABLE");
   const body = input.bytes.buffer.slice(input.bytes.byteOffset, input.bytes.byteOffset + input.bytes.byteLength) as ArrayBuffer;
-  const response = await fetch(input.url, { method: "PUT", headers: { authorization: `Bearer ${input.accessToken}`, "content-type": input.contentType }, body });
+  const response = await fetch(input.url, { method: "POST", headers: { authorization: `Bearer ${input.accessToken}`, "content-type": input.contentType }, body });
   return { ok: response.ok, status: response.status };
 }
 
