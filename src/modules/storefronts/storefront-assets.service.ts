@@ -1,4 +1,5 @@
 import { Prisma, StorefrontAssetStatus } from "@prisma/client";
+import sharp from "sharp";
 import { HttpError } from "../../lib/httpError.js";
 import { logger } from "../../lib/logger.js";
 import { prisma } from "../../lib/prisma.js";
@@ -150,13 +151,35 @@ export async function confirmStorefrontAsset(input: ConfirmStorefrontAssetInput)
     throw new HttpError(422, "STOREFRONT_ASSET_TOO_LARGE");
   }
 
-  let sha256: string | null = null;
+  let uploadedBytes: Buffer;
   try {
-    const bytes = await storage.downloadForHashing({ gcsPath: asset.gcsPath, maxBytes: MAX_STOREFRONT_ASSET_BYTES });
-    sha256 = sha256Hex(bytes);
+    uploadedBytes = await storage.downloadForHashing({ gcsPath: asset.gcsPath, maxBytes: MAX_STOREFRONT_ASSET_BYTES });
   } catch (error) {
-    logger.warn({ err: error, assetId: asset.id }, "Could not hash storefront asset for dedup — continuing without sha256");
+    logger.error({ err: error, assetId: asset.id }, "Could not download storefront asset for validation");
+    throw error;
   }
+
+  const expectedFormat = contentType === "image/jpeg" ? "jpeg" : contentType === "image/png" ? "png" : "webp";
+  let sanitized: Buffer;
+  let width: number | null = null;
+  let height: number | null = null;
+  try {
+    const metadata = await sharp(uploadedBytes, { failOn: "error" }).metadata();
+    if (metadata.format !== expectedFormat) throw new Error("STOREFRONT_ASSET_DECODED_FORMAT_MISMATCH");
+    const output = await sharp(uploadedBytes, { failOn: "error" }).rotate().toFormat(expectedFormat).toBuffer({ resolveWithObject: true });
+    sanitized = output.data;
+    width = output.info.width ?? null;
+    height = output.info.height ?? null;
+  } catch (error) {
+    await storage.deleteObject({ gcsPath: asset.gcsPath }).catch((cleanupError) => logger.error({ err: cleanupError, assetId: asset.id }, "Failed to delete invalid storefront asset upload"));
+    throw new HttpError(422, "STOREFRONT_ASSET_INVALID_IMAGE");
+  }
+  if (sanitized.byteLength > MAX_STOREFRONT_ASSET_BYTES) {
+    await storage.deleteObject({ gcsPath: asset.gcsPath }).catch((cleanupError) => logger.error({ err: cleanupError, assetId: asset.id }, "Failed to delete oversized sanitized storefront asset"));
+    throw new HttpError(422, "STOREFRONT_ASSET_TOO_LARGE");
+  }
+  await storage.overwriteObject({ gcsPath: asset.gcsPath, contentType, bytes: sanitized });
+  const sha256 = sha256Hex(sanitized);
 
   // Dedup: if an identical file already exists and is ready, reuse it instead of keeping
   // two copies of the same bytes.
@@ -184,8 +207,10 @@ export async function confirmStorefrontAsset(input: ConfirmStorefrontAssetInput)
     data: {
       status: StorefrontAssetStatus.READY,
       mime: contentType,
-      bytes: head.contentLength,
-      sha256
+      bytes: sanitized.byteLength,
+      sha256,
+      width,
+      height
     }
   });
 
