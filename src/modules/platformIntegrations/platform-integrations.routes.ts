@@ -77,7 +77,6 @@ import {
   bulkConvertPlatformImportItemsSchema,
   convertPlatformImportItemSchema
 } from "./conversion/platform-import-conversion.validation.js";
-import { h2bLifecycleRouter } from "../h2b/h2b-lifecycle.routes.js";
 
 export const platformIntegrationsRouter = Router();
 
@@ -91,7 +90,6 @@ platformIntegrationsRouter.use("/", magentoPlatformRouter);
 platformIntegrationsRouter.use("/", platformCredentialsRouter);
 platformIntegrationsRouter.use("/", platformWebhookIngestionRouter);
 platformIntegrationsRouter.use("/", platformWebhookRegistrationRouter);
-platformIntegrationsRouter.use("/", h2bLifecycleRouter);
 
 platformIntegrationsRouter.post("/platform-connections", async (req, res) => {
   const body = createPlatformConnectionSchema.parse(req.body);
