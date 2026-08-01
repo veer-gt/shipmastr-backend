@@ -6,7 +6,7 @@ set -f
 # This file validates authority and deployment inputs only.
 # It performs no deployment by itself and authorizes no load-balancer work.
 
-SHIPMASTR_GOVERNANCE_VERSION="4"
+SHIPMASTR_GOVERNANCE_VERSION="5"
 
 shipmastr_governance_fail() {
   echo "SHIPMASTR_DEPLOYMENT_BLOCKED=$1" >&2
@@ -27,6 +27,68 @@ shipmastr_governance_is_sha256() {
 
 shipmastr_governance_is_image_digest() {
   [[ "$1" =~ ^asia-south1-docker\.pkg\.dev/shipmastr-core-prod/shipmastr/shipmastr-api@sha256:[0-9a-f]{64}$ ]]
+}
+
+shipmastr_governance_is_staging_revision() {
+  local revision="$1"
+
+  [[ "${#revision}" -le 63 && \
+    "$revision" =~ ^shipmastr-api-staging-[a-z0-9]([a-z0-9-]*[a-z0-9])?$ ]]
+}
+
+shipmastr_governance_verify_secret_metadata() {
+  local project_id="$1"
+  local secret_name="$2"
+  local expected_environment="$3"
+  local secret_labels
+  local describe_status
+  local actual_environment
+  local actual_purpose
+  local enabled_version
+  local versions_status
+
+  if [[ -z "$project_id" || -z "$secret_name" || -z "$expected_environment" ]]; then
+    shipmastr_governance_fail "PLATFORM_CREDENTIAL_SECRET_METADATA_ARGUMENTS_INVALID"
+    return 1
+  fi
+
+  set +e
+  secret_labels="$(gcloud secrets describe "$secret_name" \
+    --project "$project_id" \
+    --format='value(labels.environment,labels.purpose)' 2>/dev/null)"
+  describe_status=$?
+  set -e
+
+  if [[ "$describe_status" -ne 0 || -z "$secret_labels" ]]; then
+    shipmastr_governance_fail "PLATFORM_CREDENTIAL_SECRET_NOT_FOUND"
+    return 1
+  fi
+
+  actual_environment=""
+  actual_purpose=""
+  IFS=$'\t ' read -r actual_environment actual_purpose <<< "$secret_labels"
+
+  if [[ "$actual_environment" != "$expected_environment" || \
+    "$actual_purpose" != "platform-credential-encryption" ]]; then
+    shipmastr_governance_fail "PLATFORM_CREDENTIAL_SECRET_LABELS_INVALID"
+    return 1
+  fi
+
+  set +e
+  enabled_version="$(gcloud secrets versions list "$secret_name" \
+    --project "$project_id" \
+    --filter='state=ENABLED' \
+    --limit=1 \
+    --format='value(name)' 2>/dev/null)"
+  versions_status=$?
+  set -e
+
+  if [[ "$versions_status" -ne 0 || -z "$enabled_version" ]]; then
+    shipmastr_governance_fail "PLATFORM_CREDENTIAL_SECRET_ENABLED_VERSION_REQUIRED"
+    return 1
+  fi
+
+  echo "Platform credential secret metadata verified: ${secret_name}"
 }
 
 shipmastr_governance_sha256_file() {
@@ -86,6 +148,7 @@ shipmastr_governance_write_staging_evidence() {
   local output_path="$1"
   local commit_sha="$2"
   local image_digest="$3"
+  local revision="$4"
   local temp_path
   local created_utc
   local evidence_sha
@@ -107,33 +170,59 @@ shipmastr_governance_write_staging_evidence() {
     return 1
   fi
 
+  if ! shipmastr_governance_is_staging_revision "$revision"; then
+    shipmastr_governance_fail \
+      "STAGING_EVIDENCE_REVISION_INVALID"
+    return 1
+  fi
+
   temp_path="$(mktemp "${output_path}.tmp.XXXXXX")"
   created_utc="$(date -u +%Y-%m-%dT%H:%M:%SZ)"
 
   cat > "$temp_path" <<EOF
-evidence_type=SHIPMASTR_STAGING_DEPLOYMENT_EVIDENCE_V1
+evidence_type=SHIPMASTR_STAGING_DEPLOYMENT_EVIDENCE_V2
 project_id=shipmastr-core-prod
 region=asia-south1
 service=shipmastr-api-staging
 commit_sha=$commit_sha
 image_digest=$image_digest
+revision=$revision
 migration_status=PASS
-health_v1=PASS
-health_api=PASS
+candidate_health_v1=PASS
+candidate_health_api=PASS
+active_revision_digest=PASS
+active_traffic_percent=100
+active_health_v1=PASS
+active_health_api=PASS
 public_access_mutation=disabled
 created_utc=$created_utc
 EOF
 
-  chmod 600 "$temp_path"
-  mv "$temp_path" "$output_path"
+  if ! chmod 600 "$temp_path"; then
+    rm -f "$temp_path"
+    shipmastr_governance_fail \
+      "STAGING_EVIDENCE_PERMISSIONS_FAILED"
+    return 1
+  fi
 
-  evidence_sha="$(
-    shipmastr_governance_sha256_file "$output_path"
-  )"
+  if ! evidence_sha="$(
+    shipmastr_governance_sha256_file "$temp_path"
+  )"; then
+    rm -f "$temp_path"
+    return 1
+  fi
 
   if ! shipmastr_governance_is_sha256 "$evidence_sha"; then
+    rm -f "$temp_path"
     shipmastr_governance_fail \
       "STAGING_EVIDENCE_SHA256_INVALID"
+    return 1
+  fi
+
+  if ! mv "$temp_path" "$output_path"; then
+    rm -f "$temp_path"
+    shipmastr_governance_fail \
+      "STAGING_EVIDENCE_ATOMIC_RENAME_FAILED"
     return 1
   fi
 
@@ -163,6 +252,18 @@ shipmastr_governance_verify_staging_evidence() {
   if ! shipmastr_governance_is_sha256 "$expected_sha"; then
     shipmastr_governance_fail \
       "STAGING_EVIDENCE_SHA256_REQUIRED"
+    return 1
+  fi
+
+  if ! shipmastr_governance_is_sha40 "$expected_commit"; then
+    shipmastr_governance_fail \
+      "STAGING_EVIDENCE_EXPECTED_COMMIT_INVALID"
+    return 1
+  fi
+
+  if ! shipmastr_governance_is_image_digest "$expected_digest"; then
+    shipmastr_governance_fail \
+      "STAGING_EVIDENCE_EXPECTED_DIGEST_INVALID"
     return 1
   fi
 
@@ -207,19 +308,23 @@ for (const line of lines) {
 }
 
 const expected = new Map([
-  ["evidence_type", "SHIPMASTR_STAGING_DEPLOYMENT_EVIDENCE_V1"],
+  ["evidence_type", "SHIPMASTR_STAGING_DEPLOYMENT_EVIDENCE_V2"],
   ["project_id", "shipmastr-core-prod"],
   ["region", "asia-south1"],
   ["service", "shipmastr-api-staging"],
   ["commit_sha", expectedCommit],
   ["image_digest", expectedDigest],
   ["migration_status", "PASS"],
-  ["health_v1", "PASS"],
-  ["health_api", "PASS"],
+  ["candidate_health_v1", "PASS"],
+  ["candidate_health_api", "PASS"],
+  ["active_revision_digest", "PASS"],
+  ["active_traffic_percent", "100"],
+  ["active_health_v1", "PASS"],
+  ["active_health_api", "PASS"],
   ["public_access_mutation", "disabled"],
 ]);
 
-if (values.size !== expected.size + 1) {
+if (values.size !== expected.size + 2) {
   process.exit(5);
 }
 
@@ -230,12 +335,25 @@ for (const [key, value] of expected) {
 }
 
 const createdUtc = values.get("created_utc") || "";
-if (!/^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}Z$/.test(createdUtc)) {
+const utcShape = /^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}Z$/;
+const parsedUtc = new Date(createdUtc);
+const roundTripUtc = Number.isNaN(parsedUtc.getTime())
+  ? ""
+  : parsedUtc.toISOString().replace(".000Z", "Z");
+if (!utcShape.test(createdUtc) || roundTripUtc !== createdUtc) {
   process.exit(7);
 }
 
+const revision = values.get("revision") || "";
+if (
+  revision.length > 63 ||
+  !/^shipmastr-api-staging-[a-z0-9](?:[a-z0-9-]*[a-z0-9])?$/.test(revision)
+) {
+  process.exit(9);
+}
+
 for (const key of values.keys()) {
-  if (key !== "created_utc" && !expected.has(key)) {
+  if (key !== "created_utc" && key !== "revision" && !expected.has(key)) {
     process.exit(8);
   }
 }
