@@ -11,6 +11,11 @@ TEST_DIGEST="asia-south1-docker.pkg.dev/shipmastr-core-prod/shipmastr/shipmastr-
 OTHER_DIGEST="asia-south1-docker.pkg.dev/shipmastr-core-prod/shipmastr/shipmastr-api@sha256:2222222222222222222222222222222222222222222222222222222222222222"
 TEST_EVIDENCE_SHA="aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
 TEST_REVISION="shipmastr-api-staging-00042-test"
+TEST_COMMIT_PREFIX="0123456"
+TEST_INVOCATION_UTC="20260801123456"
+TEST_PID_FRAGMENT="12345"
+TEST_REVISION_SUFFIX="sf-${TEST_COMMIT_PREFIX}-${TEST_INVOCATION_UTC}-${TEST_PID_FRAGMENT}"
+TEST_CANDIDATE_TAG="c-${TEST_COMMIT_PREFIX}-${TEST_INVOCATION_UTC:6:8}-${TEST_PID_FRAGMENT}"
 
 pass_count=0
 
@@ -717,6 +722,9 @@ prepare_staging_wrapper_fixture() {
   STAGING_FIXTURE_OUTPUT="$temp_dir/wrapper.out"
   STAGING_FIXTURE_MODE="success"
   STAGING_FIXTURE_SECRET_MODE="valid"
+  STAGING_FIXTURE_SERVICE_OVERRIDE=""
+  STAGING_FIXTURE_SERVICE_OVERRIDE_SET=0
+  STAGING_FIXTURE_DATE_MODE="valid"
 
   mkdir -p \
     "$STAGING_FIXTURE_REPO/scripts" \
@@ -821,7 +829,10 @@ if [[ "${1:-}" == "run" && "${2:-}" == "deploy" ]]; then
   candidate_tag="$(argument_after --tag "$@")"
   image_digest="$(argument_after --image "$@")"
   [[ "$service" == "shipmastr-api-staging" ]] || exit 94
-  [[ "$candidate_tag" == "$revision_suffix" ]] || exit 95
+  [[ "$candidate_tag" != "$revision_suffix" ]] || exit 95
+  [[ "$revision_suffix" =~ ^sf-[0-9a-f]{7}-[0-9]{14}-[0-9]{5}$ ]] || exit 95
+  [[ "$candidate_tag" =~ ^c-[0-9a-f]{7}-[0-9]{8}-[0-9]{5}$ ]] || exit 95
+  [[ "${revision_suffix##*-}" == "${candidate_tag##*-}" ]] || exit 95
   [[ "$image_digest" == "${SHIPMASTR_TEST_DIGEST:?}" ]] || exit 96
   [[ " $* " == *" --format=json "* ]] || exit 97
   [[ " $* " == *" --no-traffic "* ]] || exit 98
@@ -829,6 +840,7 @@ if [[ "${1:-}" == "run" && "${2:-}" == "deploy" ]]; then
   expected_revision="${service}-${revision_suffix}"
   candidate_url="https://${candidate_tag}---staging.example.invalid"
   printf '%s\n' "$expected_revision" > "${SHIPMASTR_TEST_STATE_DIR:?}/expected-revision"
+  printf '%s\n' "$revision_suffix" > "${SHIPMASTR_TEST_STATE_DIR:?}/revision-suffix"
   printf '%s\n' "$candidate_tag" > "${SHIPMASTR_TEST_STATE_DIR:?}/candidate-tag"
   printf '%s\n' "$candidate_url" > "${SHIPMASTR_TEST_STATE_DIR:?}/candidate-url"
 
@@ -974,8 +986,8 @@ for argument in "$@"; do
 done
 
 case "$request_url" in
-  https://sf-*---staging.example.invalid/v1/health|\
-  https://sf-*---staging.example.invalid/api/health|\
+  https://c-*---staging.example.invalid/v1/health|\
+  https://c-*---staging.example.invalid/api/health|\
   https://staging.example.invalid/v1/health|\
   https://staging.example.invalid/api/health)
     ;;
@@ -1010,9 +1022,31 @@ printf 'date %s\n' "$*" >> "${SHIPMASTR_TEST_COMMAND_LOG:?}"
 
 case "$*" in
   '-u +%Y%m%d%H%M%S')
-    printf '%s\n' '20260801123456'
+    case "${SHIPMASTR_TEST_DATE_MODE:-valid}" in
+      valid)
+        printf '%s\n' '20260801123456'
+        ;;
+      failure)
+        exit 97
+        ;;
+      empty)
+        ;;
+      short)
+        printf '%s\n' '2026080112345'
+        ;;
+      long)
+        printf '%s\n' '202608011234567'
+        ;;
+      nonnumeric)
+        printf '%s\n' '20260801x23456'
+        ;;
+      *)
+        exit 97
+        ;;
+    esac
     ;;
   '-u +%Y-%m-%dT%H:%M:%SZ')
+    [[ "${SHIPMASTR_TEST_DATE_MODE:-valid}" == "valid" ]] || exit 97
     printf '%s\n' '2026-08-01T12:34:56Z'
     ;;
   *)
@@ -1042,12 +1076,17 @@ execute_staging_wrapper_fixture() {
     unset SHIPMASTR_TEST_ORIGIN_MAIN_SHA
     unset SHIPMASTR_TEST_EFFECTIVE_IDENTITY
 
+    if [[ "$STAGING_FIXTURE_SERVICE_OVERRIDE_SET" == "1" ]]; then
+      export SERVICE="$STAGING_FIXTURE_SERVICE_OVERRIDE"
+    fi
+
     PATH="$STAGING_FIXTURE_MOCK_BIN:$PATH" \
     SHIPMASTR_TEST_COMMAND_LOG="$STAGING_FIXTURE_LOG" \
     SHIPMASTR_TEST_STATE_DIR="$STAGING_FIXTURE_STATE_DIR" \
     SHIPMASTR_TEST_SERVICE_URL="$STAGING_FIXTURE_SERVICE_URL" \
     SHIPMASTR_TEST_MODE="$STAGING_FIXTURE_MODE" \
     SHIPMASTR_TEST_SECRET_MODE="$STAGING_FIXTURE_SECRET_MODE" \
+    SHIPMASTR_TEST_DATE_MODE="$STAGING_FIXTURE_DATE_MODE" \
     SHIPMASTR_TEST_DIGEST="$TEST_DIGEST" \
     SHIPMASTR_TEST_OTHER_DIGEST="$OTHER_DIGEST" \
     SHIPMASTR_APPROVED_COMMIT_SHA="$STAGING_FIXTURE_HEAD" \
@@ -1063,6 +1102,7 @@ execute_staging_wrapper_fixture() {
 
 load_staging_fixture_identity() {
   read -r STAGING_FIXTURE_REVISION < "$STAGING_FIXTURE_STATE_DIR/expected-revision"
+  read -r STAGING_FIXTURE_REVISION_SUFFIX < "$STAGING_FIXTURE_STATE_DIR/revision-suffix"
   read -r STAGING_FIXTURE_TAG < "$STAGING_FIXTURE_STATE_DIR/candidate-tag"
   read -r STAGING_FIXTURE_CANDIDATE_URL < "$STAGING_FIXTURE_STATE_DIR/candidate-url"
 }
@@ -1097,6 +1137,494 @@ staging_external_command_mocks_fail_closed() {
   rm -rf "$temp_dir"
 }
 
+cloud_run_tag_rejected_without_external() {
+  local service_name="$1"
+  local traffic_tag="$2"
+  local external_count=0
+
+  gcloud() {
+    external_count=$((external_count + 1))
+    return 97
+  }
+  curl() {
+    external_count=$((external_count + 1))
+    return 97
+  }
+  date() {
+    external_count=$((external_count + 1))
+    return 97
+  }
+
+  if shipmastr_governance_validate_cloud_run_traffic_tag \
+    "$service_name" \
+    "$traffic_tag" >/dev/null 2>&1; then
+    return 1
+  fi
+
+  [[ "$external_count" -eq 0 ]]
+}
+
+staging_generated_names_rejected_without_external() {
+  local service_name="$1"
+  local commit_prefix="$2"
+  local invocation_utc="$3"
+  local pid_fragment="$4"
+  local revision_suffix="$5"
+  local candidate_tag="$6"
+  local external_count=0
+
+  gcloud() {
+    external_count=$((external_count + 1))
+    return 97
+  }
+  curl() {
+    external_count=$((external_count + 1))
+    return 97
+  }
+  date() {
+    external_count=$((external_count + 1))
+    return 97
+  }
+
+  if shipmastr_governance_validate_staging_generated_names \
+    "$service_name" \
+    "$commit_prefix" \
+    "$invocation_utc" \
+    "$pid_fragment" \
+    "$revision_suffix" \
+    "$candidate_tag" >/dev/null 2>&1; then
+    return 1
+  fi
+
+  [[ "$external_count" -eq 0 ]]
+}
+
+staging_generated_candidate_tag_differs_from_revision_suffix() {
+  local temp_dir
+  local result=0
+
+  temp_dir="$(mktemp -d)"
+  prepare_staging_wrapper_fixture "$temp_dir"
+  execute_staging_wrapper_fixture
+  load_staging_fixture_identity
+
+  [[ "$STAGING_FIXTURE_TAG" != "$STAGING_FIXTURE_REVISION_SUFFIX" ]] || result=1
+
+  rm -rf "$temp_dir"
+  return "$result"
+}
+
+staging_generated_candidate_tag_is_bounded() {
+  local temp_dir
+  local result=0
+  local service_name="shipmastr-api-staging"
+
+  temp_dir="$(mktemp -d)"
+  prepare_staging_wrapper_fixture "$temp_dir"
+  execute_staging_wrapper_fixture
+  load_staging_fixture_identity
+
+  [[ "$STAGING_FIXTURE_TAG" =~ ^c-[0-9a-f]{7}-[0-9]{8}-[0-9]{5}$ ]] || result=1
+  [[ "$STAGING_FIXTURE_REVISION_SUFFIX" =~ ^sf-[0-9a-f]{7}-[0-9]{14}-[0-9]{5}$ ]] || result=1
+  [[ "${#service_name}" -eq 21 ]] || result=1
+  [[ "${#STAGING_FIXTURE_TAG}" -eq 24 ]] || result=1
+  [[ $(( ${#STAGING_FIXTURE_TAG} + ${#service_name} )) -eq 45 ]] || result=1
+  [[ "${#STAGING_FIXTURE_REVISION_SUFFIX}" -eq 31 ]] || result=1
+  [[ "${#STAGING_FIXTURE_REVISION}" -eq 53 ]] || result=1
+
+  rm -rf "$temp_dir"
+  return "$result"
+}
+
+cloud_run_tag_combined_length_46_passes() {
+  shipmastr_governance_validate_cloud_run_traffic_tag \
+    shipmastr-api-staging \
+    c-366e154-01191621-456980
+}
+
+cloud_run_tag_combined_length_47_rejected() {
+  cloud_run_tag_rejected_without_external \
+    shipmastr-api-staging \
+    c-366e154-01191621-4569800
+}
+
+cloud_run_tag_uppercase_rejected() {
+  cloud_run_tag_rejected_without_external \
+    shipmastr-api-staging \
+    C-366e154-01191621-45698
+}
+
+cloud_run_tag_leading_hyphen_rejected() {
+  cloud_run_tag_rejected_without_external \
+    shipmastr-api-staging \
+    -c-366e154-01191621-4569
+}
+
+cloud_run_tag_trailing_hyphen_rejected() {
+  cloud_run_tag_rejected_without_external \
+    shipmastr-api-staging \
+    c-366e154-01191621-4569-
+}
+
+cloud_run_tag_punctuation_rejected() {
+  cloud_run_tag_rejected_without_external \
+    shipmastr-api-staging \
+    'c-366e154_01191621-45698'
+}
+
+cloud_run_tag_empty_service_rejected() {
+  cloud_run_tag_rejected_without_external \
+    '' \
+    c-366e154-01191621-45698
+}
+
+cloud_run_tag_empty_tag_rejected() {
+  cloud_run_tag_rejected_without_external \
+    shipmastr-api-staging \
+    ''
+}
+
+staging_pid_fragment_short_pid_is_padded() {
+  [[ "$(shipmastr_governance_format_pid_fragment 7)" == "00007" ]]
+}
+
+staging_pid_fragment_exact_five_digits_is_unchanged() {
+  [[ "$(shipmastr_governance_format_pid_fragment 12345)" == "12345" ]]
+}
+
+staging_pid_fragment_long_pid_uses_last_five_digits() {
+  [[ "$(shipmastr_governance_format_pid_fragment 123456)" == "23456" ]]
+}
+
+staging_pid_fragment_leading_zero_is_decimal_safe() {
+  [[ "$(shipmastr_governance_format_pid_fragment 00008)" == "00008" ]]
+}
+
+staging_pid_fragment_nonnumeric_rejected() {
+  local external_count=0
+
+  gcloud() {
+    external_count=$((external_count + 1))
+    return 97
+  }
+  curl() {
+    external_count=$((external_count + 1))
+    return 97
+  }
+  date() {
+    external_count=$((external_count + 1))
+    return 97
+  }
+
+  if shipmastr_governance_format_pid_fragment '12x45' \
+    >/dev/null 2>&1; then
+    return 1
+  fi
+
+  [[ "$external_count" -eq 0 ]]
+}
+
+staging_generated_pid_fragment_malformed_rejected() {
+  staging_generated_names_rejected_without_external \
+    shipmastr-api-staging \
+    "$TEST_COMMIT_PREFIX" \
+    "$TEST_INVOCATION_UTC" \
+    '12x45' \
+    "$TEST_REVISION_SUFFIX" \
+    "$TEST_CANDIDATE_TAG"
+}
+
+staging_generated_revision_suffix_mismatch_rejected() {
+  staging_generated_names_rejected_without_external \
+    shipmastr-api-staging \
+    "$TEST_COMMIT_PREFIX" \
+    "$TEST_INVOCATION_UTC" \
+    "$TEST_PID_FRAGMENT" \
+    "sf-${TEST_COMMIT_PREFIX}-${TEST_INVOCATION_UTC}-54321" \
+    "$TEST_CANDIDATE_TAG"
+}
+
+staging_timestamp_validation_failure_is_local() {
+  local mode="$1"
+  local temp_dir
+  local result=0
+
+  temp_dir="$(mktemp -d)"
+  prepare_staging_wrapper_fixture "$temp_dir"
+  STAGING_FIXTURE_DATE_MODE="$mode"
+
+  if execute_staging_wrapper_fixture; then
+    result=1
+  fi
+  grep -Fq \
+    'SHIPMASTR_DEPLOYMENT_BLOCKED=STAGING_INVOCATION_TIMESTAMP_INVALID' \
+    "$STAGING_FIXTURE_OUTPUT" || result=1
+  if grep -Eq '^(gcloud|curl) ' "$STAGING_FIXTURE_LOG"; then
+    result=1
+  fi
+  [[ ! -e "$STAGING_FIXTURE_EVIDENCE" ]] || result=1
+
+  rm -rf "$temp_dir"
+  return "$result"
+}
+
+staging_timestamp_command_failure_rejected_locally() {
+  staging_timestamp_validation_failure_is_local failure
+}
+
+staging_timestamp_empty_rejected_locally() {
+  staging_timestamp_validation_failure_is_local empty
+}
+
+staging_timestamp_short_rejected_locally() {
+  staging_timestamp_validation_failure_is_local short
+}
+
+staging_timestamp_long_rejected_locally() {
+  staging_timestamp_validation_failure_is_local long
+}
+
+staging_timestamp_nonnumeric_rejected_locally() {
+  staging_timestamp_validation_failure_is_local nonnumeric
+}
+
+staging_service_validation_failure_is_local() {
+  local service_name="$1"
+  local temp_dir
+  local result=0
+
+  temp_dir="$(mktemp -d)"
+  prepare_staging_wrapper_fixture "$temp_dir"
+  STAGING_FIXTURE_SERVICE_OVERRIDE="$service_name"
+  STAGING_FIXTURE_SERVICE_OVERRIDE_SET=1
+
+  if execute_staging_wrapper_fixture; then
+    result=1
+  fi
+  grep -Fq \
+    'SHIPMASTR_DEPLOYMENT_BLOCKED=STAGING_SERVICE_INVALID' \
+    "$STAGING_FIXTURE_OUTPUT" || result=1
+  if grep -Eq '^(gcloud|curl) ' "$STAGING_FIXTURE_LOG"; then
+    result=1
+  fi
+  [[ ! -e "$STAGING_FIXTURE_EVIDENCE" ]] || result=1
+
+  rm -rf "$temp_dir"
+  return "$result"
+}
+
+staging_service_uppercase_rejected_locally() {
+  staging_service_validation_failure_is_local Shipmastr-api-staging
+}
+
+staging_service_leading_hyphen_rejected_locally() {
+  staging_service_validation_failure_is_local -shipmastr-api-staging
+}
+
+staging_service_trailing_hyphen_rejected_locally() {
+  staging_service_validation_failure_is_local shipmastr-api-staging-
+}
+
+staging_service_punctuation_rejected_locally() {
+  staging_service_validation_failure_is_local shipmastr_api_staging
+}
+
+staging_service_whitespace_rejected_locally() {
+  staging_service_validation_failure_is_local 'shipmastr api staging'
+}
+
+staging_service_leading_digit_rejected_locally() {
+  staging_service_validation_failure_is_local 1shipmastr-api-staging
+}
+
+staging_service_empty_rejected_locally() {
+  staging_service_validation_failure_is_local ''
+}
+
+staging_service_wrong_target_rejected_locally() {
+  staging_service_validation_failure_is_local shipmastr-api-stage
+}
+
+staging_service_overlength_rejected_locally() {
+  local service_name="shipmastr-api-staging-long"
+  local candidate_tag="$TEST_CANDIDATE_TAG"
+
+  [[ "$service_name" =~ ^[a-z]([a-z0-9-]*[a-z0-9])?$ ]]
+  [[ "${#service_name}" -eq 26 ]]
+  [[ "${#candidate_tag}" -eq 24 ]]
+  [[ $(( ${#service_name} + ${#candidate_tag} )) -eq 50 ]]
+  cloud_run_tag_rejected_without_external "$service_name" "$candidate_tag"
+  staging_service_validation_failure_is_local "$service_name"
+}
+
+staging_mutated_name_validation_failure_is_local() {
+  local expected_source="$1"
+  local replacement_source="$2"
+  local expected_block="$3"
+  local temp_dir
+  local result=0
+
+  temp_dir="$(mktemp -d)"
+  prepare_staging_wrapper_fixture "$temp_dir"
+  node - \
+    "$STAGING_FIXTURE_REPO/scripts/deploy-staging.sh" \
+    "$expected_source" \
+    "$replacement_source" <<'NODE'
+const fs = require("node:fs");
+const [path, expected, replacement] = process.argv.slice(2);
+const source = fs.readFileSync(path, "utf8");
+
+if (!source.includes(expected)) {
+  process.exit(2);
+}
+
+fs.writeFileSync(path, source.replace(expected, replacement));
+NODE
+
+  if execute_staging_wrapper_fixture; then
+    result=1
+  fi
+  grep -Fq "SHIPMASTR_DEPLOYMENT_BLOCKED=${expected_block}" \
+    "$STAGING_FIXTURE_OUTPUT" || result=1
+  if grep -Eq '^(gcloud|curl) ' "$STAGING_FIXTURE_LOG"; then
+    result=1
+  fi
+  [[ ! -e "$STAGING_FIXTURE_EVIDENCE" ]] || result=1
+
+  rm -rf "$temp_dir"
+  return "$result"
+}
+
+staging_invalid_pid_fragment_exits_before_external_commands() {
+  staging_mutated_name_validation_failure_is_local \
+    'readonly INVOCATION_PID_FRAGMENT' \
+    $'INVOCATION_PID_FRAGMENT="12x45"\nreadonly INVOCATION_PID_FRAGMENT' \
+    STAGING_PID_FRAGMENT_INVALID
+}
+
+staging_empty_pid_source_exits_before_external_commands() {
+  staging_mutated_name_validation_failure_is_local \
+    'shipmastr_governance_format_pid_fragment "$$"' \
+    'shipmastr_governance_format_pid_fragment ""' \
+    STAGING_PID_FRAGMENT_INVALID
+}
+
+staging_invalid_revision_suffix_exits_before_external_commands() {
+  staging_mutated_name_validation_failure_is_local \
+    'readonly REVISION_SUFFIX="sf-${APPROVED_COMMIT_PREFIX}-${INVOCATION_UTC}-${INVOCATION_PID_FRAGMENT}"' \
+    'readonly REVISION_SUFFIX="sf-invalid"' \
+    STAGING_REVISION_SUFFIX_INVALID
+}
+
+prepare_staging_invalid_tag_wrapper_fixture() {
+  local temp_dir="$1"
+
+  prepare_staging_wrapper_fixture "$temp_dir"
+  node - "$STAGING_FIXTURE_REPO/scripts/deploy-staging.sh" <<'NODE'
+const fs = require("node:fs");
+const path = process.argv[2];
+const source = fs.readFileSync(path, "utf8");
+const expected = 'readonly CANDIDATE_TAG="c-${APPROVED_COMMIT_PREFIX}-${INVOCATION_UTC:6:8}-${INVOCATION_PID_FRAGMENT}"';
+const replacement = 'readonly CANDIDATE_TAG="invalid-tag-"';
+
+if (!source.includes(expected)) {
+  process.exit(2);
+}
+
+fs.writeFileSync(path, source.replace(expected, replacement));
+NODE
+
+  if execute_staging_wrapper_fixture; then
+    return 1
+  fi
+
+  grep -Fq \
+    'SHIPMASTR_DEPLOYMENT_BLOCKED=STAGING_CANDIDATE_TAG_INVALID' \
+    "$STAGING_FIXTURE_OUTPUT"
+}
+
+staging_invalid_tag_exits_before_gcloud() {
+  local temp_dir
+  local result=0
+
+  temp_dir="$(mktemp -d)"
+  prepare_staging_invalid_tag_wrapper_fixture "$temp_dir" || result=1
+  if grep -Eq '^(gcloud|curl) ' "$STAGING_FIXTURE_LOG"; then
+    result=1
+  fi
+
+  rm -rf "$temp_dir"
+  return "$result"
+}
+
+staging_invalid_tag_produces_no_build() {
+  local temp_dir
+  local result=0
+
+  temp_dir="$(mktemp -d)"
+  prepare_staging_invalid_tag_wrapper_fixture "$temp_dir" || result=1
+  if grep -Fq 'gcloud builds submit' "$STAGING_FIXTURE_LOG"; then
+    result=1
+  fi
+
+  rm -rf "$temp_dir"
+  return "$result"
+}
+
+staging_invalid_tag_produces_no_migration_status_job() {
+  local temp_dir
+  local result=0
+
+  temp_dir="$(mktemp -d)"
+  prepare_staging_invalid_tag_wrapper_fixture "$temp_dir" || result=1
+  if grep -Fq 'gcloud run jobs' "$STAGING_FIXTURE_LOG"; then
+    result=1
+  fi
+
+  rm -rf "$temp_dir"
+  return "$result"
+}
+
+staging_invalid_tag_produces_no_service_deployment() {
+  local temp_dir
+  local result=0
+
+  temp_dir="$(mktemp -d)"
+  prepare_staging_invalid_tag_wrapper_fixture "$temp_dir" || result=1
+  if grep -Fq 'gcloud run deploy' "$STAGING_FIXTURE_LOG"; then
+    result=1
+  fi
+
+  rm -rf "$temp_dir"
+  return "$result"
+}
+
+staging_invalid_tag_produces_no_traffic_command() {
+  local temp_dir
+  local result=0
+
+  temp_dir="$(mktemp -d)"
+  prepare_staging_invalid_tag_wrapper_fixture "$temp_dir" || result=1
+  if grep -Fq 'gcloud run services update-traffic' "$STAGING_FIXTURE_LOG"; then
+    result=1
+  fi
+
+  rm -rf "$temp_dir"
+  return "$result"
+}
+
+staging_invalid_tag_produces_no_evidence() {
+  local temp_dir
+  local result=0
+
+  temp_dir="$(mktemp -d)"
+  prepare_staging_invalid_tag_wrapper_fixture "$temp_dir" || result=1
+  [[ ! -e "$STAGING_FIXTURE_EVIDENCE" ]] || result=1
+
+  rm -rf "$temp_dir"
+  return "$result"
+}
+
 staging_candidate_sequence_positive() {
   local temp_dir
   local evidence_sha
@@ -1124,7 +1652,7 @@ staging_candidate_sequence_positive() {
     "gcloud run deploy shipmastr-api-staging --project shipmastr-core-prod --region asia-south1 --image $TEST_DIGEST" \
     "$STAGING_FIXTURE_LOG"
   grep -Fq -- \
-    "--revision-suffix $STAGING_FIXTURE_TAG --no-traffic --tag $STAGING_FIXTURE_TAG" \
+    "--revision-suffix $STAGING_FIXTURE_REVISION_SUFFIX --no-traffic --tag $STAGING_FIXTURE_TAG" \
     "$STAGING_FIXTURE_LOG"
   grep -Fq -- '--format=json' "$STAGING_FIXTURE_LOG"
   grep -Fq \
@@ -1646,6 +2174,7 @@ caller_test_variables_cannot_bypass() {
   local mock_bin
   local command_log
   local output_file
+  local expected_block
 
   temp_dir="$(mktemp -d)"
   fixture_repo="$temp_dir/repo"
@@ -1653,6 +2182,10 @@ caller_test_variables_cannot_bypass() {
   mock_bin="$temp_dir/mock-bin"
   command_log="$temp_dir/commands.log"
   output_file="$temp_dir/output.log"
+  expected_block='SHIPMASTR_DEPLOYMENT_BLOCKED=APPROVED_COMMIT_SHA_REQUIRED'
+  if [[ "$(basename "$script_path")" == "deploy-staging.sh" ]]; then
+    expected_block='SHIPMASTR_DEPLOYMENT_BLOCKED=STAGING_COMMIT_PREFIX_INVALID'
+  fi
 
   mkdir -p "$fixture_repo/scripts" "$mock_bin"
   cp "$script_path" "$fixture_script"
@@ -1707,7 +2240,7 @@ MOCK
   fi
 
   if ! grep -Fq \
-    'SHIPMASTR_DEPLOYMENT_BLOCKED=APPROVED_COMMIT_SHA_REQUIRED' \
+    "$expected_block" \
     "$output_file"; then
     rm -rf "$temp_dir"
     return 1
@@ -1937,6 +2470,86 @@ expect_fail public_approval_required public_approval_required
 expect_pass migration_status_positive migration_status_positive
 expect_fail migration_wrong_identity migration_wrong_identity
 expect_fail migration_build_without_approval migration_build_without_approval
+expect_pass staging_generated_candidate_tag_differs_from_revision_suffix \
+  staging_generated_candidate_tag_differs_from_revision_suffix
+expect_pass staging_generated_candidate_tag_is_bounded \
+  staging_generated_candidate_tag_is_bounded
+expect_pass cloud_run_tag_combined_length_46_passes \
+  cloud_run_tag_combined_length_46_passes
+expect_pass cloud_run_tag_combined_length_47_rejected \
+  cloud_run_tag_combined_length_47_rejected
+expect_pass cloud_run_tag_uppercase_rejected \
+  cloud_run_tag_uppercase_rejected
+expect_pass cloud_run_tag_leading_hyphen_rejected \
+  cloud_run_tag_leading_hyphen_rejected
+expect_pass cloud_run_tag_trailing_hyphen_rejected \
+  cloud_run_tag_trailing_hyphen_rejected
+expect_pass cloud_run_tag_punctuation_rejected \
+  cloud_run_tag_punctuation_rejected
+expect_pass cloud_run_tag_empty_service_rejected \
+  cloud_run_tag_empty_service_rejected
+expect_pass cloud_run_tag_empty_tag_rejected \
+  cloud_run_tag_empty_tag_rejected
+expect_pass staging_pid_fragment_short_pid_is_padded \
+  staging_pid_fragment_short_pid_is_padded
+expect_pass staging_pid_fragment_exact_five_digits_is_unchanged \
+  staging_pid_fragment_exact_five_digits_is_unchanged
+expect_pass staging_pid_fragment_long_pid_uses_last_five_digits \
+  staging_pid_fragment_long_pid_uses_last_five_digits
+expect_pass staging_pid_fragment_leading_zero_is_decimal_safe \
+  staging_pid_fragment_leading_zero_is_decimal_safe
+expect_pass staging_pid_fragment_nonnumeric_rejected \
+  staging_pid_fragment_nonnumeric_rejected
+expect_pass staging_generated_pid_fragment_malformed_rejected \
+  staging_generated_pid_fragment_malformed_rejected
+expect_pass staging_generated_revision_suffix_mismatch_rejected \
+  staging_generated_revision_suffix_mismatch_rejected
+expect_pass staging_invalid_pid_fragment_exits_before_external_commands \
+  staging_invalid_pid_fragment_exits_before_external_commands
+expect_pass staging_empty_pid_source_exits_before_external_commands \
+  staging_empty_pid_source_exits_before_external_commands
+expect_pass staging_invalid_revision_suffix_exits_before_external_commands \
+  staging_invalid_revision_suffix_exits_before_external_commands
+expect_pass staging_timestamp_command_failure_rejected_locally \
+  staging_timestamp_command_failure_rejected_locally
+expect_pass staging_timestamp_empty_rejected_locally \
+  staging_timestamp_empty_rejected_locally
+expect_pass staging_timestamp_short_rejected_locally \
+  staging_timestamp_short_rejected_locally
+expect_pass staging_timestamp_long_rejected_locally \
+  staging_timestamp_long_rejected_locally
+expect_pass staging_timestamp_nonnumeric_rejected_locally \
+  staging_timestamp_nonnumeric_rejected_locally
+expect_pass staging_service_uppercase_rejected_locally \
+  staging_service_uppercase_rejected_locally
+expect_pass staging_service_leading_hyphen_rejected_locally \
+  staging_service_leading_hyphen_rejected_locally
+expect_pass staging_service_trailing_hyphen_rejected_locally \
+  staging_service_trailing_hyphen_rejected_locally
+expect_pass staging_service_punctuation_rejected_locally \
+  staging_service_punctuation_rejected_locally
+expect_pass staging_service_whitespace_rejected_locally \
+  staging_service_whitespace_rejected_locally
+expect_pass staging_service_leading_digit_rejected_locally \
+  staging_service_leading_digit_rejected_locally
+expect_pass staging_service_empty_rejected_locally \
+  staging_service_empty_rejected_locally
+expect_pass staging_service_wrong_target_rejected_locally \
+  staging_service_wrong_target_rejected_locally
+expect_pass staging_service_overlength_rejected_locally \
+  staging_service_overlength_rejected_locally
+expect_pass staging_invalid_tag_exits_before_gcloud \
+  staging_invalid_tag_exits_before_gcloud
+expect_pass staging_invalid_tag_produces_no_build \
+  staging_invalid_tag_produces_no_build
+expect_pass staging_invalid_tag_produces_no_migration_status_job \
+  staging_invalid_tag_produces_no_migration_status_job
+expect_pass staging_invalid_tag_produces_no_service_deployment \
+  staging_invalid_tag_produces_no_service_deployment
+expect_pass staging_invalid_tag_produces_no_traffic_command \
+  staging_invalid_tag_produces_no_traffic_command
+expect_pass staging_invalid_tag_produces_no_evidence \
+  staging_invalid_tag_produces_no_evidence
 expect_pass staging_candidate_sequence_positive staging_candidate_sequence_positive
 expect_pass staging_external_command_mocks_fail_closed \
   staging_external_command_mocks_fail_closed

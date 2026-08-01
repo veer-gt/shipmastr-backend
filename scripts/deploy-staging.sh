@@ -10,6 +10,42 @@ source "$SCRIPT_DIR/deployment-governance.sh"
   exit 64
 }
 
+SERVICE="${SERVICE-shipmastr-api-staging}"
+INVOCATION_UTC=""
+if ! INVOCATION_UTC="$(date -u +%Y%m%d%H%M%S)"; then
+  shipmastr_governance_fail "STAGING_INVOCATION_TIMESTAMP_INVALID"
+  exit 1
+fi
+if [[ ! "$INVOCATION_UTC" =~ ^[0-9]{14}$ ]]; then
+  shipmastr_governance_fail "STAGING_INVOCATION_TIMESTAMP_INVALID"
+  exit 1
+fi
+readonly INVOCATION_UTC
+
+APPROVED_COMMIT_PREFIX="${SHIPMASTR_APPROVED_COMMIT_SHA:-}"
+APPROVED_COMMIT_PREFIX="${APPROVED_COMMIT_PREFIX:0:7}"
+readonly APPROVED_COMMIT_PREFIX
+
+INVOCATION_PID_FRAGMENT=""
+if ! INVOCATION_PID_FRAGMENT="$(
+  shipmastr_governance_format_pid_fragment "$$"
+)"; then
+  exit 1
+fi
+readonly INVOCATION_PID_FRAGMENT
+
+readonly REVISION_SUFFIX="sf-${APPROVED_COMMIT_PREFIX}-${INVOCATION_UTC}-${INVOCATION_PID_FRAGMENT}"
+readonly EXPECTED_REVISION="${SERVICE}-${REVISION_SUFFIX}"
+readonly CANDIDATE_TAG="c-${APPROVED_COMMIT_PREFIX}-${INVOCATION_UTC:6:8}-${INVOCATION_PID_FRAGMENT}"
+
+shipmastr_governance_validate_staging_generated_names \
+  "$SERVICE" \
+  "$APPROVED_COMMIT_PREFIX" \
+  "$INVOCATION_UTC" \
+  "$INVOCATION_PID_FRAGMENT" \
+  "$REVISION_SUFFIX" \
+  "$CANDIDATE_TAG"
+
 shipmastr_deployment_guard staging
 
 # Deployment logic intentionally remains in this governed entry point.
@@ -17,7 +53,6 @@ shipmastr_deployment_guard staging
 
 PROJECT_ID="${PROJECT_ID:-shipmastr-core-prod}"
 REGION="${REGION:-asia-south1}"
-SERVICE="${SERVICE:-shipmastr-api-staging}"
 PROD_SERVICE="${PROD_SERVICE:-shipmastr-api}"
 readonly MIGRATION_STATUS_JOB="shipmastr-prisma-migrate-status-staging"
 readonly PLATFORM_CREDENTIAL_ENCRYPTION_SECRET="PLATFORM_CREDENTIAL_ENCRYPTION_KEY"
@@ -39,17 +74,6 @@ STOREFRONT_ASSETS_GCS_SIGNING_SERVICE_ACCOUNT="${STOREFRONT_ASSETS_GCS_SIGNING_S
 TAG="${TAG:-staging-$(date -u +%Y%m%d%H%M%S)}"
 IMAGE_BASE="${REGION}-docker.pkg.dev/${PROJECT_ID}/${ARTIFACT_REPOSITORY}/${IMAGE_NAME}"
 STAGING_SECRET_BINDINGS="DATABASE_URL=DATABASE_URL_STAGING:latest,JWT_SECRET=JWT_SECRET:latest,APP_SECRET_PEPPER=APP_SECRET_PEPPER:latest,WEBHOOK_SECRET=WEBHOOK_SECRET:latest,ADDRESS_PHONE_PEPPER=ADDRESS_PHONE_PEPPER:latest,CHECKOUT_ADDRESS_SESSION_TOKEN_SECRET=CHECKOUT_ADDRESS_SESSION_TOKEN_SECRET:latest,SMTP_HOST=SMTP_HOST:latest,SMTP_PORT=SMTP_PORT:latest,SMTP_SECURE=SMTP_SECURE:latest,SMTP_USER=SMTP_USER:latest,SMTP_PASS=SMTP_PASS:latest,CLOUDFLARE_API_TOKEN=CLOUDFLARE_API_TOKEN:latest,CLOUDFLARE_ZONE_ID=CLOUDFLARE_ZONE_ID:latest,PLATFORM_CREDENTIAL_ENCRYPTION_KEY=${PLATFORM_CREDENTIAL_ENCRYPTION_SECRET}:latest"
-readonly INVOCATION_UTC="$(date -u +%Y%m%d%H%M%S)"
-readonly REVISION_SUFFIX="sf-${SHIPMASTR_APPROVED_COMMIT_SHA:0:7}-${INVOCATION_UTC}-$$"
-readonly EXPECTED_REVISION="${SERVICE}-${REVISION_SUFFIX}"
-readonly CANDIDATE_TAG="${REVISION_SUFFIX}"
-
-if [[ "${#EXPECTED_REVISION}" -gt 63 || \
-  ! "$REVISION_SUFFIX" =~ ^[a-z0-9]([a-z0-9-]*[a-z0-9])?$ || \
-  ! "$CANDIDATE_TAG" =~ ^[a-z0-9]([a-z0-9-]*[a-z0-9])?$ ]]; then
-  echo "Generated staging invocation identifier is not Cloud Run name-safe" >&2
-  exit 1
-fi
 
 verify_staging_deploy_result() {
   local deploy_result_path="$1"

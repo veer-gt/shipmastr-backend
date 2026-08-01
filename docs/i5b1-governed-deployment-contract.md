@@ -60,13 +60,25 @@ The application binds
 The migration-status job receives only its database secret and never receives
 the platform credential key.
 
-Each staging run generates one unique, name-safe invocation identifier in the
-form `sf-<commit7>-<UTC timestamp>-<shell pid>`. The identifier is used as both
-the Cloud Run revision suffix and candidate tag, keeping the complete revision
-name at most 63 characters. The `--no-traffic` deployment result is captured as
-JSON and must report that exact expected revision. The revision must belong to
-the fixed staging service, be Ready and carry the complete approved digest.
-The service tag must uniquely target that revision at zero percent traffic.
+Each staging run first captures one UTC timestamp and requires the `date`
+command to succeed with exactly 14 numeric `YYYYMMDDHHMMSS` characters. It
+derives one five-digit PID fragment by zero-padding a short PID or retaining
+the last five digits of a longer PID without octal arithmetic. That same
+validated fragment is used in both the full revision suffix
+`sf-<commit7>-<YYYYMMDDHHMMSS>-<pid5>` and the independently bounded candidate
+tag `c-<commit7>-<DDHHMMSS>-<pid5>`.
+
+Before the deployment guard performs its first `gcloud` command, reusable
+fail-closed validation requires the exact fixed service
+`shipmastr-api-staging`, validates its Cloud Run name syntax, checks the exact
+suffix and tag formats and relationships, and enforces the service/tag maximum
+of 46. The service is exactly 21 characters, the tag 24, their combination 45,
+the suffix 31 and the complete revision 53, below Cloud Run's 63-character
+revision-name maximum. The `--no-traffic` deployment result is captured as JSON
+and must report that exact expected revision. The revision must belong to the
+fixed staging service, be Ready and carry the complete approved digest. The
+short service tag must uniquely target that full revision at zero percent
+traffic; exact tag-to-revision attribution remains mandatory.
 
 The tagged URL is smoked directly. Immediately before the explicit
 `--to-revisions REVISION=100 --quiet` operation, the tag/revision binding,
@@ -120,7 +132,7 @@ authorization tests.
 
 ## Test isolation
 
-- production governance version 5 contains no caller-controlled test mode;
+- production governance version 6 contains no caller-controlled test mode;
 - `SHIPMASTR_GOVERNANCE_TEST_MODE` and every `SHIPMASTR_TEST_*` variable are
   ignored because production code does not reference them;
 - direct governance tests replace shell functions only inside the test process;
@@ -165,3 +177,17 @@ failure can leave staging serving the new revision. Without a valid V2 file
 and its separately reported SHA-256, production promotion remains blocked. An
 operator must use a separately reviewed staging rollback or correction when
 the new staging revision should no longer serve traffic.
+
+## Failed `366e154` release disposition
+
+The image digest produced for source commit `366e154`,
+`asia-south1-docker.pkg.dev/shipmastr-core-prod/shipmastr/shipmastr-api@sha256:de9bdfa364c30bea96385c60fb846220a118a8f2cd75ece418b5919272748c8f`,
+is not promotable. Its candidate deployment was rejected because the former
+full revision suffix was also used as the traffic tag. The staging attempt was
+rejected before Cloud Run created the candidate service revision: it created
+no candidate revision, created no candidate tag, moved no staging traffic and
+created no V2 evidence. Previously active positive traffic remained 100% on
+`shipmastr-api-staging-h2a-emailnorm-1eafee45`. A later release must build a
+fresh image from the eventual correction merge commit; the failed digest
+cannot be reused because the governed deployment scripts are copied into the
+image.
