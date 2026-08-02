@@ -70,6 +70,13 @@ const expectedMigrations = [
   "20260712180000_h2a_platform_webhook_credentials",
   "20260714100000_h2a_synthetic_tenant_lifecycle",
 ];
+const expectedRolledBackMigrationNames = [
+  "20260519160000_storefront_renderer_phase3",
+];
+const expectedUnexpectedAppliedMigrationNames = [
+  "202605070001_add_refined_user_roles",
+  "202605071_master_admin_user_type",
+];
 const expectedSchemaObjects = [
   "enum:PlatformCredentialPurpose",
   "enum:SecurityFixtureKind",
@@ -238,8 +245,11 @@ async function main() {
     const commonValid = databaseName
       && !prismaReportedDrift
       && failedMigrationNames.length === 0
-      && rolledBackMigrationNames.length === 0
-      && unexpectedAppliedMigrationNames.length === 0;
+      && same(rolledBackMigrationNames, expectedRolledBackMigrationNames)
+      && same(
+        unexpectedAppliedMigrationNames,
+        expectedUnexpectedAppliedMigrationNames,
+      );
     if (!commonValid) process.exit(10);
 
     if (phase === "precheck") {

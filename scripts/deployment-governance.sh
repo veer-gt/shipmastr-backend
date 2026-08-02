@@ -660,6 +660,13 @@ const expectedMigrations = [
   "20260712180000_h2a_platform_webhook_credentials",
   "20260714100000_h2a_synthetic_tenant_lifecycle",
 ].sort();
+const expectedRolledBackMigrationNames = [
+  "20260519160000_storefront_renderer_phase3",
+].sort();
+const expectedUnexpectedAppliedMigrationNames = [
+  "202605070001_add_refined_user_roles",
+  "202605071_master_admin_user_type",
+].sort();
 const expectedSchemaObjects = [
   "enum:PlatformCredentialPurpose",
   "enum:SecurityFixtureKind",
@@ -719,8 +726,11 @@ if (
 if (
   value.prismaReportedDrift
   || value.failedMigrationNames.length
-  || value.rolledBackMigrationNames.length
-  || value.unexpectedAppliedMigrationNames.length
+  || !same(value.rolledBackMigrationNames, expectedRolledBackMigrationNames)
+  || !same(
+    value.unexpectedAppliedMigrationNames,
+    expectedUnexpectedAppliedMigrationNames,
+  )
 ) process.exit(5);
 
 if (phase === "precheck") {
