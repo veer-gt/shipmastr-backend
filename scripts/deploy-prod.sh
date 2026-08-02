@@ -119,10 +119,10 @@ verify_production_database_target() {
   set +e
   database_identifier="$(
     DATABASE_URL_TO_VERIFY="${database_url}" \
-    PROD_DATABASE_NAME_ALLOWLIST="${PROD_DATABASE_NAME_ALLOWLIST}" \
+    PROD_DATABASE_ALLOWLIST_TO_VERIFY="${PROD_DATABASE_NAME_ALLOWLIST}" \
     node <<'NODE'
 const rawUrl = process.env.DATABASE_URL_TO_VERIFY || "";
-const allowlist = (process.env.PROD_DATABASE_NAME_ALLOWLIST || "")
+const allowlist = (process.env.PROD_DATABASE_ALLOWLIST_TO_VERIFY || "")
   .split(",")
   .map((value) => value.trim())
   .filter(Boolean);
