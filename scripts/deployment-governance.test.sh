@@ -2913,14 +2913,36 @@ let failed = [];
 let databaseName = "shipmastr_prod";
 let verified = phase === "postcheck" ? [...expected] : [];
 let schemaObjects = phase === "postcheck" ? schema : [];
+let rolledBackMigrationNames = [
+  "20260519160000_storefront_renderer_phase3",
+];
+let unexpectedAppliedMigrationNames = [
+  "202605070001_add_refined_user_roles",
+  "202605071_master_admin_user_type",
+];
 if (phase === "precheck") {
   if (mode === "missing-migration") pending = prismaPending = [expected[0]];
   if (mode === "extra-migration") pending = prismaPending = [...expected, "20260715120000_unexpected_third"];
   if (mode === "zero-pending") pending = prismaPending = [];
   if (mode === "failed-migration") failed = [expected[0]];
   if (mode === "database-not-allowlisted") databaseName = "temporary_prod_copy";
+  if (mode === "legacy-baseline-missing") {
+    unexpectedAppliedMigrationNames = ["202605070001_add_refined_user_roles"];
+  }
+  if (mode === "legacy-extra-rolled-back") {
+    rolledBackMigrationNames.push("20260519170000_unexpected_rollback");
+  }
+  if (mode === "legacy-extra-unexpected-applied") {
+    unexpectedAppliedMigrationNames.push("20260508000000_unexpected_applied");
+  }
+  if (mode === "legacy-wrong-name") {
+    rolledBackMigrationNames = ["20260519160000_storefront_renderer_phase4"];
+  }
 }
 if (phase === "postcheck" && mode === "postcheck-failure") verified = [expected[0]];
+if (phase === "postcheck" && mode === "legacy-postcheck-change") {
+  unexpectedAppliedMigrationNames.push("20260508000000_postcheck_change");
+}
 const result = {
   phase,
   databaseName,
@@ -2929,8 +2951,8 @@ const result = {
   prismaPendingNames: prismaPending,
   structuredPendingNames: pending,
   failedMigrationNames: failed,
-  rolledBackMigrationNames: [],
-  unexpectedAppliedMigrationNames: [],
+  rolledBackMigrationNames,
+  unexpectedAppliedMigrationNames,
   verifiedMigrationNames: verified,
   schemaObjects,
 };
@@ -3229,6 +3251,78 @@ production_migration_cloudsql_duplicate_annotation_blocks() {
 
 production_migration_cloudsql_verifier_failure_prevents_execution() {
   production_migration_cloudsql_fixture_blocks cloudsql-malformed-annotation
+}
+
+production_migration_legacy_precheck_fixture_blocks() {
+  local mode="$1"
+  local temp_dir
+  local execution_count
+
+  temp_dir="$(mktemp -d)"
+  prepare_production_migration_fixture "$temp_dir"
+  MIGRATION_FIXTURE_MODE="$mode"
+  if execute_production_migration_fixture; then
+    rm -rf "$temp_dir"
+    return 1
+  fi
+  execution_count="$(
+    awk '/gcloud run jobs execute/ { count += 1 } END { print count + 0 }' \
+      "$MIGRATION_FIXTURE_LOG"
+  )"
+  if [[ "$execution_count" != "1" ]] || \
+    grep -Fq 'Exact pending migration set verified; applying approved migrations' \
+      "$MIGRATION_FIXTURE_OUTPUT" || \
+    [[ -e "$MIGRATION_FIXTURE_EVIDENCE" ]]; then
+    rm -rf "$temp_dir"
+    return 1
+  fi
+  rm -rf "$temp_dir"
+}
+
+production_migration_exact_legacy_baseline_succeeds() {
+  production_migration_cloudsql_fixture_succeeds success
+}
+
+production_migration_missing_legacy_record_blocks() {
+  production_migration_legacy_precheck_fixture_blocks legacy-baseline-missing
+}
+
+production_migration_extra_rolled_back_record_blocks() {
+  production_migration_legacy_precheck_fixture_blocks legacy-extra-rolled-back
+}
+
+production_migration_extra_unexpected_applied_record_blocks() {
+  production_migration_legacy_precheck_fixture_blocks legacy-extra-unexpected-applied
+}
+
+production_migration_wrong_legacy_name_blocks() {
+  production_migration_legacy_precheck_fixture_blocks legacy-wrong-name
+}
+
+production_migration_postcheck_legacy_baseline_change_blocks() {
+  local temp_dir
+  local execution_count
+
+  temp_dir="$(mktemp -d)"
+  prepare_production_migration_fixture "$temp_dir"
+  MIGRATION_FIXTURE_MODE="legacy-postcheck-change"
+  if execute_production_migration_fixture; then
+    rm -rf "$temp_dir"
+    return 1
+  fi
+  execution_count="$(
+    awk '/gcloud run jobs execute/ { count += 1 } END { print count + 0 }' \
+      "$MIGRATION_FIXTURE_LOG"
+  )"
+  if [[ "$execution_count" != "3" || -e "$MIGRATION_FIXTURE_EVIDENCE" ]]; then
+    rm -rf "$temp_dir"
+    return 1
+  fi
+  rm -rf "$temp_dir"
+}
+
+production_migration_legacy_mismatch_never_reaches_deploy() {
+  production_migration_legacy_precheck_fixture_blocks legacy-wrong-name
 }
 
 production_migration_execution_failure_has_no_success_evidence() {
@@ -3730,6 +3824,20 @@ expect_pass production_migration_cloudsql_duplicate_annotation_blocks \
   production_migration_cloudsql_duplicate_annotation_blocks
 expect_pass production_migration_cloudsql_verifier_failure_prevents_execution \
   production_migration_cloudsql_verifier_failure_prevents_execution
+expect_pass production_migration_exact_legacy_baseline_succeeds \
+  production_migration_exact_legacy_baseline_succeeds
+expect_pass production_migration_missing_legacy_record_blocks \
+  production_migration_missing_legacy_record_blocks
+expect_pass production_migration_extra_rolled_back_record_blocks \
+  production_migration_extra_rolled_back_record_blocks
+expect_pass production_migration_extra_unexpected_applied_record_blocks \
+  production_migration_extra_unexpected_applied_record_blocks
+expect_pass production_migration_wrong_legacy_name_blocks \
+  production_migration_wrong_legacy_name_blocks
+expect_pass production_migration_postcheck_legacy_baseline_change_blocks \
+  production_migration_postcheck_legacy_baseline_change_blocks
+expect_pass production_migration_legacy_mismatch_never_reaches_deploy \
+  production_migration_legacy_mismatch_never_reaches_deploy
 expect_pass production_migration_execution_failure_has_no_success_evidence \
   production_migration_execution_failure_has_no_success_evidence
 expect_pass production_migration_postcheck_failure_has_no_success_evidence \
