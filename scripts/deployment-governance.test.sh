@@ -1944,7 +1944,11 @@ set -euo pipefail
 printf 'gcloud %s\n' "$*" >> "${SHIPMASTR_TEST_COMMAND_LOG:?}"
 
 if [[ "${1:-}" == "auth" && "${2:-}" == "list" ]]; then
-  printf '%s\n' 'shipmastr-deployer-prod@shipmastr-core-prod.iam.gserviceaccount.com'
+  if [[ "${SHIPMASTR_TEST_MIGRATION_MODE:-success}" == "owner-without-break-glass" ]]; then
+    printf '%s\n' 'indraveer.chauhan@gmail.com'
+  else
+    printf '%s\n' 'shipmastr-deployer-prod@shipmastr-core-prod.iam.gserviceaccount.com'
+  fi
   exit 0
 fi
 
@@ -2577,6 +2581,783 @@ for (const name of rejectedNames) {
 JSTEST
 }
 
+prepare_production_migration_fixture() {
+  local temp_dir="$1"
+
+  MIGRATION_FIXTURE_REPO="$temp_dir/repo"
+  MIGRATION_FIXTURE_MOCK_BIN="$temp_dir/mock-bin"
+  MIGRATION_FIXTURE_STATE_DIR="$temp_dir/state"
+  MIGRATION_FIXTURE_LOG="$temp_dir/commands.log"
+  MIGRATION_FIXTURE_OUTPUT="$temp_dir/wrapper.out"
+  MIGRATION_FIXTURE_STAGING_EVIDENCE="$temp_dir/staging-evidence.env"
+  MIGRATION_FIXTURE_BACKUP_EVIDENCE="$temp_dir/backup-evidence.env"
+  MIGRATION_FIXTURE_EVIDENCE="$temp_dir/migration-evidence.env"
+  MIGRATION_FIXTURE_MODE="success"
+  MIGRATION_FIXTURE_REMOTE_MAIN_SHA=""
+  MIGRATION_FIXTURE_STAGING_DIGEST="$TEST_DIGEST"
+  MIGRATION_FIXTURE_STAGING_EVIDENCE_SHA_OVERRIDE=""
+
+  mkdir -p \
+    "$MIGRATION_FIXTURE_REPO/scripts" \
+    "$MIGRATION_FIXTURE_MOCK_BIN" \
+    "$MIGRATION_FIXTURE_STATE_DIR"
+  cp "$SCRIPT_DIR/migrate-prod.sh" "$MIGRATION_FIXTURE_REPO/scripts/"
+  cp "$SCRIPT_DIR/deployment-governance.sh" "$MIGRATION_FIXTURE_REPO/scripts/"
+
+  git -C "$MIGRATION_FIXTURE_REPO" init -q
+  git -C "$MIGRATION_FIXTURE_REPO" config user.name 'Shipmastr Governance Test'
+  git -C "$MIGRATION_FIXTURE_REPO" config user.email 'governance-test@shipmastr.invalid'
+  git -C "$MIGRATION_FIXTURE_REPO" remote add origin \
+    'https://github.com/veer-gt/shipmastr-backend.git'
+  git -C "$MIGRATION_FIXTURE_REPO" add scripts
+  git -C "$MIGRATION_FIXTURE_REPO" \
+    -c commit.gpgsign=false \
+    commit -qm 'test: production migration fixture'
+
+  MIGRATION_FIXTURE_HEAD="$(git -C "$MIGRATION_FIXTURE_REPO" rev-parse HEAD)"
+  MIGRATION_FIXTURE_REMOTE_MAIN_SHA="$MIGRATION_FIXTURE_HEAD"
+  MIGRATION_FIXTURE_STAGING_EVIDENCE_SHA="$(
+    shipmastr_governance_write_staging_evidence \
+      "$MIGRATION_FIXTURE_STAGING_EVIDENCE" \
+      "$MIGRATION_FIXTURE_HEAD" \
+      "$TEST_DIGEST" \
+      "$TEST_REVISION"
+  )"
+
+  cat > "$MIGRATION_FIXTURE_MOCK_BIN/git" <<'MOCK'
+#!/usr/bin/env bash
+set -euo pipefail
+
+if [[ " $* " == *" ls-remote --exit-code origin refs/heads/main "* ]]; then
+  printf '%s\t%s\n' "${SHIPMASTR_TEST_REMOTE_MAIN_SHA:?}" 'refs/heads/main'
+  exit 0
+fi
+
+exec /usr/bin/git "$@"
+MOCK
+
+  cat > "$MIGRATION_FIXTURE_MOCK_BIN/date" <<'MOCK'
+#!/usr/bin/env bash
+set -euo pipefail
+printf 'date %s\n' "$*" >> "${SHIPMASTR_TEST_COMMAND_LOG:?}"
+if [[ "$*" == '-u +%Y-%m-%dT%H:%M:%SZ' ]]; then
+  printf '%s\n' '2026-08-02T10:00:00Z'
+  exit 0
+fi
+exit 97
+MOCK
+
+  cat > "$MIGRATION_FIXTURE_MOCK_BIN/sleep" <<'MOCK'
+#!/usr/bin/env bash
+set -euo pipefail
+printf 'sleep %s\n' "$*" >> "${SHIPMASTR_TEST_COMMAND_LOG:?}"
+exit 0
+MOCK
+
+  cat > "$MIGRATION_FIXTURE_MOCK_BIN/gcloud" <<'MOCK'
+#!/usr/bin/env bash
+set -euo pipefail
+
+argument_after() {
+  local expected="$1"
+  shift
+  while [[ "$#" -gt 0 ]]; do
+    if [[ "$1" == "$expected" ]]; then
+      printf '%s\n' "${2:-}"
+      return 0
+    fi
+    shift
+  done
+  return 1
+}
+
+increment_counter() {
+  local name="$1"
+  local path="${SHIPMASTR_TEST_STATE_DIR:?}/$name"
+  local value=0
+  [[ ! -f "$path" ]] || read -r value < "$path"
+  value=$((value + 1))
+  printf '%s\n' "$value" > "$path"
+  printf '%s\n' "$value"
+}
+
+if [[ "${1:-}" == "run" && "${2:-}" == "jobs" && "${3:-}" == "deploy" ]]; then
+  task_argument="$(argument_after --args "$@")"
+  task_argument="${task_argument#-ceu,}"
+  image="$(argument_after --image "$@")"
+  printf '%s\n' "$task_argument" > "${SHIPMASTR_TEST_STATE_DIR:?}/task-argument"
+  printf 'gcloud run jobs deploy %s --image %s --service-account %s --set-cloudsql-instances %s --set-env-vars %s --set-secrets %s --command %s --tasks %s --parallelism %s --max-retries %s --task-timeout %s\n' \
+    "${4:-}" \
+    "$image" \
+    "$(argument_after --service-account "$@")" \
+    "$(argument_after --set-cloudsql-instances "$@")" \
+    "$(argument_after --set-env-vars "$@")" \
+    "$(argument_after --set-secrets "$@")" \
+    "$(argument_after --command "$@")" \
+    "$(argument_after --tasks "$@")" \
+    "$(argument_after --parallelism "$@")" \
+    "$(argument_after --max-retries "$@")" \
+    "$(argument_after --task-timeout "$@")" \
+    >> "${SHIPMASTR_TEST_COMMAND_LOG:?}"
+  increment_counter job-deploy-count >/dev/null
+  exit 0
+fi
+
+printf 'gcloud %s\n' "$*" >> "${SHIPMASTR_TEST_COMMAND_LOG:?}"
+
+if [[ "${1:-}" == "auth" && "${2:-}" == "list" ]]; then
+  if [[ "${SHIPMASTR_TEST_MIGRATION_MODE:-success}" == \
+    "owner-without-break-glass" ]]; then
+    printf '%s\n' 'indraveer.chauhan@gmail.com'
+  else
+    printf '%s\n' 'shipmastr-deployer-prod@shipmastr-core-prod.iam.gserviceaccount.com'
+  fi
+  exit 0
+fi
+
+if [[ "${1:-}" == "config" && "${2:-}" == "get-value" ]]; then
+  printf '%s\n' '(unset)'
+  exit 0
+fi
+
+if [[ "${1:-}" == "run" && "${2:-}" == "services" && "${3:-}" == "describe" ]]; then
+  count="$(increment_counter service-describe-count)"
+  revision='shipmastr-api-00210-xov'
+  if [[ "${SHIPMASTR_TEST_MIGRATION_MODE:-success}" == "service-changed" && "$count" -gt 1 ]]; then
+    revision='shipmastr-api-00211-other'
+  fi
+  REVISION="$revision" node <<'NODE'
+const revision = process.env.REVISION;
+process.stdout.write(JSON.stringify({
+  metadata: { name: "shipmastr-api" },
+  status: {
+    latestCreatedRevisionName: revision,
+    latestReadyRevisionName: revision,
+    traffic: [{ revisionName: revision, percent: 100, type: "TRAFFIC_TARGET_ALLOCATION_TYPE_REVISION" }],
+  },
+}));
+NODE
+  exit 0
+fi
+
+if [[ "${1:-}" == "sql" && "${2:-}" == "backups" && "${3:-}" == "create" ]]; then
+  if [[ "${SHIPMASTR_TEST_MIGRATION_MODE:-success}" == "backup-failure" ]]; then
+    exit 90
+  fi
+  printf '%s\n' '{}'
+  exit 0
+fi
+
+if [[ "${1:-}" == "sql" && "${2:-}" == "backups" && "${3:-}" == "list" ]]; then
+  filter="$(argument_after --filter "$@")"
+  description="${filter#description=}"
+  printf '%s\n' "$description" > "${SHIPMASTR_TEST_STATE_DIR:?}/backup-description"
+  instance='shipmastr-postgres'
+  if [[ "${SHIPMASTR_TEST_MIGRATION_MODE:-success}" == "backup-list-mismatch" ]]; then
+    instance='wrong-instance'
+  fi
+  DESCRIPTION="$description" INSTANCE="$instance" node <<'NODE'
+process.stdout.write(JSON.stringify([{
+  id: "9001",
+  instance: process.env.INSTANCE,
+  description: process.env.DESCRIPTION,
+}]));
+NODE
+  exit 0
+fi
+
+if [[ "${1:-}" == "sql" && "${2:-}" == "backups" && "${3:-}" == "describe" ]]; then
+  read -r description < "${SHIPMASTR_TEST_STATE_DIR:?}/backup-description"
+  id="${4:-}"
+  if [[ "${SHIPMASTR_TEST_MIGRATION_MODE:-success}" == "backup-id-mismatch" ]]; then
+    id='9002'
+  fi
+  status='SUCCESSFUL'
+  if [[ "${SHIPMASTR_TEST_MIGRATION_MODE:-success}" == "backup-status-failure" ]]; then
+    status='FAILED'
+  fi
+  DESCRIPTION="$description" BACKUP_ID="$id" BACKUP_STATUS="$status" node <<'NODE'
+process.stdout.write(JSON.stringify({
+  id: process.env.BACKUP_ID,
+  instance: "shipmastr-postgres",
+  description: process.env.DESCRIPTION,
+  status: process.env.BACKUP_STATUS,
+  type: "ON_DEMAND",
+  startTime: "2026-08-02T10:00:00Z",
+  endTime: "2026-08-02T10:00:00Z",
+}));
+NODE
+  exit 0
+fi
+
+if [[ "${1:-}" == "run" && "${2:-}" == "jobs" && "${3:-}" == "describe" ]]; then
+  read -r task_argument < "${SHIPMASTR_TEST_STATE_DIR:?}/task-argument"
+  extra='false'
+  if [[ "${SHIPMASTR_TEST_MIGRATION_MODE:-success}" == "extra-job-secret" ]]; then
+    extra='true'
+  fi
+  TASK_ARGUMENT="$task_argument" EXTRA_SECRET="$extra" SHIPMASTR_TEST_DIGEST="${SHIPMASTR_TEST_DIGEST:?}" node <<'NODE'
+const env = [
+  { name: "APP_ENV", value: "production" },
+  { name: "DATABASE_URL", valueFrom: { secretKeyRef: { name: "DATABASE_URL", key: "latest" } } },
+];
+if (process.env.EXTRA_SECRET === "true") env.push({ name: "JWT_SECRET", value: "forbidden" });
+process.stdout.write(JSON.stringify({
+  metadata: { name: "shipmastr-prisma-migrate-prod" },
+  spec: { template: { spec: {
+    taskCount: 1,
+    parallelism: 1,
+    template: { spec: {
+      containers: [{
+        image: process.env.SHIPMASTR_TEST_DIGEST,
+        command: ["/bin/bash"],
+        args: ["-ceu", process.env.TASK_ARGUMENT],
+        env,
+      }],
+      serviceAccountName: "shipmastr-runner@shipmastr-core-prod.iam.gserviceaccount.com",
+      maxRetries: 0,
+      timeoutSeconds: "600",
+      volumes: [{ cloudSqlInstance: { instances: ["shipmastr-core-prod:asia-south1:shipmastr-postgres"] } }],
+    } },
+  } } },
+}));
+NODE
+  exit 0
+fi
+
+if [[ "${1:-}" == "run" && "${2:-}" == "jobs" && "${3:-}" == "execute" ]]; then
+  count="$(increment_counter job-execute-count)"
+  if [[ "${SHIPMASTR_TEST_MIGRATION_MODE:-success}" == "migration-execution-failure" && "$count" == "2" ]]; then
+    exit 91
+  fi
+  printf '{"metadata":{"name":"shipmastr-prisma-migrate-prod-execution-%s"}}\n' "$count"
+  exit 0
+fi
+
+if [[ "${1:-}" == "logging" && "${2:-}" == "read" ]]; then
+  filter="${3:-}"
+  phase='precheck'
+  [[ "$filter" != *'execution-3'* ]] || phase='postcheck'
+  PHASE="$phase" MODE="${SHIPMASTR_TEST_MIGRATION_MODE:-success}" node <<'NODE'
+const expected = [
+  "20260712180000_h2a_platform_webhook_credentials",
+  "20260714100000_h2a_synthetic_tenant_lifecycle",
+];
+const schema = [
+  "enum:PlatformCredentialPurpose",
+  "enum:SecurityFixtureKind",
+  "enum:SecurityFixtureStatus",
+  "foreign_key:platform_webhook_credentials_connection_id_fkey",
+  "foreign_key:security_fixture_tenants_creator_internal_user_id_fkey",
+  "foreign_key:security_fixture_tenants_merchant_id_fkey",
+  "foreign_key:security_fixture_tenants_owner_user_id_fkey",
+  "index:platform_webhook_credentials_connection_id_idx",
+  "index:platform_webhook_credentials_connection_id_purpose_key",
+  "index:platform_webhook_credentials_merchant_id_idx",
+  "index:platform_webhook_credentials_merchant_id_platform_idx",
+  "index:platform_webhook_credentials_pkey",
+  "index:security_fixture_tenants_active_slot_key",
+  "index:security_fixture_tenants_expires_at_idx",
+  "index:security_fixture_tenants_fixture_kind_status_idx",
+  "index:security_fixture_tenants_merchant_id_key",
+  "index:security_fixture_tenants_owner_user_id_key",
+  "index:security_fixture_tenants_pkey",
+  "table:platform_webhook_credentials",
+  "table:security_fixture_tenants",
+].sort();
+const phase = process.env.PHASE;
+const mode = process.env.MODE;
+if (mode === "malformed-status" && phase === "precheck") {
+  const malformed = Buffer.from(JSON.stringify({ phase }), "utf8").toString("base64");
+  process.stdout.write(`SHIPMASTR_PROD_MIGRATION_RESULT=${malformed}\n`);
+  process.exit(0);
+}
+let pending = phase === "precheck" ? [...expected] : [];
+let prismaPending = [...pending];
+let failed = [];
+let databaseName = "shipmastr_prod";
+let verified = phase === "postcheck" ? [...expected] : [];
+let schemaObjects = phase === "postcheck" ? schema : [];
+if (phase === "precheck") {
+  if (mode === "missing-migration") pending = prismaPending = [expected[0]];
+  if (mode === "extra-migration") pending = prismaPending = [...expected, "20260715120000_unexpected_third"];
+  if (mode === "zero-pending") pending = prismaPending = [];
+  if (mode === "failed-migration") failed = [expected[0]];
+  if (mode === "database-not-allowlisted") databaseName = "temporary_prod_copy";
+}
+if (phase === "postcheck" && mode === "postcheck-failure") verified = [expected[0]];
+const result = {
+  phase,
+  databaseName,
+  prismaStatusExit: phase === "precheck" ? 1 : 0,
+  prismaReportedDrift: mode === "schema-drift" && phase === "precheck",
+  prismaPendingNames: prismaPending,
+  structuredPendingNames: pending,
+  failedMigrationNames: failed,
+  rolledBackMigrationNames: [],
+  unexpectedAppliedMigrationNames: [],
+  verifiedMigrationNames: verified,
+  schemaObjects,
+};
+const encoded = Buffer.from(JSON.stringify(result), "utf8").toString("base64");
+process.stdout.write(`SHIPMASTR_PROD_MIGRATION_RESULT=${encoded}\n`);
+NODE
+  exit 0
+fi
+
+echo "UNEXPECTED_GCLOUD_COMMAND=$*" >&2
+exit 97
+MOCK
+
+  chmod 700 \
+    "$MIGRATION_FIXTURE_MOCK_BIN/git" \
+    "$MIGRATION_FIXTURE_MOCK_BIN/date" \
+    "$MIGRATION_FIXTURE_MOCK_BIN/sleep" \
+    "$MIGRATION_FIXTURE_MOCK_BIN/gcloud"
+}
+
+execute_production_migration_fixture() {
+  local evidence_sha="$MIGRATION_FIXTURE_STAGING_EVIDENCE_SHA"
+
+  if [[ -n "$MIGRATION_FIXTURE_STAGING_EVIDENCE_SHA_OVERRIDE" ]]; then
+    evidence_sha="$MIGRATION_FIXTURE_STAGING_EVIDENCE_SHA_OVERRIDE"
+  fi
+
+  (
+    unset GOOGLE_APPLICATION_CREDENTIALS
+    unset PROJECT PROJECT_ID REGION
+    unset SERVICE SERVICE_NAME CLOUD_RUN_SERVICE
+    unset SERVICE_ACCOUNT CLOUD_SQL_INSTANCE
+    unset SHIPMASTR_OWNER_BREAK_GLASS_APPROVAL
+    unset SHIPMASTR_GOVERNANCE_TEST_MODE
+    unset SHIPMASTR_TEST_REPO_CLEAN
+    unset SHIPMASTR_TEST_HEAD_SHA
+    unset SHIPMASTR_TEST_ORIGIN_MAIN_SHA
+    unset SHIPMASTR_TEST_EFFECTIVE_IDENTITY
+
+    PATH="$MIGRATION_FIXTURE_MOCK_BIN:$PATH" \
+    SHIPMASTR_TEST_COMMAND_LOG="$MIGRATION_FIXTURE_LOG" \
+    SHIPMASTR_TEST_STATE_DIR="$MIGRATION_FIXTURE_STATE_DIR" \
+    SHIPMASTR_TEST_MIGRATION_MODE="$MIGRATION_FIXTURE_MODE" \
+    SHIPMASTR_TEST_REMOTE_MAIN_SHA="$MIGRATION_FIXTURE_REMOTE_MAIN_SHA" \
+    SHIPMASTR_TEST_DIGEST="$TEST_DIGEST" \
+    SHIPMASTR_APPROVED_COMMIT_SHA="$MIGRATION_FIXTURE_HEAD" \
+    SHIPMASTR_PRODUCTION_MIGRATION_APPROVAL='APPROVE SHIPMASTR PRODUCTION DATABASE MIGRATION' \
+    SHIPMASTR_STAGING_IMAGE_DIGEST="$MIGRATION_FIXTURE_STAGING_DIGEST" \
+    SHIPMASTR_STAGING_EVIDENCE_FILE="$MIGRATION_FIXTURE_STAGING_EVIDENCE" \
+    SHIPMASTR_STAGING_EVIDENCE_SHA256="$evidence_sha" \
+    SHIPMASTR_PRODUCTION_BACKUP_EVIDENCE_OUTPUT="$MIGRATION_FIXTURE_BACKUP_EVIDENCE" \
+    SHIPMASTR_PRODUCTION_MIGRATION_EVIDENCE_OUTPUT="$MIGRATION_FIXTURE_EVIDENCE" \
+    IMAGE_DIGEST="$TEST_DIGEST" \
+    /bin/bash "$MIGRATION_FIXTURE_REPO/scripts/migrate-prod.sh"
+  ) >"$MIGRATION_FIXTURE_OUTPUT" 2>&1
+}
+
+production_migration_fixture_failure() {
+  local mode="$1"
+  local temp_dir
+  local result=0
+
+  temp_dir="$(mktemp -d)"
+  prepare_production_migration_fixture "$temp_dir"
+  MIGRATION_FIXTURE_MODE="$mode"
+  if execute_production_migration_fixture; then
+    result=1
+  fi
+  [[ ! -e "$MIGRATION_FIXTURE_EVIDENCE" ]] || result=1
+  rm -rf "$temp_dir"
+  return "$result"
+}
+
+production_migration_exact_two_path_succeeds() {
+  local temp_dir
+  local backup_line
+  local job_line
+
+  temp_dir="$(mktemp -d)"
+  prepare_production_migration_fixture "$temp_dir"
+  execute_production_migration_fixture
+
+  [[ -f "$MIGRATION_FIXTURE_BACKUP_EVIDENCE" && ! -L "$MIGRATION_FIXTURE_BACKUP_EVIDENCE" ]]
+  [[ -f "$MIGRATION_FIXTURE_EVIDENCE" && ! -L "$MIGRATION_FIXTURE_EVIDENCE" ]]
+  [[ "$(shipmastr_governance_file_mode "$MIGRATION_FIXTURE_BACKUP_EVIDENCE")" == "600" ]]
+  [[ "$(shipmastr_governance_file_mode "$MIGRATION_FIXTURE_EVIDENCE")" == "600" ]]
+  grep -Fxq 'migration_execution=PASS' "$MIGRATION_FIXTURE_EVIDENCE"
+  grep -Fxq 'migration_status_after=PASS' "$MIGRATION_FIXTURE_EVIDENCE"
+  grep -Fxq 'verified_migration_1=20260712180000_h2a_platform_webhook_credentials' "$MIGRATION_FIXTURE_EVIDENCE"
+  grep -Fxq 'verified_migration_2=20260714100000_h2a_synthetic_tenant_lifecycle' "$MIGRATION_FIXTURE_EVIDENCE"
+  grep -Fxq 'production_service_revision_before=shipmastr-api-00210-xov' "$MIGRATION_FIXTURE_EVIDENCE"
+  grep -Fxq 'production_service_revision_after=shipmastr-api-00210-xov' "$MIGRATION_FIXTURE_EVIDENCE"
+  grep -Fxq 'production_traffic_mutation=none' "$MIGRATION_FIXTURE_EVIDENCE"
+
+  backup_line="$(grep -nF 'gcloud sql backups create' "$MIGRATION_FIXTURE_LOG" | cut -d: -f1)"
+  job_line="$(grep -nF 'gcloud run jobs deploy' "$MIGRATION_FIXTURE_LOG" | head -n1 | cut -d: -f1)"
+  [[ "$backup_line" -lt "$job_line" ]]
+  [[ "$(grep -cF 'gcloud run jobs deploy' "$MIGRATION_FIXTURE_LOG")" == "3" ]]
+  [[ "$(grep -cF 'gcloud run jobs execute' "$MIGRATION_FIXTURE_LOG")" == "3" ]]
+  ! grep -Fq 'gcloud secrets versions access' "$MIGRATION_FIXTURE_LOG"
+  ! grep -Fq 'gcloud run deploy' "$MIGRATION_FIXTURE_LOG"
+  ! grep -Fq 'gcloud run services update-traffic' "$MIGRATION_FIXTURE_LOG"
+  ! grep -Fq 'gcloud builds' "$MIGRATION_FIXTURE_LOG"
+  rm -rf "$temp_dir"
+}
+
+production_migration_missing_expected_blocks() {
+  production_migration_fixture_failure missing-migration
+}
+
+production_migration_extra_pending_blocks() {
+  production_migration_fixture_failure extra-migration
+}
+
+production_migration_zero_pending_blocks() {
+  production_migration_fixture_failure zero-pending
+}
+
+production_migration_malformed_status_blocks() {
+  production_migration_fixture_failure malformed-status
+}
+
+production_migration_failed_state_blocks() {
+  production_migration_fixture_failure failed-migration
+}
+
+production_migration_schema_drift_blocks() {
+  production_migration_fixture_failure schema-drift
+}
+
+production_migration_backup_failure_precedes_job() {
+  local temp_dir
+
+  temp_dir="$(mktemp -d)"
+  prepare_production_migration_fixture "$temp_dir"
+  MIGRATION_FIXTURE_MODE="backup-failure"
+  if execute_production_migration_fixture; then
+    rm -rf "$temp_dir"
+    return 1
+  fi
+  ! grep -Fq 'gcloud run jobs deploy' "$MIGRATION_FIXTURE_LOG"
+  ! grep -Fq 'gcloud run jobs execute' "$MIGRATION_FIXTURE_LOG"
+  [[ ! -e "$MIGRATION_FIXTURE_BACKUP_EVIDENCE" ]]
+  [[ ! -e "$MIGRATION_FIXTURE_EVIDENCE" ]]
+  rm -rf "$temp_dir"
+}
+
+production_migration_backup_evidence_mismatch_blocks() {
+  local temp_dir
+
+  temp_dir="$(mktemp -d)"
+  prepare_production_migration_fixture "$temp_dir"
+  MIGRATION_FIXTURE_MODE="backup-id-mismatch"
+  if execute_production_migration_fixture; then
+    rm -rf "$temp_dir"
+    return 1
+  fi
+  ! grep -Fq 'gcloud run jobs deploy' "$MIGRATION_FIXTURE_LOG"
+  [[ ! -e "$MIGRATION_FIXTURE_EVIDENCE" ]]
+  rm -rf "$temp_dir"
+}
+
+production_migration_database_allowlist_blocks() {
+  production_migration_fixture_failure database-not-allowlisted
+}
+
+production_migration_staging_evidence_mismatch_blocks() {
+  local temp_dir
+
+  temp_dir="$(mktemp -d)"
+  prepare_production_migration_fixture "$temp_dir"
+  MIGRATION_FIXTURE_STAGING_EVIDENCE_SHA_OVERRIDE="$(printf '0%.0s' {1..64})"
+  if execute_production_migration_fixture; then
+    rm -rf "$temp_dir"
+    return 1
+  fi
+  ! grep -Fq 'gcloud sql backups create' "$MIGRATION_FIXTURE_LOG"
+  ! grep -Fq 'gcloud run jobs deploy' "$MIGRATION_FIXTURE_LOG"
+  rm -rf "$temp_dir"
+}
+
+production_migration_image_mismatch_blocks() {
+  local temp_dir
+
+  temp_dir="$(mktemp -d)"
+  prepare_production_migration_fixture "$temp_dir"
+  MIGRATION_FIXTURE_STAGING_DIGEST="$OTHER_DIGEST"
+  if execute_production_migration_fixture; then
+    rm -rf "$temp_dir"
+    return 1
+  fi
+  ! grep -Fq 'gcloud sql backups create' "$MIGRATION_FIXTURE_LOG"
+  ! grep -Fq 'gcloud run jobs deploy' "$MIGRATION_FIXTURE_LOG"
+  rm -rf "$temp_dir"
+}
+
+production_migration_remote_main_mismatch_blocks() {
+  local temp_dir
+
+  temp_dir="$(mktemp -d)"
+  prepare_production_migration_fixture "$temp_dir"
+  MIGRATION_FIXTURE_REMOTE_MAIN_SHA="$TEST_SHA"
+  if execute_production_migration_fixture; then
+    rm -rf "$temp_dir"
+    return 1
+  fi
+  ! grep -Fq 'gcloud sql backups create' "$MIGRATION_FIXTURE_LOG"
+  ! grep -Fq 'gcloud run jobs deploy' "$MIGRATION_FIXTURE_LOG"
+  rm -rf "$temp_dir"
+}
+
+production_migration_job_secret_scope_and_limits() {
+  local temp_dir
+
+  temp_dir="$(mktemp -d)"
+  prepare_production_migration_fixture "$temp_dir"
+  execute_production_migration_fixture
+  grep -Fq -- '--set-env-vars APP_ENV=production' "$MIGRATION_FIXTURE_LOG"
+  grep -Fq -- '--set-secrets DATABASE_URL=DATABASE_URL:latest' "$MIGRATION_FIXTURE_LOG"
+  grep -Fq -- '--max-retries 0 --task-timeout 600s' "$MIGRATION_FIXTURE_LOG"
+  ! grep -Eq 'JWT_SECRET|WEBHOOK_SECRET|SMTP_|CLOUDFLARE|PLATFORM_CREDENTIAL|PAYMENT' "$MIGRATION_FIXTURE_LOG"
+  rm -rf "$temp_dir"
+}
+
+production_migration_execution_failure_has_no_success_evidence() {
+  production_migration_fixture_failure migration-execution-failure
+}
+
+production_migration_postcheck_failure_has_no_success_evidence() {
+  production_migration_fixture_failure postcheck-failure
+}
+
+production_migration_service_change_blocks_evidence() {
+  production_migration_fixture_failure service-changed
+}
+
+production_migration_never_deploys_service_or_moves_traffic() {
+  node - "$SCRIPT_DIR/migrate-prod.sh" <<'NODE'
+const fs = require("node:fs");
+const source = fs.readFileSync(process.argv[2], "utf8");
+if (/gcloud\s+run\s+deploy/.test(source)) process.exit(2);
+if (/gcloud\s+run\s+services\s+update-traffic/.test(source)) process.exit(3);
+if (!source.includes('gcloud run services describe')) process.exit(4);
+NODE
+}
+
+production_migration_has_no_test_hooks() {
+  ! grep -E 'SHIPMASTR_GOVERNANCE_TEST_MODE|SHIPMASTR_TEST_' \
+    "$SCRIPT_DIR/migrate-prod.sh" \
+    "$SCRIPT_DIR/deployment-governance.sh"
+}
+
+production_migration_approval_is_exact_and_local() {
+  local temp_dir
+
+  temp_dir="$(mktemp -d)"
+  prepare_production_migration_fixture "$temp_dir"
+  if (
+    unset SHIPMASTR_PRODUCTION_MIGRATION_APPROVAL
+    PATH="$MIGRATION_FIXTURE_MOCK_BIN:$PATH" \
+    SHIPMASTR_TEST_COMMAND_LOG="$MIGRATION_FIXTURE_LOG" \
+    SHIPMASTR_TEST_STATE_DIR="$MIGRATION_FIXTURE_STATE_DIR" \
+    SHIPMASTR_APPROVED_COMMIT_SHA="$MIGRATION_FIXTURE_HEAD" \
+    SHIPMASTR_STAGING_IMAGE_DIGEST="$TEST_DIGEST" \
+    SHIPMASTR_STAGING_EVIDENCE_FILE="$MIGRATION_FIXTURE_STAGING_EVIDENCE" \
+    SHIPMASTR_STAGING_EVIDENCE_SHA256="$MIGRATION_FIXTURE_STAGING_EVIDENCE_SHA" \
+    SHIPMASTR_PRODUCTION_BACKUP_EVIDENCE_OUTPUT="$MIGRATION_FIXTURE_BACKUP_EVIDENCE" \
+    SHIPMASTR_PRODUCTION_MIGRATION_EVIDENCE_OUTPUT="$MIGRATION_FIXTURE_EVIDENCE" \
+    IMAGE_DIGEST="$TEST_DIGEST" \
+    /bin/bash "$MIGRATION_FIXTURE_REPO/scripts/migrate-prod.sh"
+  ) >"$MIGRATION_FIXTURE_OUTPUT" 2>&1; then
+    rm -rf "$temp_dir"
+    return 1
+  fi
+  grep -Fq 'SHIPMASTR_DEPLOYMENT_BLOCKED=PRODUCTION_DATABASE_MIGRATION_APPROVAL_REQUIRED' \
+    "$MIGRATION_FIXTURE_OUTPUT"
+  ! grep -Fq '^gcloud ' "$MIGRATION_FIXTURE_LOG"
+  rm -rf "$temp_dir"
+}
+
+production_migration_owner_requires_break_glass() {
+  local temp_dir
+
+  temp_dir="$(mktemp -d)"
+  prepare_production_migration_fixture "$temp_dir"
+  MIGRATION_FIXTURE_MODE="owner-without-break-glass"
+  if execute_production_migration_fixture; then
+    rm -rf "$temp_dir"
+    return 1
+  fi
+  grep -Fq 'SHIPMASTR_DEPLOYMENT_BLOCKED=OWNER_IDENTITY_REQUIRES_BREAK_GLASS_APPROVAL' \
+    "$MIGRATION_FIXTURE_OUTPUT"
+  ! grep -Fq 'gcloud sql backups create' "$MIGRATION_FIXTURE_LOG"
+  ! grep -Fq 'gcloud run jobs deploy' "$MIGRATION_FIXTURE_LOG"
+  rm -rf "$temp_dir"
+}
+
+production_migration_external_mocks_fail_closed() {
+  local temp_dir
+
+  temp_dir="$(mktemp -d)"
+  prepare_production_migration_fixture "$temp_dir"
+  if SHIPMASTR_TEST_COMMAND_LOG="$MIGRATION_FIXTURE_LOG" \
+    SHIPMASTR_TEST_STATE_DIR="$MIGRATION_FIXTURE_STATE_DIR" \
+    "$MIGRATION_FIXTURE_MOCK_BIN/gcloud" unexpected command; then
+    rm -rf "$temp_dir"
+    return 1
+  fi
+  ! grep -Fq 'curl ' "$SCRIPT_DIR/migrate-prod.sh"
+  rm -rf "$temp_dir"
+}
+
+production_migration_caller_test_variables_cannot_bypass() {
+  local temp_dir
+
+  temp_dir="$(mktemp -d)"
+  prepare_production_migration_fixture "$temp_dir"
+  if (
+    unset SHIPMASTR_APPROVED_COMMIT_SHA
+    PATH="$MIGRATION_FIXTURE_MOCK_BIN:$PATH" \
+    SHIPMASTR_TEST_COMMAND_LOG="$MIGRATION_FIXTURE_LOG" \
+    SHIPMASTR_TEST_STATE_DIR="$MIGRATION_FIXTURE_STATE_DIR" \
+    SHIPMASTR_GOVERNANCE_TEST_MODE=1 \
+    SHIPMASTR_TEST_REPO_CLEAN=1 \
+    SHIPMASTR_TEST_HEAD_SHA="$MIGRATION_FIXTURE_HEAD" \
+    SHIPMASTR_TEST_REMOTE_MAIN_SHA="$MIGRATION_FIXTURE_HEAD" \
+    SHIPMASTR_TEST_EFFECTIVE_IDENTITY='shipmastr-deployer-prod@shipmastr-core-prod.iam.gserviceaccount.com' \
+    SHIPMASTR_PRODUCTION_MIGRATION_APPROVAL='APPROVE SHIPMASTR PRODUCTION DATABASE MIGRATION' \
+    SHIPMASTR_STAGING_IMAGE_DIGEST="$TEST_DIGEST" \
+    SHIPMASTR_STAGING_EVIDENCE_FILE="$MIGRATION_FIXTURE_STAGING_EVIDENCE" \
+    SHIPMASTR_STAGING_EVIDENCE_SHA256="$MIGRATION_FIXTURE_STAGING_EVIDENCE_SHA" \
+    SHIPMASTR_PRODUCTION_BACKUP_EVIDENCE_OUTPUT="$MIGRATION_FIXTURE_BACKUP_EVIDENCE" \
+    SHIPMASTR_PRODUCTION_MIGRATION_EVIDENCE_OUTPUT="$MIGRATION_FIXTURE_EVIDENCE" \
+    IMAGE_DIGEST="$TEST_DIGEST" \
+    /bin/bash "$MIGRATION_FIXTURE_REPO/scripts/migrate-prod.sh"
+  ) >"$MIGRATION_FIXTURE_OUTPUT" 2>&1; then
+    rm -rf "$temp_dir"
+    return 1
+  fi
+  ! grep -Fq '^gcloud ' "$MIGRATION_FIXTURE_LOG"
+  grep -Fq 'SHIPMASTR_DEPLOYMENT_BLOCKED=APPROVED_COMMIT_SHA_REQUIRED' \
+    "$MIGRATION_FIXTURE_OUTPUT"
+  rm -rf "$temp_dir"
+}
+
+production_migration_evidence_parser_rejects_unknown_key() {
+  local temp_dir
+  local path
+  local sha
+
+  temp_dir="$(mktemp -d)"
+  path="$temp_dir/migration.env"
+  sha="$(shipmastr_governance_write_production_migration_evidence \
+    "$path" "$TEST_SHA" "$TEST_DIGEST" shipmastr_prod \
+    shipmastr-core-prod:asia-south1:shipmastr-postgres 9001 \
+    shipmastr-api-00210-xov shipmastr-api-00210-xov)"
+  chmod 600 "$path"
+  printf '%s\n' 'unknown_key=blocked' >> "$path"
+  sha="$(shipmastr_governance_sha256_file "$path")"
+  if shipmastr_governance_verify_production_migration_evidence \
+    "$path" "$sha" "$TEST_SHA" "$TEST_DIGEST"; then
+    rm -rf "$temp_dir"
+    return 1
+  fi
+  rm -rf "$temp_dir"
+}
+
+production_migration_evidence_parser_rejects_duplicate_key() {
+  local temp_dir
+  local path
+  local sha
+
+  temp_dir="$(mktemp -d)"
+  path="$temp_dir/migration.env"
+  sha="$(shipmastr_governance_write_production_migration_evidence \
+    "$path" "$TEST_SHA" "$TEST_DIGEST" shipmastr_prod \
+    shipmastr-core-prod:asia-south1:shipmastr-postgres 9001 \
+    shipmastr-api-00210-xov shipmastr-api-00210-xov)"
+  printf '%s\n' 'backup_status=SUCCESSFUL' >> "$path"
+  sha="$(shipmastr_governance_sha256_file "$path")"
+  if shipmastr_governance_verify_production_migration_evidence \
+    "$path" "$sha" "$TEST_SHA" "$TEST_DIGEST"; then
+    rm -rf "$temp_dir"
+    return 1
+  fi
+  rm -rf "$temp_dir"
+}
+
+production_migration_evidence_parser_rejects_missing_key() {
+  local temp_dir
+  local path
+  local replacement
+  local sha
+
+  temp_dir="$(mktemp -d)"
+  path="$temp_dir/migration.env"
+  replacement="$temp_dir/replacement.env"
+  sha="$(shipmastr_governance_write_production_migration_evidence \
+    "$path" "$TEST_SHA" "$TEST_DIGEST" shipmastr_prod \
+    shipmastr-core-prod:asia-south1:shipmastr-postgres 9001 \
+    shipmastr-api-00210-xov shipmastr-api-00210-xov)"
+  sed '/^migration_status_after=/d' "$path" > "$replacement"
+  mv "$replacement" "$path"
+  chmod 600 "$path"
+  sha="$(shipmastr_governance_sha256_file "$path")"
+  if shipmastr_governance_verify_production_migration_evidence \
+    "$path" "$sha" "$TEST_SHA" "$TEST_DIGEST"; then
+    rm -rf "$temp_dir"
+    return 1
+  fi
+  rm -rf "$temp_dir"
+}
+
+production_backup_evidence_parser_rejects_unknown_key() {
+  local temp_dir
+  local path
+  local sha
+
+  temp_dir="$(mktemp -d)"
+  path="$temp_dir/backup.env"
+  sha="$(shipmastr_governance_write_production_backup_evidence \
+    "$path" "$TEST_SHA" "$TEST_DIGEST" \
+    shipmastr-core-prod:asia-south1:shipmastr-postgres 9001 \
+    shipmastr-prod-migration-20260801123456-0123456-12345 \
+    2026-08-01T12:34:56Z 2026-08-01T12:34:56Z \
+    2026-08-01T12:35:56Z)"
+  printf '%s\n' 'secret_payload=forbidden' >> "$path"
+  sha="$(shipmastr_governance_sha256_file "$path")"
+  if shipmastr_governance_verify_production_backup_evidence \
+    "$path" "$sha" "$TEST_SHA" "$TEST_DIGEST" \
+    shipmastr-core-prod:asia-south1:shipmastr-postgres 9001 \
+    shipmastr-prod-migration-20260801123456-0123456-12345 \
+    2026-08-01T12:34:56Z; then
+    rm -rf "$temp_dir"
+    return 1
+  fi
+  rm -rf "$temp_dir"
+}
+
+production_evidence_output_inside_repository_rejected() {
+  local path="$REPO_ROOT/.production-migration-evidence-test-$$"
+
+  if shipmastr_governance_validate_new_production_evidence_output "$path"; then
+    return 1
+  fi
+  [[ ! -e "$path" ]]
+}
+
+production_evidence_existing_output_rejected() {
+  local temp_dir
+  local path
+
+  temp_dir="$(mktemp -d)"
+  path="$temp_dir/existing.env"
+  : > "$path"
+  if shipmastr_governance_validate_new_production_evidence_output "$path"; then
+    rm -rf "$temp_dir"
+    return 1
+  fi
+  rm -rf "$temp_dir"
+}
+
 expect_pass staging_positive staging_positive
 expect_pass staging_prebuilt_positive staging_prebuilt_positive
 expect_fail staging_evidence_output_required staging_evidence_output_required
@@ -2790,6 +3571,64 @@ expect_pass old_readonly_handoff_pattern_reproduces_the_original_failure \
   old_readonly_handoff_pattern_reproduces_the_original_failure
 expect_pass production_database_non_production_names_rejected \
   production_database_non_production_names_rejected
+expect_pass production_migration_exact_two_path_succeeds \
+  production_migration_exact_two_path_succeeds
+expect_pass production_migration_missing_expected_blocks \
+  production_migration_missing_expected_blocks
+expect_pass production_migration_extra_pending_blocks \
+  production_migration_extra_pending_blocks
+expect_pass production_migration_zero_pending_blocks \
+  production_migration_zero_pending_blocks
+expect_pass production_migration_malformed_status_blocks \
+  production_migration_malformed_status_blocks
+expect_pass production_migration_failed_state_blocks \
+  production_migration_failed_state_blocks
+expect_pass production_migration_schema_drift_blocks \
+  production_migration_schema_drift_blocks
+expect_pass production_migration_backup_failure_precedes_job \
+  production_migration_backup_failure_precedes_job
+expect_pass production_migration_backup_evidence_mismatch_blocks \
+  production_migration_backup_evidence_mismatch_blocks
+expect_pass production_migration_database_allowlist_blocks \
+  production_migration_database_allowlist_blocks
+expect_pass production_migration_staging_evidence_mismatch_blocks \
+  production_migration_staging_evidence_mismatch_blocks
+expect_pass production_migration_image_mismatch_blocks \
+  production_migration_image_mismatch_blocks
+expect_pass production_migration_remote_main_mismatch_blocks \
+  production_migration_remote_main_mismatch_blocks
+expect_pass production_migration_job_secret_scope_and_limits \
+  production_migration_job_secret_scope_and_limits
+expect_pass production_migration_execution_failure_has_no_success_evidence \
+  production_migration_execution_failure_has_no_success_evidence
+expect_pass production_migration_postcheck_failure_has_no_success_evidence \
+  production_migration_postcheck_failure_has_no_success_evidence
+expect_pass production_migration_service_change_blocks_evidence \
+  production_migration_service_change_blocks_evidence
+expect_pass production_migration_never_deploys_service_or_moves_traffic \
+  production_migration_never_deploys_service_or_moves_traffic
+expect_pass production_migration_has_no_test_hooks \
+  production_migration_has_no_test_hooks
+expect_pass production_migration_approval_is_exact_and_local \
+  production_migration_approval_is_exact_and_local
+expect_pass production_migration_owner_requires_break_glass \
+  production_migration_owner_requires_break_glass
+expect_pass production_migration_external_mocks_fail_closed \
+  production_migration_external_mocks_fail_closed
+expect_pass production_migration_caller_test_variables_cannot_bypass \
+  production_migration_caller_test_variables_cannot_bypass
+expect_pass production_migration_evidence_parser_rejects_unknown_key \
+  production_migration_evidence_parser_rejects_unknown_key
+expect_pass production_migration_evidence_parser_rejects_duplicate_key \
+  production_migration_evidence_parser_rejects_duplicate_key
+expect_pass production_migration_evidence_parser_rejects_missing_key \
+  production_migration_evidence_parser_rejects_missing_key
+expect_pass production_backup_evidence_parser_rejects_unknown_key \
+  production_backup_evidence_parser_rejects_unknown_key
+expect_pass production_evidence_output_inside_repository_rejected \
+  production_evidence_output_inside_repository_rejected
+expect_pass production_evidence_existing_output_rejected \
+  production_evidence_existing_output_rejected
 
 echo "I5B1_GOVERNANCE_TEST_COUNT=$pass_count"
 echo "I5B1_GOVERNANCE_TESTS=PASS"
