@@ -313,14 +313,75 @@ const containers = task?.containers || [];
 const container = containers[0] || {};
 const env = container?.env || [];
 const volumes = task?.volumes || [];
-const cloudSqlInstances = volumes.flatMap((volume) => volume?.cloudSqlInstance?.instances || []);
+const annotations = job?.spec?.template?.metadata?.annotations || {};
+const cloudSqlAnnotationKey = "run.googleapis.com/cloudsql-instances";
+const cloudSqlNamePattern = /^[a-z][a-z0-9-]{4,28}[a-z0-9]:[a-z](?:[a-z0-9-]*[a-z0-9])?:[a-z](?:[a-z0-9-]*[a-z0-9])?$/;
+
+function normalizeCloudSqlValues(values) {
+  if (!Array.isArray(values) || values.some((value) => typeof value !== "string")) {
+    return { valid: false, values: [] };
+  }
+  const normalized = values.map((value) => value.trim()).filter(Boolean);
+  if (
+    normalized.some((value) => !cloudSqlNamePattern.test(value))
+    || new Set(normalized).size !== normalized.length
+  ) {
+    return { valid: false, values: [] };
+  }
+  return { valid: true, values: normalized };
+}
+
+const annotationPresent = Object.prototype.hasOwnProperty.call(
+  annotations,
+  cloudSqlAnnotationKey,
+);
+const rawAnnotation = annotations[cloudSqlAnnotationKey];
+const annotationInstances = annotationPresent && typeof rawAnnotation === "string"
+  ? normalizeCloudSqlValues(rawAnnotation.split(","))
+  : { valid: !annotationPresent, values: [] };
+
+let volumeMetadataPresent = false;
+let volumeMetadataValid = true;
+const rawVolumeInstances = [];
+for (const volume of volumes) {
+  if (!Object.prototype.hasOwnProperty.call(volume || {}, "cloudSqlInstance")) continue;
+  volumeMetadataPresent = true;
+  const instances = volume?.cloudSqlInstance?.instances;
+  if (!Array.isArray(instances)) {
+    volumeMetadataValid = false;
+    continue;
+  }
+  rawVolumeInstances.push(...instances);
+}
+const volumeInstances = volumeMetadataValid
+  ? normalizeCloudSqlValues(rawVolumeInstances)
+  : { valid: false, values: [] };
+
+const annotationUnambiguous = !annotationPresent
+  || (annotationInstances.valid && annotationInstances.values.length === 1);
+const volumeUnambiguous = !volumeMetadataPresent
+  || (volumeInstances.valid && volumeInstances.values.length === 1);
+const representationsAgree = !annotationPresent
+  || !volumeMetadataPresent
+  || annotationInstances.values[0] === volumeInstances.values[0];
+const cloudSqlInstances = [
+  ...annotationInstances.values,
+  ...volumeInstances.values,
+];
+const uniqueCloudSqlInstances = [...new Set(cloudSqlInstances)];
 
 if (containers.length !== 1 || container.image !== expectedImage) process.exit(2);
 if ((task.serviceAccountName || task.serviceAccount) !== expectedServiceAccount) process.exit(3);
 if (Number(task.maxRetries) !== 0) process.exit(4);
 if (!new Set(["600", "600s"]).has(String(task.timeoutSeconds || task.timeout || ""))) process.exit(5);
 if (Number(outer.taskCount || 1) !== 1 || Number(outer.parallelism || 1) !== 1) process.exit(6);
-if (cloudSqlInstances.length !== 1 || cloudSqlInstances[0] !== expectedCloudSql) process.exit(7);
+if (
+  !annotationUnambiguous
+  || !volumeUnambiguous
+  || !representationsAgree
+  || uniqueCloudSqlInstances.length !== 1
+  || uniqueCloudSqlInstances[0] !== expectedCloudSql
+) process.exit(7);
 if (env.length !== 2) process.exit(8);
 
 const byName = new Map(env.map((entry) => [entry.name, entry]));

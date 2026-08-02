@@ -2796,29 +2796,64 @@ if [[ "${1:-}" == "run" && "${2:-}" == "jobs" && "${3:-}" == "describe" ]]; then
   if [[ "${SHIPMASTR_TEST_MIGRATION_MODE:-success}" == "extra-job-secret" ]]; then
     extra='true'
   fi
-  TASK_ARGUMENT="$task_argument" EXTRA_SECRET="$extra" SHIPMASTR_TEST_DIGEST="${SHIPMASTR_TEST_DIGEST:?}" node <<'NODE'
+  TASK_ARGUMENT="$task_argument" \
+  EXTRA_SECRET="$extra" \
+  MODE="${SHIPMASTR_TEST_MIGRATION_MODE:-success}" \
+  SHIPMASTR_TEST_DIGEST="${SHIPMASTR_TEST_DIGEST:?}" \
+  node <<'NODE'
 const env = [
   { name: "APP_ENV", value: "production" },
   { name: "DATABASE_URL", valueFrom: { secretKeyRef: { name: "DATABASE_URL", key: "latest" } } },
 ];
 if (process.env.EXTRA_SECRET === "true") env.push({ name: "JWT_SECRET", value: "forbidden" });
+const expectedCloudSql = "shipmastr-core-prod:asia-south1:shipmastr-postgres";
+const otherCloudSql = "shipmastr-core-prod:asia-south1:shipmastr-other";
+const mode = process.env.MODE || "success";
+let annotationValue = expectedCloudSql;
+let volumeInstances;
+if (mode === "cloudsql-volume") {
+  annotationValue = undefined;
+  volumeInstances = [expectedCloudSql];
+} else if (mode === "cloudsql-missing") {
+  annotationValue = undefined;
+} else if (mode === "cloudsql-wrong") {
+  annotationValue = otherCloudSql;
+} else if (mode === "cloudsql-two-annotation") {
+  annotationValue = `${expectedCloudSql},${otherCloudSql}`;
+} else if (mode === "cloudsql-conflict") {
+  volumeInstances = [otherCloudSql];
+} else if (mode === "cloudsql-matching-both") {
+  volumeInstances = [expectedCloudSql];
+} else if (mode === "cloudsql-annotation-whitespace") {
+  annotationValue = ` ,  ${expectedCloudSql}  , `;
+} else if (mode === "cloudsql-duplicate-annotation") {
+  annotationValue = `${expectedCloudSql}, ${expectedCloudSql}`;
+} else if (mode === "cloudsql-malformed-annotation") {
+  annotationValue = "not-a-cloudsql-connection";
+}
+const templateMetadata = annotationValue === undefined
+  ? {}
+  : { annotations: { "run.googleapis.com/cloudsql-instances": annotationValue } };
+const taskSpec = {
+  containers: [{
+    image: process.env.SHIPMASTR_TEST_DIGEST,
+    command: ["/bin/bash"],
+    args: ["-ceu", process.env.TASK_ARGUMENT],
+    env,
+  }],
+  serviceAccountName: "shipmastr-runner@shipmastr-core-prod.iam.gserviceaccount.com",
+  maxRetries: 0,
+  timeoutSeconds: "600",
+};
+if (volumeInstances !== undefined) {
+  taskSpec.volumes = [{ cloudSqlInstance: { instances: volumeInstances } }];
+}
 process.stdout.write(JSON.stringify({
   metadata: { name: "shipmastr-prisma-migrate-prod" },
-  spec: { template: { spec: {
+  spec: { template: { metadata: templateMetadata, spec: {
     taskCount: 1,
     parallelism: 1,
-    template: { spec: {
-      containers: [{
-        image: process.env.SHIPMASTR_TEST_DIGEST,
-        command: ["/bin/bash"],
-        args: ["-ceu", process.env.TASK_ARGUMENT],
-        env,
-      }],
-      serviceAccountName: "shipmastr-runner@shipmastr-core-prod.iam.gserviceaccount.com",
-      maxRetries: 0,
-      timeoutSeconds: "600",
-      volumes: [{ cloudSqlInstance: { instances: ["shipmastr-core-prod:asia-south1:shipmastr-postgres"] } }],
-    } },
+    template: { spec: taskSpec },
   } } },
 }));
 NODE
@@ -3118,6 +3153,82 @@ production_migration_job_secret_scope_and_limits() {
   grep -Fq -- '--max-retries 0 --task-timeout 600s' "$MIGRATION_FIXTURE_LOG"
   ! grep -Eq 'JWT_SECRET|WEBHOOK_SECRET|SMTP_|CLOUDFLARE|PLATFORM_CREDENTIAL|PAYMENT' "$MIGRATION_FIXTURE_LOG"
   rm -rf "$temp_dir"
+}
+
+production_migration_cloudsql_fixture_succeeds() {
+  local mode="$1"
+  local temp_dir
+
+  temp_dir="$(mktemp -d)"
+  prepare_production_migration_fixture "$temp_dir"
+  MIGRATION_FIXTURE_MODE="$mode"
+  execute_production_migration_fixture
+  [[ "$(grep -cF 'gcloud run jobs execute' "$MIGRATION_FIXTURE_LOG")" == "3" ]]
+  [[ -f "$MIGRATION_FIXTURE_EVIDENCE" ]]
+  rm -rf "$temp_dir"
+}
+
+production_migration_cloudsql_fixture_blocks() {
+  local mode="$1"
+  local temp_dir
+  local status=0
+
+  temp_dir="$(mktemp -d)"
+  prepare_production_migration_fixture "$temp_dir"
+  MIGRATION_FIXTURE_MODE="$mode"
+  if execute_production_migration_fixture; then
+    rm -rf "$temp_dir"
+    return 1
+  else
+    status=$?
+  fi
+  if [[ "$status" -ne 7 ]] || \
+    grep -Fq 'gcloud run jobs execute' "$MIGRATION_FIXTURE_LOG" || \
+    [[ -e "$MIGRATION_FIXTURE_EVIDENCE" ]]; then
+    rm -rf "$temp_dir"
+    return 1
+  fi
+  rm -rf "$temp_dir"
+}
+
+production_migration_live_cloudsql_annotation_shape_succeeds() {
+  production_migration_cloudsql_fixture_succeeds success
+}
+
+production_migration_cloudsql_volume_shape_succeeds() {
+  production_migration_cloudsql_fixture_succeeds cloudsql-volume
+}
+
+production_migration_cloudsql_metadata_missing_blocks() {
+  production_migration_cloudsql_fixture_blocks cloudsql-missing
+}
+
+production_migration_cloudsql_wrong_instance_blocks() {
+  production_migration_cloudsql_fixture_blocks cloudsql-wrong
+}
+
+production_migration_cloudsql_multiple_annotation_instances_block() {
+  production_migration_cloudsql_fixture_blocks cloudsql-two-annotation
+}
+
+production_migration_cloudsql_conflicting_representations_block() {
+  production_migration_cloudsql_fixture_blocks cloudsql-conflict
+}
+
+production_migration_cloudsql_matching_representations_succeed() {
+  production_migration_cloudsql_fixture_succeeds cloudsql-matching-both
+}
+
+production_migration_cloudsql_annotation_whitespace_normalized() {
+  production_migration_cloudsql_fixture_succeeds cloudsql-annotation-whitespace
+}
+
+production_migration_cloudsql_duplicate_annotation_blocks() {
+  production_migration_cloudsql_fixture_blocks cloudsql-duplicate-annotation
+}
+
+production_migration_cloudsql_verifier_failure_prevents_execution() {
+  production_migration_cloudsql_fixture_blocks cloudsql-malformed-annotation
 }
 
 production_migration_execution_failure_has_no_success_evidence() {
@@ -3599,6 +3710,26 @@ expect_pass production_migration_remote_main_mismatch_blocks \
   production_migration_remote_main_mismatch_blocks
 expect_pass production_migration_job_secret_scope_and_limits \
   production_migration_job_secret_scope_and_limits
+expect_pass production_migration_live_cloudsql_annotation_shape_succeeds \
+  production_migration_live_cloudsql_annotation_shape_succeeds
+expect_pass production_migration_cloudsql_volume_shape_succeeds \
+  production_migration_cloudsql_volume_shape_succeeds
+expect_pass production_migration_cloudsql_metadata_missing_blocks \
+  production_migration_cloudsql_metadata_missing_blocks
+expect_pass production_migration_cloudsql_wrong_instance_blocks \
+  production_migration_cloudsql_wrong_instance_blocks
+expect_pass production_migration_cloudsql_multiple_annotation_instances_block \
+  production_migration_cloudsql_multiple_annotation_instances_block
+expect_pass production_migration_cloudsql_conflicting_representations_block \
+  production_migration_cloudsql_conflicting_representations_block
+expect_pass production_migration_cloudsql_matching_representations_succeed \
+  production_migration_cloudsql_matching_representations_succeed
+expect_pass production_migration_cloudsql_annotation_whitespace_normalized \
+  production_migration_cloudsql_annotation_whitespace_normalized
+expect_pass production_migration_cloudsql_duplicate_annotation_blocks \
+  production_migration_cloudsql_duplicate_annotation_blocks
+expect_pass production_migration_cloudsql_verifier_failure_prevents_execution \
+  production_migration_cloudsql_verifier_failure_prevents_execution
 expect_pass production_migration_execution_failure_has_no_success_evidence \
   production_migration_execution_failure_has_no_success_evidence
 expect_pass production_migration_postcheck_failure_has_no_success_evidence \
