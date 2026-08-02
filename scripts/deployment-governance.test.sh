@@ -1898,6 +1898,7 @@ prepare_production_wrapper_fixture() {
   PRODUCTION_FIXTURE_SECRET_MODE="valid"
   PRODUCTION_FIXTURE_DEPLOY_DRY_RUN="0"
   PRODUCTION_FIXTURE_MIGRATION_STATUS_ONLY="0"
+  PRODUCTION_FIXTURE_DATABASE_NAME="shipmastr_prod"
 
   mkdir -p "$PRODUCTION_FIXTURE_REPO/scripts" "$PRODUCTION_FIXTURE_MOCK_BIN"
   cp "$SCRIPT_DIR/deploy-prod.sh" "$PRODUCTION_FIXTURE_REPO/scripts/"
@@ -1986,7 +1987,7 @@ fi
 if [[ "${1:-}" == "secrets" && "${2:-}" == "versions" && \
   "${3:-}" == "access" ]]; then
   [[ " $* " == *" --secret DATABASE_URL "* ]] || exit 94
-  printf '%s\n' 'postgresql://user:pass@localhost:5432/shipmastr_prod'
+  printf '%s\n' "postgresql://user:pass@localhost:5432/${SHIPMASTR_TEST_DATABASE_NAME:-shipmastr_prod}"
   exit 0
 fi
 
@@ -2024,11 +2025,13 @@ execute_production_wrapper_fixture() {
     unset SHIPMASTR_TEST_HEAD_SHA
     unset SHIPMASTR_TEST_ORIGIN_MAIN_SHA
     unset SHIPMASTR_TEST_EFFECTIVE_IDENTITY
+    unset SHIPMASTR_TEST_DATABASE_NAME
 
     PATH="$PRODUCTION_FIXTURE_MOCK_BIN:$PATH" \
     SHIPMASTR_TEST_COMMAND_LOG="$PRODUCTION_FIXTURE_LOG" \
     SHIPMASTR_TEST_REMOTE_MAIN_SHA="$PRODUCTION_FIXTURE_HEAD" \
     SHIPMASTR_TEST_SECRET_MODE="$PRODUCTION_FIXTURE_SECRET_MODE" \
+    SHIPMASTR_TEST_DATABASE_NAME="$PRODUCTION_FIXTURE_DATABASE_NAME" \
     SHIPMASTR_APPROVED_COMMIT_SHA="$PRODUCTION_FIXTURE_HEAD" \
     SHIPMASTR_PUBLIC_ACCESS_EXPECTATION=public \
     SHIPMASTR_PUBLIC_ACCESS_APPROVAL='APPROVE RETAIN CURRENT PUBLIC INVOCATION STATE' \
@@ -2092,6 +2095,7 @@ production_valid_preflight_precedes_job_mutation() {
   temp_dir="$(mktemp -d)"
   prepare_production_wrapper_fixture "$temp_dir"
   PRODUCTION_FIXTURE_MIGRATION_STATUS_ONLY="1"
+  PRODUCTION_FIXTURE_DATABASE_NAME="temporary_prod_copy"
   if execute_production_wrapper_fixture; then
     rm -rf "$temp_dir"
     return 1
@@ -2163,6 +2167,46 @@ production_normal_path_blocked_without_secret() {
 
   ! grep -Fq 'gcloud run jobs' "$PRODUCTION_FIXTURE_LOG"
   ! grep -Fq 'gcloud run deploy' "$PRODUCTION_FIXTURE_LOG"
+  rm -rf "$temp_dir"
+}
+
+production_non_allowlisted_database_blocks_migration_job() {
+  local temp_dir
+
+  temp_dir="$(mktemp -d)"
+  prepare_production_wrapper_fixture "$temp_dir"
+  PRODUCTION_FIXTURE_MIGRATION_STATUS_ONLY="1"
+  PRODUCTION_FIXTURE_DATABASE_NAME="temporary_prod_copy"
+
+  if execute_production_wrapper_fixture; then
+    rm -rf "$temp_dir"
+    return 1
+  fi
+
+  grep -Fq 'DATABASE_NAME_NOT_ALLOWLISTED' "$PRODUCTION_FIXTURE_OUTPUT"
+  grep -Fq 'gcloud secrets versions access latest --secret DATABASE_URL' \
+    "$PRODUCTION_FIXTURE_LOG"
+  ! grep -Fq 'gcloud run jobs deploy' "$PRODUCTION_FIXTURE_LOG"
+  ! grep -Fq 'gcloud run jobs execute' "$PRODUCTION_FIXTURE_LOG"
+  ! grep -Fq 'gcloud run deploy' "$PRODUCTION_FIXTURE_LOG"
+  ! grep -Fq 'gcloud run services update-traffic' "$PRODUCTION_FIXTURE_LOG"
+  rm -rf "$temp_dir"
+}
+
+production_valid_database_name_passes_allowlist_and_reaches_migration_job() {
+  local temp_dir
+
+  temp_dir="$(mktemp -d)"
+  prepare_production_wrapper_fixture "$temp_dir"
+  PRODUCTION_FIXTURE_MIGRATION_STATUS_ONLY="1"
+  PRODUCTION_FIXTURE_DATABASE_NAME="shipmastr_prod"
+
+  execute_production_wrapper_fixture
+
+  grep -Fq 'Production DB target verified: database=shipmastr_prod' \
+    "$PRODUCTION_FIXTURE_OUTPUT"
+  grep -Fq 'gcloud run jobs deploy' "$PRODUCTION_FIXTURE_LOG"
+  grep -Fq 'gcloud run jobs execute' "$PRODUCTION_FIXTURE_LOG"
   rm -rf "$temp_dir"
 }
 
@@ -2417,15 +2461,17 @@ function run(databaseName) {
         ...process.env,
         DATABASE_URL_TO_VERIFY:
           `postgresql://user:pass@localhost:5432/${databaseName}`,
-        PROD_DATABASE_NAME_ALLOWLIST: allowlist,
+        PROD_DATABASE_ALLOWLIST_TO_VERIFY: allowlist,
       },
     },
   );
 }
 
-const exactAllowed = run("shipmastr_prod");
-if (exactAllowed.status !== 0) {
-  process.exit(12);
+for (const allowedName of ["shipmastr", "shipmastr_prod", "shipmastr_production"]) {
+  const allowed = run(allowedName);
+  if (allowed.status !== 0) {
+    process.exit(12);
+  }
 }
 
 const deceptive = run("temporary_prod_copy");
@@ -2435,6 +2481,98 @@ if (deceptive.status === 0) {
 
 if (!deceptive.stderr.includes("DATABASE_NAME_NOT_ALLOWLISTED")) {
   process.exit(14);
+}
+JSTEST
+}
+
+production_database_allowlist_handoff_uses_new_variable_name() {
+  ! grep -Fq \
+    'PROD_DATABASE_NAME_ALLOWLIST="${PROD_DATABASE_NAME_ALLOWLIST}"' \
+    "$SCRIPT_DIR/deploy-prod.sh"
+
+  grep -Fq \
+    'PROD_DATABASE_ALLOWLIST_TO_VERIFY="${PROD_DATABASE_NAME_ALLOWLIST}"' \
+    "$SCRIPT_DIR/deploy-prod.sh"
+
+  grep -Fq \
+    'process.env.PROD_DATABASE_ALLOWLIST_TO_VERIFY' \
+    "$SCRIPT_DIR/deploy-prod.sh"
+
+  grep -Fq \
+    'readonly PROD_DATABASE_NAME_ALLOWLIST="shipmastr,shipmastr_prod,shipmastr_production"' \
+    "$SCRIPT_DIR/deploy-prod.sh"
+}
+
+old_readonly_handoff_pattern_reproduces_the_original_failure() {
+  local output
+
+  output="$(
+    bash -c '
+      readonly PROD_DATABASE_NAME_ALLOWLIST="shipmastr,shipmastr_prod,shipmastr_production"
+      set +e
+      PROD_DATABASE_NAME_ALLOWLIST="${PROD_DATABASE_NAME_ALLOWLIST}" true
+      exit 0
+    ' 2>&1
+  )"
+
+  [[ "$output" == *"PROD_DATABASE_NAME_ALLOWLIST: readonly variable"* ]]
+}
+
+production_database_non_production_names_rejected() {
+  node - "$SCRIPT_DIR/deploy-prod.sh" <<'JSTEST'
+const fs = require("node:fs");
+const { spawnSync } = require("node:child_process");
+
+const sourcePath = process.argv[2];
+const source = fs.readFileSync(sourcePath, "utf8");
+const startMarker = "node <<'NODE'\n";
+const endMarker = "\nNODE\n";
+
+const start = source.indexOf(startMarker);
+if (start < 0) {
+  process.exit(10);
+}
+
+const bodyStart = start + startMarker.length;
+const end = source.indexOf(endMarker, bodyStart);
+if (end < 0) {
+  process.exit(11);
+}
+
+const validator = source.slice(bodyStart, end);
+const allowlist = "shipmastr,shipmastr_prod,shipmastr_production";
+
+function run(databaseName) {
+  return spawnSync(
+    process.execPath,
+    ["-e", validator],
+    {
+      encoding: "utf8",
+      env: {
+        ...process.env,
+        DATABASE_URL_TO_VERIFY:
+          `postgresql://user:pass@localhost:5432/${databaseName}`,
+        PROD_DATABASE_ALLOWLIST_TO_VERIFY: allowlist,
+      },
+    },
+  );
+}
+
+const rejectedNames = [
+  "shipmastr_staging",
+  "shipmastr_development",
+  "shipmastr_test",
+  "shipmastr_scratch",
+];
+
+for (const name of rejectedNames) {
+  const result = run(name);
+  if (result.status === 0) {
+    process.exit(12);
+  }
+  if (!result.stderr.includes("NON_PRODUCTION_DATABASE_NAME")) {
+    process.exit(13);
+  }
 }
 JSTEST
 }
@@ -2604,6 +2742,10 @@ expect_pass production_dry_run_renders_without_secret_preflight \
   production_dry_run_renders_without_secret_preflight
 expect_pass production_normal_path_blocked_without_secret \
   production_normal_path_blocked_without_secret
+expect_pass production_non_allowlisted_database_blocks_migration_job \
+  production_non_allowlisted_database_blocks_migration_job
+expect_pass production_valid_database_name_passes_allowlist_and_reaches_migration_job \
+  production_valid_database_name_passes_allowlist_and_reaches_migration_job
 expect_pass evidence_v2_valid evidence_v2_valid
 expect_fail evidence_duplicate_key_rejected evidence_duplicate_key_rejected
 expect_fail evidence_unknown_key_rejected evidence_unknown_key_rejected
@@ -2642,6 +2784,12 @@ expect_pass canonical_origin_positive canonical_origin_positive
 expect_fail canonical_origin_rejects_noncanonical_url   canonical_origin_rejects_noncanonical_url
 expect_fail canonical_origin_rejects_url_rewrite   canonical_origin_rejects_url_rewrite
 expect_pass production_database_allowlist_is_strict   production_database_allowlist_is_strict
+expect_pass production_database_allowlist_handoff_uses_new_variable_name \
+  production_database_allowlist_handoff_uses_new_variable_name
+expect_pass old_readonly_handoff_pattern_reproduces_the_original_failure \
+  old_readonly_handoff_pattern_reproduces_the_original_failure
+expect_pass production_database_non_production_names_rejected \
+  production_database_non_production_names_rejected
 
 echo "I5B1_GOVERNANCE_TEST_COUNT=$pass_count"
 echo "I5B1_GOVERNANCE_TESTS=PASS"
