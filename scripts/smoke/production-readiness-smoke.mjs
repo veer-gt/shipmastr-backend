@@ -1,10 +1,8 @@
 #!/usr/bin/env node
-import { existsSync, readFileSync, readdirSync, statSync } from "node:fs";
-import { resolve } from "node:path";
-
-const root = resolve(process.cwd(), "..");
-const backend = process.cwd();
-const sellerPanel = resolve(root, "seller-panel");
+import {
+  getBundledProductionReadinessEvidence,
+  productionReadinessAttestation
+} from "../../dist/modules/productionReadiness/production-readiness.attestation.js";
 
 function boolEnv(name, fallback = false) {
   const value = process.env[name];
@@ -17,30 +15,11 @@ function stringEnv(name, fallback = "") {
   return value == null || value === "" ? fallback : String(value).trim();
 }
 
-function readFiles(dir, predicate, files = []) {
-  if (!existsSync(dir)) return files;
-  for (const entry of readdirSync(dir)) {
-    const path = resolve(dir, entry);
-    const stat = statSync(path);
-    if (stat.isDirectory()) readFiles(path, predicate, files);
-    else if (predicate(path)) files.push(path);
-  }
-  return files;
-}
-
-function countMatches(paths, pattern) {
-  const matches = [];
-  for (const path of paths) {
-    const text = readFileSync(path, "utf8");
-    if (pattern.test(text)) matches.push(path);
-  }
-  return matches;
-}
-
 export function buildProductionReadinessSmokeReport(source = process.env) {
+  const readinessEvidence = getBundledProductionReadinessEvidence();
   const docs = {
-    betaAudit: existsSync(resolve(root, "docs/shipping/phase-30-end-to-end-merchant-shipping-beta-audit.md")),
-    productionRunbook: existsSync(resolve(root, "docs/shipping/phase-39-production-deployment-runbook-smoke-test.md"))
+    betaAudit: readinessEvidence.phase30DocumentPresent,
+    productionRunbook: readinessEvidence.phase39DocumentPresent
   };
   const liveFlags = {
     workersEnabled: boolEnvFrom(source, "SHIPMASTR_WORKERS_ENABLED", false),
@@ -72,6 +51,7 @@ export function buildProductionReadinessSmokeReport(source = process.env) {
   const allowlistConfigured = Boolean(stringEnvFrom(source, "SHIPMASTR_LIVE_MERCHANT_ALLOWLIST", ""));
   const hardStops = [];
 
+  if (!readinessEvidence.attestationValid) hardStops.push("INVALID_BUNDLED_READINESS_ATTESTATION");
   if (!docs.betaAudit) hardStops.push("MISSING_PHASE_30_BETA_AUDIT_DOC");
   if (!docs.productionRunbook) hardStops.push("MISSING_PHASE_39_PRODUCTION_RUNBOOK_DOC");
   if (liveFlags.workersEnabled && !liveFlags.workerDryRun && !approvals.productionDeploy) hardStops.push("WORKERS_ACTIVE_WITHOUT_DEPLOY_APPROVAL");
@@ -83,15 +63,26 @@ export function buildProductionReadinessSmokeReport(source = process.env) {
   if (liveFlags.liveCourierRatesEnabled && liveFlags.liveCourierRatesMode === "LIVE" && (!approvals.liveCourier || !allowlistConfigured)) hardStops.push("LIVE_RATES_WITHOUT_APPROVAL_OR_ALLOWLIST");
   if (liveFlags.liveAwbLabelEnabled && liveFlags.liveAwbLabelMode === "LIVE" && (!approvals.liveCourier || !allowlistConfigured)) hardStops.push("LIVE_AWB_LABEL_WITHOUT_APPROVAL_OR_ALLOWLIST");
   if (liveFlags.courierRealCallsEnabled && !approvals.liveCourier) hardStops.push("COURIER_REAL_CALLS_WITHOUT_APPROVAL");
-
-  const sellerFiles = readFiles(resolve(sellerPanel, "src"), (path) => /\.(jsx?|css)$/.test(path));
-  const sellerUnsafeProviderMatches = countMatches(sellerFiles, /\bBigship\b|bigship/);
-  if (sellerUnsafeProviderMatches.length) hardStops.push("SELLER_UI_PROVIDER_NAME_LEAK_RISK");
+  if (!readinessEvidence.sellerUiProviderScanPassed) hardStops.push("SELLER_UI_PROVIDER_NAME_LEAK_RISK");
 
   return {
     verdict: hardStops.length ? "HARD_STOP" : "READY_WITH_LIMITED_MOCKS",
     checked_at: new Date().toISOString(),
     docs,
+    attestation: {
+      valid: readinessEvidence.attestationValid,
+      schema_version: productionReadinessAttestation.schemaVersion,
+      source_root_commit: productionReadinessAttestation.sourceRootCommit,
+      backend_base_commit: productionReadinessAttestation.backendBaseCommit,
+      phase_30_sha256: productionReadinessAttestation.documents.phase30BetaAudit.sha256,
+      phase_39_sha256: productionReadinessAttestation.documents.phase39ProductionRunbook.sha256,
+      seller_ui_provider_scan: {
+        passed: readinessEvidence.sellerUiProviderScanPassed,
+        scanned_files: productionReadinessAttestation.sellerUiProviderScan.scannedFiles,
+        tree_sha256: productionReadinessAttestation.sellerUiProviderScan.treeSha256,
+        provider_leak_hits: productionReadinessAttestation.sellerUiProviderScan.providerLeakHits
+      }
+    },
     live_flags: {
       workers: liveFlags.workersEnabled ? (liveFlags.workerDryRun ? "DRY_RUN" : "ACTIVE") : "DISABLED",
       scheduler: liveFlags.schedulerEnabled ? "ENABLED" : "DISABLED",
@@ -105,6 +96,7 @@ export function buildProductionReadinessSmokeReport(source = process.env) {
     allowlist_configured: allowlistConfigured,
     hard_stops: hardStops,
     smoke_checks: [
+      "bundled_readiness_attestation_valid",
       "readiness_report_reachable_by_api_contract",
       "pilot_merchant_allowlist_gate_present",
       "credential_readiness_gate_present",
@@ -117,6 +109,7 @@ export function buildProductionReadinessSmokeReport(source = process.env) {
       "live_rates_blocked_without_pilot_approval",
       "live_awb_label_blocked_without_pilot_approval",
       "tracking_sync_blocked_without_pilot_approval",
+      "seller_ui_provider_scan_attested",
       "public_serializers_redact_unsafe_values"
     ]
   };
