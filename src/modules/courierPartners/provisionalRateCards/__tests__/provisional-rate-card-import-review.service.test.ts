@@ -106,8 +106,9 @@ describe("provisional rate card import and review workflow", () => {
   });
 
   it("approve-internal never makes benchmark cards official or settlement-grade", () => {
-    const imported = importProvisionalRateCard(sampleTemplate(), "admin-user");
-    const approved = approveInternalProvisionalRateCard(imported.id, "reviewer-user");
+    const now = new Date("2026-06-21T00:00:00.000Z");
+    const imported = importProvisionalRateCard(sampleTemplate(), "admin-user", now);
+    const approved = approveInternalProvisionalRateCard(imported.id, "reviewer-user", now);
 
     assert.equal(approved.reviewStatus, "APPROVED_INTERNAL");
     assert.equal(approved.status, "ACTIVE_INTERNAL");
@@ -212,8 +213,9 @@ describe("provisional rate card import and review workflow", () => {
   });
 
   it("blocks seller-facing simulations whenever benchmark data is hidden from sellers", () => {
-    const imported = importProvisionalRateCard(sampleTemplate(), "admin-user");
-    const approved = approveInternalProvisionalRateCard(imported.id, "reviewer-user");
+    const now = new Date("2026-06-21T00:00:00.000Z");
+    const imported = importProvisionalRateCard(sampleTemplate(), "admin-user", now);
+    const approved = approveInternalProvisionalRateCard(imported.id, "reviewer-user", now);
 
     assert.equal(approved.status, "ACTIVE_INTERNAL");
     assert.equal(approved.publicSellerVisible, false);
@@ -223,7 +225,7 @@ describe("provisional rate card import and review workflow", () => {
       zoneCode: "WITHIN_CITY",
       weightKg: 0.5,
       sellerFacing: true
-    });
+    }, now);
 
     assert.equal(simulation.status, "BLOCKED");
     assert.equal(simulation.blockerCode, "BENCHMARK_ONLY_NOT_PUBLIC_SELLER_VISIBLE");
