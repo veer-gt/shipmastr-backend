@@ -6,13 +6,12 @@ import {
   Prisma,
   ShipmentStatus
 } from "@prisma/client";
-import { existsSync } from "node:fs";
-import { resolve } from "node:path";
 import { env } from "../../config/env.js";
 import { prisma } from "../../lib/prisma.js";
 import { getCredentialVaultReadiness } from "../credentialVault/credential-vault.service.js";
 import { getEmailDeliveryReadiness } from "../emailDelivery/email-delivery.service.js";
 import { getLivePilotReadinessSnapshot } from "../livePilot/live-pilot.service.js";
+import { getBundledProductionReadinessEvidence } from "../productionReadiness/production-readiness.attestation.js";
 import { buildProductionReadinessReport } from "../productionReadiness/production-readiness.rules.js";
 import { getLiveAwbLabelRuntime } from "../shippingNetwork/shipping-live-ship-gate.service.js";
 import { getLiveCourierRatesReadiness } from "../shippingNetwork/shipping-live-rates-gate.service.js";
@@ -68,10 +67,6 @@ function stringValue(source: Source, key: string, fallback = "") {
   const value = source[key];
   if (value === undefined || value === null) return fallback;
   return String(value).trim() || fallback;
-}
-
-function docExists(path: string) {
-  return existsSync(resolve(process.cwd(), path)) || existsSync(resolve(process.cwd(), "..", path));
 }
 
 function checkStatus(checks: PilotLaunchCheck[]): Exclude<PilotLaunchStatus, "NOT_APPLICABLE"> {
@@ -207,6 +202,7 @@ export async function buildPilotLaunchReport(
   const checkedAt = options.checkedAt instanceof Date
     ? options.checkedAt.toISOString()
     : options.checkedAt ?? new Date().toISOString();
+  const readinessEvidence = getBundledProductionReadinessEvidence();
   const [pilot, counts, credentialVault, emailReadiness, liveRates] = await Promise.all([
     getLivePilotReadinessSnapshot(merchantId, client),
     merchantCounts(merchantId, client),
@@ -216,7 +212,7 @@ export async function buildPilotLaunchReport(
   ]);
   const productionReadiness = buildProductionReadinessReport(source, {
     checkedAt,
-    betaAuditDocExists: docExists("docs/shipping/phase-30-end-to-end-merchant-shipping-beta-audit.md"),
+    betaAuditDocExists: readinessEvidence.phase30DocumentPresent,
     pilotReadiness: pilot
   });
   const awbRuntime = getLiveAwbLabelRuntime(source);
@@ -234,7 +230,7 @@ export async function buildPilotLaunchReport(
   const approvedCapabilities = pilot.approvedCapabilities;
   const hasCapability = (capability: string) => enabledCapabilities.includes(capability as never);
   const hasApproval = (capability: string) => approvedCapabilities.includes(capability as never);
-  const smokeDocExists = docExists("docs/shipping/phase-39-production-deployment-runbook-smoke-test.md");
+  const smokeDocExists = readinessEvidence.phase39DocumentPresent;
 
   const categories = [
     category("merchant_gate", "Merchant Gate", [

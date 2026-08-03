@@ -2,6 +2,10 @@ export const SCRATCH_PATTERN = /^shipmastr_scratch_[a-zA-Z0-9_]+$/;
 export const PROTECTED_DATABASES = new Set([
   "postgres", "template0", "template1", "shipmastr_dev", "shipmastr", "shipmastr_prod", "production", "staging"
 ]);
+export const SCRATCH_OWNER_PATTERN = /^[a-zA-Z_][a-zA-Z0-9_]*$/;
+export const FORBIDDEN_SCRATCH_OWNERS = new Set([
+  "postgres", "cloudsqladmin", "rdsadmin"
+]);
 
 export function assertScratchName(name) {
   if (typeof name !== "string" || !SCRATCH_PATTERN.test(name) || name === "shipmastr_scratch_") {
@@ -14,6 +18,16 @@ export function assertScratchName(name) {
 export function assertDropTarget(name) {
   if (PROTECTED_DATABASES.has(name)) throw new Error(`Protected database name refused: ${name}`);
   return assertScratchName(name);
+}
+
+export function assertScratchOwner(owner) {
+  if (typeof owner !== "string" || !SCRATCH_OWNER_PATTERN.test(owner)) {
+    throw new Error("Scratch database owner must be a simple PostgreSQL role identifier");
+  }
+  if (FORBIDDEN_SCRATCH_OWNERS.has(owner.toLowerCase())) {
+    throw new Error(`Privileged scratch database owner refused: ${owner}`);
+  }
+  return owner;
 }
 
 export function assertLocalDatabaseUrl(value) {

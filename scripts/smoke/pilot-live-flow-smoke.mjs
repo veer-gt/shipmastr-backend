@@ -5,6 +5,7 @@ const report = buildProductionReadinessSmokeReport();
 const flow = {
   verdict: report.verdict,
   checked_at: report.checked_at,
+  attestation: report.attestation,
   controlled_pilot_flow: [
     "connect_store",
     "credentials_ready",

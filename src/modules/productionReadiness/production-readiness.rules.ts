@@ -1,7 +1,6 @@
-import { existsSync } from "node:fs";
-import { resolve } from "node:path";
 import { env } from "../../config/env.js";
 import { getCredentialVaultRuntime } from "../credentialVault/credential-vault.providers.js";
+import { getBundledProductionReadinessEvidence } from "./production-readiness.attestation.js";
 import type {
   LiveEnablementStep,
   ProductionReadinessCategory,
@@ -158,11 +157,6 @@ function category(key: string, label: string, checks: ProductionReadinessCheck[]
   return { key, label, status, checks };
 }
 
-function migrationDocExists() {
-  return existsSync(resolve(process.cwd(), "../docs/shipping/phase-30-end-to-end-merchant-shipping-beta-audit.md"))
-    || existsSync(resolve(process.cwd(), "docs/shipping/phase-30-end-to-end-merchant-shipping-beta-audit.md"));
-}
-
 export function productionReadinessPlan() {
   return livePlan;
 }
@@ -245,7 +239,8 @@ export function buildProductionReadinessReport(
   };
   const merchantAllowlistConfigured = Boolean(stringValue(source, "SHIPMASTR_LIVE_MERCHANT_ALLOWLIST"))
     || pilotReadiness.allowlisted;
-  const betaDocExists = options.betaAuditDocExists ?? migrationDocExists();
+  const betaDocExists = options.betaAuditDocExists
+    ?? getBundledProductionReadinessEvidence().phase30DocumentPresent;
 
   const categories = [
     category("beta_audit", "Beta Audit", [

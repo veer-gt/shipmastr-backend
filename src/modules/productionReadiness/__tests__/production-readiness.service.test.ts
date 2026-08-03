@@ -1,6 +1,10 @@
 import assert from "node:assert/strict";
 import { readFileSync } from "node:fs";
 import { describe, it } from "node:test";
+import {
+  getBundledProductionReadinessEvidence,
+  productionReadinessAttestation
+} from "../production-readiness.attestation.js";
 import { buildProductionReadinessReport } from "../production-readiness.rules.js";
 import {
   serializeLiveEnablementPlan,
@@ -42,6 +46,26 @@ function json(value: unknown) {
 }
 
 describe("production readiness gate", () => {
+  it("uses bundled immutable Phase 30 evidence when no test override is supplied", () => {
+    const evidence = getBundledProductionReadinessEvidence();
+    const readiness = buildProductionReadinessReport(baseSource, {
+      checkedAt: "2026-06-09T00:00:00.000Z"
+    });
+    assert.equal(evidence.attestationValid, true);
+    assert.equal(evidence.phase30DocumentPresent, true);
+    assert.equal(productionReadinessAttestation.sourceRootCommit, "71a44cd93ef9b0dced6712150f48ca7b0db376c3");
+    assert.doesNotMatch(json(readiness), /MISSING_BETA_AUDIT_DOC/);
+  });
+
+  it("keeps an explicit missing Phase 30 evidence override fail-closed", () => {
+    const readiness = buildProductionReadinessReport(baseSource, {
+      checkedAt: "2026-06-09T00:00:00.000Z",
+      betaAuditDocExists: false
+    });
+    assert.equal(readiness.verdict, "BLOCKED");
+    assert.match(json(readiness), /MISSING_BETA_AUDIT_DOC/);
+  });
+
   it("defaults to controlled beta with limited mocks and not live-ready", () => {
     const readiness = report();
     assert.equal(readiness.verdict, "READY_WITH_LIMITED_MOCKS");
@@ -378,4 +402,12 @@ describe("production readiness gate", () => {
     const combined = `${service}\n${rules}`;
     assert.doesNotMatch(combined, /prisma|fetch\(|axios|sendMail|nodemailer|createLabel|getLabel|manifestOrder|getRates|shipNow|createShipment|setInterval|cron/i);
   });
+  it("runtime readiness code does not probe sibling source trees", () => {
+    const rules = readFileSync("src/modules/productionReadiness/production-readiness.rules.ts", "utf8");
+    const pilot = readFileSync("src/modules/pilotLaunch/pilot-launch.service.ts", "utf8");
+    const smoke = readFileSync("scripts/smoke/production-readiness-smoke.mjs", "utf8");
+    const combined = `${rules}\n${pilot}\n${smoke}`;
+    assert.doesNotMatch(combined, /existsSync|readdirSync|statSync|process\.cwd\(\)/i);
+  });
+
 });
