@@ -36,6 +36,7 @@
     "self-test:weight-guard:gcs-signed-url": "node scripts/weight-guard-gcs-signed-url-self-test.cjs",
     "self-test:weight-guard:gcs-put-head": "node scripts/weight-guard-gcs-put-head-self-test.cjs",
     "seed:local-admin": "node scripts/seed-local-admin.mjs",
+    "owner:reconcile-master-admin": "npm run build && node scripts/reconcile-shipmastr-owner-master-admin.mjs",
     "seed:storefront-demo": "node scripts/seed-storefront-demo.mjs",
     "storefront:migrate-base64-assets": "node scripts/migrate-storefront-base64-assets.mjs",
     "storefront:verify-zero-base64": "node scripts/verify-zero-base64-storefront-theme.mjs"

@@ -25,9 +25,11 @@ export function isInternalMasterAdminUser(user?: {
   role?: string | null;
   userType?: string | null;
 } | null) {
-  if (!user || String(user.userType || "").toUpperCase() !== "INTERNAL_SHIPMASTR") return false;
-  if (String(user.role || "").toUpperCase() === "MASTER_ADMIN") return true;
-  return isProtectedMasterAdminEmail(user.email);
+  return Boolean(
+    user
+    && String(user.userType || "").toUpperCase() === "INTERNAL_SHIPMASTR"
+    && String(user.role || "").toUpperCase() === "MASTER_ADMIN"
+  );
 }
 
 export function isInternalAdminUser(user?: {

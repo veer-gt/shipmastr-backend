@@ -2,7 +2,7 @@ import type { Request, Response, NextFunction } from "express";
 import jwt from "jsonwebtoken";
 import { env } from "../config/env.js";
 import { canonicalRoleForAccount, isAdminRole, isCourierRole, normalizeAccountRole, UserRole } from "../lib/accountRoles.js";
-import { isInternalAdminUser, isInternalMasterAdminUser } from "../lib/masterAdmin.js";
+import { isInternalAdminUser, isInternalMasterAdminUser, isProtectedMasterAdminEmail } from "../lib/masterAdmin.js";
 import { prisma } from "../lib/prisma.js";
 import { fixtureAuthenticationAllowed } from "../modules/securityFixtures/h2a-staging-tenant.service.js";
 
@@ -104,7 +104,7 @@ export function requireMasterAdminJwt(req: Request, res: Response, next: NextFun
       },
     });
 
-    if (!user || !isInternalMasterAdminUser(user)) {
+    if (!user || !isInternalAdminUser(user)) {
       return res.status(403).json({ error: "INTERNAL_ADMIN_ONLY" });
     }
 
@@ -114,8 +114,14 @@ export function requireMasterAdminJwt(req: Request, res: Response, next: NextFun
       role: canonicalRoleForAccount(user),
     };
 
-    if (req.auth.role !== UserRole.MASTER_ADMIN) {
-      return res.status(403).json({ error: "MASTER_ADMIN_ONLY" });
+    if (
+      !isInternalMasterAdminUser(user)
+      || req.auth.role !== UserRole.MASTER_ADMIN
+    ) {
+      const error = isProtectedMasterAdminEmail(user.email)
+        ? "MASTER_ADMIN_ONLY"
+        : "INTERNAL_ADMIN_ONLY";
+      return res.status(403).json({ error });
     }
 
     next();
