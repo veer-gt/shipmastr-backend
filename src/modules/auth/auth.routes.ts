@@ -8,7 +8,6 @@ import { env } from "../../config/env.js";
 import { HttpError } from "../../lib/httpError.js";
 import { emailTemplates, sendTransactionalEmail } from "../../lib/email.js";
 import { ActorType, actorTypeForAccount, canonicalRoleForAccount, dashboardPathForRole, normalizeAccountRole, UserRole } from "../../lib/accountRoles.js";
-import { isProtectedMasterAdminEmail } from "../../lib/masterAdmin.js";
 import admin from "../../lib/firebase.js";
 import { changePasswordForAccount, type PasswordAccount } from "./change-password.service.js";
 import { requestPasswordReset, resetPasswordWithToken, verifyPasswordResetToken } from "./password-reset.service.js";
@@ -625,19 +624,6 @@ authRouter.post("/login", async (req, res) => {
     throw new HttpError(400, "INVALID_LOGIN");
   }
 
-  if (
-    isProtectedMasterAdminEmail(user.email) &&
-    (String(user.role).toUpperCase() !== "MASTER_ADMIN" || String(user.userType || "").toUpperCase() !== "INTERNAL_SHIPMASTR")
-  ) {
-    user = await prisma.user.update({
-      where: { id: user.id },
-      data: {
-        role: "MASTER_ADMIN",
-        userType: "INTERNAL_SHIPMASTR"
-      },
-      include: { merchant: true }
-    });
-  }
 
   const password = await verifyPasswordAndMaybeRehash(body.password, user.passwordHash);
 
