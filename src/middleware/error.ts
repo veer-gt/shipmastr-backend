@@ -58,6 +58,12 @@ type HttpErrorSnapshot = {
   publicDetails: PublicErrorDetails | undefined;
 };
 
+function isTrustedPublicDetails(value: unknown): value is PublicErrorDetails {
+  return isPublicErrorDetails(value)
+    && Object.isFrozen(value)
+    && Object.values(value).every((entry) => !Array.isArray(entry) || Object.isFrozen(entry));
+}
+
 function snapshotHttpError(err: HttpError): HttpErrorSnapshot | undefined {
   if (isProxy(err)) return undefined;
 
@@ -90,7 +96,10 @@ function snapshotHttpError(err: HttpError): HttpErrorSnapshot | undefined {
       if (
         publicDetailsDescriptor
         && "value" in publicDetailsDescriptor
-        && isPublicErrorDetails(publicDetailsDescriptor.value)
+        && publicDetailsDescriptor.writable === false
+        && publicDetailsDescriptor.enumerable
+        && publicDetailsDescriptor.configurable === false
+        && isTrustedPublicDetails(publicDetailsDescriptor.value)
       ) {
         publicDetails = publicDetailsDescriptor.value;
       }

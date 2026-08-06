@@ -581,6 +581,44 @@ describe("errorHandler", () => {
     }, () => error);
   });
 
+  it("fails closed for mutable runtime public details before warning callbacks can mutate them", async () => {
+    const sentinel = "postgresql://logger-mutation:password@internal.invalid/private?token=sk-public-details";
+    const details: { field: string; reasons: string[]; token?: string } = {
+      field: "externalOrderId",
+      reasons: ["duplicate"]
+    };
+    const error = Object.create(PublicHttpError.prototype) as PublicHttpError;
+    Object.defineProperties(error, {
+      status: { value: 409, writable: true, enumerable: true, configurable: true },
+      message: { value: "ORDER_ALREADY_EXISTS", writable: true, enumerable: false, configurable: true },
+      details: { value: details, writable: true, enumerable: true, configurable: true },
+      publicDetails: { value: details, writable: true, enumerable: true, configurable: true }
+    });
+    const warnings: unknown[][] = [];
+    const originalWarn = logger.warn;
+    logger.warn = ((...args: unknown[]) => {
+      details.field = sentinel;
+      details.reasons[0] = sentinel;
+      details.token = sentinel;
+      warnings.push(args);
+    }) as typeof logger.warn;
+
+    try {
+      await withApp(async (baseUrl) => {
+        const response = await fetch(`${baseUrl}/failure`);
+        const body = await response.json();
+
+        assert.equal(response.status, 409);
+        assert.deepEqual(body, {
+          error: "ORDER_ALREADY_EXISTS"
+        });
+        assert.equal(JSON.stringify({ body, warnings }).includes(sentinel), false);
+      }, () => error);
+    } finally {
+      logger.warn = originalWarn;
+    }
+  });
+
   it("fails closed when PublicHttpError details are invalid at runtime", async () => {
     const error = new PublicHttpError(400, "INVALID_PUBLIC_DETAILS", {
       field: { secret: "internal" }
