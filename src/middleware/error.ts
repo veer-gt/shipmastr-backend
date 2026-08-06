@@ -2,7 +2,12 @@ import type { ErrorRequestHandler } from "express";
 import { isProxy } from "node:util/types";
 import { Prisma } from "@prisma/client";
 import { ZodError } from "zod";
-import { HttpError, PublicHttpError } from "../lib/httpError.js";
+import {
+  HttpError,
+  PublicHttpError,
+  isPublicErrorDetails,
+  type PublicErrorDetails
+} from "../lib/httpError.js";
 import { logger } from "../lib/logger.js";
 import { clientNetworkKey } from "../lib/client-network.js";
 
@@ -13,6 +18,7 @@ const HTTP_DETAIL_KEY_ALLOWLIST = new Set([
 const MAX_LOGGED_NAMES = 12;
 const MAX_SCHEMA_NAME_LENGTH = 64;
 const MAX_SCHEMA_FIELDS = 12;
+const UNINSPECTABLE_HTTP_DETAILS = Object.freeze({ type: "uninspectable" as const });
 
 const schemaModels = new Map(Prisma.dmmf.datamodel.models.map((model) => [
   model.name,
@@ -29,6 +35,7 @@ function detailType(value: unknown) {
 
 function summarizeHttpDetails(value: unknown) {
   try {
+    if (isProxy(value)) return UNINSPECTABLE_HTTP_DETAILS;
     const type = detailType(value);
     if (Array.isArray(value)) return { type, itemCount: value.length };
     if (!value || typeof value !== "object") return { type };
@@ -39,7 +46,65 @@ function summarizeHttpDetails(value: unknown) {
       keys: keys.filter((key) => HTTP_DETAIL_KEY_ALLOWLIST.has(key)).slice(0, MAX_LOGGED_NAMES)
     };
   } catch {
-    return { type: "uninspectable" };
+    return UNINSPECTABLE_HTTP_DETAILS;
+  }
+}
+
+type HttpErrorSnapshot = {
+  status: number;
+  message: string;
+  details: unknown;
+  detailsInspectable: boolean;
+  publicDetails: PublicErrorDetails | undefined;
+};
+
+function snapshotHttpError(err: HttpError): HttpErrorSnapshot | undefined {
+  if (isProxy(err)) return undefined;
+
+  try {
+    const descriptors = Object.getOwnPropertyDescriptors(err);
+    const statusDescriptor = descriptors.status;
+    const messageDescriptor = descriptors.message;
+    if (
+      !statusDescriptor
+      || !("value" in statusDescriptor)
+      || typeof statusDescriptor.value !== "number"
+      || !Number.isInteger(statusDescriptor.value)
+      || statusDescriptor.value < 400
+      || statusDescriptor.value > 599
+      || !messageDescriptor
+      || !("value" in messageDescriptor)
+      || typeof messageDescriptor.value !== "string"
+    ) return undefined;
+
+    const detailsDescriptor = descriptors.details;
+    let details: unknown;
+    let detailsInspectable = false;
+    if (detailsDescriptor && "value" in detailsDescriptor) {
+      details = detailsDescriptor.value;
+      detailsInspectable = true;
+    }
+    let publicDetails: PublicErrorDetails | undefined;
+    if (err instanceof PublicHttpError) {
+      const publicDetailsDescriptor = descriptors.publicDetails;
+      if (
+        publicDetailsDescriptor
+        && "value" in publicDetailsDescriptor
+        && isPublicErrorDetails(publicDetailsDescriptor.value)
+      ) {
+        publicDetails = publicDetailsDescriptor.value;
+      }
+    }
+
+    return {
+      status: statusDescriptor.value,
+      message: messageDescriptor.value,
+      details,
+      detailsInspectable,
+      publicDetails
+    };
+  } catch {
+    return undefined;
   }
 }
 
@@ -108,21 +173,27 @@ export const errorHandler: ErrorRequestHandler = (err, req, res, _next) => {
   }
 
   if (err instanceof HttpError) {
+    const snapshot = snapshotHttpError(err);
+    const status = snapshot?.status ?? 500;
+    const message = snapshot?.message ?? "INTERNAL_SERVER_ERROR";
+    const details = snapshot?.detailsInspectable
+      ? summarizeHttpDetails(snapshot.details)
+      : UNINSPECTABLE_HTTP_DETAILS;
     logger.warn({
       security: {
         event: "request_http_error_rejected",
-        status: err.status,
-        code: err.message,
+        status,
+        code: message,
         method: req.method,
         route: req.originalUrl.split("?")[0],
         truncatedNetworkIdentifier: clientNetworkKey(req),
-        details: summarizeHttpDetails(err.details)
+        details
       }
     }, "HTTP request rejected");
-    const body = err instanceof PublicHttpError && err.publicDetails
-      ? { error: err.message, details: err.publicDetails }
-      : { error: err.message };
-    return res.status(err.status).json(body);
+    const body = snapshot?.publicDetails
+      ? { error: message, details: snapshot.publicDetails }
+      : { error: message };
+    return res.status(status).json(body);
   }
 
   if (err instanceof Prisma.PrismaClientKnownRequestError) {
@@ -138,13 +209,19 @@ export const errorHandler: ErrorRequestHandler = (err, req, res, _next) => {
     }
 
     if (code === "P2002") {
+      let meta: unknown;
+      try {
+        meta = err.meta;
+      } catch {
+        meta = undefined;
+      }
       logger.warn({
         security: {
           event: "database_unique_constraint_rejected",
           method: req.method,
           route: req.originalUrl.split("?")[0],
           truncatedNetworkIdentifier: clientNetworkKey(req),
-          ...summarizePrismaUniqueConstraint(err.meta)
+          ...summarizePrismaUniqueConstraint(meta)
         }
       }, "Database unique constraint rejected");
       return res.status(409).json({ error: "UNIQUE_CONSTRAINT_VIOLATION" });

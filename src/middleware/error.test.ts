@@ -420,6 +420,155 @@ describe("errorHandler", () => {
     });
   });
 
+  it("rejects a proxied HttpError details array before its length trap runs", async () => {
+    const sentinel = "sk-http-array-length-trap-sentinel";
+    let lengthReads = 0;
+    const details = new Proxy(["safe"], {
+      get(target, property, receiver) {
+        if (property === "length") {
+          lengthReads += 1;
+          return sentinel;
+        }
+        return Reflect.get(target, property, receiver);
+      }
+    });
+    const error = new HttpError(409, "ORDER_ALREADY_EXISTS", details);
+
+    await captureWarnings(async (warnings) => {
+      await withApp(async (baseUrl) => {
+        const response = await fetch(`${baseUrl}/failure`);
+
+        assert.equal(response.status, 409);
+        assert.deepEqual(await response.json(), { error: "ORDER_ALREADY_EXISTS" });
+      }, () => error);
+
+      assert.equal(lengthReads, 0);
+      assert.equal(JSON.stringify(warnings).includes(sentinel), false);
+      assert.deepEqual((warnings[0]?.[0] as {
+        security?: { details?: unknown };
+      }).security?.details, { type: "uninspectable" });
+    });
+  });
+
+  it("rejects a proxied HttpError details object before its ownKeys trap runs", async () => {
+    const sentinel = "sk-http-object-own-keys-trap-sentinel";
+    let ownKeysReads = 0;
+    const details = new Proxy({ field: "email" }, {
+      ownKeys() {
+        ownKeysReads += 1;
+        throw new Error(sentinel);
+      }
+    });
+    const error = new HttpError(422, "INVALID_ORDER", details);
+
+    await captureWarnings(async (warnings) => {
+      await withApp(async (baseUrl) => {
+        const response = await fetch(`${baseUrl}/failure`);
+
+        assert.equal(response.status, 422);
+        assert.deepEqual(await response.json(), { error: "INVALID_ORDER" });
+      }, () => error);
+
+      assert.equal(ownKeysReads, 0);
+      assert.equal(JSON.stringify(warnings).includes(sentinel), false);
+      assert.deepEqual((warnings[0]?.[0] as {
+        security?: { details?: unknown };
+      }).security?.details, { type: "uninspectable" });
+    });
+  });
+
+  it("contains a throwing HttpError details accessor without invoking it", async () => {
+    const sentinel = "postgresql://details-getter:password@internal.invalid/private?token=sk-details-getter";
+    const error = new HttpError(422, "INVALID_ORDER");
+    let detailsReads = 0;
+    Object.defineProperty(error, "details", {
+      configurable: true,
+      enumerable: true,
+      get() {
+        detailsReads += 1;
+        throw new Error(sentinel);
+      }
+    });
+
+    await captureWarnings(async (warnings) => {
+      await withApp(async (baseUrl) => {
+        const response = await fetch(`${baseUrl}/failure`);
+
+        assert.equal(response.status, 422);
+        assert.deepEqual(await response.json(), { error: "INVALID_ORDER" });
+      }, () => error);
+
+      assert.equal(detailsReads, 0);
+      assert.equal(warnings.length, 1);
+      assert.equal(JSON.stringify(warnings).includes(sentinel), false);
+      const security = (warnings[0]?.[0] as {
+        security?: { status?: unknown; code?: unknown; details?: unknown };
+      }).security;
+      assert.equal(security?.status, 422);
+      assert.equal(security?.code, "INVALID_ORDER");
+      assert.deepEqual(security?.details, { type: "uninspectable" });
+    });
+  });
+
+  it("uses a fixed generic boundary for accessor-backed HttpError status and message", async () => {
+    const sentinel = "postgresql://http-accessor:password@internal.invalid/private?token=sk-http-accessor";
+    const error = new HttpError(409, "ORDER_ALREADY_EXISTS", { field: "email" });
+    let statusReads = 0;
+    let messageReads = 0;
+    Object.defineProperties(error, {
+      status: {
+        configurable: true,
+        enumerable: true,
+        get() {
+          statusReads += 1;
+          return statusReads === 1 ? 409 : 200;
+        }
+      },
+      message: {
+        configurable: true,
+        enumerable: false,
+        get() {
+          messageReads += 1;
+          return messageReads === 1 ? "ORDER_ALREADY_EXISTS" : sentinel;
+        }
+      }
+    });
+
+    await captureWarnings(async (warnings) => {
+      await withApp(async (baseUrl) => {
+        const response = await fetch(`${baseUrl}/failure?token=${encodeURIComponent(sentinel)}`);
+
+        assert.equal(response.status, 500);
+        assert.deepEqual(await response.json(), { error: "INTERNAL_SERVER_ERROR" });
+      }, () => error);
+
+      assert.equal(statusReads, 0);
+      assert.equal(messageReads, 0);
+      assert.equal(warnings.length, 1);
+      assert.equal(JSON.stringify(warnings).includes(sentinel), false);
+      const record = warnings[0]?.[0] as {
+        err?: unknown;
+        security?: {
+          event?: unknown;
+          status?: unknown;
+          code?: unknown;
+          method?: unknown;
+          route?: unknown;
+          truncatedNetworkIdentifier?: unknown;
+          details?: unknown;
+        };
+      };
+      assert.equal(Object.prototype.hasOwnProperty.call(record, "err"), false);
+      assert.equal(record.security?.event, "request_http_error_rejected");
+      assert.equal(record.security?.status, 500);
+      assert.equal(record.security?.code, "INTERNAL_SERVER_ERROR");
+      assert.equal(record.security?.method, "GET");
+      assert.equal(record.security?.route, "/failure");
+      assert.match(String(record.security?.truncatedNetworkIdentifier), /^[a-f0-9]{24}$/);
+      assert.deepEqual(record.security?.details, { type: "uninspectable" });
+    });
+  });
+
   it("returns validated PublicHttpError details unchanged", async () => {
     const details = { field: "externalOrderId", reasons: ["duplicate", 409, false, null] };
     const error = new PublicHttpError(409, "ORDER_ALREADY_EXISTS", details);
@@ -490,6 +639,46 @@ describe("errorHandler", () => {
       assert.match(String(warning.security?.truncatedNetworkIdentifier), /^[a-f0-9]{24}$/);
       assert.equal(warning.security?.model, "Merchant");
       assert.deepEqual(warning.security?.fields, ["email", "id"]);
+    });
+  });
+
+  it("contains a throwing outer P2002 meta getter after one guarded read", async () => {
+    const sentinel = "postgresql://meta-getter:password@internal.invalid/private?token=sk-meta-getter";
+    const error = p2002({ modelName: "Merchant", target: ["email"] });
+    let metaReads = 0;
+    Object.defineProperty(error, "meta", {
+      configurable: true,
+      enumerable: true,
+      get() {
+        metaReads += 1;
+        throw new Error(sentinel);
+      }
+    });
+
+    await captureWarnings(async (warnings) => {
+      await withApp(async (baseUrl) => {
+        const response = await fetch(`${baseUrl}/failure?token=${encodeURIComponent(sentinel)}`);
+
+        assert.equal(response.status, 409);
+        assert.deepEqual(await response.json(), { error: "UNIQUE_CONSTRAINT_VIOLATION" });
+      }, () => error);
+
+      assert.equal(metaReads, 1);
+      assert.equal(warnings.length, 1);
+      const serializedWarnings = JSON.stringify(warnings);
+      assert.equal(serializedWarnings.includes(sentinel), false);
+      assert.ok(serializedWarnings.length < 1024);
+      const security = (warnings[0]?.[0] as {
+        security?: Record<string, unknown>;
+      }).security;
+      assert.ok(security);
+      assert.equal(security.event, "database_unique_constraint_rejected");
+      assert.equal(security.method, "GET");
+      assert.equal(security.route, "/failure");
+      assert.match(String(security.truncatedNetworkIdentifier), /^[a-f0-9]{24}$/);
+      assert.equal("model" in security, false);
+      assert.equal("fields" in security, false);
+      assert.equal("constraint" in security, false);
     });
   });
 

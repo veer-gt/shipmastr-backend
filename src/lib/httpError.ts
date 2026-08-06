@@ -1,3 +1,5 @@
+import { isProxy } from "node:util/types";
+
 export class HttpError extends Error {
   status: number;
   details?: unknown;
@@ -19,15 +21,68 @@ function isPrimitive(value: unknown): value is PublicErrorPrimitive {
     || (typeof value === "number" && Number.isFinite(value));
 }
 
-export function isPublicErrorDetails(value: unknown): value is PublicErrorDetails {
-  try {
-    if (!value || typeof value !== "object" || Array.isArray(value) || Object.getPrototypeOf(value) !== Object.prototype) return false;
-    return Object.values(value).every((entry) =>
-      isPrimitive(entry) || (Array.isArray(entry) && entry.every(isPrimitive))
-    );
-  } catch {
-    return false;
+function snapshotPrimitiveArray(value: unknown): PublicErrorPrimitive[] | undefined {
+  if (!value || typeof value !== "object" || isProxy(value) || !Array.isArray(value)) return undefined;
+  if (Object.getPrototypeOf(value) !== Array.prototype) return undefined;
+
+  const lengthDescriptor = Object.getOwnPropertyDescriptor(value, "length");
+  if (
+    !lengthDescriptor
+    || !("value" in lengthDescriptor)
+    || lengthDescriptor.enumerable
+    || lengthDescriptor.configurable
+    || !Number.isSafeInteger(lengthDescriptor.value)
+    || lengthDescriptor.value < 0
+  ) return undefined;
+
+  const length = lengthDescriptor.value as number;
+  const ownKeys = Reflect.ownKeys(value);
+  if (ownKeys.length !== length + 1) return undefined;
+
+  const snapshot: PublicErrorPrimitive[] = [];
+  for (let index = 0; index < length; index += 1) {
+    const descriptor = Object.getOwnPropertyDescriptor(value, String(index));
+    if (!descriptor || !("value" in descriptor) || !descriptor.enumerable || !isPrimitive(descriptor.value)) {
+      return undefined;
+    }
+    snapshot.push(descriptor.value);
   }
+
+  Object.freeze(snapshot);
+  return snapshot;
+}
+
+function snapshotPublicErrorDetails(value: unknown): PublicErrorDetails | undefined {
+  try {
+    if (!value || typeof value !== "object" || isProxy(value) || Array.isArray(value)) return undefined;
+    if (Object.getPrototypeOf(value) !== Object.prototype) return undefined;
+
+    const snapshot: PublicErrorDetails = {};
+    for (const key of Reflect.ownKeys(value)) {
+      if (typeof key !== "string") return undefined;
+      const descriptor = Object.getOwnPropertyDescriptor(value, key);
+      if (!descriptor || !("value" in descriptor) || !descriptor.enumerable) return undefined;
+
+      const entry = descriptor.value;
+      const publicEntry = isPrimitive(entry) ? entry : snapshotPrimitiveArray(entry);
+      if (publicEntry === undefined) return undefined;
+      Object.defineProperty(snapshot, key, {
+        value: publicEntry,
+        writable: true,
+        enumerable: true,
+        configurable: true
+      });
+    }
+
+    Object.freeze(snapshot);
+    return snapshot;
+  } catch {
+    return undefined;
+  }
+}
+
+export function isPublicErrorDetails(value: unknown): value is PublicErrorDetails {
+  return snapshotPublicErrorDetails(value) !== undefined;
 }
 
 export class PublicHttpError extends HttpError {
@@ -35,6 +90,14 @@ export class PublicHttpError extends HttpError {
 
   constructor(status: number, message: string, details: PublicErrorDetails) {
     super(status, message, details);
-    if (isPublicErrorDetails(details)) this.publicDetails = details;
+    const publicDetails = snapshotPublicErrorDetails(details);
+    if (publicDetails) {
+      Object.defineProperty(this, "publicDetails", {
+        value: publicDetails,
+        writable: false,
+        enumerable: true,
+        configurable: false
+      });
+    }
   }
 }
