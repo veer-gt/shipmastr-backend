@@ -142,6 +142,18 @@ export const errorHandler: ErrorRequestHandler = (err, req, res, _next) => {
       }, "Database unique constraint rejected");
       return res.status(409).json({ error: "UNIQUE_CONSTRAINT_VIOLATION" });
     }
+
+    const code = err.code;
+    logger.error({
+      security: {
+        event: "database_request_failed",
+        code: typeof code === "string" && /^P[0-9]{4}$/.test(code) ? code : "UNKNOWN",
+        method: req.method,
+        route: req.originalUrl.split("?")[0],
+        truncatedNetworkIdentifier: clientNetworkKey(req)
+      }
+    }, "Database request failed");
+    return res.status(500).json({ error: "INTERNAL_SERVER_ERROR" });
   }
 
   if (isPayloadTooLargeError(err)) {

@@ -43,6 +43,14 @@ function p2002(meta: Record<string, unknown>) {
   });
 }
 
+function p2003(message: string, meta: Record<string, unknown>) {
+  return new Prisma.PrismaClientKnownRequestError(message, {
+    code: "P2003",
+    clientVersion: Prisma.prismaVersion.client,
+    meta
+  });
+}
+
 function p2025() {
   return new Prisma.PrismaClientKnownRequestError("missing", {
     code: "P2025",
@@ -123,6 +131,85 @@ describe("errorHandler", () => {
       assert.equal(response.status, 404);
       assert.deepEqual(await response.json(), { error: "NOT_FOUND" });
     }, p2025);
+  });
+
+  it("logs a bounded P2003 event without the raw Prisma error or request query", async () => {
+    const databaseUrl = "postgresql://raw-prisma-user:raw-prisma-pass@internal.invalid/db?token=sk-raw-prisma";
+    const metadataToken = "sk-p2003-metadata-must-not-leak";
+    const queryToken = "sk-p2003-query-must-not-leak";
+    const error = p2003(`Foreign key constraint failed for ${databaseUrl}`, {
+      field_name: "Order_merchantId_fkey",
+      databaseUrl,
+      token: metadataToken
+    });
+
+    await captureErrors(async (errors) => {
+      await withApp(async (baseUrl) => {
+        const response = await fetch(`${baseUrl}/failure?token=${encodeURIComponent(queryToken)}`);
+
+        assert.equal(response.status, 500);
+        assert.deepEqual(await response.json(), { error: "INTERNAL_SERVER_ERROR" });
+      }, () => error);
+
+      assert.equal(errors.length, 1);
+      const record = errors[0]?.[0] as {
+        err?: unknown;
+        security?: {
+          event?: unknown;
+          code?: unknown;
+          method?: unknown;
+          route?: unknown;
+          truncatedNetworkIdentifier?: unknown;
+        };
+      };
+      const serializedErrors = JSON.stringify(errors);
+      assert.deepEqual({
+        rawErrorObject: record.err === error,
+        containsDatabaseUrl: serializedErrors.includes(databaseUrl),
+        containsMetadataToken: serializedErrors.includes(metadataToken),
+        containsQueryToken: serializedErrors.includes(queryToken),
+        containsRawErrProperty: Object.prototype.hasOwnProperty.call(record, "err")
+      }, {
+        rawErrorObject: false,
+        containsDatabaseUrl: false,
+        containsMetadataToken: false,
+        containsQueryToken: false,
+        containsRawErrProperty: false
+      });
+      assert.equal(record.security?.event, "database_request_failed");
+      assert.equal(record.security?.code, "P2003");
+      assert.equal(record.security?.method, "GET");
+      assert.equal(record.security?.route, "/failure");
+      assert.match(String(record.security?.truncatedNetworkIdentifier), /^[a-f0-9]{24}$/);
+      assert.equal(errors[0]?.[1], "Database request failed");
+    });
+  });
+
+  it("replaces malformed Prisma request codes with UNKNOWN", async () => {
+    const sentinel = "postgresql://malformed-code-user:malformed-code-pass@internal.invalid/private";
+    const error = new Prisma.PrismaClientKnownRequestError("malformed known request error", {
+      code: `P2003-${sentinel}`,
+      clientVersion: Prisma.prismaVersion.client,
+      meta: { sentinel }
+    });
+
+    await captureErrors(async (errors) => {
+      await withApp(async (baseUrl) => {
+        const response = await fetch(`${baseUrl}/failure`);
+
+        assert.equal(response.status, 500);
+        assert.deepEqual(await response.json(), { error: "INTERNAL_SERVER_ERROR" });
+      }, () => error);
+
+      assert.equal(errors.length, 1);
+      const record = errors[0]?.[0] as {
+        err?: unknown;
+        security?: { code?: unknown };
+      };
+      assert.equal(record.security?.code, "UNKNOWN");
+      assert.equal(Object.prototype.hasOwnProperty.call(record, "err"), false);
+      assert.equal(JSON.stringify(errors).includes(sentinel), false);
+    });
   });
 
   it("returns an exact generic 500 response without the internal message", async () => {
