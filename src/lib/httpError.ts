@@ -14,6 +14,13 @@ export class HttpError extends Error {
 export type PublicErrorPrimitive = string | number | boolean | null;
 export type PublicErrorDetails = Record<string, PublicErrorPrimitive | PublicErrorPrimitive[]>;
 
+const publicDetailsByError = new WeakMap<object, PublicErrorDetails>();
+
+export function getPublicHttpErrorDetails(value: unknown): PublicErrorDetails | undefined {
+  if ((typeof value !== "object" && typeof value !== "function") || value === null) return undefined;
+  return publicDetailsByError.get(value);
+}
+
 function isPrimitive(value: unknown): value is PublicErrorPrimitive {
   return value === null
     || typeof value === "string"
@@ -98,6 +105,7 @@ export class PublicHttpError extends HttpError {
         enumerable: true,
         configurable: false
       });
+      publicDetailsByError.set(this, publicDetails);
     }
   }
 }

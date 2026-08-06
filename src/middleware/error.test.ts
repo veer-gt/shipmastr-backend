@@ -356,6 +356,115 @@ describe("errorHandler", () => {
     });
   });
 
+  it("contains a root proxy before any prototype inspection", async () => {
+    const sentinel = "postgresql://proxy-root:password@internal.invalid/private?token=sk-proxy-root";
+    let prototypeReads = 0;
+    const proxyError = new Proxy(new Error(sentinel), {
+      getPrototypeOf() {
+        prototypeReads += 1;
+        throw new Error(sentinel);
+      }
+    });
+    let responseStatus: number | undefined;
+    let responseBody: string | undefined;
+
+    await captureErrors(async (errors) => {
+      await withApp(async (baseUrl) => {
+        const response = await fetch(`${baseUrl}/failure?token=${encodeURIComponent(sentinel)}`);
+        responseStatus = response.status;
+        responseBody = await response.text();
+      }, () => proxyError);
+
+      const record = errors[0]?.[0] as {
+        err?: unknown;
+        security?: {
+          event?: unknown;
+          method?: unknown;
+          route?: unknown;
+          truncatedNetworkIdentifier?: unknown;
+        };
+      } | undefined;
+      assert.deepEqual({
+        prototypeReads,
+        responseStatus,
+        exactBody: responseBody === "{\"error\":\"INTERNAL_SERVER_ERROR\"}",
+        errorCalls: errors.length,
+        rawRootLogged: record?.err === proxyError,
+        sentinelLogged: JSON.stringify(errors).includes(sentinel)
+      }, {
+        prototypeReads: 0,
+        responseStatus: 500,
+        exactBody: true,
+        errorCalls: 1,
+        rawRootLogged: false,
+        sentinelLogged: false
+      });
+      assert.equal(Object.prototype.hasOwnProperty.call(record ?? {}, "err"), false);
+      assert.equal(record?.security?.event, "uninspectable_request_error");
+      assert.equal(record?.security?.method, "GET");
+      assert.equal(record?.security?.route, "/failure");
+      assert.match(String(record?.security?.truncatedNetworkIdentifier), /^[a-f0-9]{24}$/);
+      assert.equal(errors[0]?.[1], "Uninspectable request error");
+    });
+  });
+
+  it("contains accessor-backed payload markers without invoking them", async () => {
+    const sentinel = "postgresql://accessor-root:password@internal.invalid/private?token=sk-accessor-root";
+    const getterReads = { type: 0, status: 0, statusCode: 0 };
+    const accessorError: Record<string, unknown> = {};
+    for (const property of ["type", "status", "statusCode"] as const) {
+      Object.defineProperty(accessorError, property, {
+        configurable: true,
+        enumerable: true,
+        get() {
+          getterReads[property] += 1;
+          throw new Error(sentinel);
+        }
+      });
+    }
+    let responseStatus: number | undefined;
+    let responseBody: string | undefined;
+
+    await captureErrors(async (errors) => {
+      await withApp(async (baseUrl) => {
+        const response = await fetch(`${baseUrl}/failure?token=${encodeURIComponent(sentinel)}`);
+        responseStatus = response.status;
+        responseBody = await response.text();
+      }, () => accessorError);
+
+      const record = errors[0]?.[0] as {
+        err?: unknown;
+        security?: {
+          event?: unknown;
+          method?: unknown;
+          route?: unknown;
+          truncatedNetworkIdentifier?: unknown;
+        };
+      } | undefined;
+      assert.deepEqual({
+        getterReads,
+        responseStatus,
+        exactBody: responseBody === "{\"error\":\"INTERNAL_SERVER_ERROR\"}",
+        errorCalls: errors.length,
+        rawRootLogged: record?.err === accessorError,
+        sentinelLogged: JSON.stringify(errors).includes(sentinel)
+      }, {
+        getterReads: { type: 0, status: 0, statusCode: 0 },
+        responseStatus: 500,
+        exactBody: true,
+        errorCalls: 1,
+        rawRootLogged: false,
+        sentinelLogged: false
+      });
+      assert.equal(Object.prototype.hasOwnProperty.call(record ?? {}, "err"), false);
+      assert.equal(record?.security?.event, "uninspectable_request_error");
+      assert.equal(record?.security?.method, "GET");
+      assert.equal(record?.security?.route, "/failure");
+      assert.match(String(record?.security?.truncatedNetworkIdentifier), /^[a-f0-9]{24}$/);
+      assert.equal(errors[0]?.[1], "Uninspectable request error");
+    });
+  });
+
   it("keeps ordinary HttpError details out of the response", async () => {
     const sentinel = "postgresql://db-user:db-pass@internal.example/shipmastr?token=sk-private";
     const error = new HttpError(409, "ORDER_ALREADY_EXISTS", {
@@ -619,6 +728,62 @@ describe("errorHandler", () => {
     } finally {
       logger.warn = originalWarn;
     }
+  });
+
+  it("fails closed for immutable prototype-forged public details", async () => {
+    const sentinel = "postgresql://immutable-forgery:password@internal.invalid/private?token=sk-immutable-forgery";
+    const details = Object.freeze({
+      field: "externalOrderId",
+      reasons: Object.freeze(["duplicate", 409, false, null]),
+      token: sentinel
+    });
+    const error = Object.create(PublicHttpError.prototype) as PublicHttpError;
+    Object.defineProperties(error, {
+      status: { value: 409, writable: true, enumerable: true, configurable: true },
+      message: { value: "ORDER_ALREADY_EXISTS", writable: true, enumerable: false, configurable: true },
+      details: { value: details, writable: true, enumerable: true, configurable: true },
+      publicDetails: { value: details, writable: false, enumerable: true, configurable: false }
+    });
+
+    await captureWarnings(async (warnings) => {
+      let body: unknown;
+      await withApp(async (baseUrl) => {
+        const response = await fetch(`${baseUrl}/failure?token=${encodeURIComponent(sentinel)}`);
+        body = await response.json();
+
+        assert.equal(response.status, 409);
+      }, () => error);
+
+      assert.deepEqual(body, { error: "ORDER_ALREADY_EXISTS" });
+      assert.equal(warnings.length, 1);
+      const serializedBoundary = JSON.stringify({ body, warnings });
+      assert.equal(serializedBoundary.includes(sentinel), false);
+      assert.ok(serializedBoundary.length < 1024);
+      const record = warnings[0]?.[0] as {
+        err?: unknown;
+        security?: {
+          event?: unknown;
+          status?: unknown;
+          code?: unknown;
+          method?: unknown;
+          route?: unknown;
+          truncatedNetworkIdentifier?: unknown;
+          details?: unknown;
+        };
+      };
+      assert.equal(Object.prototype.hasOwnProperty.call(record, "err"), false);
+      assert.equal(record.security?.event, "request_http_error_rejected");
+      assert.equal(record.security?.status, 409);
+      assert.equal(record.security?.code, "ORDER_ALREADY_EXISTS");
+      assert.equal(record.security?.method, "GET");
+      assert.equal(record.security?.route, "/failure");
+      assert.match(String(record.security?.truncatedNetworkIdentifier), /^[a-f0-9]{24}$/);
+      assert.deepEqual(record.security?.details, {
+        type: "object",
+        keyCount: 3,
+        keys: ["field", "reasons"]
+      });
+    });
   });
 
   it("fails closed when PublicHttpError details are invalid at runtime", async () => {

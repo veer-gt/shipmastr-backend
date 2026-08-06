@@ -1,6 +1,7 @@
 import assert from "node:assert/strict";
 import { describe, it } from "node:test";
 import {
+  getPublicHttpErrorDetails,
   HttpError,
   PublicHttpError,
   isPublicErrorDetails
@@ -37,6 +38,34 @@ describe("PublicHttpError", () => {
       enumerable: true,
       configurable: false
     });
+  });
+
+  it("resolves public details only for constructor-created instances", () => {
+    const constructed = new PublicHttpError(409, "ORDER_ALREADY_EXISTS", {
+      field: "externalOrderId",
+      reasons: ["duplicate"]
+    });
+    const mutableForgery = Object.create(PublicHttpError.prototype) as PublicHttpError;
+    Object.defineProperty(mutableForgery, "publicDetails", {
+      value: { field: "externalOrderId" },
+      writable: true,
+      enumerable: true,
+      configurable: true
+    });
+    const immutableForgery = Object.create(PublicHttpError.prototype) as PublicHttpError;
+    Object.defineProperty(immutableForgery, "publicDetails", {
+      value: Object.freeze({
+        field: "externalOrderId",
+        reasons: Object.freeze(["duplicate"])
+      }),
+      writable: false,
+      enumerable: true,
+      configurable: false
+    });
+
+    assert.equal(getPublicHttpErrorDetails(constructed), constructed.publicDetails);
+    assert.equal(getPublicHttpErrorDetails(mutableForgery), undefined);
+    assert.equal(getPublicHttpErrorDetails(immutableForgery), undefined);
   });
 
   it("rejects overridden and proxied arrays without invoking their hostile behavior", () => {

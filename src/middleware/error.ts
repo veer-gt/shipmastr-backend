@@ -1,11 +1,11 @@
-import type { ErrorRequestHandler } from "express";
+import type { ErrorRequestHandler, Request, Response } from "express";
 import { isProxy } from "node:util/types";
 import { Prisma } from "@prisma/client";
 import { ZodError } from "zod";
 import {
+  getPublicHttpErrorDetails,
   HttpError,
   PublicHttpError,
-  isPublicErrorDetails,
   type PublicErrorDetails
 } from "../lib/httpError.js";
 import { logger } from "../lib/logger.js";
@@ -58,12 +58,6 @@ type HttpErrorSnapshot = {
   publicDetails: PublicErrorDetails | undefined;
 };
 
-function isTrustedPublicDetails(value: unknown): value is PublicErrorDetails {
-  return isPublicErrorDetails(value)
-    && Object.isFrozen(value)
-    && Object.values(value).every((entry) => !Array.isArray(entry) || Object.isFrozen(entry));
-}
-
 function snapshotHttpError(err: HttpError): HttpErrorSnapshot | undefined {
   if (isProxy(err)) return undefined;
 
@@ -92,17 +86,7 @@ function snapshotHttpError(err: HttpError): HttpErrorSnapshot | undefined {
     }
     let publicDetails: PublicErrorDetails | undefined;
     if (err instanceof PublicHttpError) {
-      const publicDetailsDescriptor = descriptors.publicDetails;
-      if (
-        publicDetailsDescriptor
-        && "value" in publicDetailsDescriptor
-        && publicDetailsDescriptor.writable === false
-        && publicDetailsDescriptor.enumerable
-        && publicDetailsDescriptor.configurable === false
-        && isTrustedPublicDetails(publicDetailsDescriptor.value)
-      ) {
-        publicDetails = publicDetailsDescriptor.value;
-      }
+      publicDetails = getPublicHttpErrorDetails(err);
     }
 
     return {
@@ -155,13 +139,52 @@ function summarizePrismaUniqueConstraint(meta: unknown) {
   }
 }
 
-function isPayloadTooLargeError(err: unknown) {
-  if (!err || typeof err !== "object") return false;
-  const candidate = err as { type?: unknown; status?: unknown; statusCode?: unknown };
-  return candidate.type === "entity.too.large" || candidate.status === 413 || candidate.statusCode === 413;
+type PayloadTooLargeClassification = "payload-too-large" | "not-payload-too-large" | "uninspectable";
+
+function classifyPayloadTooLargeError(err: unknown): PayloadTooLargeClassification {
+  if ((typeof err !== "object" && typeof err !== "function") || err === null) {
+    return "not-payload-too-large";
+  }
+
+  try {
+    const descriptors = Object.getOwnPropertyDescriptors(err);
+    const markerDescriptors = [descriptors.type, descriptors.status, descriptors.statusCode];
+    if (markerDescriptors.some((descriptor) => descriptor && !("value" in descriptor))) {
+      return "uninspectable";
+    }
+
+    const type = descriptors.type && "value" in descriptors.type
+      ? descriptors.type.value
+      : undefined;
+    const status = descriptors.status && "value" in descriptors.status
+      ? descriptors.status.value
+      : undefined;
+    const statusCode = descriptors.statusCode && "value" in descriptors.statusCode
+      ? descriptors.statusCode.value
+      : undefined;
+    return type === "entity.too.large" || status === 413 || statusCode === 413
+      ? "payload-too-large"
+      : "not-payload-too-large";
+  } catch {
+    return "uninspectable";
+  }
+}
+
+function respondToUninspectableRoot(req: Request, res: Response) {
+  logger.error({
+    security: {
+      event: "uninspectable_request_error",
+      method: req.method,
+      route: req.originalUrl.split("?")[0],
+      truncatedNetworkIdentifier: clientNetworkKey(req)
+    }
+  }, "Uninspectable request error");
+  return res.status(500).json({ error: "INTERNAL_SERVER_ERROR" });
 }
 
 export const errorHandler: ErrorRequestHandler = (err, req, res, _next) => {
+  if (isProxy(err)) return respondToUninspectableRoot(req, res);
+
   if (err instanceof ZodError) {
     logger.warn({
       security: {
@@ -248,8 +271,12 @@ export const errorHandler: ErrorRequestHandler = (err, req, res, _next) => {
     return res.status(500).json({ error: "INTERNAL_SERVER_ERROR" });
   }
 
-  if (isPayloadTooLargeError(err)) {
+  const payloadTooLargeClassification = classifyPayloadTooLargeError(err);
+  if (payloadTooLargeClassification === "payload-too-large") {
     return res.status(413).json({ error: "PAYLOAD_TOO_LARGE" });
+  }
+  if (payloadTooLargeClassification === "uninspectable") {
+    return respondToUninspectableRoot(req, res);
   }
 
   logger.error({ err }, "Unhandled error");
