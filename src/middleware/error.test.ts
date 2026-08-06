@@ -61,6 +61,17 @@ async function captureWarnings<T>(callback: (warnings: unknown[][]) => Promise<T
   }
 }
 
+async function captureErrors<T>(callback: (errors: unknown[][]) => Promise<T>) {
+  const errors: unknown[][] = [];
+  const original = logger.error;
+  logger.error = ((...args: unknown[]) => { errors.push(args); }) as typeof logger.error;
+  try {
+    return await callback(errors);
+  } finally {
+    logger.error = original;
+  }
+}
+
 describe("errorHandler", () => {
   it("maps oversized JSON bodies to a safe 413 response", async () => {
     await withApp(async (baseUrl) => {
@@ -116,13 +127,20 @@ describe("errorHandler", () => {
 
   it("returns an exact generic 500 response without the internal message", async () => {
     const internalMessage = "sentinel-internal-message";
+    const error = new Error(internalMessage);
 
-    await withApp(async (baseUrl) => {
-      const response = await fetch(`${baseUrl}/failure`);
+    await captureErrors(async (errors) => {
+      await withApp(async (baseUrl) => {
+        const response = await fetch(`${baseUrl}/failure`);
 
-      assert.equal(response.status, 500);
-      assert.deepEqual(await response.json(), { error: "INTERNAL_SERVER_ERROR" });
-    }, () => new Error(internalMessage));
+        assert.equal(response.status, 500);
+        assert.deepEqual(await response.json(), { error: "INTERNAL_SERVER_ERROR" });
+      }, () => error);
+
+      assert.equal(errors.length, 1);
+      assert.equal((errors[0]?.[0] as { err?: unknown }).err, error);
+      assert.equal(errors[0]?.[1], "Unhandled error");
+    });
   });
 
   it("keeps ordinary HttpError details out of the response", async () => {
