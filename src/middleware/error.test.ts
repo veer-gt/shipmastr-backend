@@ -4,6 +4,7 @@ import { createServer } from "node:http";
 import { describe, it } from "node:test";
 import { Prisma } from "@prisma/client";
 import express from "express";
+import { ZodError } from "zod";
 
 import { HttpError, PublicHttpError } from "../lib/httpError.js";
 import { logger } from "../lib/logger.js";
@@ -42,6 +43,13 @@ function p2002(meta: Record<string, unknown>) {
   });
 }
 
+function p2025() {
+  return new Prisma.PrismaClientKnownRequestError("missing", {
+    code: "P2025",
+    clientVersion: Prisma.prismaVersion.client
+  });
+}
+
 async function captureWarnings<T>(callback: (warnings: unknown[][]) => Promise<T>) {
   const warnings: unknown[][] = [];
   const original = logger.warn;
@@ -65,6 +73,56 @@ describe("errorHandler", () => {
       assert.equal(response.status, 413);
       assert.deepEqual(await response.json(), { error: "PAYLOAD_TOO_LARGE" });
     });
+  });
+
+  it("returns flattened Zod details while keeping invalid values out of validation warnings", async () => {
+    const invalidValue = "sk-zod-input-must-not-leak";
+    const error = new ZodError([{
+      code: "custom",
+      path: ["email"],
+      message: "invalid",
+      input: invalidValue
+    }]);
+
+    await captureWarnings(async (warnings) => {
+      await withApp(async (baseUrl) => {
+        const response = await fetch(`${baseUrl}/failure`);
+        const body = await response.json();
+
+        assert.equal(response.status, 400);
+        assert.deepEqual(body, {
+          error: "VALIDATION_ERROR",
+          details: { formErrors: [], fieldErrors: { email: ["invalid"] } }
+        });
+        assert.equal(JSON.stringify({ body, warnings }).includes(invalidValue), false);
+      }, () => error);
+
+      const warning = warnings[0]?.[0] as {
+        security?: { event?: unknown; fields?: unknown };
+      };
+      assert.equal(warning.security?.event, "request_validation_rejected");
+      assert.deepEqual(warning.security?.fields, [{ field: "email", rule: "custom" }]);
+    });
+  });
+
+  it("returns an exact P2025 not-found response", async () => {
+    await withApp(async (baseUrl) => {
+      const response = await fetch(`${baseUrl}/failure`);
+
+      assert.equal(response.status, 404);
+      assert.deepEqual(await response.json(), { error: "NOT_FOUND" });
+    }, p2025);
+  });
+
+  it("returns an exact generic 500 response without the internal message", async () => {
+    const internalMessage = "sentinel-internal-message";
+
+    await withApp(async (baseUrl) => {
+      const response = await fetch(`${baseUrl}/failure`);
+
+      assert.equal(response.status, 500);
+      assert.deepEqual(await response.json(), { error: "INTERNAL_SERVER_ERROR" });
+    }, () => new Error(internalMessage));
   });
 
   it("keeps ordinary HttpError details out of the response", async () => {
