@@ -10,6 +10,15 @@ const HTTP_DETAIL_KEY_ALLOWLIST = new Set([
   "mode", "event", "events", "fromState", "toState"
 ]);
 const MAX_LOGGED_NAMES = 12;
+const MAX_SCHEMA_NAME_LENGTH = 64;
+const MAX_SCHEMA_FIELDS = 12;
+
+const schemaModels = new Map(Prisma.dmmf.datamodel.models.map((model) => [
+  model.name,
+  {
+    fields: new Set(model.fields.map((field) => field.name))
+  }
+]));
 
 function detailType(value: unknown) {
   if (value === null) return "null";
@@ -30,6 +39,32 @@ function summarizeHttpDetails(value: unknown) {
     };
   } catch {
     return { type: "uninspectable" };
+  }
+}
+
+function summarizePrismaUniqueConstraint(meta: unknown) {
+  try {
+    if (!meta || typeof meta !== "object") return {};
+    const candidate = meta as { modelName?: unknown; target?: unknown };
+    if (typeof candidate.modelName !== "string" || candidate.modelName.length > MAX_SCHEMA_NAME_LENGTH) return {};
+
+    const schemaModel = schemaModels.get(candidate.modelName);
+    if (!schemaModel) return {};
+
+    const suppliedFields = typeof candidate.target === "string"
+      ? [candidate.target]
+      : Array.isArray(candidate.target) && candidate.target.every((field) => typeof field === "string")
+        ? candidate.target
+        : [];
+    const fields = suppliedFields
+      .filter((field) => field.length <= MAX_SCHEMA_NAME_LENGTH && schemaModel.fields.has(field))
+      .slice(0, MAX_SCHEMA_FIELDS);
+
+    return fields.length > 0
+      ? { model: candidate.modelName, fields }
+      : { model: candidate.modelName };
+  } catch {
+    return {};
   }
 }
 
@@ -83,10 +118,16 @@ export const errorHandler: ErrorRequestHandler = (err, req, res, _next) => {
     }
 
     if (err.code === "P2002") {
-      return res.status(409).json({
-        error: "UNIQUE_CONSTRAINT_VIOLATION",
-        details: err.meta
-      });
+      logger.warn({
+        security: {
+          event: "database_unique_constraint_rejected",
+          method: req.method,
+          route: req.originalUrl.split("?")[0],
+          truncatedNetworkIdentifier: clientNetworkKey(req),
+          ...summarizePrismaUniqueConstraint(err.meta)
+        }
+      }, "Database unique constraint rejected");
+      return res.status(409).json({ error: "UNIQUE_CONSTRAINT_VIOLATION" });
     }
   }
 
