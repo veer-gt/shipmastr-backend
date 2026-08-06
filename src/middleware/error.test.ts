@@ -612,6 +612,8 @@ describe("errorHandler", () => {
         assert.deepEqual(body, {
           error: "ORDER_ALREADY_EXISTS"
         });
+        assert.equal(warnings.length, 1);
+        assert.equal(details.token, sentinel);
         assert.equal(JSON.stringify({ body, warnings }).includes(sentinel), false);
       }, () => error);
     } finally {
