@@ -126,11 +126,18 @@ export const errorHandler: ErrorRequestHandler = (err, req, res, _next) => {
   }
 
   if (err instanceof Prisma.PrismaClientKnownRequestError) {
-    if (err.code === "P2025") {
+    let code: unknown;
+    try {
+      code = err.code;
+    } catch {
+      code = undefined;
+    }
+
+    if (code === "P2025") {
       return res.status(404).json({ error: "NOT_FOUND" });
     }
 
-    if (err.code === "P2002") {
+    if (code === "P2002") {
       logger.warn({
         security: {
           event: "database_unique_constraint_rejected",
@@ -143,7 +150,6 @@ export const errorHandler: ErrorRequestHandler = (err, req, res, _next) => {
       return res.status(409).json({ error: "UNIQUE_CONSTRAINT_VIOLATION" });
     }
 
-    const code = err.code;
     logger.error({
       security: {
         event: "database_request_failed",

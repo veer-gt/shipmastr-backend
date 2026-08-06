@@ -212,6 +212,132 @@ describe("errorHandler", () => {
     });
   });
 
+  it("snapshots a stateful Prisma request code exactly once", async () => {
+    const sentinel = "postgresql://stateful-code-user:stateful-code-pass@internal.invalid/private";
+    const error = p2003(`stateful known request error ${sentinel}`, {
+      token: sentinel,
+      target: ["email"]
+    });
+    let codeReads = 0;
+    Object.defineProperty(error, "code", {
+      configurable: true,
+      enumerable: true,
+      get() {
+        codeReads += 1;
+        return codeReads === 1 ? "P2003" : "P2002";
+      }
+    });
+
+    await captureWarnings(async (warnings) => {
+      await captureErrors(async (errors) => {
+        let responseStatus: number | undefined;
+        let responseBody: unknown;
+        await withApp(async (baseUrl) => {
+          const response = await fetch(`${baseUrl}/failure?token=${encodeURIComponent(sentinel)}`);
+          responseStatus = response.status;
+          responseBody = await response.json();
+        }, () => error);
+
+        assert.deepEqual({
+          codeReads,
+          responseStatus,
+          responseBody,
+          errorCalls: errors.length,
+          warningCalls: warnings.length
+        }, {
+          codeReads: 1,
+          responseStatus: 500,
+          responseBody: { error: "INTERNAL_SERVER_ERROR" },
+          errorCalls: 1,
+          warningCalls: 0
+        });
+
+        const record = errors[0]?.[0] as {
+          err?: unknown;
+          security?: {
+            event?: unknown;
+            code?: unknown;
+            method?: unknown;
+            route?: unknown;
+            truncatedNetworkIdentifier?: unknown;
+          };
+        };
+        assert.equal(record.err, undefined);
+        assert.equal(Object.prototype.hasOwnProperty.call(record, "err"), false);
+        assert.equal(JSON.stringify({ errors, warnings, responseBody }).includes(sentinel), false);
+        assert.equal(record.security?.event, "database_request_failed");
+        assert.equal(record.security?.code, "P2003");
+        assert.equal(record.security?.method, "GET");
+        assert.equal(record.security?.route, "/failure");
+        assert.match(String(record.security?.truncatedNetworkIdentifier), /^[a-f0-9]{24}$/);
+        assert.equal(errors[0]?.[1], "Database request failed");
+      });
+    });
+  });
+
+  it("contains a throwing Prisma request code getter and logs UNKNOWN", async () => {
+    const sentinel = "postgresql://throwing-code-user:throwing-code-pass@internal.invalid/private";
+    const error = p2003(`throwing known request error ${sentinel}`, {
+      token: sentinel,
+      target: ["email"]
+    });
+    let codeReads = 0;
+    Object.defineProperty(error, "code", {
+      configurable: true,
+      enumerable: true,
+      get() {
+        codeReads += 1;
+        throw new Error(`code getter failed ${sentinel}`);
+      }
+    });
+
+    await captureWarnings(async (warnings) => {
+      await captureErrors(async (errors) => {
+        let responseStatus: number | undefined;
+        let responseBody: string | undefined;
+        await withApp(async (baseUrl) => {
+          const response = await fetch(`${baseUrl}/failure?token=${encodeURIComponent(sentinel)}`);
+          responseStatus = response.status;
+          responseBody = await response.text();
+        }, () => error);
+
+        assert.deepEqual({
+          codeReads,
+          responseStatus,
+          responseBody,
+          errorCalls: errors.length,
+          warningCalls: warnings.length
+        }, {
+          codeReads: 1,
+          responseStatus: 500,
+          responseBody: "{\"error\":\"INTERNAL_SERVER_ERROR\"}",
+          errorCalls: 1,
+          warningCalls: 0
+        });
+
+        const record = errors[0]?.[0] as {
+          err?: unknown;
+          security?: {
+            event?: unknown;
+            code?: unknown;
+            method?: unknown;
+            route?: unknown;
+            truncatedNetworkIdentifier?: unknown;
+          };
+        };
+        assert.equal(record.err, undefined);
+        assert.equal(Object.prototype.hasOwnProperty.call(record, "err"), false);
+        assert.equal(JSON.stringify({ errors, warnings, responseBody }).includes(sentinel), false);
+        assert.equal(record.security?.event, "database_request_failed");
+        assert.equal(record.security?.code, "UNKNOWN");
+        assert.equal(record.security?.method, "GET");
+        assert.equal(record.security?.route, "/failure");
+        assert.match(String(record.security?.truncatedNetworkIdentifier), /^[a-f0-9]{24}$/);
+        assert.equal(errors[0]?.[1], "Database request failed");
+      });
+    });
+  });
+
   it("returns an exact generic 500 response without the internal message", async () => {
     const internalMessage = "sentinel-internal-message";
     const error = new Error(internalMessage);
