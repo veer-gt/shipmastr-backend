@@ -1,9 +1,37 @@
 import type { ErrorRequestHandler } from "express";
 import { Prisma } from "@prisma/client";
 import { ZodError } from "zod";
-import { HttpError } from "../lib/httpError.js";
+import { HttpError, PublicHttpError } from "../lib/httpError.js";
 import { logger } from "../lib/logger.js";
 import { clientNetworkKey } from "../lib/client-network.js";
+
+const HTTP_DETAIL_KEY_ALLOWLIST = new Set([
+  "field", "fields", "index", "limit", "reason", "reasons", "status",
+  "mode", "event", "events", "fromState", "toState"
+]);
+const MAX_LOGGED_NAMES = 12;
+
+function detailType(value: unknown) {
+  if (value === null) return "null";
+  if (Array.isArray(value)) return "array";
+  return typeof value;
+}
+
+function summarizeHttpDetails(value: unknown) {
+  try {
+    const type = detailType(value);
+    if (Array.isArray(value)) return { type, itemCount: value.length };
+    if (!value || typeof value !== "object") return { type };
+    const keys = Object.keys(value);
+    return {
+      type,
+      keyCount: keys.length,
+      keys: keys.filter((key) => HTTP_DETAIL_KEY_ALLOWLIST.has(key)).slice(0, MAX_LOGGED_NAMES)
+    };
+  } catch {
+    return { type: "uninspectable" };
+  }
+}
 
 function isPayloadTooLargeError(err: unknown) {
   if (!err || typeof err !== "object") return false;
@@ -32,10 +60,21 @@ export const errorHandler: ErrorRequestHandler = (err, req, res, _next) => {
   }
 
   if (err instanceof HttpError) {
-    return res.status(err.status).json({
-      error: err.message,
-      details: err.details
-    });
+    logger.warn({
+      security: {
+        event: "request_http_error_rejected",
+        status: err.status,
+        code: err.message,
+        method: req.method,
+        route: req.originalUrl.split("?")[0],
+        truncatedNetworkIdentifier: clientNetworkKey(req),
+        details: summarizeHttpDetails(err.details)
+      }
+    }, "HTTP request rejected");
+    const body = err instanceof PublicHttpError && err.publicDetails
+      ? { error: err.message, details: err.publicDetails }
+      : { error: err.message };
+    return res.status(err.status).json(body);
   }
 
   if (err instanceof Prisma.PrismaClientKnownRequestError) {
