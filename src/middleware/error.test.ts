@@ -358,4 +358,84 @@ describe("errorHandler", () => {
       assert.deepEqual(security?.fields, merchantFields.slice(0, 12));
     });
   });
+
+  it("snapshots a stateful P2002 modelName accessor before validation", async () => {
+    const sentinel = "sk-stateful-model-secret";
+    let modelNameReads = 0;
+    const meta: Record<string, unknown> = { target: ["email"] };
+    Object.defineProperty(meta, "modelName", {
+      enumerable: true,
+      get() {
+        modelNameReads += 1;
+        return modelNameReads <= 3 ? "Merchant" : sentinel;
+      }
+    });
+    const error = p2002(meta);
+    modelNameReads = 0;
+
+    await captureWarnings(async (warnings) => {
+      await withApp(async (baseUrl) => {
+        const response = await fetch(`${baseUrl}/failure`);
+        assert.equal(response.status, 409);
+        assert.deepEqual(await response.json(), { error: "UNIQUE_CONSTRAINT_VIOLATION" });
+      }, () => error);
+
+      assert.equal(modelNameReads, 1);
+      assert.equal(JSON.stringify(warnings).includes(sentinel), false);
+      const security = (warnings[0]?.[0] as {
+        security?: { model?: unknown; fields?: unknown };
+      }).security;
+      assert.equal(security?.model, "Merchant");
+      assert.deepEqual(security?.fields, ["email"]);
+    });
+  });
+
+  it("fails closed for a proxied P2002 target", async () => {
+    const sentinel = "postgresql://proxy-user:proxy-pass@internal.example/private";
+    const target = new Proxy(["email"], {
+      get(source, property, receiver) {
+        if (property === "every") return () => true;
+        if (property === "filter") return () => [sentinel];
+        return Reflect.get(source, property, receiver);
+      }
+    });
+
+    await captureWarnings(async (warnings) => {
+      await withApp(async (baseUrl) => {
+        const response = await fetch(`${baseUrl}/failure`);
+        assert.equal(response.status, 409);
+        assert.deepEqual(await response.json(), { error: "UNIQUE_CONSTRAINT_VIOLATION" });
+      }, () => p2002({ modelName: "Merchant", target }));
+
+      assert.equal(JSON.stringify(warnings).includes(sentinel), false);
+      const security = (warnings[0]?.[0] as {
+        security?: { model?: unknown; fields?: unknown };
+      }).security;
+      assert.equal(security?.model, "Merchant");
+      assert.equal(security?.fields, undefined);
+    });
+  });
+
+  it("ignores overridden P2002 target collection methods", async () => {
+    const sentinel = "planted-overridden-array-secret";
+    const target = ["email"];
+    target.every = (() => true) as unknown as typeof target.every;
+    target.filter = (() => target) as typeof target.filter;
+    target.slice = (() => [sentinel]) as typeof target.slice;
+
+    await captureWarnings(async (warnings) => {
+      await withApp(async (baseUrl) => {
+        const response = await fetch(`${baseUrl}/failure`);
+        assert.equal(response.status, 409);
+        assert.deepEqual(await response.json(), { error: "UNIQUE_CONSTRAINT_VIOLATION" });
+      }, () => p2002({ modelName: "Merchant", target }));
+
+      assert.equal(JSON.stringify(warnings).includes(sentinel), false);
+      const security = (warnings[0]?.[0] as {
+        security?: { model?: unknown; fields?: unknown };
+      }).security;
+      assert.equal(security?.model, "Merchant");
+      assert.deepEqual(security?.fields, ["email"]);
+    });
+  });
 });

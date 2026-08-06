@@ -1,4 +1,5 @@
 import type { ErrorRequestHandler } from "express";
+import { isProxy } from "node:util/types";
 import { Prisma } from "@prisma/client";
 import { ZodError } from "zod";
 import { HttpError, PublicHttpError } from "../lib/httpError.js";
@@ -46,23 +47,35 @@ function summarizePrismaUniqueConstraint(meta: unknown) {
   try {
     if (!meta || typeof meta !== "object") return {};
     const candidate = meta as { modelName?: unknown; target?: unknown };
-    if (typeof candidate.modelName !== "string" || candidate.modelName.length > MAX_SCHEMA_NAME_LENGTH) return {};
+    const modelName = candidate.modelName;
+    if (typeof modelName !== "string" || modelName.length > MAX_SCHEMA_NAME_LENGTH) return {};
 
-    const schemaModel = schemaModels.get(candidate.modelName);
+    const schemaModel = schemaModels.get(modelName);
     if (!schemaModel) return {};
 
-    const suppliedFields = typeof candidate.target === "string"
-      ? [candidate.target]
-      : Array.isArray(candidate.target) && candidate.target.every((field) => typeof field === "string")
-        ? candidate.target
-        : [];
-    const fields = suppliedFields
-      .filter((field) => field.length <= MAX_SCHEMA_NAME_LENGTH && schemaModel.fields.has(field))
-      .slice(0, MAX_SCHEMA_FIELDS);
+    const target = candidate.target;
+    const fields: string[] = [];
+    if (typeof target === "string") {
+      if (target.length <= MAX_SCHEMA_NAME_LENGTH && schemaModel.fields.has(target)) fields.push(target);
+    } else if (Array.isArray(target) && !isProxy(target)) {
+      const targetLength = target.length;
+      if (targetLength > schemaModel.fields.size) return { model: modelName };
+      for (let index = 0; index < targetLength; index += 1) {
+        const field = target[index];
+        if (typeof field !== "string") return { model: modelName };
+        if (
+          fields.length < MAX_SCHEMA_FIELDS
+          && field.length <= MAX_SCHEMA_NAME_LENGTH
+          && schemaModel.fields.has(field)
+        ) {
+          fields.push(field);
+        }
+      }
+    }
 
     return fields.length > 0
-      ? { model: candidate.modelName, fields }
-      : { model: candidate.modelName };
+      ? { model: modelName, fields }
+      : { model: modelName };
   } catch {
     return {};
   }
