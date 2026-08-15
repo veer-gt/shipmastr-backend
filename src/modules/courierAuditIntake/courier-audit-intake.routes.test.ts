@@ -105,8 +105,11 @@ function signedHeaders(body: string, timestamp = String(Math.floor(Date.now() / 
   };
 }
 
-function createParserApp(router: express.Router) {
+function createParserApp(router: express.Router, options: { trustProxy?: boolean } = {}) {
   const app = express();
+  if (options.trustProxy) {
+    app.set("trust proxy", 1);
+  }
   app.use(express.json({
     limit: "256kb",
     verify: (req, _res, buffer) => {
@@ -123,7 +126,7 @@ function createParserApp(router: express.Router) {
   return app;
 }
 
-async function sendRequest(app: Express, body: string, headers: Record<string, string> = {}) {
+async function sendRequest(app: Express, body: string | Blob, headers: Record<string, string> = {}) {
   const server = createServer(app);
   await new Promise<void>((resolve, reject) => {
     server.once("error", reject);
@@ -208,6 +211,31 @@ test("valid signed exact body returns 201 then 200 for an exact duplicate", asyn
   assert.equal(duplicate.status, 200);
   assert.deepEqual(duplicate.body, { ...first.body as object, duplicate: true });
   assert.equal(memory.calls, 2);
+});
+
+test("valid signed non-JSON and missing-content-type requests return 400 without ingesting", async () => {
+  const routes = await loadIntakeRoutes();
+  const memory = createMemoryIngest();
+  const app = createParserApp(routes.createCourierAuditIntakeRouter({
+    signingSecret: SIGNING_SECRET,
+    enableRateLimit: false,
+    ingest: memory.ingest
+  }));
+  const body = JSON.stringify(basePayload());
+  const signed = signedHeaders(body);
+  const { "content-type": _contentType, ...withoutContentType } = signed;
+
+  for (const request of [
+    { body, headers: { ...signed, "content-type": "text/plain" } },
+    { body: new Blob([body]), headers: withoutContentType }
+  ]) {
+    const response = await sendRequest(app, request.body, request.headers);
+
+    assert.equal(response.status, 400);
+    assert.deepEqual(response.body, { error: "INVALID_COURIER_AUDIT_INTAKE_CONTENT_TYPE" });
+  }
+
+  assert.equal(memory.calls, 0);
 });
 
 test("changed whitespace with the old signature returns the generic authentication error", async () => {
@@ -318,22 +346,35 @@ test("source fingerprint conflicts return 409 without a generic error response",
   assert.deepEqual(response.body, { error: "COURIER_AUDIT_INTAKE_SOURCE_CONFLICT" });
 });
 
-test("the inbound limiter allows 60 requests per minute per source IP and rejects the 61st", async () => {
+test("the inbound limiter uses separate 60-request source-IP buckets without invoking ingest", async () => {
   const routes = await loadIntakeRoutes();
   assert.equal(routes.courierAuditIntakeRateLimit.windowMs, 60_000);
   assert.equal(routes.courierAuditIntakeRateLimit.limit, 60);
-  const app = createParserApp(routes.createCourierAuditIntakeRouter({ signingSecret: SIGNING_SECRET, ingest: async () => {
-    throw new Error("persistence must not run");
-  } }));
+  const app = createParserApp(routes.createCourierAuditIntakeRouter({
+    signingSecret: SIGNING_SECRET,
+    ingest: async () => {
+      throw new Error("persistence must not run");
+    }
+  }), { trustProxy: true });
   const body = JSON.stringify(basePayload());
+  const sourceAHeaders = {
+    "content-type": "application/json",
+    "x-forwarded-for": "203.0.113.10"
+  };
+  const sourceBHeaders = {
+    "content-type": "application/json",
+    "x-forwarded-for": "203.0.113.11"
+  };
 
-  const statuses: number[] = [];
+  const sourceAStatuses: number[] = [];
   for (let index = 0; index < 61; index += 1) {
-    statuses.push((await sendRequest(app, body, { "content-type": "application/json" })).status);
+    sourceAStatuses.push((await sendRequest(app, body, sourceAHeaders)).status);
   }
+  const sourceBFirst = (await sendRequest(app, body, sourceBHeaders)).status;
 
-  assert.equal(statuses.slice(0, 60).every((status) => status === 401), true);
-  assert.equal(statuses[60], 429);
+  assert.equal(sourceAStatuses.slice(0, 60).every((status) => status === 401), true);
+  assert.equal(sourceAStatuses[60], 429);
+  assert.equal(sourceBFirst, 401);
 });
 
 test("the global 256kb JSON parser rejects oversize bodies before persistence", async () => {

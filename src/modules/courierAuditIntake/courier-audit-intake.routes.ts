@@ -1,4 +1,4 @@
-import { Router, type Request, type Response, type NextFunction } from "express";
+import { raw, Router, type Request, type Response, type NextFunction } from "express";
 import rateLimit from "express-rate-limit";
 
 import { env } from "../../config/env.js";
@@ -31,6 +31,18 @@ function invalidAuthentication(res: Response) {
   return res.status(401).json({ error: "INVALID_INTAKE_AUTHENTICATION" });
 }
 
+const captureUnparsedRawBody = raw({
+  limit: "256kb",
+  type: (req) => {
+    const contentType = req.headers["content-type"];
+    const value = Array.isArray(contentType) ? contentType[0] : contentType;
+    return value?.split(";", 1)[0]?.trim().toLowerCase() !== "application/json";
+  },
+  verify: (req, _res, buffer) => {
+    (req as Request & { rawBody?: Buffer }).rawBody = Buffer.from(buffer);
+  }
+});
+
 export function createCourierAuditIntakeRouter(options: RouteOptions = {}) {
   const router = Router();
   const signingSecret = options.signingSecret ?? env.COURIER_AUDIT_INTAKE_SIGNING_SECRET;
@@ -43,7 +55,7 @@ export function createCourierAuditIntakeRouter(options: RouteOptions = {}) {
   });
   const rateLimitMiddleware = options.enableRateLimit === false ? [] : [limiter];
 
-  router.post("/", ...rateLimitMiddleware, async (req: Request, res: Response, next: NextFunction) => {
+  router.post("/", ...rateLimitMiddleware, captureUnparsedRawBody, async (req: Request, res: Response, next: NextFunction) => {
     const timestamp = req.header("x-shipmastr-intake-timestamp");
     const signature = req.header("x-shipmastr-intake-signature");
     if (!signingSecret) {
