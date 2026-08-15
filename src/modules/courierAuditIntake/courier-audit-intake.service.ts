@@ -1,0 +1,373 @@
+import { Prisma } from "@prisma/client";
+import { prisma } from "../../lib/prisma.js";
+import type {
+  CourierAuditAttachment,
+  CourierAuditIntakeRequest,
+  CourierAuditNormalizedProjection,
+  CourierAuditWarning
+} from "./courier-audit-intake.contract.js";
+import { deriveCourierAuditSourceFingerprint } from "./courier-audit-intake.fingerprint.js";
+import { normalizeCourierAuditExtraction } from "./courier-audit-intake.normalize.js";
+
+const INGESTION_STATUS = "VALIDATED" as const;
+const REVIEW_STATUS = "NEEDS_REVIEW" as const;
+const SOURCE_IDENTITY_FIELDS = ["sourceProvider", "sourceAccountId", "providerMessageId"] as const;
+const SOURCE_IDENTITY_CONSTRAINTS = new Set([
+  "CourierAuditIntake_sourceProvider_sourceAccountId_providerM_key",
+  "CourierAuditIntake_sourceProvider_sourceAccountId_providerMessageId_key"
+]);
+
+type Db = typeof prisma;
+
+export type CourierAuditIngestResult = {
+  intakeId: string;
+  ingestionStatus: "VALIDATED";
+  reviewStatus: "NEEDS_REVIEW";
+  duplicate: boolean;
+};
+
+export interface CourierAuditIntakeListItem {
+  id: string;
+  sourceProvider: "GMAIL";
+  sourceReceivedAt: Date;
+  createdAt: Date;
+  senderSummary: string | null;
+  companySummary: string | null;
+  warningCount: number;
+  attachmentCount: number;
+  ingestionStatus: "VALIDATED";
+  reviewStatus: "NEEDS_REVIEW";
+}
+
+export interface CourierAuditIntakeListResult {
+  items: CourierAuditIntakeListItem[];
+  nextCursor: string | null;
+}
+
+export interface CourierAuditIntakeDetail {
+  id: string;
+  createdAt: Date;
+  source: {
+    provider: "GMAIL";
+    accountId: string;
+    messageId: string;
+    threadId: string | null;
+    receivedAt: Date;
+    senderName: string | null;
+    senderEmail: string | null;
+    subject: string | null;
+    bodySha256: string;
+    snippet: string | null;
+  };
+  attachments: CourierAuditAttachment[];
+  revision: {
+    revision: 1;
+    schemaVersion: string;
+    parserName: string;
+    parserVersion: string;
+    mode: "DETERMINISTIC" | "AI_ASSISTED";
+    modelProvider: string | null;
+    modelName: string | null;
+    promptVersion: string | null;
+    extractedAt: Date;
+    extractionResult: CourierAuditIntakeRequest["extraction"]["result"];
+    normalizedProjection: CourierAuditNormalizedProjection;
+    warnings: CourierAuditWarning[];
+    confidence: number | null;
+    createdAt: Date;
+  };
+  ingestionStatus: "VALIDATED";
+  reviewStatus: "NEEDS_REVIEW";
+}
+
+export class CourierAuditIntakeConflictError extends Error {
+  readonly code = "COURIER_AUDIT_INTAKE_SOURCE_CONFLICT";
+  readonly statusCode = 409;
+
+  constructor() {
+    super("Courier audit source identity already exists with a different immutable fingerprint.");
+    this.name = "CourierAuditIntakeConflictError";
+  }
+}
+
+export class CourierAuditIntakeCursorError extends Error {
+  readonly code = "INVALID_COURIER_AUDIT_INTAKE_CURSOR";
+  readonly statusCode = 400;
+
+  constructor() {
+    super("Courier audit intake cursor is invalid.");
+    this.name = "CourierAuditIntakeCursorError";
+  }
+}
+
+function success(intakeId: string, duplicate: boolean): CourierAuditIngestResult {
+  return {
+    intakeId,
+    ingestionStatus: INGESTION_STATUS,
+    reviewStatus: REVIEW_STATUS,
+    duplicate
+  };
+}
+
+function isExactSourceIdentityTarget(target: unknown): boolean {
+  if (typeof target === "string") {
+    return SOURCE_IDENTITY_CONSTRAINTS.has(target);
+  }
+  if (!Array.isArray(target) || target.length !== SOURCE_IDENTITY_FIELDS.length) {
+    return false;
+  }
+  return SOURCE_IDENTITY_FIELDS.every((field, index) => target[index] === field);
+}
+
+function isSourceIdentityUniqueViolation(error: unknown): error is Prisma.PrismaClientKnownRequestError {
+  if (!(error instanceof Prisma.PrismaClientKnownRequestError) || error.code !== "P2002") {
+    return false;
+  }
+  const modelName = error.meta?.modelName;
+  if (modelName !== undefined && modelName !== "CourierAuditIntake") {
+    return false;
+  }
+  return isExactSourceIdentityTarget(error.meta?.target);
+}
+
+export async function ingestCourierAuditIntake(
+  request: CourierAuditIntakeRequest,
+  client: Db = prisma
+): Promise<CourierAuditIngestResult> {
+  const sourceFingerprintSha256 = deriveCourierAuditSourceFingerprint(request);
+  const normalized = normalizeCourierAuditExtraction(request.extraction);
+  const identity = {
+    sourceProvider: request.source.provider,
+    sourceAccountId: request.source.accountId,
+    providerMessageId: request.source.messageId
+  };
+
+  try {
+    return await client.$transaction(async (tx) => {
+      const intake = await tx.courierAuditIntake.create({
+        data: {
+          ...identity,
+          providerThreadId: request.source.threadId ?? null,
+          sourceReceivedAt: new Date(request.source.receivedAt),
+          senderName: request.source.from.name ?? null,
+          senderEmail: request.source.from.email ?? null,
+          subject: request.source.subject ?? null,
+          bodySha256: request.source.bodySha256,
+          bodySnippet: request.source.snippet ?? null,
+          sourceFingerprintSha256,
+          attachmentManifest: request.attachments as Prisma.InputJsonValue
+        }
+      });
+
+      await tx.courierAuditExtractionRevision.create({
+        data: {
+          intakeId: intake.id,
+          revision: 1,
+          schemaVersion: request.schemaVersion,
+          parserName: request.extraction.parserName,
+          parserVersion: request.extraction.parserVersion,
+          mode: request.extraction.mode,
+          modelProvider: request.extraction.modelProvider,
+          modelName: request.extraction.modelName,
+          promptVersion: request.extraction.promptVersion,
+          extractedAt: new Date(request.extraction.extractedAt),
+          extractionResult: request.extraction.result as Prisma.InputJsonValue,
+          normalizedProjection: normalized.normalizedProjection as unknown as Prisma.InputJsonValue,
+          warnings: normalized.warnings as Prisma.InputJsonValue,
+          confidence: request.extraction.confidence
+        }
+      });
+
+      return success(intake.id, false);
+    });
+  } catch (error) {
+    if (!isSourceIdentityUniqueViolation(error)) {
+      throw error;
+    }
+
+    const winner = await client.courierAuditIntake.findUnique({
+      where: { sourceProvider_sourceAccountId_providerMessageId: identity },
+      select: { id: true, sourceFingerprintSha256: true }
+    });
+    if (!winner) {
+      throw error;
+    }
+    if (winner.sourceFingerprintSha256 !== sourceFingerprintSha256) {
+      throw new CourierAuditIntakeConflictError();
+    }
+    return success(winner.id, true);
+  }
+}
+
+type ListCursor = { createdAt: Date; id: string };
+
+function encodeCursor(cursor: ListCursor): string {
+  return Buffer.from(JSON.stringify({ createdAt: cursor.createdAt.toISOString(), id: cursor.id }), "utf8").toString("base64url");
+}
+
+function decodeCursor(value: string): ListCursor {
+  try {
+    const decoded = JSON.parse(Buffer.from(value, "base64url").toString("utf8")) as Record<string, unknown>;
+    if (typeof decoded.createdAt !== "string" || typeof decoded.id !== "string" || decoded.id.length === 0) {
+      throw new CourierAuditIntakeCursorError();
+    }
+    const createdAt = new Date(decoded.createdAt);
+    if (!Number.isFinite(createdAt.getTime()) || createdAt.toISOString() !== decoded.createdAt) {
+      throw new CourierAuditIntakeCursorError();
+    }
+    return { createdAt, id: decoded.id };
+  } catch (error) {
+    if (error instanceof CourierAuditIntakeCursorError) throw error;
+    throw new CourierAuditIntakeCursorError();
+  }
+}
+
+function compactWhitespace(value: string): string {
+  return value.trim().replace(/\s+/gu, " ");
+}
+
+function senderSummary(name: string | null, email: string | null): string | null {
+  if (name) {
+    const summary = compactWhitespace(name);
+    if (summary) return summary;
+  }
+  if (!email) return null;
+  const at = email.lastIndexOf("@");
+  if (at < 1 || at === email.length - 1) return null;
+  const local = email.slice(0, at);
+  const domain = email.slice(at + 1);
+  return `${local.slice(0, 1)}***@${domain}`;
+}
+
+function jsonArrayLength(value: Prisma.JsonValue): number {
+  return Array.isArray(value) ? value.length : 0;
+}
+
+function companySummary(value: Prisma.JsonValue): string | null {
+  if (!value || Array.isArray(value) || typeof value !== "object") return null;
+  const companyName = (value as Prisma.JsonObject).companyName;
+  return typeof companyName === "string" ? companyName : null;
+}
+
+export async function listCourierAuditIntakes(
+  input: { cursor?: string; limit: number; from?: Date; to?: Date },
+  client: Db = prisma
+): Promise<CourierAuditIntakeListResult> {
+  const cursor = input.cursor ? decodeCursor(input.cursor) : undefined;
+  const clauses: Prisma.CourierAuditIntakeWhereInput[] = [];
+  if (input.from || input.to) {
+    clauses.push({
+      createdAt: {
+        ...(input.from ? { gte: input.from } : {}),
+        ...(input.to ? { lte: input.to } : {})
+      }
+    });
+  }
+  if (cursor) {
+    clauses.push({
+      OR: [
+        { createdAt: { lt: cursor.createdAt } },
+        { createdAt: cursor.createdAt, id: { lt: cursor.id } }
+      ]
+    });
+  }
+
+  const listArgs = {
+    ...(clauses.length ? { where: { AND: clauses } } : {}),
+    orderBy: [{ createdAt: "desc" }, { id: "desc" }],
+    take: input.limit + 1,
+    select: {
+      id: true,
+      sourceProvider: true,
+      sourceReceivedAt: true,
+      createdAt: true,
+      senderName: true,
+      senderEmail: true,
+      attachmentManifest: true,
+      revisions: {
+        where: { revision: 1 },
+        take: 1,
+        select: { normalizedProjection: true, warnings: true }
+      }
+    }
+  } satisfies Prisma.CourierAuditIntakeFindManyArgs;
+  const rows = await client.courierAuditIntake.findMany(listArgs);
+  const hasNextPage = rows.length > input.limit;
+  const page = hasNextPage ? rows.slice(0, input.limit) : rows;
+
+  return {
+    items: page.map((row) => {
+      const revision = row.revisions[0];
+      return {
+        id: row.id,
+        sourceProvider: row.sourceProvider,
+        sourceReceivedAt: row.sourceReceivedAt,
+        createdAt: row.createdAt,
+        senderSummary: senderSummary(row.senderName, row.senderEmail),
+        companySummary: revision ? companySummary(revision.normalizedProjection) : null,
+        warningCount: revision ? jsonArrayLength(revision.warnings) : 0,
+        attachmentCount: jsonArrayLength(row.attachmentManifest),
+        ingestionStatus: INGESTION_STATUS,
+        reviewStatus: REVIEW_STATUS
+      };
+    }),
+    nextCursor: hasNextPage && page.length
+      ? encodeCursor({ createdAt: page[page.length - 1]!.createdAt, id: page[page.length - 1]!.id })
+      : null
+  };
+}
+
+export async function getCourierAuditIntakeDetail(
+  id: string,
+  client: Db = prisma
+): Promise<CourierAuditIntakeDetail | null> {
+  const intake = await client.courierAuditIntake.findUnique({
+    where: { id },
+    include: {
+      revisions: {
+        where: { revision: 1 },
+        orderBy: { revision: "asc" },
+        take: 1
+      }
+    }
+  });
+  if (!intake) return null;
+  const revision = intake.revisions[0];
+  if (!revision || revision.revision !== 1) return null;
+
+  return {
+    id: intake.id,
+    createdAt: intake.createdAt,
+    source: {
+      provider: intake.sourceProvider,
+      accountId: intake.sourceAccountId,
+      messageId: intake.providerMessageId,
+      threadId: intake.providerThreadId,
+      receivedAt: intake.sourceReceivedAt,
+      senderName: intake.senderName,
+      senderEmail: intake.senderEmail,
+      subject: intake.subject,
+      bodySha256: intake.bodySha256,
+      snippet: intake.bodySnippet
+    },
+    attachments: intake.attachmentManifest as unknown as CourierAuditAttachment[],
+    revision: {
+      revision: 1,
+      schemaVersion: revision.schemaVersion,
+      parserName: revision.parserName,
+      parserVersion: revision.parserVersion,
+      mode: revision.mode,
+      modelProvider: revision.modelProvider,
+      modelName: revision.modelName,
+      promptVersion: revision.promptVersion,
+      extractedAt: revision.extractedAt,
+      extractionResult: revision.extractionResult as unknown as CourierAuditIntakeRequest["extraction"]["result"],
+      normalizedProjection: revision.normalizedProjection as unknown as CourierAuditNormalizedProjection,
+      warnings: revision.warnings as unknown as CourierAuditWarning[],
+      confidence: revision.confidence,
+      createdAt: revision.createdAt
+    },
+    ingestionStatus: INGESTION_STATUS,
+    reviewStatus: REVIEW_STATUS
+  };
+}
