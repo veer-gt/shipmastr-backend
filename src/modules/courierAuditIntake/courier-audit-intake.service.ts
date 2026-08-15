@@ -276,7 +276,7 @@ export async function listCourierAuditIntakes(
   input: { cursor?: string; limit: number; from?: Date; to?: Date },
   client: Db = prisma
 ): Promise<CourierAuditIntakeListResult> {
-  const cursor = input.cursor ? decodeCursor(input.cursor) : undefined;
+  const cursor = input.cursor === undefined ? undefined : decodeCursor(input.cursor);
   const clauses: Prisma.CourierAuditIntakeWhereInput[] = [];
   if (input.from || input.to) {
     clauses.push({

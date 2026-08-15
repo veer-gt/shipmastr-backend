@@ -558,6 +558,19 @@ describe("courier audit intake service", () => {
     }
   });
 
+  it("rejects an explicitly supplied empty cursor with stable HttpError-compatible cursor details", async () => {
+    const database = makePaginatedListClient([]);
+
+    await assert.rejects(
+      listCourierAuditIntakes({ limit: 25, cursor: "" }, database.client),
+      (error) => error instanceof CourierAuditIntakeCursorError &&
+        error instanceof HttpError &&
+        error.status === 400 &&
+        error.message === "INVALID_COURIER_AUDIT_INTAKE_CURSOR" &&
+        error.code === "INVALID_COURIER_AUDIT_INTAKE_CURSOR"
+    );
+  });
+
   it("paginates equal createdAt rows stably and sends bounded select, date, order, and cursor predicates", async () => {
     const createdAt = new Date("2026-08-07T16:30:00.000Z");
     const from = new Date("2026-08-01T00:00:00.000Z");
