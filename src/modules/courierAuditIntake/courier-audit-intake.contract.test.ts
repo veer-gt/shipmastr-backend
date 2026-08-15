@@ -4,6 +4,7 @@ import { courierAuditIntakeRequestSchema } from "./courier-audit-intake.contract
 
 const hash = "a".repeat(64);
 const MiB_25 = 25 * 1024 * 1024;
+const MiB_50 = 50 * 1024 * 1024;
 type ProtocolValue = Record<string, unknown>;
 
 const base = (): ProtocolValue => ({
@@ -151,6 +152,38 @@ test("requires only SKIPPED_OVERSIZE for attachments over 25 MiB", () => {
   for (const processingStatus of ["PARSED_DETERMINISTIC", "PARSED_AI", "SKIPPED_UNSUPPORTED", "FAILED"]) {
     rejected({ ...base(), attachments: [attachment({ sizeBytes: MiB_25 + 1, processingStatus, parser: processingStatus.startsWith("PARSED") ? "parser" : null })] });
   }
+});
+
+test("allows processed attachments totaling exactly 50 MiB", () => {
+  parsed({
+    ...base(),
+    attachments: [
+      attachment({ sourceAttachmentId: "part-1", sizeBytes: MiB_25 }),
+      attachment({ sourceAttachmentId: "part-2", sizeBytes: MiB_50 - MiB_25 })
+    ]
+  });
+});
+
+test("rejects processed attachments totaling more than 50 MiB", () => {
+  rejected({
+    ...base(),
+    attachments: [
+      attachment({ sourceAttachmentId: "part-1", sizeBytes: MiB_25 }),
+      attachment({ sourceAttachmentId: "part-2", sizeBytes: MiB_25 }),
+      attachment({ sourceAttachmentId: "part-3", sizeBytes: 1 })
+    ]
+  });
+});
+
+test("excludes sub-25-MiB skipped oversize attachments from the aggregate processing total", () => {
+  parsed({
+    ...base(),
+    attachments: [
+      attachment({ sourceAttachmentId: "part-1", sizeBytes: MiB_25 }),
+      attachment({ sourceAttachmentId: "part-2", sizeBytes: MiB_25 }),
+      attachment({ sourceAttachmentId: "part-3", sizeBytes: 1, processingStatus: "SKIPPED_OVERSIZE", parser: null })
+    ]
+  });
 });
 
 test("enforces parsed attachment parser and AI message provenance invariants", () => {

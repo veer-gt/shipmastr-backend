@@ -2,6 +2,7 @@ import { z } from "zod";
 
 const MAX_ATTACHMENT_SIZE_BYTES = 1_073_741_824;
 const MAX_PROCESSING_ATTACHMENT_SIZE_BYTES = 25 * 1024 * 1024;
+const MAX_TOTAL_PROCESSING_ATTACHMENT_SIZE_BYTES = 50 * 1024 * 1024;
 const sha256Schema = z.string().regex(/^[a-f0-9]{64}$/);
 const timestampSchema = z.string().datetime({ offset: true });
 const optionalBoundedString = (maximum: number) => z.string().max(maximum).optional();
@@ -116,8 +117,12 @@ export const courierAuditIntakeRequestSchema = z.object({
     context.addIssue({ code: "custom", path: ["extraction"], message: "AI-assisted extraction requires complete model provenance." });
   }
 
+  let totalProcessingAttachmentSizeBytes = 0;
   for (const [index, attachment] of value.attachments.entries()) {
     const isParsed = attachment.processingStatus === "PARSED_DETERMINISTIC" || attachment.processingStatus === "PARSED_AI";
+    if (isParsed) {
+      totalProcessingAttachmentSizeBytes += attachment.sizeBytes;
+    }
     if (isParsed && !attachment.parser) {
       context.addIssue({ code: "custom", path: ["attachments", index, "parser"], message: "Parsed attachments require a parser." });
     }
@@ -127,6 +132,10 @@ export const courierAuditIntakeRequestSchema = z.object({
     if (attachment.sizeBytes > MAX_PROCESSING_ATTACHMENT_SIZE_BYTES && attachment.processingStatus !== "SKIPPED_OVERSIZE") {
       context.addIssue({ code: "custom", path: ["attachments", index, "processingStatus"], message: "Attachments over 25 MiB must be skipped as oversize." });
     }
+  }
+
+  if (totalProcessingAttachmentSizeBytes > MAX_TOTAL_PROCESSING_ATTACHMENT_SIZE_BYTES) {
+    context.addIssue({ code: "custom", path: ["attachments"], message: "Processed attachments cannot exceed 50 MiB in total." });
   }
 });
 
