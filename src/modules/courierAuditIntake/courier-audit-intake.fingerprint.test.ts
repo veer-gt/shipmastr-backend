@@ -86,6 +86,35 @@ test("uses the fixed canonical tuple hash and sorts attachments by sourceAttachm
   assert.equal(deriveCourierAuditSourceFingerprint(canonicalOrder), expectedFingerprint);
 });
 
+test("canonicalizes full duplicate attachment sort keys without hiding immutable metadata changes", () => {
+  const first = attachment({
+    sourceAttachmentId: "duplicate-attachment",
+    filename: "duplicate.pdf",
+    declaredMimeType: "application/pdf",
+    sizeBytes: 100,
+    sha256: "b".repeat(64)
+  });
+  const second = attachment({
+    sourceAttachmentId: "duplicate-attachment",
+    filename: "duplicate.pdf",
+    declaredMimeType: "application/pdf",
+    sizeBytes: 200,
+    sha256: "c".repeat(64)
+  });
+  const original = requestWithAttachments([first, second]);
+  const reversed = requestWithAttachments([second, first]);
+
+  assert.equal(deriveCourierAuditSourceFingerprint(original), deriveCourierAuditSourceFingerprint(reversed));
+
+  const changedFirst = structuredClone(original);
+  changedFirst.attachments[0]!.sizeBytes = 101;
+  assert.notEqual(deriveCourierAuditSourceFingerprint(changedFirst), deriveCourierAuditSourceFingerprint(original));
+
+  const changedSecond = structuredClone(original);
+  changedSecond.attachments[1]!.sha256 = "d".repeat(64);
+  assert.notEqual(deriveCourierAuditSourceFingerprint(changedSecond), deriveCourierAuditSourceFingerprint(original));
+});
+
 test("excludes extraction, model provenance, schema version, and processing-derived fields", () => {
   const original = fixture();
   const changes: Array<(value: CourierAuditIntakeRequest) => void> = [
