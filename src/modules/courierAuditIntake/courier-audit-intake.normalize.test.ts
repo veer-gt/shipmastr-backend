@@ -69,9 +69,9 @@ test("canonicalizes safe whitespace in bounded text and samples", () => {
 });
 
 test("lowercases a syntactically valid email", () => {
-  const result = normalizeCourierAuditExtraction(extraction({ contactEmail: "  Operations+Billing@Example.TEST  " }));
+  const result = normalizeCourierAuditExtraction(extraction({ contactEmail: "  First.Last+Billing@Example.TEST  " }));
 
-  assert.equal(result.normalizedProjection.contactEmail, "operations+billing@example.test");
+  assert.equal(result.normalizedProjection.contactEmail, "first.last+billing@example.test");
   assert.deepEqual(result.warnings, []);
 });
 
@@ -84,6 +84,18 @@ test("sets an invalid email to null and appends a bounded warning", () => {
     message: "Contact email could not be normalized deterministically.",
     field: "contactEmail"
   }]);
+});
+
+test("rejects invalid leading, trailing, and consecutive dots in unquoted email local parts", () => {
+  for (const contactEmail of [".a@example.com", "a.@example.com", "a..b@example.com"]) {
+    const result = normalizeCourierAuditExtraction(extraction({ contactEmail }));
+    assert.equal(result.normalizedProjection.contactEmail, null);
+    assert.deepEqual(result.warnings, [{
+      code: "INVALID_CONTACT_EMAIL",
+      message: "Contact email could not be normalized deterministically.",
+      field: "contactEmail"
+    }]);
+  }
 });
 
 test("normalizes only the three deterministic Indian phone forms", () => {

@@ -16,7 +16,7 @@ const canonicalizeWhitespace = (value: string | null | undefined): string | null
 
 const normalizedEmail = (value: string | null | undefined): string | null => {
   const email = canonicalizeWhitespace(value);
-  if (email === null || !/^[A-Z0-9.!#$%&'*+/=?^_`{|}~-]+@[A-Z0-9](?:[A-Z0-9-]{0,61}[A-Z0-9])?(?:\.[A-Z0-9](?:[A-Z0-9-]{0,61}[A-Z0-9])?)+$/iu.test(email)) {
+  if (email === null || !/^[A-Z0-9!#$%&'*+/=?^_`{|}~-]+(?:\.[A-Z0-9!#$%&'*+/=?^_`{|}~-]+)*@[A-Z0-9](?:[A-Z0-9-]{0,61}[A-Z0-9])?(?:\.[A-Z0-9](?:[A-Z0-9-]{0,61}[A-Z0-9])?)+$/iu.test(email)) {
     return null;
   }
 
