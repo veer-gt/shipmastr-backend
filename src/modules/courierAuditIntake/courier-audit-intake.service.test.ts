@@ -5,10 +5,12 @@ import { Prisma, PrismaClient } from "@prisma/client";
 import type { CourierAuditIntakeRequest } from "./courier-audit-intake.contract.js";
 import {
   CourierAuditIntakeConflictError,
+  CourierAuditIntakeCursorError,
   getCourierAuditIntakeDetail,
   ingestCourierAuditIntake,
   listCourierAuditIntakes
 } from "./courier-audit-intake.service.js";
+import { HttpError } from "../../lib/httpError.js";
 
 const SOURCE_IDENTITY_TARGET = ["sourceProvider", "sourceAccountId", "providerMessageId"];
 const firstCreatedAt = new Date("2026-08-07T16:00:01.000Z");
@@ -17,6 +19,7 @@ function requestFixture(overrides: {
   accountId?: string;
   messageId?: string;
   senderName?: string;
+  senderEmail?: string;
   subject?: string;
   bodySha256?: string;
 } = {}): CourierAuditIntakeRequest {
@@ -30,7 +33,7 @@ function requestFixture(overrides: {
       receivedAt: "2026-08-07T15:58:45.123Z",
       from: {
         name: overrides.senderName ?? "  Acme   Billing  ",
-        email: "billing@example.test"
+        email: overrides.senderEmail ?? "billing@example.test"
       },
       subject: overrides.subject ?? "July courier statement",
       bodySha256: overrides.bodySha256 ?? "a".repeat(64),
@@ -362,6 +365,9 @@ describe("courier audit intake service", () => {
     await assert.rejects(
       ingestCourierAuditIntake(requestFixture({ bodySha256: "c".repeat(64) }), client),
       (error) => error instanceof CourierAuditIntakeConflictError &&
+        error instanceof HttpError &&
+        error.status === 409 &&
+        error.message === "COURIER_AUDIT_INTAKE_SOURCE_CONFLICT" &&
         (error as CourierAuditIntakeConflictError).code === "COURIER_AUDIT_INTAKE_SOURCE_CONFLICT"
     );
 
@@ -508,11 +514,47 @@ describe("courier audit intake service", () => {
       messageId: "sender-name-email-embedded",
       senderName: "Billing contact billing@example.test"
     }), client);
+    await ingestCourierAuditIntake(requestFixture({
+      messageId: "sender-name-email-punycode",
+      senderName: "Billing contact billing@example.xn--p1ai",
+      senderEmail: "billing@example.xn--p1ai"
+    }), client);
+    await ingestCourierAuditIntake(requestFixture({
+      messageId: "sender-name-email-unicode-domain",
+      senderName: "Billing contact billing@例え.テスト",
+      senderEmail: "billing@例え.テスト"
+    }), client);
 
     const list = await listCourierAuditIntakes({ limit: 25 }, client);
-    assert.equal(list.items.length, 2);
+    assert.equal(list.items.length, 4);
     for (const item of list.items) {
       assert.equal(item.senderSummary?.includes("billing@example.test"), false);
+      assert.equal(item.senderSummary?.includes("billing@example.xn--p1ai"), false);
+      assert.equal(item.senderSummary?.includes("billing@例え.テスト"), false);
+    }
+  });
+
+  it("rejects malformed cursors with stable HttpError-compatible cursor details", async () => {
+    const database = makePaginatedListClient([]);
+    const validId = "00000000-0000-4000-8000-000000000001";
+    const validTimestamp = firstCreatedAt.toISOString();
+    const malformedCursors = [
+      Buffer.from(JSON.stringify({ createdAt: validTimestamp }), "utf8").toString("base64url"),
+      Buffer.from(JSON.stringify({ createdAt: validTimestamp, id: validId, extra: true }), "utf8").toString("base64url"),
+      `${Buffer.from(JSON.stringify({ createdAt: validTimestamp, id: validId }), "utf8").toString("base64url")}=` ,
+      Buffer.from(JSON.stringify({ createdAt: validTimestamp, id: "intake-1" }), "utf8").toString("base64url"),
+      Buffer.from(JSON.stringify({ createdAt: "2026-08-07T16:00:01Z", id: validId }), "utf8").toString("base64url")
+    ];
+
+    for (const cursor of malformedCursors) {
+      await assert.rejects(
+        listCourierAuditIntakes({ limit: 25, cursor }, database.client),
+        (error) => error instanceof CourierAuditIntakeCursorError &&
+          error instanceof HttpError &&
+          error.status === 400 &&
+          error.message === "INVALID_COURIER_AUDIT_INTAKE_CURSOR" &&
+          error.code === "INVALID_COURIER_AUDIT_INTAKE_CURSOR"
+      );
     }
   });
 
@@ -521,16 +563,19 @@ describe("courier audit intake service", () => {
     const from = new Date("2026-08-01T00:00:00.000Z");
     const to = new Date("2026-08-31T23:59:59.999Z");
     const database = makePaginatedListClient([
-      paginatedListRow("intake-a", createdAt),
-      paginatedListRow("intake-c", createdAt),
-      paginatedListRow("intake-b", createdAt)
+      paginatedListRow("00000000-0000-4000-8000-00000000000a", createdAt),
+      paginatedListRow("00000000-0000-4000-8000-00000000000c", createdAt),
+      paginatedListRow("00000000-0000-4000-8000-00000000000b", createdAt)
     ]);
 
     const first = await listCourierAuditIntakes({ limit: 2, from, to }, database.client);
-    assert.deepEqual(first.items.map((item) => item.id), ["intake-c", "intake-b"]);
+    assert.deepEqual(first.items.map((item) => item.id), [
+      "00000000-0000-4000-8000-00000000000c",
+      "00000000-0000-4000-8000-00000000000b"
+    ]);
     assert.ok(first.nextCursor);
     const second = await listCourierAuditIntakes({ limit: 2, from, to, cursor: first.nextCursor }, database.client);
-    assert.deepEqual(second.items.map((item) => item.id), ["intake-a"]);
+    assert.deepEqual(second.items.map((item) => item.id), ["00000000-0000-4000-8000-00000000000a"]);
     assert.equal(second.nextCursor, null);
 
     const expectedSelect = {
@@ -559,7 +604,7 @@ describe("courier audit intake service", () => {
         {
           OR: [
             { createdAt: { lt: createdAt } },
-            { createdAt, id: { lt: "intake-b" } }
+            { createdAt, id: { lt: "00000000-0000-4000-8000-00000000000b" } }
           ]
         }
       ]
@@ -581,20 +626,28 @@ scratchTest("uses database uniqueness for 16 concurrent first deliveries", async
     messageId: `scratch-race-message-${token}`
   });
   const database = new PrismaClient();
-  let fixtureIntakeId: string | undefined;
+  const fulfilledIntakeIds = new Set<string>();
+  const fixtureIdentity = {
+    sourceProvider: "GMAIL" as const,
+    sourceAccountId: request.source.accountId,
+    providerMessageId: request.source.messageId
+  };
   try {
-    const results = await Promise.all(Array.from(
+    const settledResults = await Promise.allSettled(Array.from(
       { length: 16 },
-      async () => ingestCourierAuditIntake(request, database)
+      async () => {
+        const result = await ingestCourierAuditIntake(request, database);
+        fulfilledIntakeIds.add(result.intakeId);
+        return result;
+      }
     ));
-    fixtureIntakeId = results[0]?.intakeId;
+    const results = settledResults.flatMap((result) => result.status === "fulfilled" ? [result.value] : []);
+    assert.equal(settledResults.length, 16);
+    assert.equal(settledResults.filter((result) => result.status === "rejected").length, 0);
+    assert.equal(results.length, 16);
     const ids = new Set(results.map((result: { intakeId: string }) => result.intakeId));
     const intakeCount = await database.courierAuditIntake.count({
-      where: {
-        sourceProvider: "GMAIL",
-        sourceAccountId: request.source.accountId,
-        providerMessageId: request.source.messageId
-      }
+      where: fixtureIdentity
     });
     assert.ok(results[0]);
     const revisionCount = await database.courierAuditExtractionRevision.count({
@@ -608,14 +661,20 @@ scratchTest("uses database uniqueness for 16 concurrent first deliveries", async
     assert.equal(revisionCount, 1);
   } finally {
     try {
-      if (fixtureIntakeId) {
-        await database.courierAuditExtractionRevision.deleteMany({
-          where: { intakeId: fixtureIntakeId }
-        });
-        await database.courierAuditIntake.deleteMany({
-          where: { id: fixtureIntakeId }
-        });
-      }
+      const fulfilledIds = [...fulfilledIntakeIds];
+      await database.courierAuditExtractionRevision.deleteMany({
+        where: fulfilledIds.length > 0
+          ? {
+            OR: [
+              { intakeId: { in: fulfilledIds } },
+              { intake: fixtureIdentity }
+            ]
+          }
+          : { intake: fixtureIdentity }
+      });
+      await database.courierAuditIntake.deleteMany({
+        where: fixtureIdentity
+      });
     } finally {
       await database.$disconnect();
     }

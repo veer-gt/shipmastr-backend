@@ -1,5 +1,6 @@
 import { Prisma } from "@prisma/client";
 import { prisma } from "../../lib/prisma.js";
+import { HttpError } from "../../lib/httpError.js";
 import type {
   CourierAuditAttachment,
   CourierAuditIntakeRequest,
@@ -16,7 +17,9 @@ const SOURCE_IDENTITY_CONSTRAINTS = new Set([
   "CourierAuditIntake_sourceProvider_sourceAccountId_providerM_key",
   "CourierAuditIntake_sourceProvider_sourceAccountId_providerMessageId_key"
 ]);
-const EMAIL_ADDRESS_PATTERN = /[A-Z0-9._%+-]+@[A-Z0-9.-]+\.[A-Z]{2,}/giu;
+const EMAIL_ADDRESS_PATTERN = /[^\s<>()"'`]+@[^\s<>()"'`]+/gu;
+const COURIER_AUDIT_INTAKE_ID_PATTERN = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/iu;
+const BASE64URL_PATTERN = /^[A-Za-z0-9_-]+$/u;
 
 type Db = typeof prisma;
 
@@ -81,22 +84,20 @@ export interface CourierAuditIntakeDetail {
   reviewStatus: "NEEDS_REVIEW";
 }
 
-export class CourierAuditIntakeConflictError extends Error {
+export class CourierAuditIntakeConflictError extends HttpError {
   readonly code = "COURIER_AUDIT_INTAKE_SOURCE_CONFLICT";
-  readonly statusCode = 409;
 
   constructor() {
-    super("Courier audit source identity already exists with a different immutable fingerprint.");
+    super(409, "COURIER_AUDIT_INTAKE_SOURCE_CONFLICT");
     this.name = "CourierAuditIntakeConflictError";
   }
 }
 
-export class CourierAuditIntakeCursorError extends Error {
+export class CourierAuditIntakeCursorError extends HttpError {
   readonly code = "INVALID_COURIER_AUDIT_INTAKE_CURSOR";
-  readonly statusCode = 400;
 
   constructor() {
-    super("Courier audit intake cursor is invalid.");
+    super(400, "INVALID_COURIER_AUDIT_INTAKE_CURSOR");
     this.name = "CourierAuditIntakeCursorError";
   }
 }
@@ -208,8 +209,23 @@ function encodeCursor(cursor: ListCursor): string {
 
 function decodeCursor(value: string): ListCursor {
   try {
-    const decoded = JSON.parse(Buffer.from(value, "base64url").toString("utf8")) as Record<string, unknown>;
-    if (typeof decoded.createdAt !== "string" || typeof decoded.id !== "string" || decoded.id.length === 0) {
+    if (!BASE64URL_PATTERN.test(value)) {
+      throw new CourierAuditIntakeCursorError();
+    }
+    const encoded = Buffer.from(value, "base64url");
+    if (encoded.toString("base64url") !== value) {
+      throw new CourierAuditIntakeCursorError();
+    }
+    const decoded = JSON.parse(encoded.toString("utf8")) as Record<string, unknown>;
+    const fields = Object.keys(decoded);
+    if (
+      fields.length !== 2 ||
+      !fields.includes("createdAt") ||
+      !fields.includes("id") ||
+      typeof decoded.createdAt !== "string" ||
+      typeof decoded.id !== "string" ||
+      !COURIER_AUDIT_INTAKE_ID_PATTERN.test(decoded.id)
+    ) {
       throw new CourierAuditIntakeCursorError();
     }
     const createdAt = new Date(decoded.createdAt);
