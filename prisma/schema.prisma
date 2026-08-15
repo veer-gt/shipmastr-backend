@@ -7,6 +7,15 @@ datasource db {
   url      = env("DATABASE_URL")
 }
 
+enum CourierAuditIntakeSourceProvider {
+  GMAIL
+}
+
+enum CourierAuditExtractionMode {
+  DETERMINISTIC
+  AI_ASSISTED
+}
+
 enum PaymentMode {
   PREPAID
   COD
@@ -6763,4 +6772,49 @@ model SlaBreach {
   @@index([orderId])
   @@index([courierId])
   @@index([createdAt])
+}
+
+model CourierAuditIntake {
+  id                      String                           @id @default(uuid())
+  createdAt               DateTime                         @default(now())
+  sourceProvider          CourierAuditIntakeSourceProvider
+  sourceAccountId         String
+  providerMessageId       String
+  providerThreadId        String?
+  sourceReceivedAt        DateTime
+  senderName              String?
+  senderEmail             String?
+  subject                 String?
+  bodySha256              String
+  bodySnippet             String?
+  sourceFingerprintSha256 String
+  attachmentManifest      Json
+  revisions               CourierAuditExtractionRevision[]
+
+  @@unique([sourceProvider, sourceAccountId, providerMessageId])
+  @@index([createdAt, id])
+  @@index([sourceReceivedAt, id])
+}
+
+model CourierAuditExtractionRevision {
+  id                   String                     @id @default(uuid())
+  intakeId             String
+  revision             Int
+  schemaVersion        String
+  parserName           String
+  parserVersion        String
+  mode                 CourierAuditExtractionMode
+  modelProvider        String?
+  modelName            String?
+  promptVersion        String?
+  extractedAt          DateTime
+  extractionResult     Json
+  normalizedProjection Json
+  warnings             Json
+  confidence           Float?
+  createdAt            DateTime                   @default(now())
+  intake               CourierAuditIntake         @relation(fields: [intakeId], references: [id], onDelete: Restrict)
+
+  @@unique([intakeId, revision])
+  @@index([intakeId, createdAt])
 }
