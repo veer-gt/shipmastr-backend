@@ -1,4 +1,5 @@
 import assert from "node:assert/strict";
+import { randomUUID } from "node:crypto";
 import { describe, it } from "node:test";
 import { Prisma, PrismaClient } from "@prisma/client";
 import type { CourierAuditIntakeRequest } from "./courier-audit-intake.contract.js";
@@ -13,7 +14,9 @@ const SOURCE_IDENTITY_TARGET = ["sourceProvider", "sourceAccountId", "providerMe
 const firstCreatedAt = new Date("2026-08-07T16:00:01.000Z");
 
 function requestFixture(overrides: {
+  accountId?: string;
   messageId?: string;
+  senderName?: string;
   subject?: string;
   bodySha256?: string;
 } = {}): CourierAuditIntakeRequest {
@@ -21,12 +24,12 @@ function requestFixture(overrides: {
     schemaVersion: "courier-audit-intake.v1",
     source: {
       provider: "GMAIL",
-      accountId: "mailbox-workflow-01",
+      accountId: overrides.accountId ?? "mailbox-workflow-01",
       messageId: overrides.messageId ?? "gmail-message-1001",
       threadId: "gmail-thread-77",
       receivedAt: "2026-08-07T15:58:45.123Z",
       from: {
-        name: "  Acme   Billing  ",
+        name: overrides.senderName ?? "  Acme   Billing  ",
         email: "billing@example.test"
       },
       subject: overrides.subject ?? "July courier statement",
@@ -101,6 +104,10 @@ function makeDatabase(options: {
   failRevisionCreate?: Error;
   transactionError?: unknown;
 } = {}) {
+  const controls: {
+    failRevisionCreate?: Error;
+    transactionError?: unknown;
+  } = { ...options };
   const state: {
     intakes: StoredIntake[];
     revisions: StoredRevision[];
@@ -161,7 +168,7 @@ function makeDatabase(options: {
     },
     courierAuditExtractionRevision: {
       create: async ({ data }: any) => {
-        if (options.failRevisionCreate) throw options.failRevisionCreate;
+        if (controls.failRevisionCreate) throw controls.failRevisionCreate;
         const row = revisionRow(data, `revision-${targetState.nextRevisionId++}`);
         targetState.revisions.push(row);
         return row;
@@ -176,7 +183,7 @@ function makeDatabase(options: {
   const client = {
     ...model(state),
     $transaction: async (callback: (tx: unknown) => Promise<unknown>) => {
-      if (options.transactionError) throw options.transactionError;
+      if (controls.transactionError) throw controls.transactionError;
       const draft = {
         ...state,
         intakes: state.intakes.map((row) => ({ ...row })),
@@ -192,7 +199,57 @@ function makeDatabase(options: {
     }
   };
 
-  return { client: client as any, state };
+  return { client: client as any, controls, state };
+}
+
+function paginatedListRow(id: string, createdAt: Date) {
+  return {
+    id,
+    sourceProvider: "GMAIL" as const,
+    sourceReceivedAt: new Date("2026-08-07T15:58:45.123Z"),
+    createdAt,
+    senderName: "Courier Billing",
+    senderEmail: "billing@example.test",
+    attachmentManifest: [],
+    revisions: [{
+      normalizedProjection: { companyName: "Courier Company" },
+      warnings: []
+    }]
+  };
+}
+
+function makePaginatedListClient(rows: ReturnType<typeof paginatedListRow>[]) {
+  const calls: any[] = [];
+  return {
+    calls,
+    client: {
+      courierAuditIntake: {
+        findMany: async (args: any) => {
+          calls.push(args);
+          let filtered = [...rows];
+          for (const clause of args.where?.AND ?? []) {
+            if (clause.createdAt && !clause.OR) {
+              const { gte, lte } = clause.createdAt;
+              if (gte) filtered = filtered.filter((row) => row.createdAt >= gte);
+              if (lte) filtered = filtered.filter((row) => row.createdAt <= lte);
+            }
+            if (clause.OR) {
+              const olderThan = clause.OR[0]?.createdAt?.lt as Date;
+              const equalTo = clause.OR[1]?.createdAt as Date;
+              const idLessThan = clause.OR[1]?.id?.lt as string;
+              filtered = filtered.filter((row) =>
+                row.createdAt < olderThan ||
+                (row.createdAt.getTime() === equalTo.getTime() && row.id < idLessThan)
+              );
+            }
+          }
+          return filtered
+            .sort((left, right) => right.createdAt.getTime() - left.createdAt.getTime() || right.id.localeCompare(left.id))
+            .slice(0, args.take);
+        }
+      }
+    } as any
+  };
 }
 
 describe("courier audit intake service", () => {
@@ -320,6 +377,37 @@ describe("courier audit intake service", () => {
     await assert.rejects(ingestCourierAuditIntake(requestFixture(), client), (error) => error === unrelated);
   });
 
+  it("accepts the actual truncated PostgreSQL source-identity constraint target", async () => {
+    const database = makeDatabase();
+    const request = requestFixture();
+    const first = await ingestCourierAuditIntake(request, database.client);
+    database.controls.transactionError = p2002("CourierAuditIntake_sourceProvider_sourceAccountId_providerM_key");
+
+    const duplicate = await ingestCourierAuditIntake(request, database.client);
+
+    assert.equal(duplicate.intakeId, first.intakeId);
+    assert.equal(duplicate.duplicate, true);
+    assert.equal(database.state.revisions.length, 1);
+  });
+
+  it("rethrows wrong string and wrong-order array P2002 targets", async () => {
+    for (const target of [
+      "CourierAuditExtractionRevision_intakeId_revision_key",
+      ["sourceAccountId", "sourceProvider", "providerMessageId"]
+    ]) {
+      const error = p2002(target);
+      const { client } = makeDatabase({ transactionError: error });
+      await assert.rejects(ingestCourierAuditIntake(requestFixture(), client), (caught) => caught === error);
+    }
+  });
+
+  it("rethrows the original source-identity P2002 when no committed winner exists", async () => {
+    const error = p2002(SOURCE_IDENTITY_TARGET);
+    const { client } = makeDatabase({ transactionError: error });
+
+    await assert.rejects(ingestCourierAuditIntake(requestFixture(), client), (caught) => caught === error);
+  });
+
   it("rethrows an unrelated repository error unchanged", async () => {
     const repositoryError = new Error("database unavailable");
     const { client } = makeDatabase({ transactionError: repositoryError });
@@ -410,6 +498,74 @@ describe("courier audit intake service", () => {
     });
   });
 
+  it("never exposes a full email supplied as or embedded in senderName", async () => {
+    const { client } = makeDatabase();
+    await ingestCourierAuditIntake(requestFixture({
+      messageId: "sender-name-email-exact",
+      senderName: "billing@example.test"
+    }), client);
+    await ingestCourierAuditIntake(requestFixture({
+      messageId: "sender-name-email-embedded",
+      senderName: "Billing contact billing@example.test"
+    }), client);
+
+    const list = await listCourierAuditIntakes({ limit: 25 }, client);
+    assert.equal(list.items.length, 2);
+    for (const item of list.items) {
+      assert.equal(item.senderSummary?.includes("billing@example.test"), false);
+    }
+  });
+
+  it("paginates equal createdAt rows stably and sends bounded select, date, order, and cursor predicates", async () => {
+    const createdAt = new Date("2026-08-07T16:30:00.000Z");
+    const from = new Date("2026-08-01T00:00:00.000Z");
+    const to = new Date("2026-08-31T23:59:59.999Z");
+    const database = makePaginatedListClient([
+      paginatedListRow("intake-a", createdAt),
+      paginatedListRow("intake-c", createdAt),
+      paginatedListRow("intake-b", createdAt)
+    ]);
+
+    const first = await listCourierAuditIntakes({ limit: 2, from, to }, database.client);
+    assert.deepEqual(first.items.map((item) => item.id), ["intake-c", "intake-b"]);
+    assert.ok(first.nextCursor);
+    const second = await listCourierAuditIntakes({ limit: 2, from, to, cursor: first.nextCursor }, database.client);
+    assert.deepEqual(second.items.map((item) => item.id), ["intake-a"]);
+    assert.equal(second.nextCursor, null);
+
+    const expectedSelect = {
+      id: true,
+      sourceProvider: true,
+      sourceReceivedAt: true,
+      createdAt: true,
+      senderName: true,
+      senderEmail: true,
+      attachmentManifest: true,
+      revisions: {
+        where: { revision: 1 },
+        take: 1,
+        select: { normalizedProjection: true, warnings: true }
+      }
+    };
+    assert.deepEqual(database.calls[0].orderBy, [{ createdAt: "desc" }, { id: "desc" }]);
+    assert.equal(database.calls[0].take, 3);
+    assert.deepEqual(database.calls[0].select, expectedSelect);
+    assert.deepEqual(database.calls[0].where, {
+      AND: [{ createdAt: { gte: from, lte: to } }]
+    });
+    assert.deepEqual(database.calls[1].where, {
+      AND: [
+        { createdAt: { gte: from, lte: to } },
+        {
+          OR: [
+            { createdAt: { lt: createdAt } },
+            { createdAt, id: { lt: "intake-b" } }
+          ]
+        }
+      ]
+    });
+  });
+
   it("returns null detail when the intake does not exist", async () => {
     const { client } = makeDatabase();
     assert.equal(await getCourierAuditIntakeDetail("missing-intake", client), null);
@@ -419,13 +575,19 @@ describe("courier audit intake service", () => {
 const scratchTest = process.env.COURIER_AUDIT_INTAKE_DB_TEST === "1" ? it : it.skip;
 
 scratchTest("uses database uniqueness for 16 concurrent first deliveries", async () => {
-  const request = requestFixture({ messageId: "scratch-race-message" });
+  const token = randomUUID();
+  const request = requestFixture({
+    accountId: `scratch-race-account-${token}`,
+    messageId: `scratch-race-message-${token}`
+  });
   const database = new PrismaClient();
+  let fixtureIntakeId: string | undefined;
   try {
     const results = await Promise.all(Array.from(
       { length: 16 },
       async () => ingestCourierAuditIntake(request, database)
     ));
+    fixtureIntakeId = results[0]?.intakeId;
     const ids = new Set(results.map((result: { intakeId: string }) => result.intakeId));
     const intakeCount = await database.courierAuditIntake.count({
       where: {
@@ -445,20 +607,17 @@ scratchTest("uses database uniqueness for 16 concurrent first deliveries", async
     assert.equal(intakeCount, 1);
     assert.equal(revisionCount, 1);
   } finally {
-    const intakes = await database.courierAuditIntake.findMany({
-      where: {
-        sourceProvider: "GMAIL",
-        sourceAccountId: request.source.accountId,
-        providerMessageId: request.source.messageId
-      },
-      select: { id: true }
-    });
-    await database.courierAuditExtractionRevision.deleteMany({
-      where: { intakeId: { in: intakes.map((intake) => intake.id) } }
-    });
-    await database.courierAuditIntake.deleteMany({
-      where: { id: { in: intakes.map((intake) => intake.id) } }
-    });
-    await database.$disconnect();
+    try {
+      if (fixtureIntakeId) {
+        await database.courierAuditExtractionRevision.deleteMany({
+          where: { intakeId: fixtureIntakeId }
+        });
+        await database.courierAuditIntake.deleteMany({
+          where: { id: fixtureIntakeId }
+        });
+      }
+    } finally {
+      await database.$disconnect();
+    }
   }
 });

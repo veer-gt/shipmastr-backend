@@ -16,6 +16,7 @@ const SOURCE_IDENTITY_CONSTRAINTS = new Set([
   "CourierAuditIntake_sourceProvider_sourceAccountId_providerM_key",
   "CourierAuditIntake_sourceProvider_sourceAccountId_providerMessageId_key"
 ]);
+const EMAIL_ADDRESS_PATTERN = /[A-Z0-9._%+-]+@[A-Z0-9.-]+\.[A-Z]{2,}/giu;
 
 type Db = typeof prisma;
 
@@ -226,17 +227,23 @@ function compactWhitespace(value: string): string {
   return value.trim().replace(/\s+/gu, " ");
 }
 
+function maskEmailAddress(value: string): string {
+  const at = value.lastIndexOf("@");
+  if (at < 1 || at === value.length - 1) return "[redacted-email]";
+  return `${value.slice(0, 1)}***@${value.slice(at + 1)}`;
+}
+
+function maskEmailAddresses(value: string): string {
+  return value.replace(EMAIL_ADDRESS_PATTERN, maskEmailAddress);
+}
+
 function senderSummary(name: string | null, email: string | null): string | null {
   if (name) {
     const summary = compactWhitespace(name);
-    if (summary) return summary;
+    if (summary) return maskEmailAddresses(summary);
   }
   if (!email) return null;
-  const at = email.lastIndexOf("@");
-  if (at < 1 || at === email.length - 1) return null;
-  const local = email.slice(0, at);
-  const domain = email.slice(at + 1);
-  return `${local.slice(0, 1)}***@${domain}`;
+  return maskEmailAddress(email);
 }
 
 function jsonArrayLength(value: Prisma.JsonValue): number {
