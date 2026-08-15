@@ -27,6 +27,9 @@ type AdminRouterDependencies = {
 
 function parseListQuery(query: unknown) {
   const parsed = listQuerySchema.parse(query);
+  if ((parsed.from === undefined) !== (parsed.to === undefined)) {
+    throw new HttpError(400, "COURIER_AUDIT_INTAKE_DATE_RANGE_REQUIRES_BOTH_BOUNDS");
+  }
   if (parsed.from && parsed.to && parsed.from > parsed.to) {
     throw new HttpError(400, "INVALID_COURIER_AUDIT_INTAKE_DATE_RANGE");
   }
