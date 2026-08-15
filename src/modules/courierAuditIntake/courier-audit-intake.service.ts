@@ -22,6 +22,19 @@ const COURIER_AUDIT_INTAKE_ID_PATTERN = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0
 const BASE64URL_PATTERN = /^[A-Za-z0-9_-]+$/u;
 
 type Db = typeof prisma;
+type RawListDb = Pick<Db, "$queryRaw">;
+
+type CourierAuditIntakeListProjectionRow = {
+  id: string;
+  sourceProvider: "GMAIL";
+  sourceReceivedAt: Date;
+  createdAt: Date;
+  senderName: string | null;
+  senderEmail: string | null;
+  attachmentCount: number;
+  warningCount: number;
+  companySummary: string | null;
+};
 
 export type CourierAuditIngestResult = {
   intakeId: string;
@@ -272,6 +285,91 @@ function companySummary(value: Prisma.JsonValue): string | null {
   return typeof companyName === "string" ? companyName : null;
 }
 
+function buildCourierAuditIntakeListResult(
+  rows: CourierAuditIntakeListProjectionRow[],
+  limit: number
+): CourierAuditIntakeListResult {
+  const hasNextPage = rows.length > limit;
+  const page = hasNextPage ? rows.slice(0, limit) : rows;
+
+  return {
+    items: page.map((row) => ({
+      id: row.id,
+      sourceProvider: row.sourceProvider,
+      sourceReceivedAt: row.sourceReceivedAt,
+      createdAt: row.createdAt,
+      senderSummary: senderSummary(row.senderName, row.senderEmail),
+      companySummary: row.companySummary,
+      warningCount: row.warningCount,
+      attachmentCount: row.attachmentCount,
+      ingestionStatus: INGESTION_STATUS,
+      reviewStatus: REVIEW_STATUS
+    })),
+    nextCursor: hasNextPage && page.length
+      ? encodeCursor({ createdAt: page[page.length - 1]!.createdAt, id: page[page.length - 1]!.id })
+      : null
+  };
+}
+
+type CourierAuditIntakeRawListRow = CourierAuditIntakeListProjectionRow;
+
+async function listCourierAuditIntakesWithScalarProjection(
+  input: { cursor?: string; limit: number; from?: Date; to?: Date },
+  cursor: ListCursor | undefined,
+  client: RawListDb
+): Promise<CourierAuditIntakeListResult> {
+  const predicates: Prisma.Sql[] = [];
+  if (input.from) predicates.push(Prisma.sql`i."createdAt" >= ${input.from}`);
+  if (input.to) predicates.push(Prisma.sql`i."createdAt" <= ${input.to}`);
+  if (cursor) {
+    predicates.push(Prisma.sql`(
+      i."createdAt" < ${cursor.createdAt}
+      OR (i."createdAt" = ${cursor.createdAt} AND i."id" < ${cursor.id})
+    )`);
+  }
+  const where = predicates.length
+    ? Prisma.sql`WHERE ${Prisma.join(predicates, " AND ")}`
+    : Prisma.sql``;
+
+  const rows = await client.$queryRaw<CourierAuditIntakeRawListRow[]>(Prisma.sql`
+    SELECT
+      i."id",
+      i."sourceProvider",
+      i."sourceReceivedAt",
+      i."createdAt",
+      i."senderName",
+      i."senderEmail",
+      CASE
+        WHEN jsonb_typeof(i."attachmentManifest") = 'array'
+        THEN jsonb_array_length(i."attachmentManifest")
+        ELSE 0
+      END AS "attachmentCount",
+      CASE
+        WHEN jsonb_typeof(r."warnings") = 'array'
+        THEN jsonb_array_length(r."warnings")
+        ELSE 0
+      END AS "warningCount",
+      CASE
+        WHEN jsonb_typeof(r."normalizedProjection") = 'object'
+          AND jsonb_typeof(r."normalizedProjection" -> 'companyName') = 'string'
+        THEN r."normalizedProjection" ->> 'companyName'
+        ELSE NULL
+      END AS "companySummary"
+    FROM "CourierAuditIntake" AS i
+    LEFT JOIN LATERAL (
+      SELECT r0."normalizedProjection", r0."warnings"
+      FROM "CourierAuditExtractionRevision" AS r0
+      WHERE r0."intakeId" = i."id" AND r0."revision" = 1
+      LIMIT 1
+    ) AS r ON TRUE
+    ${where}
+    ORDER BY i."createdAt" DESC, i."id" DESC
+    LIMIT ${input.limit + 1}
+  `);
+
+  return buildCourierAuditIntakeListResult(rows, input.limit);
+}
+
 export async function listCourierAuditIntakes(
   input: { cursor?: string; limit: number; from?: Date; to?: Date },
   client: Db = prisma
@@ -295,6 +393,12 @@ export async function listCourierAuditIntakes(
     });
   }
 
+  const rawClient = client as Db & { $queryRaw?: Db["$queryRaw"] };
+  if (typeof rawClient.$queryRaw === "function") {
+    return listCourierAuditIntakesWithScalarProjection(input, cursor, rawClient);
+  }
+
+  // Production Prisma clients always take the scalar raw-query path above; this branch only supports legacy unit doubles without $queryRaw.
   const listArgs = {
     ...(clauses.length ? { where: { AND: clauses } } : {}),
     orderBy: [{ createdAt: "desc" }, { id: "desc" }],
@@ -315,29 +419,20 @@ export async function listCourierAuditIntakes(
     }
   } satisfies Prisma.CourierAuditIntakeFindManyArgs;
   const rows = await client.courierAuditIntake.findMany(listArgs);
-  const hasNextPage = rows.length > input.limit;
-  const page = hasNextPage ? rows.slice(0, input.limit) : rows;
-
-  return {
-    items: page.map((row) => {
-      const revision = row.revisions[0];
-      return {
-        id: row.id,
-        sourceProvider: row.sourceProvider,
-        sourceReceivedAt: row.sourceReceivedAt,
-        createdAt: row.createdAt,
-        senderSummary: senderSummary(row.senderName, row.senderEmail),
-        companySummary: revision ? companySummary(revision.normalizedProjection) : null,
-        warningCount: revision ? jsonArrayLength(revision.warnings) : 0,
-        attachmentCount: jsonArrayLength(row.attachmentManifest),
-        ingestionStatus: INGESTION_STATUS,
-        reviewStatus: REVIEW_STATUS
-      };
-    }),
-    nextCursor: hasNextPage && page.length
-      ? encodeCursor({ createdAt: page[page.length - 1]!.createdAt, id: page[page.length - 1]!.id })
-      : null
-  };
+  return buildCourierAuditIntakeListResult(rows.map((row) => {
+    const revision = row.revisions[0];
+    return {
+      id: row.id,
+      sourceProvider: row.sourceProvider,
+      sourceReceivedAt: row.sourceReceivedAt,
+      createdAt: row.createdAt,
+      senderName: row.senderName,
+      senderEmail: row.senderEmail,
+      companySummary: revision ? companySummary(revision.normalizedProjection) : null,
+      warningCount: revision ? jsonArrayLength(revision.warnings) : 0,
+      attachmentCount: jsonArrayLength(row.attachmentManifest)
+    };
+  }), input.limit);
 }
 
 export async function getCourierAuditIntakeDetail(

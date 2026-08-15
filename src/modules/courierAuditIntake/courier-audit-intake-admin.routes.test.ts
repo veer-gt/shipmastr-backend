@@ -1,6 +1,6 @@
 import assert from "node:assert/strict";
 import { once } from "node:events";
-import { readFileSync } from "node:fs";
+import { existsSync, readFileSync } from "node:fs";
 import type { Server } from "node:http";
 import { afterEach, describe, it } from "node:test";
 import express from "express";
@@ -18,7 +18,10 @@ const { errorHandler } = await import("../../middleware/error.js");
 const { requireMasterAdminJwt } = await import("../../middleware/jwtAuth.js");
 const { prisma } = await import("../../lib/prisma.js");
 const { logger } = await import("../../lib/logger.js");
-const { CourierAuditIntakeCursorError } = await import("./courier-audit-intake.service.js");
+const {
+  CourierAuditIntakeCursorError,
+  listCourierAuditIntakes
+} = await import("./courier-audit-intake.service.js");
 const { createCourierAuditIntakeAdminRouter } = await import("./courier-audit-intake-admin.routes.js");
 logger.level = "silent";
 
@@ -275,6 +278,69 @@ describe("courier audit intake admin routes", () => {
     assert.deepEqual(calls, [{ limit: 25 }]);
   });
 
+  it("uses a database-side scalar projection when the real Prisma raw-query path is available", async () => {
+    const rawQueries: Array<{ text: string; values: unknown[] }> = [];
+    const client = {
+      $queryRaw: async (query: { text: string; values: unknown[] }) => {
+        rawQueries.push(query);
+        return [{
+          id: INTAKE_ID,
+          sourceProvider: "GMAIL" as const,
+          sourceReceivedAt: new Date("2026-08-07T15:58:45.123Z"),
+          createdAt: new Date("2026-08-07T16:00:01.000Z"),
+          senderName: "Billing contact billing@example.test",
+          senderEmail: "billing@example.test",
+          attachmentCount: 1,
+          warningCount: 2,
+          companySummary: "Acme Logistics"
+        }];
+      },
+      courierAuditIntake: {
+        findMany: async () => {
+          throw new Error("UNSAFE_FIND_MANY_PATH_USED");
+        }
+      }
+    } as unknown as Parameters<typeof listCourierAuditIntakes>[1];
+    const from = new Date("2026-08-01T00:00:00.000Z");
+    const to = new Date("2026-08-31T23:59:59.999Z");
+    const cursorCreatedAt = new Date("2026-08-07T16:30:00.000Z");
+    const cursorId = "00000000-0000-4000-8000-00000000000b";
+    const cursor = Buffer.from(JSON.stringify({
+      createdAt: cursorCreatedAt.toISOString(),
+      id: cursorId
+    }), "utf8").toString("base64url");
+
+    const result = await listCourierAuditIntakes({ limit: 1, from, to, cursor }, client);
+
+    assert.deepEqual(result, {
+      items: [{
+        id: INTAKE_ID,
+        sourceProvider: "GMAIL",
+        sourceReceivedAt: new Date("2026-08-07T15:58:45.123Z"),
+        createdAt: new Date("2026-08-07T16:00:01.000Z"),
+        senderSummary: "Billing contact b***@example.test",
+        companySummary: "Acme Logistics",
+        warningCount: 2,
+        attachmentCount: 1,
+        ingestionStatus: "VALIDATED",
+        reviewStatus: "NEEDS_REVIEW"
+      }],
+      nextCursor: null
+    });
+    assert.equal(rawQueries.length, 1);
+    const query = rawQueries[0];
+    assert.ok(query);
+    assert.deepEqual(query.values, [from, to, cursorCreatedAt, cursorCreatedAt, cursorId, 2]);
+    assert.match(query.text, /ORDER BY i\."createdAt" DESC, i\."id" DESC/u);
+    assert.match(query.text, /LIMIT \$6/u);
+    assert.match(query.text, /AS "attachmentCount"/u);
+    assert.match(query.text, /AS "warningCount"/u);
+    assert.match(query.text, /AS "companySummary"/u);
+    assert.doesNotMatch(query.text, /i\."attachmentManifest"\s+AS\s+"attachmentManifest"/u);
+    assert.doesNotMatch(query.text, /r\."normalizedProjection"\s+AS\s+"normalizedProjection"/u);
+    assert.doesNotMatch(query.text, /r\."warnings"\s+AS\s+"warnings"/u);
+  });
+
   it("accepts the maximum page size and rejects a larger page size", async () => {
     const calls: any[] = [];
 
@@ -327,6 +393,54 @@ describe("courier audit intake admin routes", () => {
         signRole("MASTER_ADMIN")
       );
       assert.equal(response.status, 400);
+    });
+
+    assert.equal(listCalls, 0);
+  });
+
+  it("rejects a from-only filter with a stable 400 without querying", async () => {
+    let listCalls = 0;
+
+    await withAdminApp({
+      list: async () => {
+        listCalls += 1;
+        return { items: [], nextCursor: null };
+      }
+    }, async (baseUrl) => {
+      const response = await request(
+        baseUrl,
+        "GET",
+        "/?from=2026-08-01T00:00:00.000Z",
+        signRole("MASTER_ADMIN")
+      );
+      assert.equal(response.status, 400);
+      assert.deepEqual(response.body, {
+        error: "COURIER_AUDIT_INTAKE_DATE_RANGE_REQUIRES_BOTH_BOUNDS"
+      });
+    });
+
+    assert.equal(listCalls, 0);
+  });
+
+  it("rejects a to-only filter with a stable 400 without querying", async () => {
+    let listCalls = 0;
+
+    await withAdminApp({
+      list: async () => {
+        listCalls += 1;
+        return { items: [], nextCursor: null };
+      }
+    }, async (baseUrl) => {
+      const response = await request(
+        baseUrl,
+        "GET",
+        "/?to=2026-08-31T23:59:59.999Z",
+        signRole("MASTER_ADMIN")
+      );
+      assert.equal(response.status, 400);
+      assert.deepEqual(response.body, {
+        error: "COURIER_AUDIT_INTAKE_DATE_RANGE_REQUIRES_BOTH_BOUNDS"
+      });
     });
 
     assert.equal(listCalls, 0);
@@ -390,7 +504,9 @@ describe("courier audit intake admin routes", () => {
       }
     });
 
-    const routesSource = readFileSync(new URL("../../routes/index.js", import.meta.url), "utf8");
+    const compiledRoutesPath = new URL("../../routes/index.js", import.meta.url);
+    const sourceRoutesPath = new URL("../../routes/index.ts", import.meta.url);
+    const routesSource = readFileSync(existsSync(compiledRoutesPath) ? compiledRoutesPath : sourceRoutesPath, "utf8");
     assert.match(routesSource, /apiRouter\.use\("\/admin\/courier-audit-intakes", requireMasterAdminJwt, courierAuditIntakeAdminRouter\);/u);
     assert.doesNotMatch(routesSource, /apiRouter\.use\("\/admin\/courier-audit-intakes", requireAdminJwt/u);
     assert.match(routesSource, /if \(env\.COURIER_AUDIT_INTAKE_ENABLED\) \{\s*apiRouter\.use\("\/v1\/integrations\/intakes\/courier-audit", courierAuditIntakeRouter\);\s*\}/su);
