@@ -186,6 +186,28 @@ test("excludes sub-25-MiB skipped oversize attachments from the aggregate proces
   });
 });
 
+test("excludes sub-25-MiB skipped unsupported attachments from the aggregate processing total", () => {
+  parsed({
+    ...base(),
+    attachments: [
+      attachment({ sourceAttachmentId: "part-1", sizeBytes: MiB_25 }),
+      attachment({ sourceAttachmentId: "part-2", sizeBytes: MiB_25 }),
+      attachment({ sourceAttachmentId: "part-3", sizeBytes: 1, processingStatus: "SKIPPED_UNSUPPORTED", parser: null })
+    ]
+  });
+});
+
+test("counts failed attachments toward the aggregate processing total", () => {
+  rejected({
+    ...base(),
+    attachments: [
+      attachment({ sourceAttachmentId: "part-1", sizeBytes: MiB_25 }),
+      attachment({ sourceAttachmentId: "part-2", sizeBytes: MiB_25 }),
+      attachment({ sourceAttachmentId: "part-3", sizeBytes: MiB_25, processingStatus: "FAILED", parser: null })
+    ]
+  });
+});
+
 test("enforces parsed attachment parser and AI message provenance invariants", () => {
   rejected({ ...base(), attachments: [attachment({ parser: null })] });
   rejected({ ...base(), attachments: [attachment({ processingStatus: "PARSED_AI", parser: "ai-parser" })] });

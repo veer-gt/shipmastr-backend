@@ -120,7 +120,8 @@ export const courierAuditIntakeRequestSchema = z.object({
   let totalProcessingAttachmentSizeBytes = 0;
   for (const [index, attachment] of value.attachments.entries()) {
     const isParsed = attachment.processingStatus === "PARSED_DETERMINISTIC" || attachment.processingStatus === "PARSED_AI";
-    if (isParsed) {
+    const countsTowardProcessingCeiling = isParsed || attachment.processingStatus === "FAILED";
+    if (countsTowardProcessingCeiling) {
       totalProcessingAttachmentSizeBytes += attachment.sizeBytes;
     }
     if (isParsed && !attachment.parser) {
