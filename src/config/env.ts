@@ -181,6 +181,8 @@ const schema = z.object({
   ADDRESS_NETWORK_MIN_HIT_RATE_PERCENT: z.coerce.number().min(0).max(100).default(8),
   ADDRESS_NETWORK_METRICS_WINDOW_DAYS: z.coerce.number().int().min(1).max(365).default(30),
   QUOTE_PRICE_SOURCE: z.enum(["catalog_strict", "client_allowed"]).optional(),
+  COURIER_AUDIT_INTAKE_ENABLED: envBoolean(false),
+  COURIER_AUDIT_INTAKE_SIGNING_SECRET: z.string().min(32).optional(),
   COURIER_AUDIT_N8N_WEBHOOK_URL: z.string().url().optional(),
   WALLET_W1_ENABLED: envBoolean(false),
   WALLET_W1_SANDBOX_ONLY: envBoolean(true),
@@ -202,6 +204,10 @@ assertCheckoutDevOtpCodeProductionSafety(parsedEnv);
 
 if (parsedEnv.H2A_SYNTHETIC_TENANT_LIFECYCLE_ENABLED && parsedEnv.APP_ENV !== "staging") {
   throw new Error("H2A_SYNTHETIC_TENANT_LIFECYCLE_FORBIDDEN");
+}
+
+if (parsedEnv.COURIER_AUDIT_INTAKE_ENABLED && !parsedEnv.COURIER_AUDIT_INTAKE_SIGNING_SECRET) {
+  throw new Error("COURIER_AUDIT_INTAKE_SIGNING_SECRET_REQUIRED");
 }
 
 function isValidPlatformCredentialKey(value: string | undefined) {
