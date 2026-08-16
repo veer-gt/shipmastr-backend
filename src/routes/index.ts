@@ -24,6 +24,8 @@ import { courierPartnersRouter } from "../modules/courierPartners/courier-partne
 import { adminCourierPartnerRouter, courierOnboardingRouter } from "../modules/courierPartnerOnboarding/onboarding.routes.js";
 import { courierRouter } from "../modules/courier/courier.routes.js";
 import { courierAuditRouter } from "../modules/courierAudit/courier-audit.routes.js";
+import { courierAuditIntakeAdminRouter } from "../modules/courierAuditIntake/courier-audit-intake-admin.routes.js";
+import { courierAuditIntakeRouter } from "../modules/courierAuditIntake/courier-audit-intake.routes.js";
 import { courierInvoicesRouter } from "../modules/courierInvoices/courier-invoices.routes.js";
 import { pincodeRouter } from "../modules/address/pincode.routes.js";
 import { adminDomainsRouter, domainStatusRouter, internalDomainProvisioningRouter, merchantDomainsRouter } from "../modules/domains/domains.routes.js";
@@ -72,6 +74,10 @@ apiRouter.use("/courier-partner-applications", courierPartnerApplicationRouter);
 apiRouter.use("/courier-partners", courierPartnersRouter);
 apiRouter.use("/v1/courier-partners", courierPartnersRouter);
 apiRouter.use("/v1/public/courier-audit", courierAuditRouter);
+if (env.COURIER_AUDIT_INTAKE_ENABLED) {
+  apiRouter.use("/v1/integrations/intakes/courier-audit", courierAuditIntakeRouter);
+}
+apiRouter.use("/admin/courier-audit-intakes", requireMasterAdminJwt, courierAuditIntakeAdminRouter);
 apiRouter.use("/admin/courier-partner-applications", requireAdminJwt, adminCourierPartnerApplicationRouter);
 apiRouter.use("/admin/courier-partners", requireAdminJwt, adminCourierPartnerRouter);
 apiRouter.use("/admin/courier-provider-lanes", requireAdminJwt, adminCourierProviderRegistryRouter);

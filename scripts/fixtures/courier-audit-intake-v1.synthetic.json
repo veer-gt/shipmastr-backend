@@ -1,0 +1,93 @@
+{
+  "schemaVersion": "courier-audit-intake.v1",
+  "source": {
+    "provider": "GMAIL",
+    "accountId": "synthetic-courier-intake-v1.test",
+    "messageId": "gmail-message-synthetic-courier-audit-v1.test-0001",
+    "threadId": "gmail-thread-synthetic-courier-audit-v1.test-0001",
+    "receivedAt": "2026-08-15T12:00:00.000Z",
+    "from": {
+      "name": "Synthetic Courier Test Producer",
+      "email": "producer@synthetic-courier.test"
+    },
+    "subject": "Synthetic courier audit fixture INV-TEST-2026-0001",
+    "bodySha256": "2530986070340acc115e2fa35c9832a8cb96417fc6b1b8ee13293f0d3c1ec4ca",
+    "snippet": "Synthetic courier audit contract fixture; no live provider payload."
+  },
+  "attachments": [
+    {
+      "sourceAttachmentId": "attachment-invoice-text.test-0001",
+      "filename": "invoice-INV-TEST-2026-0001.test.txt",
+      "declaredMimeType": "text/plain",
+      "detectedMimeType": "text/plain",
+      "sizeBytes": 82,
+      "sha256": "6515c572ac6330c85c3b7489a4c8b11989988ea57424a6a1837e8d56f81944f9",
+      "artifactKind": "TEXT",
+      "processingStatus": "PARSED_DETERMINISTIC",
+      "parser": "synthetic-text-parser-v1"
+    },
+    {
+      "sourceAttachmentId": "attachment-manifest-unsupported.test-0001",
+      "filename": "manifest-unsupported.test.bin",
+      "declaredMimeType": "application/octet-stream",
+      "detectedMimeType": "application/octet-stream",
+      "sizeBytes": 96,
+      "sha256": "5451c1438d997791ca42473dbe961185db6737e90841b66b82e44c6429b02689",
+      "artifactKind": "OTHER",
+      "processingStatus": "SKIPPED_UNSUPPORTED",
+      "parser": null
+    },
+    {
+      "sourceAttachmentId": "attachment-manifest-oversize.test-0001",
+      "filename": "manifest-oversize.test.xlsx",
+      "declaredMimeType": "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+      "detectedMimeType": "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+      "sizeBytes": 26214401,
+      "sha256": "3838f5b143d07088be18e3eae8bd507c4fac1ae6030fcd62cc3bf56fb92ba22c",
+      "artifactKind": "XLSX",
+      "processingStatus": "SKIPPED_OVERSIZE",
+      "parser": null
+    }
+  ],
+  "extraction": {
+    "extractedAt": "2026-08-15T12:00:01.000Z",
+    "parserName": "synthetic-courier-audit-parser",
+    "parserVersion": "1.0.0",
+    "mode": "DETERMINISTIC",
+    "modelProvider": null,
+    "modelName": null,
+    "promptVersion": null,
+    "result": {
+      "companyName": "Synthetic Courier Test Co.",
+      "contactName": "Test Intake Contact",
+      "contactEmail": "intake-contact@synthetic-courier.test",
+      "contactPhone": null,
+      "courierName": "Synthetic Courier",
+      "documentKinds": [
+        "COURIER_INVOICE",
+        "MIS"
+      ],
+      "invoiceNumbers": [
+        "INV-TEST-2026-0001"
+      ],
+      "billingPeriodStart": "2026-08-01",
+      "billingPeriodEnd": "2026-08-31",
+      "currency": "INR",
+      "totalBilledAmount": "12345.67",
+      "shipmentCount": 2,
+      "awbSamples": [
+        "AWB-TEST-2026-0001",
+        "AWB-TEST-2026-0002"
+      ],
+      "summary": "Synthetic deterministic fixture with metadata-only skipped manifests."
+    },
+    "warnings": [
+      {
+        "code": "ATTACHMENT_SKIPPED",
+        "message": "Synthetic manifest attachments are intentionally skipped.",
+        "field": "attachments"
+      }
+    ],
+    "confidence": 1
+  }
+}
