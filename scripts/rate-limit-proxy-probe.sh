@@ -638,6 +638,9 @@ MATRIX_GENERATIONS=("gen1" "gen2")
 MATRIX_TAGS=("$TAG_G1" "$TAG_G2")
 MATRIX_REVISIONS=("" "")
 MATRIX_URLS=("" "")
+MATRIX_EXPECTED_LOG_LABELS_JSON=("" "")
+MATRIX_EXPECTED_LOG_LABELS_SHA256=("" "")
+MATRIX_EXPECTED_LOG_LABEL_COUNTS=("" "")
 MATRIX_DEPLOY_ATTEMPTED=(0 0)
 MATRIX_DEPLOY_UNRESOLVED=(0 0)
 IMAGE_REF=""
@@ -700,6 +703,7 @@ record_matrix_cell() {
   local service_json=""
   local tag_target=""
   local revision_json=""
+  local label_metadata=""
   local binding_output=""
 
   [[ "$matrix_index" == "0" || "$matrix_index" == "1" ]] || return 1
@@ -725,6 +729,16 @@ record_matrix_cell() {
     node --input-type=module -e "$DEPLOYED_REVISION_ENV_VALIDATOR" || return 1
   MATRIX_DISCOVERY_STATE="owned"
   MATRIX_REVISIONS[$matrix_index]="$tag_target"
+  label_metadata="$(
+    REVISION_JSON="$revision_json" node "$PARSER" revision-log-labels
+  )" || return 1
+  read_fields "$label_metadata"
+  test "${#READ_FIELDS[@]}" -eq 3 || return 1
+  [[ "${READ_FIELDS[1]}" =~ ^[0-9a-f]{64}$ ]] || return 1
+  [[ "${READ_FIELDS[2]}" =~ ^(0|[1-9][0-9]*)$ ]] || return 1
+  MATRIX_EXPECTED_LOG_LABELS_JSON[$matrix_index]="${READ_FIELDS[0]}"
+  MATRIX_EXPECTED_LOG_LABELS_SHA256[$matrix_index]="${READ_FIELDS[1]}"
+  MATRIX_EXPECTED_LOG_LABEL_COUNTS[$matrix_index]="${READ_FIELDS[2]}"
   binding_output="$(SERVICE_JSON="$service_json" TAG_TO_VERIFY="$tag" \
     ORIGINAL_REVISION_TO_VERIFY="$ORIGINAL_REVISION" node --input-type=module -e "$TAG_BINDING_VALIDATOR")" || return 1
   read_fields "$binding_output"
@@ -733,6 +747,9 @@ record_matrix_cell() {
   DEPLOYED_TAG_REVISION="${READ_FIELDS[0]}"
   DEPLOYED_TAG_URL="${READ_FIELDS[1]}"
   MATRIX_URLS[$matrix_index]="$DEPLOYED_TAG_URL"
+  test -n "${MATRIX_EXPECTED_LOG_LABELS_JSON[$matrix_index]}" || return 1
+  [[ "${MATRIX_EXPECTED_LOG_LABELS_SHA256[$matrix_index]}" =~ ^[0-9a-f]{64}$ ]] || return 1
+  [[ "${MATRIX_EXPECTED_LOG_LABEL_COUNTS[$matrix_index]}" =~ ^(0|[1-9][0-9]*)$ ]] || return 1
   MATRIX_DISCOVERY_STATE="ready"
   RECORDED_MATRIX_CELL=1
 }
@@ -871,6 +888,10 @@ generate_probe_context() {
   LIVE_RUNTIME_STATE_JSON_TO_RECORD="$LIVE_RUNTIME_STATE_JSON" \
   GEN1_REVISION_TO_RECORD="${MATRIX_REVISIONS[0]}" \
   GEN2_REVISION_TO_RECORD="${MATRIX_REVISIONS[1]}" \
+  GEN1_LOG_LABELS_SHA256_TO_RECORD="${MATRIX_EXPECTED_LOG_LABELS_SHA256[0]}" \
+  GEN1_LOG_LABELS_COUNT_TO_RECORD="${MATRIX_EXPECTED_LOG_LABEL_COUNTS[0]}" \
+  GEN2_LOG_LABELS_SHA256_TO_RECORD="${MATRIX_EXPECTED_LOG_LABELS_SHA256[1]}" \
+  GEN2_LOG_LABELS_COUNT_TO_RECORD="${MATRIX_EXPECTED_LOG_LABEL_COUNTS[1]}" \
   MATRIX_EXACT_MATCH_TO_RECORD="$MATRIX_EXACT_MATCH" \
   PRODUCTION_DOMAIN_MAPPING_COUNT_TO_RECORD="$PRODUCTION_DOMAIN_MAPPING_COUNT" \
   PRODUCTION_FINGERPRINT_BEFORE_TO_RECORD="$PRODUCTION_FINGERPRINT_BEFORE" \
@@ -886,6 +907,10 @@ generate_probe_context() {
     const imageDigest = required("IMAGE_DIGEST_TO_RECORD");
     const gen1Revision = required("GEN1_REVISION_TO_RECORD");
     const gen2Revision = required("GEN2_REVISION_TO_RECORD");
+    const gen1LogLabelsSha256 = required("GEN1_LOG_LABELS_SHA256_TO_RECORD");
+    const gen2LogLabelsSha256 = required("GEN2_LOG_LABELS_SHA256_TO_RECORD");
+    const gen1LogLabelsCount = Number(required("GEN1_LOG_LABELS_COUNT_TO_RECORD"));
+    const gen2LogLabelsCount = Number(required("GEN2_LOG_LABELS_COUNT_TO_RECORD"));
     const matrixExactMatchText = required("MATRIX_EXACT_MATCH_TO_RECORD");
     const productionFingerprintBefore = required("PRODUCTION_FINGERPRINT_BEFORE_TO_RECORD");
     const productionDomainMappingCount = Number(required("PRODUCTION_DOMAIN_MAPPING_COUNT_TO_RECORD"));
@@ -894,6 +919,10 @@ generate_probe_context() {
     if (!/^sha256:[0-9a-f]{64}$/u.test(imageDigest)) process.exit(5);
     if (!/^shipmastr-api-staging-[a-z0-9-]+$/u.test(gen1Revision)) process.exit(6);
     if (!/^shipmastr-api-staging-[a-z0-9-]+$/u.test(gen2Revision)) process.exit(6);
+    if (!/^[0-9a-f]{64}$/u.test(gen1LogLabelsSha256)) process.exit(6);
+    if (!/^[0-9a-f]{64}$/u.test(gen2LogLabelsSha256)) process.exit(6);
+    if (!Number.isInteger(gen1LogLabelsCount) || gen1LogLabelsCount < 0 || gen1LogLabelsCount > 64) process.exit(6);
+    if (!Number.isInteger(gen2LogLabelsCount) || gen2LogLabelsCount < 0 || gen2LogLabelsCount > 64) process.exit(6);
     if (matrixExactMatchText !== "true" && matrixExactMatchText !== "false") process.exit(7);
     if (!/^[0-9a-f]{64}$/u.test(productionFingerprintBefore)) process.exit(8);
     if (productionDomainMappingCount !== 0) process.exit(9);
@@ -917,8 +946,18 @@ generate_probe_context() {
       liveRuntime,
       matrix: {
         concurrency: 40,
-        gen1: { generation: "gen1", revision: gen1Revision },
-        gen2: { generation: "gen2", revision: gen2Revision },
+        gen1: {
+          generation: "gen1",
+          revision: gen1Revision,
+          logLabelsSha256: gen1LogLabelsSha256,
+          logLabelsCount: gen1LogLabelsCount
+        },
+        gen2: {
+          generation: "gen2",
+          revision: gen2Revision,
+          logLabelsSha256: gen2LogLabelsSha256,
+          logLabelsCount: gen2LogLabelsCount
+        },
         exactMatch: matrixExactMatchText === "true"
       },
       productionDomainMappingCount,
@@ -930,7 +969,7 @@ generate_probe_context() {
     };
     const serialized = JSON.stringify(context, null, 2);
     if (/https?:\/\//iu.test(serialized)) process.exit(11);
-    if (/\b(?:headers?|token|credential|secretRef|body|envList)\b/iu.test(serialized)) process.exit(12);
+    if (/\b(?:headers?|token|credential|secretRef|body|envList|expectedLabels|labelsJson|canonicalJson)\b/iu.test(serialized)) process.exit(12);
     process.stdout.write(`${serialized}\n`);
   ' > "$PROBE_CONTEXT_TMP" || {
     rm -f -- "$PROBE_CONTEXT_TMP"
@@ -941,12 +980,18 @@ generate_probe_context() {
   PROBE_CONTEXT_PATH_TO_VERIFY="$PROBE_CONTEXT_TMP" \
   GEN1_REVISION_TO_VERIFY="${MATRIX_REVISIONS[0]}" \
   GEN2_REVISION_TO_VERIFY="${MATRIX_REVISIONS[1]}" \
+  GEN1_LOG_LABELS_SHA256_TO_VERIFY="${MATRIX_EXPECTED_LOG_LABELS_SHA256[0]}" \
+  GEN1_LOG_LABELS_COUNT_TO_VERIFY="${MATRIX_EXPECTED_LOG_LABEL_COUNTS[0]}" \
+  GEN2_LOG_LABELS_SHA256_TO_VERIFY="${MATRIX_EXPECTED_LOG_LABELS_SHA256[1]}" \
+  GEN2_LOG_LABELS_COUNT_TO_VERIFY="${MATRIX_EXPECTED_LOG_LABEL_COUNTS[1]}" \
   MATRIX_EXACT_MATCH_TO_VERIFY="$MATRIX_EXACT_MATCH" \
   PRODUCTION_FINGERPRINT_TO_VERIFY="$PRODUCTION_FINGERPRINT_BEFORE" \
   node --input-type=module -e '
     import { readFileSync } from "node:fs";
     const context = JSON.parse(readFileSync(process.env.PROBE_CONTEXT_PATH_TO_VERIFY, "utf8"));
     const serialized = JSON.stringify(context);
+    const gen1Keys = Object.keys(context?.matrix?.gen1 ?? {}).sort().join(",");
+    const gen2Keys = Object.keys(context?.matrix?.gen2 ?? {}).sort().join(",");
     if (
       context?.cleanupVerified !== true ||
       context?.productionDomainMappingCount !== 0 ||
@@ -954,14 +999,20 @@ generate_probe_context() {
       context?.matrix?.concurrency !== 40 ||
       context?.matrix?.gen1?.generation !== "gen1" ||
       context?.matrix?.gen1?.revision !== process.env.GEN1_REVISION_TO_VERIFY ||
+      context?.matrix?.gen1?.logLabelsSha256 !== process.env.GEN1_LOG_LABELS_SHA256_TO_VERIFY ||
+      String(context?.matrix?.gen1?.logLabelsCount) !== process.env.GEN1_LOG_LABELS_COUNT_TO_VERIFY ||
+      gen1Keys !== "generation,logLabelsCount,logLabelsSha256,revision" ||
       context?.matrix?.gen2?.generation !== "gen2" ||
       context?.matrix?.gen2?.revision !== process.env.GEN2_REVISION_TO_VERIFY ||
+      context?.matrix?.gen2?.logLabelsSha256 !== process.env.GEN2_LOG_LABELS_SHA256_TO_VERIFY ||
+      String(context?.matrix?.gen2?.logLabelsCount) !== process.env.GEN2_LOG_LABELS_COUNT_TO_VERIFY ||
+      gen2Keys !== "generation,logLabelsCount,logLabelsSha256,revision" ||
       String(context?.matrix?.exactMatch) !== process.env.MATRIX_EXACT_MATCH_TO_VERIFY ||
       context?.activeTrafficUnchanged !== true ||
       context?.featureDisabled !== true ||
       context?.productionMutated !== false ||
       /https?:\/\//iu.test(serialized) ||
-      /\b(?:headers?|token|credential|secretRef|body|envList)\b/iu.test(serialized)
+      /\b(?:headers?|token|credential|secretRef|body|envList|expectedLabels|labelsJson|canonicalJson)\b/iu.test(serialized)
     ) process.exit(2);
   ' || {
     rm -f -- "$PROBE_CONTEXT_TMP"
@@ -1070,7 +1121,11 @@ cleanup() {
     fi
   fi
 
-  unset PROBE_TOKEN GEN1_LOGS_JSON GEN2_LOGS_JSON MATRIX_LOGS_JSON
+  unset \
+    PROBE_TOKEN \
+    GEN1_LOGS_JSON GEN2_LOGS_JSON MATRIX_LOGS_JSON \
+    GEN1_EXPECTED_LOG_LABELS_JSON GEN2_EXPECTED_LOG_LABELS_JSON
+  MATRIX_EXPECTED_LOG_LABELS_JSON=("" "")
   rm -f -- "$EVIDENCE_TMP" "$PROBE_CONTEXT_TMP"
   if [[ "$?" -ne 0 ]]; then
     cleanup_failed=1
@@ -1160,6 +1215,8 @@ cleanup() {
   if [[ "$EVIDENCE_CAPTURED" -eq 1 && "$CLEANUP_VERIFIED" -eq 1 ]]; then
     generate_probe_context || cleanup_failed=1
   fi
+  MATRIX_EXPECTED_LOG_LABELS_SHA256=("" "")
+  MATRIX_EXPECTED_LOG_LABEL_COUNTS=("" "")
 
   if [[
     "$cleanup_failed" -eq 0 &&
@@ -1392,6 +1449,8 @@ MATRIX_LOGS_JSON="$MATRIX_LOGS_JSON" \
 PROBE_TOKEN_FOR_LEAK_CHECK="$PROBE_TOKEN" \
 GEN1_REVISION="${MATRIX_REVISIONS[0]}" \
 GEN2_REVISION="${MATRIX_REVISIONS[1]}" \
+GEN1_EXPECTED_LOG_LABELS_JSON="${MATRIX_EXPECTED_LOG_LABELS_JSON[0]}" \
+GEN2_EXPECTED_LOG_LABELS_JSON="${MATRIX_EXPECTED_LOG_LABELS_JSON[1]}" \
 node scripts/rate-limit-proxy-probe-evidence.mjs assemble > "$EVIDENCE_TMP"
 mv "$EVIDENCE_TMP" "$PROBE_RESULTS_RUN_PATH"
 EVIDENCE_CAPTURED=1
@@ -1415,17 +1474,27 @@ trap - EXIT INT TERM
 PROBE_CONTEXT_PATH_TO_VERIFY="$PROBE_CONTEXT_PATH" node --input-type=module -e '
   import { readFileSync } from "node:fs";
   const context = JSON.parse(readFileSync(process.env.PROBE_CONTEXT_PATH_TO_VERIFY, "utf8"));
+  const serialized = JSON.stringify(context);
+  const validCell = (cell, generation) =>
+    cell?.generation === generation &&
+    /^shipmastr-api-staging-[a-z0-9-]+$/u.test(cell?.revision ?? "") &&
+    /^[0-9a-f]{64}$/u.test(cell?.logLabelsSha256 ?? "") &&
+    Number.isInteger(cell?.logLabelsCount) &&
+    cell.logLabelsCount >= 0 &&
+    cell.logLabelsCount <= 64 &&
+    Object.keys(cell).sort().join(",") === "generation,logLabelsCount,logLabelsSha256,revision";
   if (
     context?.cleanupVerified !== true ||
     context?.productionDomainMappingCount !== 0 ||
     context?.productionFingerprintBefore === undefined ||
     context?.matrix?.concurrency !== 40 ||
-    context?.matrix?.gen1?.generation !== "gen1" ||
-    context?.matrix?.gen2?.generation !== "gen2" ||
+    !validCell(context?.matrix?.gen1, "gen1") ||
+    !validCell(context?.matrix?.gen2, "gen2") ||
     typeof context?.matrix?.exactMatch !== "boolean" ||
     context?.activeTrafficUnchanged !== true ||
     context?.featureDisabled !== true ||
-    context?.productionMutated !== false
+    context?.productionMutated !== false ||
+    /\b(?:expectedLabels|labelsJson|canonicalJson)\b/iu.test(serialized)
   ) process.exit(2);
 '
 

@@ -16,7 +16,8 @@ const sourceRoot = resolve(".");
 const runnerFiles = [
   "rate-limit-proxy-probe.sh",
   "rate-limit-proxy-probe-parsers.mjs",
-  "rate-limit-proxy-probe-evidence.mjs"
+  "rate-limit-proxy-probe-evidence.mjs",
+  "rate-limit-proxy-probe-evidence-schema.mjs"
 ];
 const evidenceDirectory = ".superpowers/sdd/2026-08-17-cloud-run-rate-limit-header-probe";
 
@@ -111,7 +112,11 @@ const sanitized = args.map((arg) => arg.startsWith("--update-env-vars=")
 appendFileSync(callLog, JSON.stringify({ command: "gcloud", args: sanitized }) + "\\n");
 
 const structuralCases = ["baseline", "forwarded-ipv4", "xff-ipv4", "both-ipv4", "both-ipv6"];
-const event = (probeCase) => ({
+const labelsForGeneration = (generation) => generation === "gen1"
+  ? { environment: "diagnostic", matrixGeneration: "one" }
+  : { environment: "diagnostic", matrixGeneration: "two" };
+const event = (probeCase, index, cell, scenario) => ({
+  insertId: "probe-" + cell.generation + "-" + String(index),
   jsonPayload: {
     eventName: "rate_limit_proxy_probe",
     probeCase,
@@ -126,9 +131,33 @@ const event = (probeCase) => ({
     reqIpEqualsSocket: true,
     reqIpXForwardedForPosition: null,
     socketXForwardedForPosition: null,
+    hostname: "probe-host",
     level: 30,
-    msg: "rate limit proxy probe"
-  }
+    msg: "rate limit proxy probe",
+    pid: 123,
+    time: 1786924800000
+  },
+  labels: {
+    instanceId: "abcdef0123456789",
+    ...labelsForGeneration(cell.generation),
+    ...(scenario === "log_label_mismatch" && cell.generation === "gen2"
+      ? { matrixGeneration: "changed" }
+      : {})
+  },
+  logName: "projects/shipmastr-core-prod/logs/run.googleapis.com%2Fstdout",
+  receiveTimestamp: "2026-08-17T12:00:01Z",
+  resource: {
+    type: "cloud_run_revision",
+    labels: {
+      project_id: "shipmastr-core-prod",
+      service_name: "shipmastr-api-staging",
+      configuration_name: "shipmastr-api-staging",
+      location: "asia-south1",
+      revision_name: cell.revision
+    }
+  },
+  severity: "INFO",
+  timestamp: "2026-08-17T12:00:00Z"
 });
 
 function stagingService(state) {
@@ -202,7 +231,11 @@ function revision(state, name) {
   const cell = Object.values(state.cells).find((candidate) => candidate.revision === name);
   if (!cell) process.exit(44);
   return {
-    metadata: { name, annotations: { "run.googleapis.com/execution-environment": cell.generation } },
+    metadata: {
+      name,
+      annotations: { "run.googleapis.com/execution-environment": cell.generation },
+      labels: labelsForGeneration(cell.generation)
+    },
     spec: {
       containerConcurrency: 40,
       containers: [{ image: cell.image, env: [
@@ -276,7 +309,12 @@ if (args[0] === "config" && args[1] === "get-value" && args[2] === "project") {
   if (args.includes("--remove-env-vars=RATE_LIMIT_PROXY_PROBE_TOKEN")) state.tokenPresent = false;
   save(state);
 } else if (args[0] === "logging" && args[1] === "read") {
-  process.stdout.write(JSON.stringify(structuralCases.map(event)) + "\\n");
+  const state = load();
+  const revisionName = args[2]?.match(/resource\.labels\.revision_name="([^"]+)"/u)?.[1];
+  const cell = Object.values(state.cells).find((candidate) => candidate.revision === revisionName);
+  if (!cell) process.exit(44);
+  process.stdout.write(JSON.stringify(structuralCases.map((probeCase, index) =>
+    event(probeCase, index, cell, state.scenario))) + "\\n");
 } else {
   process.exit(64);
 }
@@ -424,9 +462,11 @@ export async function runFakeProbe({ scenario = "success", signals = [] } = {}) 
   return {
     ...outcome,
     calls: readCalls(callLog),
+    context: existsSync(contextPath) ? JSON.parse(readFileSync(contextPath, "utf8")) : undefined,
     contextExists: existsSync(contextPath),
     harnessTimedOut,
     lockExists: existsSync(lockPath),
+    result: existsSync(resultPath) ? JSON.parse(readFileSync(resultPath, "utf8")) : undefined,
     resultExists: existsSync(resultPath),
     root,
     state: readState(statePath),

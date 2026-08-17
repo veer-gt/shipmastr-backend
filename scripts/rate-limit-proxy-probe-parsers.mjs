@@ -1,4 +1,8 @@
 import { createHash } from "node:crypto";
+import {
+  expectedLogLabelMetadata,
+  ProbeSchemaError
+} from "./rate-limit-proxy-probe-evidence-schema.mjs";
 
 function fail(code) {
   process.exit(code);
@@ -124,6 +128,15 @@ function ownedTag() {
   process.stdout.write("owned\n");
 }
 
+function revisionLogLabels() {
+  const revision = parseObject("REVISION_JSON");
+  const labels = revision?.metadata?.labels;
+  const metadata = expectedLogLabelMetadata(labels);
+  process.stdout.write(
+    `${metadata.canonicalJson}\n${metadata.sha256}\n${metadata.count}\n`
+  );
+}
+
 const command = process.argv[2];
 if (command === "tag-state") {
   tagState();
@@ -133,6 +146,13 @@ if (command === "tag-state") {
   matrixPreflight();
 } else if (command === "production-fingerprint") {
   productionFingerprint();
+} else if (command === "revision-log-labels") {
+  try {
+    revisionLogLabels();
+  } catch (error) {
+    if (error instanceof ProbeSchemaError) fail(4);
+    throw error;
+  }
 } else {
   fail(64);
 }

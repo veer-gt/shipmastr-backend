@@ -26,11 +26,13 @@ function revisionJson({
   containers = [{ image }],
   name = revision,
   generation = "gen1",
-  concurrency = 40
+  concurrency = 40,
+  labels = { environment: "diagnostic", matrixGeneration: "one" }
 } = {}) {
   return JSON.stringify({
     metadata: {
       name,
+      labels,
       annotations: { "run.googleapis.com/execution-environment": generation }
     },
     spec: { containers, containerConcurrency: concurrency }
@@ -316,6 +318,69 @@ test("production fingerprint is stable and changes with service state", () => {
   assert.notEqual(same.stdout, labelChanged.stdout);
 });
 
+test("revision-log-labels emits canonical immutable metadata", () => {
+  const result = runParser("revision-log-labels", {
+    REVISION_JSON: revisionJson({ labels: { z: "last", a: "first" } })
+  });
+  assert.equal(result.status, 0, result.stderr);
+  const [canonical, sha256, count, trailing] = result.stdout.split("\n");
+  assert.equal(canonical, '{"a":"first","z":"last"}');
+  assert.match(sha256, /^[0-9a-f]{64}$/u);
+  assert.equal(count, "2");
+  assert.equal(trailing, "");
+});
+
+test("revision-log-labels rejects missing and non-object label maps without output", () => {
+  const invalidRevisions = [
+    { metadata: { name: revision } },
+    { metadata: { name: revision, labels: null } },
+    { metadata: { name: revision, labels: [] } },
+    { metadata: { name: revision, labels: "diagnostic" } },
+    { metadata: { name: revision, labels: 1 } }
+  ];
+  for (const invalidRevision of invalidRevisions) {
+    const result = runParser("revision-log-labels", {
+      REVISION_JSON: JSON.stringify(invalidRevision)
+    });
+    assert.equal(result.stdout, "");
+    assert.equal(result.stderr, "");
+    assert.notEqual(result.status, 0);
+  }
+});
+
+test("revision-log-labels enforces label count, string, bounds, and control-character limits", () => {
+  const invalidLabels = [
+    Object.fromEntries(Array.from({ length: 65 }, (_, index) => [`key-${index}`, "value"])),
+    { "": "value" },
+    { ["k".repeat(129)]: "value" },
+    { key: 1 },
+    { key: "v".repeat(257) },
+    { "key\u0000": "value" },
+    { key: "value\u007f" }
+  ];
+  for (const labels of invalidLabels) {
+    const result = runParser("revision-log-labels", {
+      REVISION_JSON: revisionJson({ labels })
+    });
+    assert.equal(result.stdout, "");
+    assert.equal(result.stderr, "");
+    assert.notEqual(result.status, 0);
+  }
+});
+
+test("revision-log-labels rejects canonical maps above 16,384 UTF-8 bytes", () => {
+  const labels = Object.fromEntries(Array.from({ length: 64 }, (_, index) => [
+    `key-${String(index).padStart(2, "0")}-${"k".repeat(121)}`,
+    "v".repeat(256)
+  ]));
+  const result = runParser("revision-log-labels", {
+    REVISION_JSON: revisionJson({ labels })
+  });
+  assert.equal(result.stdout, "");
+  assert.equal(result.stderr, "");
+  assert.notEqual(result.status, 0);
+});
+
 test("owned tag and immutable image pass cleanup ownership validation", () => {
   const service = serviceJson([{ tag, revisionName: revision, percent: 0 }]);
   const state = runParser("tag-state", {
@@ -461,6 +526,22 @@ function assertNoProductionMutation(run) {
   }
 }
 
+function assertNoRawLabelMaps(run) {
+  const serializedArtifacts = JSON.stringify({ result: run.result, context: run.context });
+  for (const output of [run.stdout, run.stderr, serializedArtifacts]) {
+    for (const forbidden of [
+      "MATRIX_EXPECTED_LOG_LABELS_JSON",
+      "GEN1_EXPECTED_LOG_LABELS_JSON",
+      "GEN2_EXPECTED_LOG_LABELS_JSON",
+      "expectedLabels",
+      "labelsJson",
+      "canonicalJson"
+    ]) assert.equal(output.includes(forbidden), false);
+    assert.equal(output.includes('"matrixGeneration":"one"'), false);
+    assert.equal(output.includes('"matrixGeneration":"two"'), false);
+  }
+}
+
 test("normal runner succeeds through fake cloud boundaries and mutates only its staging cells", {
   timeout: 30_000
 }, async (t) => {
@@ -487,6 +568,36 @@ test("normal runner succeeds through fake cloud boundaries and mutates only its 
   assert.equal(run.resultExists, true);
   assert.equal(run.contextExists, true);
   assert.equal(run.lockExists, false);
+  assert.equal(JSON.stringify(run.result).includes("diagnostic-generation-one"), false);
+  assert.equal(JSON.stringify(run.context).includes("diagnostic-generation-one"), false);
+  assert.match(run.context.matrix.gen1.logLabelsSha256, /^[0-9a-f]{64}$/u);
+  assert.equal(run.context.matrix.gen1.logLabelsCount, 2);
+  assert.match(run.context.matrix.gen2.logLabelsSha256, /^[0-9a-f]{64}$/u);
+  assert.equal(run.context.matrix.gen2.logLabelsCount, 2);
+  assert.notEqual(
+    run.context.matrix.gen1.logLabelsSha256,
+    run.context.matrix.gen2.logLabelsSha256
+  );
+  assertNoRawLabelMaps(run);
+  assertNoProductionMutation(run);
+});
+
+test("post-capture Gen2 log label mismatch fails closed and reconciles owned staging state", {
+  timeout: 30_000
+}, async (t) => {
+  const run = await runFakeProbe({ scenario: "log_label_mismatch" });
+  t.after(() => run.dispose());
+  assert.equal(run.harnessTimedOut, false, run.stderr);
+  assert.notEqual(run.status, 0);
+  assert.equal(deployedTags(run).length, 2);
+  assert.deepEqual(new Set(removedTags(run)), new Set(deployedTags(run)));
+  assert.equal(run.state.cells.gen1.removed, true);
+  assert.equal(run.state.cells.gen2.removed, true);
+  assert.equal(run.state.tokenPresent, false);
+  assert.equal(run.resultExists, false);
+  assert.equal(run.contextExists, false);
+  assert.equal(run.lockExists, false);
+  assertNoRawLabelMaps(run);
   assertNoProductionMutation(run);
 });
 
@@ -504,6 +615,7 @@ test("timed-out partial deploy returns 124 after late owned-tag discovery and cl
   assert.equal(run.resultExists, false);
   assert.equal(run.contextExists, false);
   assert.equal(run.lockExists, false);
+  assertNoRawLabelMaps(run);
   assertNoProductionMutation(run);
 });
 
@@ -519,6 +631,7 @@ test("unresolved timed-out deploy retains its operator lock for reconciliation",
   assert.equal(run.resultExists, false);
   assert.equal(run.contextExists, false);
   assert.equal(run.lockExists, true);
+  assertNoRawLabelMaps(run);
   assertNoProductionMutation(run);
 });
 
@@ -533,6 +646,7 @@ test("ambiguous tag ownership fails closed without deleting or publishing", {
   assert.equal(run.resultExists, false);
   assert.equal(run.contextExists, false);
   assert.equal(run.lockExists, true);
+  assertNoRawLabelMaps(run);
   assertNoProductionMutation(run);
 });
 
@@ -551,6 +665,7 @@ test("cleanup failure still attempts both exact cells and returns nonzero", {
   assert.equal(run.resultExists, false);
   assert.equal(run.contextExists, false);
   assert.equal(run.lockExists, true);
+  assertNoRawLabelMaps(run);
   assertNoProductionMutation(run);
 });
 
@@ -569,6 +684,7 @@ test("a timed-out cleanup command returns 124 after bounded successful reconcili
   assert.equal(run.resultExists, false);
   assert.equal(run.contextExists, false);
   assert.equal(run.lockExists, false);
+  assertNoRawLabelMaps(run);
   assertNoProductionMutation(run);
 });
 
@@ -584,6 +700,7 @@ for (const [signal, expectedStatus] of [["SIGINT", 130], ["SIGTERM", 143]]) {
     assert.equal(run.state.cells.gen1.removed, true);
     assert.equal(run.resultExists, false);
     assert.equal(run.contextExists, false);
+    assertNoRawLabelMaps(run);
     assertNoProductionMutation(run);
   });
 }
@@ -607,6 +724,7 @@ for (const [first, second, expectedStatus] of [
     assert.equal(run.state.cells.gen1.removed, true);
     assert.equal(run.resultExists, false);
     assert.equal(run.contextExists, false);
+    assertNoRawLabelMaps(run);
     assertNoProductionMutation(run);
   });
 }
@@ -621,5 +739,6 @@ test("partial artifact publication is rolled back behaviorally", {
   assert.equal(run.resultExists, false);
   assert.equal(run.contextExists, false);
   assert.equal(run.lockExists, false);
+  assertNoRawLabelMaps(run);
   assertNoProductionMutation(run);
 });
