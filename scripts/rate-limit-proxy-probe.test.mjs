@@ -92,6 +92,82 @@ test("partial deployments are recorded for ownership-safe cleanup before failure
   assert.ok(revisionRecord < bindingReadiness);
 });
 
+test("deploy mutation is cancellation-safe and cleanup performs bounded stable discovery", () => {
+  const source = readFileSync(runnerPath, "utf8");
+  const deployFunction = source.slice(
+    source.indexOf("deploy_matrix_cell()"),
+    source.indexOf("run_five_cases()"),
+  );
+  const criticalStart = deployFunction.indexOf("MUTATION_CRITICAL=1");
+  const deploy = deployFunction.indexOf('gcloud run deploy "$SERVICE"');
+  const stableDiscovery = deployFunction.indexOf(
+    'discover_matrix_cell_stably "$generation" "$tag" "$matrix_index" "1"',
+  );
+  const criticalEnd = deployFunction.indexOf("MUTATION_CRITICAL=0", criticalStart);
+  assert.ok(criticalStart >= 0 && criticalStart < deploy);
+  assert.ok(deploy < stableDiscovery && stableDiscovery < criticalEnd);
+  assert.match(source, /DISCOVERY_MAX_ATTEMPTS=[1-9][0-9]*/u);
+  assert.match(source, /DISCOVERY_INTERVAL_SECONDS=[1-9][0-9]*/u);
+  assert.match(source, /MATRIX_DEPLOY_ATTEMPTED\[\$matrix_index\]=1/u);
+  assert.match(source, /discover_matrix_cell_stably "gen1" "\$TAG_G1" "0" "0"/u);
+  assert.match(source, /discover_matrix_cell_stably "gen2" "\$TAG_G2" "1" "0"/u);
+  assert.match(source, /stabilize_owned_tag_cleanup "\$TAG_G1" "0" "gen1"/u);
+  assert.match(source, /stabilize_owned_tag_cleanup "\$TAG_G2" "1" "gen2"/u);
+});
+
+test("context is validated and published only after cleanup verification", () => {
+  const source = readFileSync(runnerPath, "utf8");
+  const cleanupVerified = source.indexOf("CLEANUP_VERIFIED=1");
+  const generateContext = source.indexOf("generate_probe_context", cleanupVerified);
+  const publishContext = source.indexOf('mv "$PROBE_CONTEXT_RUN_PATH" "$PROBE_CONTEXT_PATH"', generateContext);
+  assert.match(source, /CONTEXT_GENERATED=0/u);
+  assert.match(source, /CONTEXT_VALIDATED=0/u);
+  assert.match(source, /CLEANUP_VERIFIED=0/u);
+  assert.match(source, /CONTEXT_GENERATED=1/u);
+  assert.match(source, /CONTEXT_VALIDATED=1/u);
+  assert.ok(cleanupVerified >= 0 && cleanupVerified < generateContext);
+  assert.ok(generateContext < publishContext);
+  assert.doesNotMatch(source, /if \[\[ -e "\$PROBE_CONTEXT_TMP" \]\]/u);
+});
+
+test("INT and TERM are latched through cleanup and retain signal exit status", () => {
+  const source = readFileSync(runnerPath, "utf8");
+  assert.match(source, /latch_signal 130/u);
+  assert.match(source, /latch_signal 143/u);
+  assert.match(source, /trap 'latch_signal 130' INT/u);
+  assert.match(source, /trap 'latch_signal 143' TERM/u);
+  assert.match(source, /if \[\[ "\$SIGNAL_STATUS" -ne 0 \]\]; then\s+final_status="\$SIGNAL_STATUS"/u);
+  assert.doesNotMatch(source, /trap '' INT TERM/u);
+  assert.match(
+    source,
+    /cleanup\(\) \{[\s\S]*?MUTATION_CRITICAL=1\s+trap 'latch_signal 130' INT\s+trap 'latch_signal 143' TERM\s+[\s\S]*?CLEANUP_DONE=1/u,
+  );
+  assert.match(
+    source,
+    /preflight_on_exit\(\) \{[\s\S]*?trap - EXIT\s+trap 'latch_signal 130' INT\s+trap 'latch_signal 143' TERM/u,
+  );
+  assert.match(
+    source,
+    /set -e\s+trap on_int INT\s+trap on_term TERM\s+MUTATION_CRITICAL=0\s+return "\$final_status"/u,
+  );
+});
+
+test("single-operator lock rejects foreign ownership and guards shared artifact publication", () => {
+  const source = readFileSync(runnerPath, "utf8");
+  const acquire = source.indexOf("acquire_operator_lock");
+  const sharedArtifactGate = source.indexOf('test ! -e "$EVIDENCE_DIR/probe-results.json"');
+  const sharedPreflight = source.indexOf('gcloud run services describe "$SERVICE"');
+  const publish = source.indexOf('mv "$PROBE_CONTEXT_RUN_PATH" "$PROBE_CONTEXT_PATH"');
+  const release = source.indexOf("release_operator_lock", publish);
+  assert.match(source, /mkdir "\$OPERATOR_LOCK_DIR"/u);
+  assert.match(source, /test "\$lock_owner_on_disk" = "\$OPERATOR_LOCK_OWNER"/u);
+  assert.match(source, /PROBE_RESULTS_RUN_PATH=.*\$RUN_ID/u);
+  assert.match(source, /PROBE_CONTEXT_RUN_PATH=.*\$RUN_ID/u);
+  assert.doesNotMatch(source, /rm -rf .*OPERATOR_LOCK/u);
+  assert.ok(acquire >= 0 && acquire < sharedArtifactGate && sharedArtifactGate < sharedPreflight);
+  assert.ok(publish >= 0 && publish < release);
+});
+
 test("runner uses a lowercase-safe numeric UTC timestamp for run-owned tags", () => {
   const source = readFileSync(runnerPath, "utf8");
   assert.match(source, /RUN_TIMESTAMP="\$\(date -u \+%Y%m%d%H%M%S\)"/u);

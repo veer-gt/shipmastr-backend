@@ -25,6 +25,66 @@ create_run_identity() {
   test "$TAG_G1" != "$TAG_G2"
 }
 
+acquire_operator_lock() {
+  mkdir "$OPERATOR_LOCK_DIR" 2>/dev/null || return 1
+  if ! printf '%s\n' "$OPERATOR_LOCK_OWNER" > "$OPERATOR_LOCK_OWNER_FILE"; then
+    rmdir "$OPERATOR_LOCK_DIR" >/dev/null 2>&1 || true
+    return 1
+  fi
+  LOCK_ACQUIRED=1
+}
+
+release_operator_lock() {
+  local lock_owner_on_disk=""
+
+  if [[ "$LOCK_ACQUIRED" -ne 1 ]]; then return 0; fi
+  if [[ ! -f "$OPERATOR_LOCK_OWNER_FILE" || -L "$OPERATOR_LOCK_OWNER_FILE" ]]; then return 1; fi
+  lock_owner_on_disk="$(< "$OPERATOR_LOCK_OWNER_FILE")" || return 1
+  test "$lock_owner_on_disk" = "$OPERATOR_LOCK_OWNER" || return 1
+  rm -- "$OPERATOR_LOCK_OWNER_FILE" || return 1
+  rmdir "$OPERATOR_LOCK_DIR" || return 1
+  LOCK_ACQUIRED=0
+}
+
+latch_signal() {
+  local signal_status="$1"
+  if [[ "$SIGNAL_STATUS" -eq 0 ]]; then
+    SIGNAL_STATUS="$signal_status"
+  fi
+}
+
+preflight_on_exit() {
+  local status="$?"
+  MUTATION_CRITICAL=1
+  trap - EXIT
+  trap 'latch_signal 130' INT
+  trap 'latch_signal 143' TERM
+  if ! release_operator_lock && [[ "$status" -eq 0 ]]; then
+    status=1
+  fi
+  trap preflight_on_int INT
+  trap preflight_on_term TERM
+  MUTATION_CRITICAL=0
+  if [[ "$SIGNAL_STATUS" -ne 0 ]]; then
+    status="$SIGNAL_STATUS"
+  fi
+  exit "$status"
+}
+
+preflight_on_int() {
+  latch_signal 130
+  if [[ "$MUTATION_CRITICAL" -eq 0 ]]; then
+    exit 130
+  fi
+}
+
+preflight_on_term() {
+  latch_signal 143
+  if [[ "$MUTATION_CRITICAL" -eq 0 ]]; then
+    exit 143
+  fi
+}
+
 bash32_self_test() {
   local matrix_text="gen1
 40
@@ -32,6 +92,8 @@ gen2
 40"
   local generations=()
   local concurrencies=()
+  local lock_test_root=""
+  local saved_lock_owner=""
   read_fields "$matrix_text"
   test "${#READ_FIELDS[@]}" -eq 4
   generations[0]="${READ_FIELDS[0]}"
@@ -44,6 +106,27 @@ gen2
     "$(date -u +%Y%m%d%H%M%S)" \
     "$(git rev-parse --short=12 HEAD)" \
     "001122334455"
+  lock_test_root="$(mktemp -d)"
+  OPERATOR_LOCK_DIR="$lock_test_root/operator.lock"
+  OPERATOR_LOCK_OWNER_FILE="$OPERATOR_LOCK_DIR/owner"
+  OPERATOR_LOCK_OWNER="00112233445566778899aabbccddeeff"
+  LOCK_ACQUIRED=0
+  acquire_operator_lock
+  test -d "$OPERATOR_LOCK_DIR"
+  if acquire_operator_lock; then return 1; fi
+  test -d "$OPERATOR_LOCK_DIR"
+  saved_lock_owner="$OPERATOR_LOCK_OWNER"
+  OPERATOR_LOCK_OWNER="foreign-owner"
+  if release_operator_lock; then return 1; fi
+  test -d "$OPERATOR_LOCK_DIR"
+  OPERATOR_LOCK_OWNER="$saved_lock_owner"
+  release_operator_lock
+  test ! -e "$OPERATOR_LOCK_DIR"
+  rmdir "$lock_test_root"
+  SIGNAL_STATUS=0
+  latch_signal 130
+  latch_signal 143
+  test "$SIGNAL_STATUS" -eq 130
   printf '%s\n' 'RATE_LIMIT_PROXY_PROBE_BASH32_SELF_TEST_OK'
 }
 
@@ -64,7 +147,7 @@ IMAGE_URI="asia-south1-docker.pkg.dev/shipmastr-core-prod/shipmastr/shipmastr-ap
 EVIDENCE_DIR=".superpowers/sdd/2026-08-17-cloud-run-rate-limit-header-probe"
 PARSER="scripts/rate-limit-proxy-probe-parsers.mjs"
 
-for required_command in git gcloud node openssl curl date mv rm; do
+for required_command in git gcloud node openssl curl date mv rm mkdir rmdir mktemp sleep; do
   command -v "$required_command" >/dev/null 2>&1
 done
 test -f "$PARSER"
@@ -74,8 +157,19 @@ test "$(git merge-base HEAD "$EXPECTED_BASE")" = "$EXPECTED_BASE"
 git diff --quiet
 git diff --cached --quiet
 test -z "$(git status --porcelain --untracked-files=normal)"
-test "$(gcloud config get-value project 2>/dev/null)" = "$PROJECT"
 test -d "$EVIDENCE_DIR"
+SIGNAL_STATUS=0
+MUTATION_CRITICAL=0
+LOCK_ACQUIRED=0
+OPERATOR_LOCK_DIR="$EVIDENCE_DIR/.rate-limit-proxy-probe.lock"
+OPERATOR_LOCK_OWNER_FILE="$OPERATOR_LOCK_DIR/owner"
+OPERATOR_LOCK_OWNER="$(openssl rand -hex 16)"
+[[ "$OPERATOR_LOCK_OWNER" =~ ^[0-9a-f]{32}$ ]]
+trap preflight_on_exit EXIT
+trap preflight_on_int INT
+trap preflight_on_term TERM
+acquire_operator_lock
+test "$(gcloud config get-value project 2>/dev/null)" = "$PROJECT"
 test ! -e "$EVIDENCE_DIR/probe-results.json"
 test ! -e "$EVIDENCE_DIR/probe-context.json"
 SOURCE_HEAD="$(git rev-parse HEAD)"
@@ -266,18 +360,31 @@ create_run_identity \
   "$RUN_NONCE"
 IMAGE_TAG="rate-limit-proxy-probe-$RUN_ID"
 EVIDENCE_TMP="$EVIDENCE_DIR/.probe-results-$RUN_ID.tmp"
+PROBE_RESULTS_RUN_PATH="$EVIDENCE_DIR/.probe-results-$RUN_ID.ready"
+PROBE_RESULTS_PATH="$EVIDENCE_DIR/probe-results.json"
 PROBE_CONTEXT_PATH="$EVIDENCE_DIR/probe-context.json"
 PROBE_CONTEXT_TMP="$EVIDENCE_DIR/.probe-context-$RUN_ID.tmp"
+PROBE_CONTEXT_RUN_PATH="$EVIDENCE_DIR/.probe-context-$RUN_ID.ready"
 test ! -e "$EVIDENCE_TMP"
+test ! -e "$PROBE_RESULTS_RUN_PATH"
 test ! -e "$PROBE_CONTEXT_TMP"
+test ! -e "$PROBE_CONTEXT_RUN_PATH"
 MATRIX_GENERATIONS=("gen1" "gen2")
 MATRIX_TAGS=("$TAG_G1" "$TAG_G2")
 MATRIX_REVISIONS=("" "")
 MATRIX_URLS=("" "")
+MATRIX_DEPLOY_ATTEMPTED=(0 0)
 IMAGE_REF=""
 EVIDENCE_CAPTURED=0
+CONTEXT_GENERATED=0
+CONTEXT_VALIDATED=0
+CLEANUP_VERIFIED=0
+ARTIFACTS_PUBLISHED=0
 CLEANUP_DONE=0
 MATRIX_EXACT_MATCH=""
+DISCOVERY_MAX_ATTEMPTS=6
+DISCOVERY_INTERVAL_SECONDS=5
+DISCOVERY_REQUIRED_ABSENT=3
 
 TAG_BINDING_VALIDATOR='
   const service = JSON.parse(process.env.SERVICE_JSON ?? "");
@@ -327,12 +434,16 @@ record_matrix_cell() {
 
   [[ "$matrix_index" == "0" || "$matrix_index" == "1" ]] || return 1
   RECORDED_MATRIX_CELL=0
+  MATRIX_DISCOVERY_STATE="unknown"
   DEPLOYED_TAG_REVISION=""
   DEPLOYED_TAG_URL=""
   service_json="$(gcloud run services describe "$SERVICE" \
     --project="$PROJECT" --region="$REGION" --format=json)" || return 1
   tag_target="$(SERVICE_JSON="$service_json" TAG_TO_FIND="$tag" node "$PARSER" tag-state)" || return 1
-  if [[ "$tag_target" == "absent" ]]; then return 0; fi
+  if [[ "$tag_target" == "absent" ]]; then
+    MATRIX_DISCOVERY_STATE="absent"
+    return 0
+  fi
   if [[ -z "$IMAGE_REF" ]]; then return 1; fi
   revision_json="$(gcloud run revisions describe "$tag_target" \
     --project="$PROJECT" --region="$REGION" --format=json)" || return 1
@@ -342,6 +453,7 @@ record_matrix_cell() {
     EXPECTED_CONTAINER_CONCURRENCY="40" node "$PARSER" owned-tag >/dev/null || return 1
   REVISION_JSON="$revision_json" EXPECTED_TOKEN="$PROBE_TOKEN" \
     node --input-type=module -e "$DEPLOYED_REVISION_ENV_VALIDATOR" || return 1
+  MATRIX_DISCOVERY_STATE="owned"
   MATRIX_REVISIONS[$matrix_index]="$tag_target"
   binding_output="$(SERVICE_JSON="$service_json" TAG_TO_VERIFY="$tag" \
     ORIGINAL_REVISION_TO_VERIFY="$ORIGINAL_REVISION" node --input-type=module -e "$TAG_BINDING_VALIDATOR")" || return 1
@@ -351,7 +463,42 @@ record_matrix_cell() {
   DEPLOYED_TAG_REVISION="${READ_FIELDS[0]}"
   DEPLOYED_TAG_URL="${READ_FIELDS[1]}"
   MATRIX_URLS[$matrix_index]="$DEPLOYED_TAG_URL"
+  MATRIX_DISCOVERY_STATE="ready"
   RECORDED_MATRIX_CELL=1
+}
+
+discover_matrix_cell_stably() {
+  local generation="$1"
+  local tag="$2"
+  local matrix_index="$3"
+  local require_ready="$4"
+  local attempt=0
+  local absent_streak=0
+  local record_status=0
+
+  [[ "$require_ready" == "0" || "$require_ready" == "1" ]] || return 1
+  while [[ "$attempt" -lt "$DISCOVERY_MAX_ATTEMPTS" ]]; do
+    attempt=$((attempt + 1))
+    record_status=0
+    record_matrix_cell "$generation" "$tag" "$matrix_index" || record_status="$?"
+    if [[ -n "${MATRIX_REVISIONS[$matrix_index]}" ]]; then
+      if [[ "$require_ready" -eq 0 || "$RECORDED_MATRIX_CELL" -eq 1 ]]; then
+        return 0
+      fi
+    fi
+    if [[ "$MATRIX_DISCOVERY_STATE" == "absent" ]]; then
+      absent_streak=$((absent_streak + 1))
+    else
+      absent_streak=0
+    fi
+    if [[ "$attempt" -lt "$DISCOVERY_MAX_ATTEMPTS" ]]; then
+      sleep "$DISCOVERY_INTERVAL_SECONDS"
+    fi
+  done
+  if [[ "$require_ready" -eq 0 && "$absent_streak" -ge "$DISCOVERY_REQUIRED_ABSENT" ]]; then
+    return 0
+  fi
+  return 1
 }
 
 cleanup_owned_tag() {
@@ -381,6 +528,157 @@ cleanup_owned_tag() {
     --project="$PROJECT" --region="$REGION" --remove-tags="$tag" --quiet
 }
 
+stabilize_owned_tag_cleanup() {
+  local tag="$1"
+  local matrix_index="$2"
+  local generation="$3"
+  local attempt=0
+  local absent_streak=0
+  local service_json=""
+  local tag_target=""
+
+  while [[ "$attempt" -lt "$DISCOVERY_MAX_ATTEMPTS" ]]; do
+    attempt=$((attempt + 1))
+    if [[ -z "${MATRIX_REVISIONS[$matrix_index]}" ]]; then
+      record_matrix_cell "$generation" "$tag" "$matrix_index" >/dev/null 2>&1 || true
+    fi
+    cleanup_owned_tag "$tag" "${MATRIX_REVISIONS[$matrix_index]}" "$generation" >/dev/null 2>&1 || true
+    service_json="$(gcloud run services describe "$SERVICE" \
+      --project="$PROJECT" --region="$REGION" --format=json)" || service_json=""
+    if [[ -n "$service_json" ]]; then
+      tag_target="$(SERVICE_JSON="$service_json" TAG_TO_FIND="$tag" node "$PARSER" tag-state)" || tag_target=""
+    else
+      tag_target=""
+    fi
+    if [[ "$tag_target" == "absent" ]]; then
+      absent_streak=$((absent_streak + 1))
+    else
+      absent_streak=0
+    fi
+    if [[ "$attempt" -lt "$DISCOVERY_MAX_ATTEMPTS" ]]; then
+      sleep "$DISCOVERY_INTERVAL_SECONDS"
+    fi
+  done
+  test "$absent_streak" -ge "$DISCOVERY_REQUIRED_ABSENT"
+}
+
+generate_probe_context() {
+  CONTEXT_GENERATED=0
+  CONTEXT_VALIDATED=0
+  rm -f -- "$PROBE_CONTEXT_TMP" "$PROBE_CONTEXT_RUN_PATH" || return 1
+
+  PROJECT_TO_RECORD="$PROJECT" \
+  REGION_TO_RECORD="$REGION" \
+  SERVICE_TO_RECORD="$SERVICE" \
+  PRODUCTION_SERVICE_TO_RECORD="$PRODUCTION_SERVICE" \
+  SOURCE_HEAD_TO_RECORD="$SOURCE_HEAD" \
+  TESTED_HEAD_TO_RECORD="$TESTED_HEAD" \
+  ORIGINAL_REVISION_TO_RECORD="$ORIGINAL_REVISION" \
+  IMAGE_DIGEST_TO_RECORD="$DIGEST" \
+  LIVE_RUNTIME_STATE_JSON_TO_RECORD="$LIVE_RUNTIME_STATE_JSON" \
+  GEN1_REVISION_TO_RECORD="${MATRIX_REVISIONS[0]}" \
+  GEN2_REVISION_TO_RECORD="${MATRIX_REVISIONS[1]}" \
+  MATRIX_EXACT_MATCH_TO_RECORD="$MATRIX_EXACT_MATCH" \
+  PRODUCTION_DOMAIN_MAPPING_COUNT_TO_RECORD="$PRODUCTION_DOMAIN_MAPPING_COUNT" \
+  PRODUCTION_FINGERPRINT_BEFORE_TO_RECORD="$PRODUCTION_FINGERPRINT_BEFORE" \
+  CLEANUP_VERIFIED_TO_RECORD="$CLEANUP_VERIFIED" \
+  node --input-type=module -e '
+    const required = (name) => {
+      const value = process.env[name];
+      if (typeof value !== "string" || value.length === 0) process.exit(2);
+      return value;
+    };
+    const sourceHead = required("SOURCE_HEAD_TO_RECORD");
+    const testedHead = required("TESTED_HEAD_TO_RECORD");
+    const imageDigest = required("IMAGE_DIGEST_TO_RECORD");
+    const gen1Revision = required("GEN1_REVISION_TO_RECORD");
+    const gen2Revision = required("GEN2_REVISION_TO_RECORD");
+    const matrixExactMatchText = required("MATRIX_EXACT_MATCH_TO_RECORD");
+    const productionFingerprintBefore = required("PRODUCTION_FINGERPRINT_BEFORE_TO_RECORD");
+    const productionDomainMappingCount = Number(required("PRODUCTION_DOMAIN_MAPPING_COUNT_TO_RECORD"));
+    if (required("CLEANUP_VERIFIED_TO_RECORD") !== "1") process.exit(3);
+    if (!/^[0-9a-f]{40}$/u.test(sourceHead) || testedHead !== sourceHead) process.exit(4);
+    if (!/^sha256:[0-9a-f]{64}$/u.test(imageDigest)) process.exit(5);
+    if (!/^shipmastr-api-staging-[a-z0-9-]+$/u.test(gen1Revision)) process.exit(6);
+    if (!/^shipmastr-api-staging-[a-z0-9-]+$/u.test(gen2Revision)) process.exit(6);
+    if (matrixExactMatchText !== "true" && matrixExactMatchText !== "false") process.exit(7);
+    if (!/^[0-9a-f]{64}$/u.test(productionFingerprintBefore)) process.exit(8);
+    if (productionDomainMappingCount !== 0) process.exit(9);
+    const liveRuntime = JSON.parse(required("LIVE_RUNTIME_STATE_JSON_TO_RECORD"));
+    if (
+      liveRuntime === null ||
+      typeof liveRuntime !== "object" ||
+      Array.isArray(liveRuntime) ||
+      liveRuntime?.productionActive?.concurrency !== 40
+    ) process.exit(10);
+
+    const context = {
+      project: required("PROJECT_TO_RECORD"),
+      region: required("REGION_TO_RECORD"),
+      service: required("SERVICE_TO_RECORD"),
+      productionService: required("PRODUCTION_SERVICE_TO_RECORD"),
+      sourceHead,
+      testedHead,
+      originalStagingRevision: required("ORIGINAL_REVISION_TO_RECORD"),
+      imageDigest,
+      liveRuntime,
+      matrix: {
+        concurrency: 40,
+        gen1: { generation: "gen1", revision: gen1Revision },
+        gen2: { generation: "gen2", revision: gen2Revision },
+        exactMatch: matrixExactMatchText === "true"
+      },
+      productionDomainMappingCount,
+      productionFingerprintBefore,
+      cleanupVerified: true,
+      activeTrafficUnchanged: true,
+      featureDisabled: true,
+      productionMutated: false
+    };
+    const serialized = JSON.stringify(context, null, 2);
+    if (/https?:\/\//iu.test(serialized)) process.exit(11);
+    if (/\b(?:headers?|token|credential|secretRef|body|envList)\b/iu.test(serialized)) process.exit(12);
+    process.stdout.write(`${serialized}\n`);
+  ' > "$PROBE_CONTEXT_TMP" || {
+    rm -f -- "$PROBE_CONTEXT_TMP"
+    return 1
+  }
+  CONTEXT_GENERATED=1
+
+  PROBE_CONTEXT_PATH_TO_VERIFY="$PROBE_CONTEXT_TMP" \
+  GEN1_REVISION_TO_VERIFY="${MATRIX_REVISIONS[0]}" \
+  GEN2_REVISION_TO_VERIFY="${MATRIX_REVISIONS[1]}" \
+  MATRIX_EXACT_MATCH_TO_VERIFY="$MATRIX_EXACT_MATCH" \
+  PRODUCTION_FINGERPRINT_TO_VERIFY="$PRODUCTION_FINGERPRINT_BEFORE" \
+  node --input-type=module -e '
+    import { readFileSync } from "node:fs";
+    const context = JSON.parse(readFileSync(process.env.PROBE_CONTEXT_PATH_TO_VERIFY, "utf8"));
+    const serialized = JSON.stringify(context);
+    if (
+      context?.cleanupVerified !== true ||
+      context?.productionDomainMappingCount !== 0 ||
+      context?.productionFingerprintBefore !== process.env.PRODUCTION_FINGERPRINT_TO_VERIFY ||
+      context?.matrix?.concurrency !== 40 ||
+      context?.matrix?.gen1?.generation !== "gen1" ||
+      context?.matrix?.gen1?.revision !== process.env.GEN1_REVISION_TO_VERIFY ||
+      context?.matrix?.gen2?.generation !== "gen2" ||
+      context?.matrix?.gen2?.revision !== process.env.GEN2_REVISION_TO_VERIFY ||
+      String(context?.matrix?.exactMatch) !== process.env.MATRIX_EXACT_MATCH_TO_VERIFY ||
+      context?.activeTrafficUnchanged !== true ||
+      context?.featureDisabled !== true ||
+      context?.productionMutated !== false ||
+      /https?:\/\//iu.test(serialized) ||
+      /\b(?:headers?|token|credential|secretRef|body|envList)\b/iu.test(serialized)
+    ) process.exit(2);
+  ' || {
+    rm -f -- "$PROBE_CONTEXT_TMP"
+    return 1
+  }
+
+  mv "$PROBE_CONTEXT_TMP" "$PROBE_CONTEXT_RUN_PATH" || return 1
+  CONTEXT_VALIDATED=1
+}
+
 cleanup() {
   local incoming_status="${1:-$?}"
   local cleanup_failed=0
@@ -393,18 +691,34 @@ cleanup() {
   local PRODUCTION_SERVICE_JSON_AFTER=""
   local PRODUCTION_FINGERPRINT_AFTER=""
 
+  MUTATION_CRITICAL=1
+  trap 'latch_signal 130' INT
+  trap 'latch_signal 143' TERM
   if [[ "$CLEANUP_DONE" -eq 1 ]]; then
     return "$incoming_status"
   fi
   CLEANUP_DONE=1
-  trap '' INT TERM
   set +e
 
   if [[ -z "${MATRIX_REVISIONS[0]}" ]]; then
-    record_matrix_cell "gen1" "$TAG_G1" "0" || cleanup_failed=1
+    if [[ "${MATRIX_DEPLOY_ATTEMPTED[0]}" -eq 1 ]]; then
+      discover_matrix_cell_stably "gen1" "$TAG_G1" "0" "0" || cleanup_failed=1
+    else
+      record_matrix_cell "gen1" "$TAG_G1" "0" || cleanup_failed=1
+    fi
   fi
   if [[ -z "${MATRIX_REVISIONS[1]}" ]]; then
-    record_matrix_cell "gen2" "$TAG_G2" "1" || cleanup_failed=1
+    if [[ "${MATRIX_DEPLOY_ATTEMPTED[1]}" -eq 1 ]]; then
+      discover_matrix_cell_stably "gen2" "$TAG_G2" "1" "0" || cleanup_failed=1
+    else
+      record_matrix_cell "gen2" "$TAG_G2" "1" || cleanup_failed=1
+    fi
+  fi
+  if [[ "${MATRIX_DEPLOY_ATTEMPTED[0]}" -eq 1 ]]; then
+    stabilize_owned_tag_cleanup "$TAG_G1" "0" "gen1" || cleanup_failed=1
+  fi
+  if [[ "${MATRIX_DEPLOY_ATTEMPTED[1]}" -eq 1 ]]; then
+    stabilize_owned_tag_cleanup "$TAG_G2" "1" "gen2" || cleanup_failed=1
   fi
   cleanup_owned_tag "$TAG_G1" "${MATRIX_REVISIONS[0]}" "gen1" || cleanup_failed=1
   cleanup_owned_tag "$TAG_G2" "${MATRIX_REVISIONS[1]}" "gen2" || cleanup_failed=1
@@ -451,7 +765,7 @@ cleanup() {
   fi
 
   unset PROBE_TOKEN GEN1_LOGS_JSON GEN2_LOGS_JSON MATRIX_LOGS_JSON
-  rm -f -- "$EVIDENCE_TMP"
+  rm -f -- "$EVIDENCE_TMP" "$PROBE_CONTEXT_TMP"
   if [[ "$?" -ne 0 ]]; then
     cleanup_failed=1
   fi
@@ -519,33 +833,67 @@ cleanup() {
     fi
     test "$PRODUCTION_FINGERPRINT_AFTER" = "$PRODUCTION_FINGERPRINT_BEFORE" || cleanup_failed=1
   fi
-  if [[ "$EVIDENCE_CAPTURED" -eq 1 ]]; then
-    if [[ -e "$PROBE_CONTEXT_TMP" ]]; then
-      mv "$PROBE_CONTEXT_TMP" "$PROBE_CONTEXT_PATH"
-      if [[ "$?" -ne 0 ]]; then
+
+  if [[ "$cleanup_failed" -eq 0 ]]; then
+    CLEANUP_VERIFIED=1
+  fi
+
+  if [[ "$EVIDENCE_CAPTURED" -eq 1 && "$CLEANUP_VERIFIED" -eq 1 ]]; then
+    generate_probe_context || cleanup_failed=1
+  fi
+
+  if [[
+    "$cleanup_failed" -eq 0 &&
+    "$EVIDENCE_CAPTURED" -eq 1 &&
+    "$CONTEXT_GENERATED" -eq 1 &&
+    "$CONTEXT_VALIDATED" -eq 1
+  ]]; then
+    if mv "$PROBE_RESULTS_RUN_PATH" "$PROBE_RESULTS_PATH"; then
+      if mv "$PROBE_CONTEXT_RUN_PATH" "$PROBE_CONTEXT_PATH"; then
+        ARTIFACTS_PUBLISHED=1
+      else
+        mv "$PROBE_RESULTS_PATH" "$PROBE_RESULTS_RUN_PATH" >/dev/null 2>&1 || true
         cleanup_failed=1
       fi
     else
       cleanup_failed=1
     fi
+  elif [[ "$EVIDENCE_CAPTURED" -eq 0 ]]; then
+    rm -f -- "$PROBE_RESULTS_RUN_PATH" "$PROBE_CONTEXT_RUN_PATH"
+    if [[ "$?" -ne 0 ]]; then cleanup_failed=1; fi
   else
-    rm -f -- "$EVIDENCE_DIR/probe-results.json" "$PROBE_CONTEXT_PATH" "$PROBE_CONTEXT_TMP"
-    if [[ "$?" -ne 0 ]]; then
-      cleanup_failed=1
+    rm -f -- "$PROBE_CONTEXT_RUN_PATH"
+    if [[ "$?" -ne 0 ]]; then cleanup_failed=1; fi
+  fi
+
+  if ! release_operator_lock; then
+    if [[ "$ARTIFACTS_PUBLISHED" -eq 1 ]]; then
+      mv "$PROBE_RESULTS_PATH" "$PROBE_RESULTS_RUN_PATH" >/dev/null 2>&1 || \
+        rm -f -- "$PROBE_RESULTS_PATH"
+      mv "$PROBE_CONTEXT_PATH" "$PROBE_CONTEXT_RUN_PATH" >/dev/null 2>&1 || \
+        rm -f -- "$PROBE_CONTEXT_PATH"
+      ARTIFACTS_PUBLISHED=0
     fi
+    cleanup_failed=1
   fi
 
   local final_status="$incoming_status"
-  if [[ "$cleanup_failed" -ne 0 && "$final_status" -eq 0 ]]; then
+  if [[ "$SIGNAL_STATUS" -ne 0 ]]; then
+    final_status="$SIGNAL_STATUS"
+  elif [[ "$cleanup_failed" -ne 0 && "$final_status" -eq 0 ]]; then
     final_status=1
   fi
   set -e
+  trap on_int INT
+  trap on_term TERM
+  MUTATION_CRITICAL=0
   return "$final_status"
 }
 
 on_exit() {
   local status="$?"
-  trap - EXIT INT TERM
+  MUTATION_CRITICAL=1
+  trap - EXIT
   if cleanup "$status"; then
     status=0
   else
@@ -555,11 +903,17 @@ on_exit() {
 }
 
 on_int() {
-  exit 130
+  latch_signal 130
+  if [[ "$MUTATION_CRITICAL" -eq 0 ]]; then
+    exit 130
+  fi
 }
 
 on_term() {
-  exit 143
+  latch_signal 143
+  if [[ "$MUTATION_CRITICAL" -eq 0 ]]; then
+    exit 143
+  fi
 }
 
 deploy_matrix_cell() {
@@ -577,6 +931,8 @@ deploy_matrix_cell() {
     return 1
   fi
 
+  MATRIX_DEPLOY_ATTEMPTED[$matrix_index]=1
+  MUTATION_CRITICAL=1
   gcloud run deploy "$SERVICE" \
     --project="$PROJECT" \
     --region="$REGION" \
@@ -588,7 +944,11 @@ deploy_matrix_cell() {
     --tag="$tag" \
     --quiet || deploy_status="$?"
 
-  record_matrix_cell "$generation" "$tag" "$matrix_index" || record_status="$?"
+  discover_matrix_cell_stably "$generation" "$tag" "$matrix_index" "1" || record_status="$?"
+  MUTATION_CRITICAL=0
+  if [[ "$SIGNAL_STATUS" -ne 0 ]]; then
+    return "$SIGNAL_STATUS"
+  fi
   if [[ "$deploy_status" -ne 0 ]]; then
     return "$deploy_status"
   fi
@@ -679,7 +1039,7 @@ PROBE_TOKEN_FOR_LEAK_CHECK="$PROBE_TOKEN" \
 GEN1_REVISION="${MATRIX_REVISIONS[0]}" \
 GEN2_REVISION="${MATRIX_REVISIONS[1]}" \
 node scripts/rate-limit-proxy-probe-evidence.mjs assemble > "$EVIDENCE_TMP"
-mv "$EVIDENCE_TMP" "$EVIDENCE_DIR/probe-results.json"
+mv "$EVIDENCE_TMP" "$PROBE_RESULTS_RUN_PATH"
 EVIDENCE_CAPTURED=1
 unset GEN1_LOGS_JSON GEN2_LOGS_JSON MATRIX_LOGS_JSON
 
@@ -687,78 +1047,7 @@ MATRIX_EXACT_MATCH="$(node -e '
   const evidence=require(process.argv[1]);
   if (typeof evidence?.comparison?.exactMatch!=="boolean") process.exit(2);
   process.stdout.write(String(evidence.comparison.exactMatch));
-' "$(pwd)/$EVIDENCE_DIR/probe-results.json")"
-
-PROJECT_TO_RECORD="$PROJECT" \
-REGION_TO_RECORD="$REGION" \
-SERVICE_TO_RECORD="$SERVICE" \
-PRODUCTION_SERVICE_TO_RECORD="$PRODUCTION_SERVICE" \
-SOURCE_HEAD_TO_RECORD="$SOURCE_HEAD" \
-TESTED_HEAD_TO_RECORD="$TESTED_HEAD" \
-ORIGINAL_REVISION_TO_RECORD="$ORIGINAL_REVISION" \
-IMAGE_DIGEST_TO_RECORD="$DIGEST" \
-LIVE_RUNTIME_STATE_JSON_TO_RECORD="$LIVE_RUNTIME_STATE_JSON" \
-GEN1_REVISION_TO_RECORD="${MATRIX_REVISIONS[0]}" \
-GEN2_REVISION_TO_RECORD="${MATRIX_REVISIONS[1]}" \
-MATRIX_EXACT_MATCH_TO_RECORD="$MATRIX_EXACT_MATCH" \
-PRODUCTION_DOMAIN_MAPPING_COUNT_TO_RECORD="$PRODUCTION_DOMAIN_MAPPING_COUNT" \
-PRODUCTION_FINGERPRINT_BEFORE_TO_RECORD="$PRODUCTION_FINGERPRINT_BEFORE" \
-node --input-type=module -e '
-  const required = (name) => {
-    const value = process.env[name];
-    if (typeof value !== "string" || value.length === 0) process.exit(2);
-    return value;
-  };
-  const sourceHead = required("SOURCE_HEAD_TO_RECORD");
-  const testedHead = required("TESTED_HEAD_TO_RECORD");
-  const imageDigest = required("IMAGE_DIGEST_TO_RECORD");
-  const gen1Revision = required("GEN1_REVISION_TO_RECORD");
-  const gen2Revision = required("GEN2_REVISION_TO_RECORD");
-  const matrixExactMatchText = required("MATRIX_EXACT_MATCH_TO_RECORD");
-  const productionFingerprintBefore = required("PRODUCTION_FINGERPRINT_BEFORE_TO_RECORD");
-  const productionDomainMappingCount = Number(required("PRODUCTION_DOMAIN_MAPPING_COUNT_TO_RECORD"));
-  if (!/^[0-9a-f]{40}$/u.test(sourceHead) || testedHead !== sourceHead) process.exit(3);
-  if (!/^sha256:[0-9a-f]{64}$/u.test(imageDigest)) process.exit(4);
-  if (!/^shipmastr-api-staging-[a-z0-9-]+$/u.test(gen1Revision)) process.exit(5);
-  if (!/^shipmastr-api-staging-[a-z0-9-]+$/u.test(gen2Revision)) process.exit(5);
-  if (matrixExactMatchText !== "true" && matrixExactMatchText !== "false") process.exit(6);
-  if (!/^[0-9a-f]{64}$/u.test(productionFingerprintBefore)) process.exit(7);
-  if (productionDomainMappingCount !== 0) process.exit(8);
-  const liveRuntime = JSON.parse(required("LIVE_RUNTIME_STATE_JSON_TO_RECORD"));
-  if (
-    liveRuntime === null ||
-    typeof liveRuntime !== "object" ||
-    Array.isArray(liveRuntime) ||
-    liveRuntime?.productionActive?.concurrency !== 40
-  ) process.exit(9);
-
-  const context = {
-    project: required("PROJECT_TO_RECORD"),
-    region: required("REGION_TO_RECORD"),
-    service: required("SERVICE_TO_RECORD"),
-    productionService: required("PRODUCTION_SERVICE_TO_RECORD"),
-    sourceHead,
-    testedHead,
-    originalStagingRevision: required("ORIGINAL_REVISION_TO_RECORD"),
-    imageDigest,
-    liveRuntime,
-    matrix: {
-      concurrency: 40,
-      gen1: { generation: "gen1", revision: gen1Revision },
-      gen2: { generation: "gen2", revision: gen2Revision },
-      exactMatch: matrixExactMatchText === "true"
-    },
-    productionDomainMappingCount,
-    productionFingerprintBefore,
-    activeTrafficUnchanged: true,
-    featureDisabled: true,
-    productionMutated: false
-  };
-  const serialized = JSON.stringify(context, null, 2);
-  if (/https?:\/\//iu.test(serialized)) process.exit(10);
-  if (/\b(?:headers?|token|credential|secretRef|body|envList)\b/iu.test(serialized)) process.exit(11);
-  process.stdout.write(`${serialized}\n`);
-' > "$PROBE_CONTEXT_TMP"
+' "$(pwd)/$PROBE_RESULTS_RUN_PATH")"
 
 if cleanup 0; then
   :
@@ -772,6 +1061,7 @@ PROBE_CONTEXT_PATH_TO_VERIFY="$PROBE_CONTEXT_PATH" node --input-type=module -e '
   import { readFileSync } from "node:fs";
   const context = JSON.parse(readFileSync(process.env.PROBE_CONTEXT_PATH_TO_VERIFY, "utf8"));
   if (
+    context?.cleanupVerified !== true ||
     context?.productionDomainMappingCount !== 0 ||
     context?.productionFingerprintBefore === undefined ||
     context?.matrix?.concurrency !== 40 ||
