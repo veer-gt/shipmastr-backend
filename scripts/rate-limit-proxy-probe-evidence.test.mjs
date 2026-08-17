@@ -115,3 +115,25 @@ test("assembler rejects sensitive wrapper fields outside the two generation logs
     assert.notEqual(result.status, 0);
   }
 });
+
+test("assembler rejects prohibited fields and URL values nested under allowed wrappers", () => {
+  const valid = cloudEntries();
+  const nestedSensitiveMaterial = [
+    ["labels", { body: "raw request payload" }],
+    ["resource", { requestUrl: "https://example.com/private" }],
+    ["operation", { "x-shipmastr-intake-signature": "deadbeef" }],
+    ["labels", { credentials: "private credential" }],
+    ["labels", { envList: ["PRIVATE_KEY=value"] }],
+    ["labels", { note: "https://example.com/private" }]
+  ];
+  for (const [wrapperKey, wrapperValue] of nestedSensitiveMaterial) {
+    const result = runEvidence({
+      gen1: valid.map((entry, index) => index === 0
+        ? { ...entry, [wrapperKey]: wrapperValue }
+        : entry),
+      gen2: valid
+    });
+    assert.equal(result.stdout, "");
+    assert.notEqual(result.status, 0);
+  }
+});

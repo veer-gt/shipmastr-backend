@@ -37,19 +37,34 @@ const ordinaryEnvelopeKeys = new Set([
 ]);
 const nullableCount = (value) => value === null || (Number.isInteger(value) && value >= 0);
 const nullablePosition = (value) => value === null || (Number.isInteger(value) && value >= 1);
-const forbiddenKeys = new Set([
+const forbiddenNormalizedKeys = new Set([
   "authorization",
+  "body",
   "clientip",
   "cookie",
+  "credential",
+  "credentials",
+  "env",
+  "environment",
+  "environmentlist",
+  "environmentvariables",
+  "envlist",
+  "envvars",
   "forwarded",
   "headers",
   "httprequest",
+  "intakesignature",
   "rawheaders",
   "remoteip",
+  "requestbody",
+  "requesturl",
   "serverip",
+  "signature",
+  "url",
   "x-forwarded-for",
+  "xshipmastrintakesignature",
   "x-shipmastr-rate-limit-probe-token"
-]);
+].map((key) => key.replace(/[^a-z0-9]/gu, "")));
 
 function containsIpAddress(value) {
   const ipv4Candidates = value.match(/(?:^|[^0-9])((?:[0-9]{1,3}\.){3}[0-9]{1,3})(?=$|[^0-9])/gu) ?? [];
@@ -63,11 +78,27 @@ function containsIpAddress(value) {
   });
 }
 
+function normalizedKey(key) {
+  return key.toLowerCase().replace(/[^a-z0-9]/gu, "");
+}
+
+function forbiddenKey(key) {
+  const normalized = normalizedKey(key);
+  return (
+    forbiddenNormalizedKeys.has(normalized) ||
+    normalized.includes("credential") ||
+    normalized.endsWith("signature") ||
+    normalized.endsWith("body") ||
+    normalized.endsWith("url")
+  );
+}
+
 function containsSensitiveMaterial(value, probeToken) {
   if (typeof value === "string") {
     const normalized = value.toLowerCase();
     return (
       normalized.includes(probeToken.toLowerCase()) ||
+      /https?:\/\//iu.test(value) ||
       /(?:^|[^a-z0-9-])x-forwarded-for\s*:/iu.test(value) ||
       /(?:^|[^a-z0-9-])forwarded\s*:/iu.test(value) ||
       /(?:^|[^a-z0-9-])for\s*=/iu.test(value) ||
@@ -77,7 +108,7 @@ function containsSensitiveMaterial(value, probeToken) {
   if (Array.isArray(value)) return value.some((child) => containsSensitiveMaterial(child, probeToken));
   if (value === null || typeof value !== "object") return false;
   return Object.entries(value).some(([key, child]) =>
-    forbiddenKeys.has(key.toLowerCase()) || containsSensitiveMaterial(child, probeToken)
+    forbiddenKey(key) || containsSensitiveMaterial(child, probeToken)
   );
 }
 
