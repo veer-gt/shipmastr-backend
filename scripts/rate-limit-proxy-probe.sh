@@ -10,7 +10,7 @@ BRANCH="hotfix/rate-limit-proxy-probe"
 IMAGE_URI="asia-south1-docker.pkg.dev/shipmastr-core-prod/shipmastr/shipmastr-api"
 EVIDENCE_DIR=".superpowers/sdd/2026-08-17-cloud-run-rate-limit-header-probe"
 
-for required_command in git gcloud node openssl curl date; do
+for required_command in git gcloud node openssl curl date mv rm; do
   command -v "$required_command" >/dev/null 2>&1
 done
 
@@ -21,6 +21,7 @@ git diff --cached --quiet
 test -z "$(git status --porcelain --untracked-files=normal)"
 test "$(gcloud config get-value project 2>/dev/null)" = "$PROJECT"
 test -d "$EVIDENCE_DIR"
+test ! -e "$EVIDENCE_DIR/probe-results.json"
 
 STAGING_SERVICE_JSON="$(gcloud run services describe "$SERVICE" \
   --project="$PROJECT" --region="$REGION" --format=json)"
@@ -108,7 +109,9 @@ SERVICE_JSON="$STAGING_SERVICE_JSON" node --input-type=module -e '
   if (traffic.some((entry) => typeof entry?.tag === "string" && entry.tag.startsWith("rlp-"))) {
     process.exit(3);
   }
-  const env = service?.spec?.template?.spec?.containers?.[0]?.env;
+  const containers = service?.spec?.template?.spec?.containers;
+  if (!Array.isArray(containers) || containers.length !== 1) process.exit(4);
+  const env = containers[0]?.env;
   if (env !== undefined && !Array.isArray(env)) process.exit(4);
   const probeTokens = (env ?? []).filter((entry) => entry?.name === "RATE_LIMIT_PROXY_PROBE_TOKEN");
   if (probeTokens.length !== 0) process.exit(5);
@@ -178,6 +181,8 @@ test "${#PROBE_TOKEN}" -eq 64
 RUN_ID="$(date -u +%Y%m%dT%H%M%SZ)-$(git rev-parse --short=12 HEAD)"
 TAG="rlp-$(date -u +%m%d%H%M%S)"
 IMAGE_TAG="rate-limit-proxy-probe-$RUN_ID"
+EVIDENCE_TMP="$EVIDENCE_DIR/.probe-results-$RUN_ID.tmp"
+test ! -e "$EVIDENCE_TMP"
 CLEANUP_DONE=0
 
 cleanup() {
@@ -223,7 +228,9 @@ cleanup() {
       SERVICE_JSON="$current_service_json" EXPECTED_TOKEN="$PROBE_TOKEN" \
       node --input-type=module -e '
         const service = JSON.parse(process.env.SERVICE_JSON ?? "");
-        const env = service?.spec?.template?.spec?.containers?.[0]?.env;
+        const containers = service?.spec?.template?.spec?.containers;
+        if (!Array.isArray(containers) || containers.length !== 1) process.exit(2);
+        const env = containers[0]?.env;
         if (env !== undefined && !Array.isArray(env)) process.exit(2);
         const matches = (env ?? []).filter((entry) => entry?.name === "RATE_LIMIT_PROXY_PROBE_TOKEN");
         if (matches.length === 0) {
@@ -254,6 +261,10 @@ cleanup() {
   fi
 
   unset PROBE_TOKEN
+  rm -f -- "$EVIDENCE_TMP"
+  if [[ "$?" -ne 0 ]]; then
+    cleanup_failed=1
+  fi
 
   current_service_json="$(gcloud run services describe "$SERVICE" \
     --project="$PROJECT" --region="$REGION" --format=json)"
@@ -274,7 +285,9 @@ cleanup() {
         Number(positive[0]?.percent) !== 100
       ) process.exit(3);
       if (traffic.some((entry) => entry?.tag === process.env.TAG_TO_VERIFY)) process.exit(4);
-      const env = service?.spec?.template?.spec?.containers?.[0]?.env;
+      const containers = service?.spec?.template?.spec?.containers;
+      if (!Array.isArray(containers) || containers.length !== 1) process.exit(5);
+      const env = containers[0]?.env;
       if (env !== undefined && !Array.isArray(env)) process.exit(5);
       const probeTokens = (env ?? []).filter((entry) => entry?.name === "RATE_LIMIT_PROXY_PROBE_TOKEN");
       if (probeTokens.length !== 0) process.exit(6);
@@ -456,14 +469,13 @@ gcloud logging read \
   --freshness=30m \
   --order=asc \
   --limit=20 \
-  --format=json > "$EVIDENCE_DIR/probe-results.json"
-
+  --format=json | \
 PROBE_TOKEN_TO_VERIFY="$PROBE_TOKEN" \
-EVIDENCE_PATH="$EVIDENCE_DIR/probe-results.json" \
 node --input-type=module -e '
   import { readFileSync } from "node:fs";
+  import { isIP } from "node:net";
 
-  const evidence = JSON.parse(readFileSync(process.env.EVIDENCE_PATH, "utf8"));
+  const evidence = JSON.parse(readFileSync(0, "utf8"));
   const expectedCases = ["baseline", "forwarded-ipv4", "xff-ipv4", "both-ipv4", "both-ipv6"];
   const structuralKeys = [
     "eventName",
@@ -501,62 +513,87 @@ node --input-type=module -e '
   ]);
   const nullableCount = (value) => value === null || (Number.isInteger(value) && value >= 0);
   const nullablePosition = (value) => value === null || (Number.isInteger(value) && value >= 1);
-
-  if (!Array.isArray(evidence) || evidence.length !== 5) process.exit(2);
-  evidence.forEach((entry, index) => {
-    if (entry === null || typeof entry !== "object" || Array.isArray(entry)) process.exit(3);
-    if (Object.keys(entry).some((key) => !ordinaryEnvelopeKeys.has(key))) process.exit(4);
-    const payload = entry.jsonPayload;
-    if (payload === null || typeof payload !== "object" || Array.isArray(payload)) process.exit(5);
-    const payloadKeys = Object.keys(payload).sort();
-    const allowedPayloadKeys = [...structuralKeys, ...ordinaryPayloadKeys].sort();
-    if (payloadKeys.some((key) => !allowedPayloadKeys.includes(key))) process.exit(6);
-    if (structuralKeys.some((key) => !Object.hasOwn(payload, key))) process.exit(7);
-    if (payload.eventName !== "rate_limit_proxy_probe") process.exit(8);
-    if (payload.probeCase !== expectedCases[index]) process.exit(9);
-    if (payload.path !== "/api/health") process.exit(10);
-    if (typeof payload.forwardedPresent !== "boolean") process.exit(11);
-    if (!["absent", "simple", "quoted", "malformed"].includes(payload.forwardedParseStatus)) process.exit(12);
-    if (!nullableCount(payload.forwardedElementCount)) process.exit(13);
-    if (!nullablePosition(payload.forwardedMarkerPosition)) process.exit(14);
-    if (typeof payload.xForwardedForPresent !== "boolean") process.exit(15);
-    if (!Number.isInteger(payload.xForwardedForElementCount) || payload.xForwardedForElementCount < 0) process.exit(16);
-    if (!nullablePosition(payload.xForwardedForMarkerPosition)) process.exit(17);
-    if (typeof payload.reqIpEqualsSocket !== "boolean") process.exit(18);
-    if (!nullablePosition(payload.reqIpXForwardedForPosition)) process.exit(19);
-    if (!nullablePosition(payload.socketXForwardedForPosition)) process.exit(20);
-  });
-
-  const serialized = JSON.stringify(evidence);
-  const normalizedSerialized = serialized.toLowerCase();
-  const forbiddenValues = [
-    process.env.PROBE_TOKEN_TO_VERIFY,
-    "192.0.2.",
-    "198.51.100.",
-    "2001:db8",
-    "for=",
-  ];
-  if (forbiddenValues.some((value) => value && normalizedSerialized.includes(value.toLowerCase()))) {
-    process.exit(21);
-  }
   const forbiddenKeys = new Set([
     "authorization",
+    "clientip",
     "cookie",
     "forwarded",
     "headers",
-    "rawHeaders",
+    "httprequest",
+    "rawheaders",
+    "remoteip",
+    "serverip",
     "x-forwarded-for",
     "x-shipmastr-rate-limit-probe-token",
   ]);
-  const containsForbiddenKey = (value) => {
-    if (Array.isArray(value)) return value.some(containsForbiddenKey);
+  const containsIpAddress = (value) => {
+    const ipv4Candidates = value.match(/(?:^|[^0-9])((?:[0-9]{1,3}\.){3}[0-9]{1,3})(?=$|[^0-9])/gu) ?? [];
+    if (ipv4Candidates.some((candidate) =>
+      isIP(candidate.replace(/^[^0-9]+|[^0-9]+$/gu, "")) === 4
+    )) return true;
+    const addressCandidates = value.match(/[0-9a-f:.%\[\]]+/giu) ?? [];
+    return addressCandidates.some((candidate) => {
+      const normalized = candidate.replace(/^\[|\]$/gu, "").split("%", 1)[0];
+      return isIP(normalized) === 6;
+    });
+  };
+  const containsSensitiveMaterial = (value) => {
+    if (typeof value === "string") {
+      const normalized = value.toLowerCase();
+      return (
+        normalized.includes((process.env.PROBE_TOKEN_TO_VERIFY ?? "").toLowerCase()) ||
+        /(?:^|[^a-z0-9-])x-forwarded-for\s*:/iu.test(value) ||
+        /(?:^|[^a-z0-9-])forwarded\s*:/iu.test(value) ||
+        /(?:^|[^a-z0-9-])for\s*=/iu.test(value) ||
+        containsIpAddress(value)
+      );
+    }
+    if (Array.isArray(value)) return value.some(containsSensitiveMaterial);
     if (value === null || typeof value !== "object") return false;
     return Object.entries(value).some(([key, child]) =>
-      forbiddenKeys.has(key) || containsForbiddenKey(child)
+      forbiddenKeys.has(key.toLowerCase()) || containsSensitiveMaterial(child)
     );
   };
-  if (containsForbiddenKey(evidence)) process.exit(22);
-'
+
+  if (!Array.isArray(evidence) || evidence.length !== 5) process.exit(2);
+  if (containsSensitiveMaterial(evidence)) process.exit(3);
+  evidence.forEach((entry, index) => {
+    if (entry === null || typeof entry !== "object" || Array.isArray(entry)) process.exit(4);
+    if (Object.keys(entry).some((key) => !ordinaryEnvelopeKeys.has(key))) process.exit(5);
+    const payload = entry.jsonPayload;
+    if (payload === null || typeof payload !== "object" || Array.isArray(payload)) process.exit(6);
+    const payloadKeys = Object.keys(payload).sort();
+    const allowedPayloadKeys = [...structuralKeys, ...ordinaryPayloadKeys].sort();
+    if (payloadKeys.some((key) => !allowedPayloadKeys.includes(key))) process.exit(7);
+    if (structuralKeys.some((key) => !Object.hasOwn(payload, key))) process.exit(8);
+    if (payload.msg !== undefined && payload.msg !== "rate limit proxy probe") process.exit(9);
+    if (payload.eventName !== "rate_limit_proxy_probe") process.exit(10);
+    if (payload.probeCase !== expectedCases[index]) process.exit(11);
+    if (payload.path !== "/api/health") process.exit(12);
+    if (typeof payload.forwardedPresent !== "boolean") process.exit(13);
+    if (!["absent", "simple", "quoted", "malformed"].includes(payload.forwardedParseStatus)) process.exit(14);
+    if (!nullableCount(payload.forwardedElementCount)) process.exit(15);
+    if (!nullablePosition(payload.forwardedMarkerPosition)) process.exit(16);
+    if (typeof payload.xForwardedForPresent !== "boolean") process.exit(17);
+    if (!Number.isInteger(payload.xForwardedForElementCount) || payload.xForwardedForElementCount < 0) process.exit(18);
+    if (!nullablePosition(payload.xForwardedForMarkerPosition)) process.exit(19);
+    if (typeof payload.reqIpEqualsSocket !== "boolean") process.exit(20);
+    if (!nullablePosition(payload.reqIpXForwardedForPosition)) process.exit(21);
+    if (!nullablePosition(payload.socketXForwardedForPosition)) process.exit(22);
+  });
+
+  const projected = evidence.map(({ jsonPayload }) => Object.fromEntries(
+    structuralKeys.map((key) => [key, jsonPayload[key]])
+  ));
+  const projectedKeys = structuralKeys.slice().sort();
+  if (projected.some((event) => {
+    const keys = Object.keys(event).sort();
+    return keys.length !== projectedKeys.length || keys.some((key, index) => key !== projectedKeys[index]);
+  })) process.exit(23);
+  if (containsSensitiveMaterial(projected)) process.exit(24);
+  process.stdout.write(`${JSON.stringify(projected, null, 2)}\n`);
+' > "$EVIDENCE_TMP"
+mv "$EVIDENCE_TMP" "$EVIDENCE_DIR/probe-results.json"
 
 if cleanup 0; then
   :
