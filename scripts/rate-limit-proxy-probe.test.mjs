@@ -136,10 +136,12 @@ test("foreign tag target is rejected", () => {
     REVISION_JSON: revisionJson(),
     TAG_TO_FIND: tag,
     EXPECTED_REVISION: revision,
-    EXPECTED_IMAGE_REF: image
+    EXPECTED_IMAGE_REF: image,
+    EXPECTED_EXECUTION_ENVIRONMENT: "gen1",
+    EXPECTED_CONTAINER_CONCURRENCY: "40"
   });
   assert.equal(result.stderr, "");
-  assert.notEqual(result.status, 0);
+  assert.equal(result.status, 4);
 });
 
 test("missing or ambiguous tag revisions are rejected", () => {
