@@ -69,9 +69,18 @@ function runEvidence(matrix, overrides = {}) {
 
 function assertRejected(matrix, message) {
   const result = runEvidence(matrix);
+  assert.equal(Buffer.byteLength(result.stdout, "utf8"), 0, message);
+  assert.equal(Buffer.byteLength(result.stderr, "utf8"), 0, message);
   assert.equal(result.stdout, "", message);
   assert.equal(result.stderr, "", message);
   assert.notEqual(result.status, 0, message);
+}
+
+function assertAccepted(matrix, message) {
+  const result = runEvidence(matrix);
+  assert.equal(result.status, 0, `${message}: ${result.stderr}`);
+  assert.equal(result.stderr, "", message);
+  assert.equal(JSON.parse(result.stdout).events.length, 10, message);
 }
 
 function mutateOne(mutator) {
@@ -159,7 +168,7 @@ test("assembler validates every remaining Cloud Logging boundary fail-closed", (
     (entry) => { entry.operation = { id: "i\u0001", producer: "p", first: true, last: true }; },
     (entry) => { entry.sourceLocation = { file: "f", line: "-1", function: "n" }; },
     (entry) => { entry.sourceLocation = { file: "f", line: 1, function: "n" }; },
-    (entry) => { entry.sourceLocation = { file: "f", line: "4294967296", function: "n" }; },
+    (entry) => { entry.sourceLocation = { file: "f", line: "9223372036854775808", function: "n" }; },
     (entry) => { entry.sourceLocation = { file: "f".repeat(513), line: "1", function: "n" }; },
     (entry) => { entry.jsonPayload.hostname = 1; }, (entry) => { entry.jsonPayload.level = "30"; },
     (entry) => { entry.jsonPayload.msg = 1; }, (entry) => { entry.jsonPayload.pid = 2_147_483_648; },
@@ -354,5 +363,75 @@ test("Task 1 sensitive values reach the real assembler scanner through allowed l
     matrix.gen1[0].labels.note = value;
     const result = runEvidence(matrix, { GEN1_EXPECTED_LOG_LABELS_JSON: JSON.stringify({ ...configuredLabels.gen1, note: value }) });
     assert.equal(result.stdout, ""); assert.equal(result.stderr, ""); assert.notEqual(result.status, 0, value);
+  }
+});
+
+test("Task 3 fix rejects a hostname containing a space fail-closed", () => {
+  assertRejected(mutateOne((entry) => { entry.jsonPayload.hostname = "probe host"; }), "hostname space");
+});
+
+test("Task 3 fix rejects a 254-character hostname fail-closed", () => {
+  assertRejected(mutateOne((entry) => { entry.jsonPayload.hostname = "h".repeat(254); }), "hostname length 254");
+});
+
+test("Task 3 fix accepts exact hostname boundaries and internal punctuation", () => {
+  for (const hostname of ["h", "h".repeat(253), "host.name_with-internal-punctuation"]) {
+    assertAccepted(mutateOne((entry) => { entry.jsonPayload.hostname = hostname; }), `hostname length ${hostname.length}`);
+  }
+});
+
+test("Task 3 fix rejects remaining hostname contract violations fail-closed", () => {
+  const invalid = [
+    ["non-ASCII", "h\u00e9st"], ["leading punctuation", ".host"], ["trailing punctuation", "host-"],
+    ["zero length", ""], ["disallowed ASCII punctuation", "host!name"]
+  ];
+  for (const [message, hostname] of invalid) {
+    assertRejected(mutateOne((entry) => { entry.jsonPayload.hostname = hostname; }), message);
+  }
+});
+
+test("Task 3 fix accepts every one-member operation", () => {
+  for (const operation of [{ id: "i" }, { producer: "p" }, { first: true }, { last: false }]) {
+    assertAccepted(mutateOne((entry) => { entry.operation = operation; }), `operation ${Object.keys(operation)[0]}`);
+  }
+});
+
+test("Task 3 fix accepts every one-member source location", () => {
+  for (const sourceLocation of [{ file: "f" }, { line: "1" }, { function: "n" }]) {
+    assertAccepted(mutateOne((entry) => { entry.sourceLocation = sourceLocation; }), `sourceLocation ${Object.keys(sourceLocation)[0]}`);
+  }
+});
+
+test("Task 3 fix accepts the source line zero boundary", () => {
+  assertAccepted(mutateOne((entry) => { entry.sourceLocation = { line: "0" }; }), "sourceLocation line 0");
+});
+
+test("Task 3 fix accepts the source line max-int64 boundary", () => {
+  assertAccepted(mutateOne((entry) => { entry.sourceLocation = { line: "9223372036854775807" }; }), "sourceLocation line 9223372036854775807");
+});
+
+test("Task 3 fix rejects invalid operation shapes and members fail-closed", () => {
+  const invalid = [
+    null, [], {}, { unknown: true },
+    { id: 1 }, { producer: 1 }, { first: "true" }, { last: "false" },
+    { id: "" }, { producer: "" }, { id: "i".repeat(257) }, { producer: "p".repeat(257) },
+    { id: "i\u0001" }, { producer: "p\u007f" }
+  ];
+  for (const operation of invalid) {
+    assertRejected(mutateOne((entry) => { entry.operation = operation; }), `operation ${JSON.stringify(operation)}`);
+  }
+});
+
+test("Task 3 fix rejects invalid source location shapes and members fail-closed", () => {
+  const invalid = [
+    null, [], {}, { unknown: true },
+    { file: 1 }, { line: 1 }, { function: 1 },
+    { file: "" }, { function: "" }, { file: "f".repeat(513) }, { function: "n".repeat(513) },
+    { file: "f\u0001" }, { function: "n\u007f" },
+    { line: "" }, { line: "-1" }, { line: "+1" }, { line: "1.0" }, { line: " 1" },
+    { line: "01" }, { line: "9223372036854775808" }
+  ];
+  for (const sourceLocation of invalid) {
+    assertRejected(mutateOne((entry) => { entry.sourceLocation = sourceLocation; }), `sourceLocation ${JSON.stringify(sourceLocation)}`);
   }
 });

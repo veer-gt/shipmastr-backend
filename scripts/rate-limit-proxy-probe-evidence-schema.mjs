@@ -24,6 +24,8 @@ const structuralKeys = [
 const requiredEnvelopeKeys = ["insertId", "jsonPayload", "labels", "logName", "receiveTimestamp", "resource", "severity", "timestamp"];
 const optionalEnvelopeKeys = ["operation", "sourceLocation", "spanId", "trace", "traceSampled"];
 const rfc3339 = /^[0-9]{4}-(?:0[1-9]|1[0-2])-(?:0[1-9]|[12][0-9]|3[01])T(?:[01][0-9]|2[0-3]):[0-5][0-9]:[0-5][0-9](?:\.[0-9]{1,9})?(?:Z|[+-](?:[01][0-9]|2[0-3]):[0-5][0-9])$/u;
+const hostname = /^(?=.{1,253}$)[A-Za-z0-9](?:[A-Za-z0-9._-]*[A-Za-z0-9])?$/u;
+const int64Maximum = "9223372036854775807";
 
 export function canonicalizeJson(value) {
   if (Array.isArray(value)) return `[${value.map(canonicalizeJson).join(",")}]`;
@@ -145,20 +147,23 @@ function validateEntryLabels(labels, expectedLabels) {
 }
 
 function validateOperation(operation) {
-  if (operation === undefined) return;
-  exactKeys(operation, ["id", "producer", "first", "last"], [], "OPERATION_KEYS");
-  boundedString(operation.id, 1, 256, "OPERATION_ID");
-  boundedString(operation.producer, 1, 256, "OPERATION_PRODUCER");
-  exactBoolean(operation.first, "OPERATION_FIRST");
-  exactBoolean(operation.last, "OPERATION_LAST");
+  exactKeys(operation, [], ["id", "producer", "first", "last"], "OPERATION_KEYS");
+  if (Object.keys(operation).length === 0) fail("OPERATION_KEYS");
+  if (Object.hasOwn(operation, "id")) boundedString(operation.id, 1, 256, "OPERATION_ID");
+  if (Object.hasOwn(operation, "producer")) boundedString(operation.producer, 1, 256, "OPERATION_PRODUCER");
+  if (Object.hasOwn(operation, "first")) exactBoolean(operation.first, "OPERATION_FIRST");
+  if (Object.hasOwn(operation, "last")) exactBoolean(operation.last, "OPERATION_LAST");
 }
 
 function validateSourceLocation(sourceLocation) {
-  if (sourceLocation === undefined) return;
-  exactKeys(sourceLocation, ["file", "line", "function"], [], "SOURCE_LOCATION_KEYS");
-  boundedString(sourceLocation.file, 1, 512, "SOURCE_LOCATION_FILE");
-  boundedString(sourceLocation.function, 1, 512, "SOURCE_LOCATION_FUNCTION");
-  if (typeof sourceLocation.line !== "string" || !/^(?:0|[1-9][0-9]{0,9})$/u.test(sourceLocation.line) || Number(sourceLocation.line) > 4_294_967_295) fail("SOURCE_LOCATION_LINE");
+  exactKeys(sourceLocation, [], ["file", "line", "function"], "SOURCE_LOCATION_KEYS");
+  if (Object.keys(sourceLocation).length === 0) fail("SOURCE_LOCATION_KEYS");
+  if (Object.hasOwn(sourceLocation, "file")) boundedString(sourceLocation.file, 1, 512, "SOURCE_LOCATION_FILE");
+  if (Object.hasOwn(sourceLocation, "function")) boundedString(sourceLocation.function, 1, 512, "SOURCE_LOCATION_FUNCTION");
+  if (Object.hasOwn(sourceLocation, "line") && (
+    typeof sourceLocation.line !== "string" || !/^(?:0|[1-9][0-9]{0,18})$/u.test(sourceLocation.line) ||
+    (sourceLocation.line.length === int64Maximum.length && sourceLocation.line > int64Maximum)
+  )) fail("SOURCE_LOCATION_LINE");
 }
 
 function nullableCount(value, code) {
@@ -182,7 +187,7 @@ function validatePayload(payload, expectedCase) {
   exactBoolean(payload.reqIpEqualsSocket, "PAYLOAD_REQ_SOCKET");
   nullablePosition(payload.reqIpXForwardedForPosition, "PAYLOAD_REQ_XFF");
   nullablePosition(payload.socketXForwardedForPosition, "PAYLOAD_SOCKET_XFF");
-  if (Object.hasOwn(payload, "hostname")) boundedString(payload.hostname, 1, 255, "PINO_HOSTNAME");
+  if (Object.hasOwn(payload, "hostname") && (typeof payload.hostname !== "string" || !hostname.test(payload.hostname))) fail("PINO_HOSTNAME");
   if (Object.hasOwn(payload, "level") && payload.level !== 30) fail("PINO_LEVEL");
   if (Object.hasOwn(payload, "msg") && payload.msg !== "rate limit proxy probe") fail("PINO_MSG");
   if (Object.hasOwn(payload, "pid")) safeInteger(payload.pid, 1, 2_147_483_647, "PINO_PID");
@@ -195,8 +200,8 @@ export function validateLogEntry(entry, options) {
   validateEnvelopeScalars(entry);
   validateResource(entry.resource, options.expectedRevision);
   validateEntryLabels(entry.labels, options.expectedLabels);
-  validateOperation(entry.operation);
-  validateSourceLocation(entry.sourceLocation);
+  if (Object.hasOwn(entry, "operation")) validateOperation(entry.operation);
+  if (Object.hasOwn(entry, "sourceLocation")) validateSourceLocation(entry.sourceLocation);
   validatePayload(entry.jsonPayload, options.expectedCase);
   if (containsSensitiveValue(entry, options.probeToken)) fail("SENSITIVE_VALUE");
   const projection = Object.freeze(Object.fromEntries(structuralKeys.map((key) => [key, entry.jsonPayload[key]])));

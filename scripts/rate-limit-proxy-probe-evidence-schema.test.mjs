@@ -105,3 +105,26 @@ test("schema keeps the final projection sensitive-value scan active", () => {
     (error) => error instanceof ProbeSchemaError && error.code === "SENSITIVE_OUTPUT"
   );
 });
+
+test("Task 3 fix schema errors retain fixed sanitized codes", () => {
+  const invalid = [
+    [(entry) => { entry.jsonPayload.hostname = "probe host"; }, "PINO_HOSTNAME"],
+    [(entry) => { entry.operation = {}; }, "OPERATION_KEYS"],
+    [(entry) => { entry.operation = { id: 1 }; }, "OPERATION_ID"],
+    [(entry) => { entry.operation = { producer: 1 }; }, "OPERATION_PRODUCER"],
+    [(entry) => { entry.operation = { first: "true" }; }, "OPERATION_FIRST"],
+    [(entry) => { entry.operation = { last: "false" }; }, "OPERATION_LAST"],
+    [(entry) => { entry.sourceLocation = {}; }, "SOURCE_LOCATION_KEYS"],
+    [(entry) => { entry.sourceLocation = { file: 1 }; }, "SOURCE_LOCATION_FILE"],
+    [(entry) => { entry.sourceLocation = { line: "9223372036854775808" }; }, "SOURCE_LOCATION_LINE"],
+    [(entry) => { entry.sourceLocation = { function: 1 }; }, "SOURCE_LOCATION_FUNCTION"]
+  ];
+  for (const [mutate, code] of invalid) {
+    const entry = completeEntry();
+    mutate(entry);
+    assert.throws(
+      () => validateLogEntry(entry, validOptions),
+      (error) => error instanceof ProbeSchemaError && error.code === code && JSON.stringify(error) === `{"name":"ProbeSchemaError","code":"${code}"}`
+    );
+  }
+});
