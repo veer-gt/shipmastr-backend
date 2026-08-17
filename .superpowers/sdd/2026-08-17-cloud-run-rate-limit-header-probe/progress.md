@@ -6,7 +6,7 @@
 - Production mutation: forbidden
 - Active staging traffic mutation: forbidden
 - Courier Audit Intake: disabled
-- Status: implementation not started
+- Status: verified for the isolated staging-only probe; not intended for merge
 - Task 1: complete (commits a965f43..36fcca5, review clean; controller verified branch, direct parent, and clean-worktree invariants)
 - Task 2: complete (commits 024fd8d..356481b, review clean; RED 1/4, GREEN 4/4)
 - Task 3: minor (deferred): middleware factory relies on the Task 2 env boundary for the configured token's exact 64-hex shape
@@ -16,3 +16,17 @@
 - Task 5: minor (deferred): repository-wide git diff --check awaits controller restoration of Linux-generated tracked dist/node_modules state
 - Task 5: fix round 1/5 (2 addressed, 0 open — structural-only evidence and exact-one-container token ownership; commits 03ce6f3..a0c4051)
 - Task 5: complete (commits c516749..a0c4051, review clean after fix round 1)
+- Task 6: human ruling — accepted semantic equivalence for exactly two topology-only missing-sibling ENOENT failures and three skips; no other full-suite failure is accepted
+- Task 6: complete at source head dce7e2b (2,124 tests; 2,119 passed; 2 approved topology-only failures; 3 skipped; boundary audit clean)
+- Final review: blocked at dce7e2b by 1 Critical and 3 Important findings
+- Final fix wave 1: commit c13fad4 resolved request-log privacy, Bash 3.2 parsing, owned-tag cleanup, and most topology/context checks; scoped re-review left the pre-mutation service-template runtime-parity gate open
+- Final fix wave 2: explicitly human-authorized narrow correction commit 9dcabc7 preserves service-template, active-staging, and active-production runtime values and rejects any mismatch before token generation, build, or deploy
+- Final re-review: all Critical and Important findings addressed; no new Critical or Important breakage
+- Final review minor (deferred): final-fix-report.md top-level metadata still labels c13fad4 as the final intentional commit although its appended second-round section records 9dcabc7; provenance wording only, with no functional or safety effect
+- Final tested source head: 9dcabc743e11bbd8d683bbb7558b3693bde6b165
+- Final focused verification: 32 tests; 32 passed; 0 failed; 0 skipped
+- Final synthetic verification: 2,125 tests; 2,120 passed; exactly 2 approved missing-sibling ENOENT failures; 3 skipped; report /tmp/shipmastr-rate-limit-proxy-probe-full-suite-20260817T091723Z.log
+- Final accepted failure 1: ../seller-panel/src/pages/MerchantSetupCrudPage.jsx
+- Final accepted failure 2: ../docs/n8n/shipmastr-domains-mock-provisioning.workflow.json
+- Final boundary audit: no sensitive probe-middleware logging; staging/no-traffic guards present; Prisma and Courier Audit Intake service diff 0 bytes
+- Cloud/runner status: no runner, gcloud, build, deploy, logging, curl, GitHub push, or network action executed during implementation or verification
