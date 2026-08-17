@@ -214,3 +214,53 @@ test("assembler enforces raw-matrix and expected-label-map bounds", () => {
     assert.equal(result.stdout, ""); assert.equal(result.stderr, ""); assert.notEqual(result.status, 0);
   }
 });
+
+test("assembler accepts an empty configured-label value when the entry carries it", () => {
+  const matrix = { gen1: cloudEntries("gen1"), gen2: cloudEntries("gen2") };
+  matrix.gen1[0].labels.optional = "";
+  const result = runEvidence(matrix, {
+    GEN1_EXPECTED_LOG_LABELS_JSON: JSON.stringify({ ...configuredLabels.gen1, optional: "" })
+  });
+  assert.equal(result.status, 0, result.stderr);
+  assert.equal(JSON.parse(result.stdout).events.length, 10);
+});
+
+test("assembler rejects matrix count, order, trace, span, and remaining nested bounds", () => {
+  const shortGeneration = { gen1: cloudEntries("gen1").slice(0, 4), gen2: cloudEntries("gen2") };
+  assertRejected(shortGeneration, "generation array must contain all five cases");
+  const wrongOrder = { gen1: cloudEntries("gen1").reverse(), gen2: cloudEntries("gen2") };
+  assertRejected(wrongOrder, "generation arrays must retain the fixed case order");
+  const invalid = [
+    (entry) => { entry.jsonPayload.eventName = "other"; }, (entry) => { entry.jsonPayload.path = "/other"; },
+    (entry) => { entry.jsonPayload.forwardedParseStatus = "other"; }, (entry) => { entry.jsonPayload.socketXForwardedForPosition = -1; },
+    (entry) => { entry.trace = "projects/other/traces/" + "a".repeat(32); },
+    (entry) => { entry.trace = "projects/shipmastr-core-prod/traces/" + "a".repeat(31); },
+    (entry) => { entry.trace = "projects/shipmastr-core-prod/traces/" + "a".repeat(33); },
+    (entry) => { entry.trace = "projects/shipmastr-core-prod/traces/" + "g".repeat(32); },
+    (entry) => { entry.spanId = "a".repeat(15); }, (entry) => { entry.spanId = "a".repeat(17); },
+    (entry) => { entry.spanId = "g".repeat(16); },
+    (entry) => { entry.operation = { id: "i".repeat(257), producer: "p", first: true, last: true }; },
+    (entry) => { entry.operation = { id: "i", producer: "p".repeat(257), first: true, last: true }; },
+    (entry) => { entry.operation = { id: "i", producer: "p", first: true, last: "false" }; },
+    (entry) => { entry.operation = { id: "i", producer: "p", first: true, last: true, unknown: true }; },
+    (entry) => { entry.sourceLocation = { file: "", line: "1", function: "n" }; },
+    (entry) => { entry.sourceLocation = { file: "f", line: "1.5", function: "n" }; },
+    (entry) => { entry.sourceLocation = { file: "f", line: "1", function: "n\u0001" }; },
+    (entry) => { entry.sourceLocation = { file: "f", line: "1", function: "n", unknown: true }; },
+    (entry) => { entry.jsonPayload.hostname = "h".repeat(256); }, (entry) => { entry.jsonPayload.hostname = "h\u0001"; },
+    (entry) => { entry.jsonPayload.level = 29; }, (entry) => { entry.jsonPayload.pid = "42"; }, (entry) => { entry.jsonPayload.time = "0"; }
+  ];
+  for (const change of invalid) assertRejected(mutateOne(change));
+});
+
+test("assembler accepts exact comparison cases and configured-label map boundaries", () => {
+  const matching = runEvidence({ gen1: cloudEntries("gen1"), gen2: cloudEntries("gen2") });
+  assert.equal(matching.status, 0, matching.stderr);
+  assert.deepEqual(JSON.parse(matching.stdout).comparison.cases, cases.map((probeCase) => ({ probeCase, equal: true })));
+  const labels64 = Object.fromEntries(Array.from({ length: 64 }, (_, index) => [`k${index}`, "v"]));
+  const matrix = { gen1: cloudEntries("gen1"), gen2: cloudEntries("gen2") };
+  for (const entry of [...matrix.gen1, ...matrix.gen2]) { delete entry.labels.environment; delete entry.labels.generation; }
+  const result = runEvidence(matrix, { GEN1_EXPECTED_LOG_LABELS_JSON: JSON.stringify(labels64), GEN2_EXPECTED_LOG_LABELS_JSON: JSON.stringify(labels64) });
+  assert.equal(result.status, 0, result.stderr);
+  assert.equal(JSON.parse(result.stdout).events.length, 10);
+});

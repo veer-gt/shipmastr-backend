@@ -64,6 +64,21 @@ test("expected-label metadata accepts all documented map boundaries", () => {
   assert.throws(() => expectedLogLabelMetadata(exactSize), ProbeSchemaError);
 });
 
+test("expected-label metadata and parser accept empty configured values", () => {
+  const labels = { optional: "" };
+  const metadata = expectedLogLabelMetadata(labels);
+  assert.deepEqual(metadata.value, labels);
+  assert.equal(metadata.canonicalJson, '{"optional":""}');
+  assert.deepEqual(parseExpectedLogLabels('{"optional":""}').value, labels);
+});
+
+test("expected-label maps reject invalid key bounds while retaining zero-length values", () => {
+  for (const labels of [{ "": "value" }, { ["k".repeat(129)]: "value" }, { "k\u0001": "value" }, { key: null }]) {
+    assert.throws(() => expectedLogLabelMetadata(labels), ProbeSchemaError);
+  }
+  assert.deepEqual(parseExpectedLogLabels('{"empty":""}').value, { empty: "" });
+});
+
 test("schema rejects sensitive values only after an otherwise-valid configured label passes validation", () => {
   for (const value of ["https://example.invalid/", "192.0.2.1", "2001:db8::1", "Forwarded: for=x", "X-Forwarded-For: x", "for=x", "c".repeat(64)]) {
     const entry = completeEntry();

@@ -68,7 +68,7 @@ function validateExpectedLabelsObject(labels) {
   if (entries.length > 64) fail("EXPECTED_LABELS_COUNT");
   for (const [key, value] of entries) {
     boundedString(key, 1, 128, "EXPECTED_LABELS_KEY");
-    boundedString(value, 1, 256, "EXPECTED_LABELS_VALUE");
+    boundedString(value, 0, 256, "EXPECTED_LABELS_VALUE");
   }
 }
 
