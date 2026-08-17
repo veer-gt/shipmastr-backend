@@ -146,9 +146,58 @@ test("INT and TERM are latched through cleanup and retain signal exit status", (
     source,
     /preflight_on_exit\(\) \{[\s\S]*?trap - EXIT\s+trap 'latch_signal 130' INT\s+trap 'latch_signal 143' TERM/u,
   );
+});
+
+test("cleanup re-arbitrates a late signal after leaving its critical section", () => {
+  const source = readFileSync(runnerPath, "utf8");
+  const cleanupBody = source.slice(source.indexOf("\ncleanup() {"), source.indexOf("\non_exit() {"));
+  const restoreInt = cleanupBody.lastIndexOf("trap on_int INT");
+  const restoreTerm = cleanupBody.lastIndexOf("trap on_term TERM");
+  const criticalClear = cleanupBody.lastIndexOf("MUTATION_CRITICAL=0");
+  const lateArbitration = cleanupBody.indexOf(
+    'if [[ "$SIGNAL_STATUS" -ne 0 ]]; then',
+    criticalClear,
+  );
+  const signalStatusReturn = cleanupBody.indexOf('final_status="$SIGNAL_STATUS"', lateArbitration);
+  const finalReturn = cleanupBody.lastIndexOf('return "$final_status"');
+  assert.ok(restoreInt >= 0 && restoreInt < restoreTerm);
+  assert.ok(restoreTerm < criticalClear && criticalClear < lateArbitration);
+  assert.ok(lateArbitration < signalStatusReturn && signalStatusReturn < finalReturn);
+});
+
+test("partial promotion rollback clears state only after both shared paths are absent", () => {
+  const source = readFileSync(runnerPath, "utf8");
+  const rollbackBody = source.slice(
+    source.indexOf("rollback_published_artifacts()"),
+    source.indexOf("\nlatch_signal()"),
+  );
+  const resultProof = rollbackBody.indexOf('artifact_path_absent "$PROBE_RESULTS_PATH"');
+  const contextProof = rollbackBody.indexOf('artifact_path_absent "$PROBE_CONTEXT_PATH"');
+  const clearState = rollbackBody.indexOf("ARTIFACTS_PUBLISHED=0");
+  assert.match(source, /RESULTS_PROMOTED=0/u);
+  assert.match(source, /CONTEXT_PROMOTED=0/u);
+  assert.match(rollbackBody, /if \[\[ "\$RESULTS_PROMOTED" -eq 1 \]\]/u);
+  assert.match(rollbackBody, /if \[\[ "\$CONTEXT_PROMOTED" -eq 1 \]\]/u);
+  assert.ok(resultProof >= 0 && resultProof < contextProof);
+  assert.ok(contextProof < clearState);
+  assert.doesNotMatch(rollbackBody, /\|\| true/u);
+});
+
+test("unproven publication rollback retains lock and publication ownership state", () => {
+  const source = readFileSync(runnerPath, "utf8");
+  const cleanupBody = source.slice(source.indexOf("\ncleanup() {"), source.indexOf("\non_exit() {"));
+  assert.match(source, /PUBLICATION_ROLLBACK_FAILED=0/u);
+  assert.match(
+    cleanupBody,
+    /if \[\[ "\$PUBLICATION_ROLLBACK_FAILED" -eq 0 \]\]; then\s+if ! release_operator_lock; then[\s\S]*?rollback_published_artifacts \|\| PUBLICATION_ROLLBACK_FAILED=1/u,
+  );
+  assert.match(
+    cleanupBody,
+    /if \[\[ "\$PUBLICATION_ROLLBACK_FAILED" -ne 0 \]\]; then\s+cleanup_failed=1/u,
+  );
   assert.match(
     source,
-    /set -e\s+trap on_int INT\s+trap on_term TERM\s+MUTATION_CRITICAL=0\s+return "\$final_status"/u,
+    /if ! rmdir "\$OPERATOR_LOCK_DIR"; then[\s\S]*?printf '%s\\n' "\$OPERATOR_LOCK_OWNER" > "\$OPERATOR_LOCK_OWNER_FILE"[\s\S]*?return 1/u,
   );
 });
 

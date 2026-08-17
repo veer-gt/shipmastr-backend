@@ -42,8 +42,47 @@ release_operator_lock() {
   lock_owner_on_disk="$(< "$OPERATOR_LOCK_OWNER_FILE")" || return 1
   test "$lock_owner_on_disk" = "$OPERATOR_LOCK_OWNER" || return 1
   rm -- "$OPERATOR_LOCK_OWNER_FILE" || return 1
-  rmdir "$OPERATOR_LOCK_DIR" || return 1
+  if ! rmdir "$OPERATOR_LOCK_DIR"; then
+    if [[ ! -e "$OPERATOR_LOCK_OWNER_FILE" && ! -L "$OPERATOR_LOCK_OWNER_FILE" ]]; then
+      printf '%s\n' "$OPERATOR_LOCK_OWNER" > "$OPERATOR_LOCK_OWNER_FILE" || return 1
+    fi
+    return 1
+  fi
   LOCK_ACQUIRED=0
+}
+
+artifact_path_absent() {
+  local artifact_path="$1"
+  [[ ! -e "$artifact_path" && ! -L "$artifact_path" ]]
+}
+
+rollback_promoted_artifact() {
+  local shared_path="$1"
+  local run_path="$2"
+
+  if artifact_path_absent "$shared_path"; then return 0; fi
+  if ! mv "$shared_path" "$run_path" >/dev/null 2>&1; then
+    rm -f -- "$shared_path" >/dev/null 2>&1 || return 1
+  fi
+  artifact_path_absent "$shared_path"
+}
+
+rollback_published_artifacts() {
+  local rollback_failed=0
+
+  if [[ "$RESULTS_PROMOTED" -eq 1 ]]; then
+    rollback_promoted_artifact "$PROBE_RESULTS_PATH" "$PROBE_RESULTS_RUN_PATH" || rollback_failed=1
+  fi
+  if [[ "$CONTEXT_PROMOTED" -eq 1 ]]; then
+    rollback_promoted_artifact "$PROBE_CONTEXT_PATH" "$PROBE_CONTEXT_RUN_PATH" || rollback_failed=1
+  fi
+  artifact_path_absent "$PROBE_RESULTS_PATH" || rollback_failed=1
+  artifact_path_absent "$PROBE_CONTEXT_PATH" || rollback_failed=1
+  if [[ "$rollback_failed" -ne 0 ]]; then return 1; fi
+
+  RESULTS_PROMOTED=0
+  CONTEXT_PROMOTED=0
+  ARTIFACTS_PUBLISHED=0
 }
 
 latch_signal() {
@@ -122,6 +161,38 @@ gen2
   OPERATOR_LOCK_OWNER="$saved_lock_owner"
   release_operator_lock
   test ! -e "$OPERATOR_LOCK_DIR"
+
+  PROBE_RESULTS_PATH="$lock_test_root/shared-results.json"
+  PROBE_RESULTS_RUN_PATH="$lock_test_root/run-results.json"
+  PROBE_CONTEXT_PATH="$lock_test_root/shared-context.json"
+  PROBE_CONTEXT_RUN_PATH="$lock_test_root/run-context.json"
+  printf '%s\n' 'safe-results' > "$PROBE_RESULTS_PATH"
+  mkdir "$PROBE_CONTEXT_PATH"
+  RESULTS_PROMOTED=1
+  CONTEXT_PROMOTED=0
+  ARTIFACTS_PUBLISHED=1
+  if rollback_published_artifacts; then return 1; fi
+  test ! -e "$PROBE_RESULTS_PATH"
+  test -f "$PROBE_RESULTS_RUN_PATH"
+  test -d "$PROBE_CONTEXT_PATH"
+  test "$ARTIFACTS_PUBLISHED" -eq 1
+  rm -- "$PROBE_RESULTS_RUN_PATH"
+  rmdir "$PROBE_CONTEXT_PATH"
+
+  printf '%s\n' 'safe-results' > "$PROBE_RESULTS_PATH"
+  printf '%s\n' 'safe-context' > "$PROBE_CONTEXT_PATH"
+  RESULTS_PROMOTED=1
+  CONTEXT_PROMOTED=1
+  ARTIFACTS_PUBLISHED=1
+  rollback_published_artifacts
+  test ! -e "$PROBE_RESULTS_PATH"
+  test ! -e "$PROBE_CONTEXT_PATH"
+  test -f "$PROBE_RESULTS_RUN_PATH"
+  test -f "$PROBE_CONTEXT_RUN_PATH"
+  test "$RESULTS_PROMOTED" -eq 0
+  test "$CONTEXT_PROMOTED" -eq 0
+  test "$ARTIFACTS_PUBLISHED" -eq 0
+  rm -- "$PROBE_RESULTS_RUN_PATH" "$PROBE_CONTEXT_RUN_PATH"
   rmdir "$lock_test_root"
   SIGNAL_STATUS=0
   latch_signal 130
@@ -380,6 +451,9 @@ CONTEXT_GENERATED=0
 CONTEXT_VALIDATED=0
 CLEANUP_VERIFIED=0
 ARTIFACTS_PUBLISHED=0
+RESULTS_PROMOTED=0
+CONTEXT_PROMOTED=0
+PUBLICATION_ROLLBACK_FAILED=0
 CLEANUP_DONE=0
 MATRIX_EXACT_MATCH=""
 DISCOVERY_MAX_ATTEMPTS=6
@@ -849,14 +923,17 @@ cleanup() {
     "$CONTEXT_VALIDATED" -eq 1
   ]]; then
     if mv "$PROBE_RESULTS_RUN_PATH" "$PROBE_RESULTS_PATH"; then
+      RESULTS_PROMOTED=1
+      ARTIFACTS_PUBLISHED=1
       if mv "$PROBE_CONTEXT_RUN_PATH" "$PROBE_CONTEXT_PATH"; then
-        ARTIFACTS_PUBLISHED=1
+        CONTEXT_PROMOTED=1
       else
-        mv "$PROBE_RESULTS_PATH" "$PROBE_RESULTS_RUN_PATH" >/dev/null 2>&1 || true
         cleanup_failed=1
+        rollback_published_artifacts || PUBLICATION_ROLLBACK_FAILED=1
       fi
     else
       cleanup_failed=1
+      rollback_published_artifacts || PUBLICATION_ROLLBACK_FAILED=1
     fi
   elif [[ "$EVIDENCE_CAPTURED" -eq 0 ]]; then
     rm -f -- "$PROBE_RESULTS_RUN_PATH" "$PROBE_CONTEXT_RUN_PATH"
@@ -866,14 +943,15 @@ cleanup() {
     if [[ "$?" -ne 0 ]]; then cleanup_failed=1; fi
   fi
 
-  if ! release_operator_lock; then
-    if [[ "$ARTIFACTS_PUBLISHED" -eq 1 ]]; then
-      mv "$PROBE_RESULTS_PATH" "$PROBE_RESULTS_RUN_PATH" >/dev/null 2>&1 || \
-        rm -f -- "$PROBE_RESULTS_PATH"
-      mv "$PROBE_CONTEXT_PATH" "$PROBE_CONTEXT_RUN_PATH" >/dev/null 2>&1 || \
-        rm -f -- "$PROBE_CONTEXT_PATH"
-      ARTIFACTS_PUBLISHED=0
+  if [[ "$PUBLICATION_ROLLBACK_FAILED" -eq 0 ]]; then
+    if ! release_operator_lock; then
+      cleanup_failed=1
+      if [[ "$ARTIFACTS_PUBLISHED" -eq 1 ]]; then
+        rollback_published_artifacts || PUBLICATION_ROLLBACK_FAILED=1
+      fi
     fi
+  fi
+  if [[ "$PUBLICATION_ROLLBACK_FAILED" -ne 0 ]]; then
     cleanup_failed=1
   fi
 
@@ -887,6 +965,9 @@ cleanup() {
   trap on_int INT
   trap on_term TERM
   MUTATION_CRITICAL=0
+  if [[ "$SIGNAL_STATUS" -ne 0 ]]; then
+    final_status="$SIGNAL_STATUS"
+  fi
   return "$final_status"
 }
 
