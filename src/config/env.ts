@@ -184,6 +184,7 @@ const schema = z.object({
   COURIER_AUDIT_INTAKE_ENABLED: envBoolean(false),
   COURIER_AUDIT_INTAKE_SIGNING_SECRET: z.string().min(32).optional(),
   COURIER_AUDIT_N8N_WEBHOOK_URL: z.string().url().optional(),
+  RATE_LIMIT_PROXY_PROBE_TOKEN: z.string().regex(/^[0-9a-f]{64}$/i).optional(),
   WALLET_W1_ENABLED: envBoolean(false),
   WALLET_W1_SANDBOX_ONLY: envBoolean(true),
   WALLET_W1_ALLOW_LIVE_PAYMENTS: envBoolean(false),
@@ -200,6 +201,9 @@ const schema = z.object({
 });
 
 const parsedEnv = schema.parse(process.env);
+if (parsedEnv.RATE_LIMIT_PROXY_PROBE_TOKEN && parsedEnv.APP_ENV !== "staging") {
+  throw new Error("RATE_LIMIT_PROXY_PROBE_TOKEN_STAGING_ONLY");
+}
 assertCheckoutDevOtpCodeProductionSafety(parsedEnv);
 
 if (parsedEnv.H2A_SYNTHETIC_TENANT_LIFECYCLE_ENABLED && parsedEnv.APP_ENV !== "staging") {
