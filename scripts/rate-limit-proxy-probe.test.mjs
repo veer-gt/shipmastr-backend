@@ -30,6 +30,30 @@ test("runner remains compatible with macOS Bash 3.2 array parsing", () => {
   assert.equal(/\b(?:mapfile|readarray)\b/u.test(source), false);
 });
 
+test("runtime parity requires the staging template and both active revisions to match", () => {
+  const matching = {
+    STAGING_TEMPLATE_EXECUTION_ENVIRONMENT: "gen2",
+    STAGING_TEMPLATE_CONTAINER_CONCURRENCY: "80",
+    STAGING_ACTIVE_EXECUTION_ENVIRONMENT: "gen2",
+    STAGING_ACTIVE_CONTAINER_CONCURRENCY: "80",
+    PRODUCTION_ACTIVE_EXECUTION_ENVIRONMENT: "gen2",
+    PRODUCTION_ACTIVE_CONTAINER_CONCURRENCY: "80"
+  };
+  const accepted = runParser("runtime-parity", matching);
+  assert.equal(accepted.status, 0, accepted.stderr);
+  assert.equal(accepted.stdout, "equal\n");
+
+  for (const overrides of [
+    { STAGING_TEMPLATE_EXECUTION_ENVIRONMENT: "gen1" },
+    { STAGING_TEMPLATE_CONTAINER_CONCURRENCY: "40" },
+    { STAGING_TEMPLATE_EXECUTION_ENVIRONMENT: "__absent__" }
+  ]) {
+    const rejected = runParser("runtime-parity", { ...matching, ...overrides });
+    assert.equal(rejected.stderr, "");
+    assert.notEqual(rejected.status, 0);
+  }
+});
+
 test("owned tag and immutable image pass cleanup ownership validation", () => {
   const service = serviceJson([{ tag, revisionName: revision, percent: 0 }]);
   const state = runParser("tag-state", {

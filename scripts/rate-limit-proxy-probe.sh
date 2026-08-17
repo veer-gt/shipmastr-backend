@@ -70,8 +70,8 @@ EOF
 test "${#STAGING_SERVICE_FIELDS[@]}" -eq 5
 ORIGINAL_STAGING_URL="${STAGING_SERVICE_FIELDS[0]}"
 ORIGINAL_REVISION="${STAGING_SERVICE_FIELDS[1]}"
-STAGING_EXECUTION_ENVIRONMENT="${STAGING_SERVICE_FIELDS[2]}"
-STAGING_CONTAINER_CONCURRENCY="${STAGING_SERVICE_FIELDS[3]}"
+STAGING_TEMPLATE_EXECUTION_ENVIRONMENT="${STAGING_SERVICE_FIELDS[2]}"
+STAGING_TEMPLATE_CONTAINER_CONCURRENCY="${STAGING_SERVICE_FIELDS[3]}"
 ORIGINAL_TRAFFIC_JSON="${STAGING_SERVICE_FIELDS[4]}"
 
 ORIGINAL_REVISION_JSON="$(gcloud run revisions describe "$ORIGINAL_REVISION" \
@@ -114,8 +114,8 @@ test "${#ORIGINAL_REVISION_FIELDS[@]}" -eq 5
 ORIGINAL_IMAGE_DIGEST="${ORIGINAL_REVISION_FIELDS[0]}"
 ACTIVE_COURIER_AUDIT_INTAKE="${ORIGINAL_REVISION_FIELDS[1]}"
 ACTIVE_PROBE_TOKEN_STATE="${ORIGINAL_REVISION_FIELDS[2]}"
-STAGING_EXECUTION_ENVIRONMENT="${ORIGINAL_REVISION_FIELDS[3]}"
-STAGING_CONTAINER_CONCURRENCY="${ORIGINAL_REVISION_FIELDS[4]}"
+STAGING_ACTIVE_EXECUTION_ENVIRONMENT="${ORIGINAL_REVISION_FIELDS[3]}"
+STAGING_ACTIVE_CONTAINER_CONCURRENCY="${ORIGINAL_REVISION_FIELDS[4]}"
 [[ "$ORIGINAL_IMAGE_DIGEST" =~ ^sha256:[0-9a-f]{64}$ ]]
 [[ "$ACTIVE_COURIER_AUDIT_INTAKE" == "__absent__" || "$ACTIVE_COURIER_AUDIT_INTAKE" == "false" ]]
 test "$ACTIVE_PROBE_TOKEN_STATE" = "__absent__"
@@ -177,15 +177,19 @@ done <<EOF
 $PRODUCTION_RUNTIME_FIELDS_OUTPUT
 EOF
 test "${#PRODUCTION_RUNTIME_FIELDS[@]}" -eq 2
-PRODUCTION_EXECUTION_ENVIRONMENT="${PRODUCTION_RUNTIME_FIELDS[0]}"
-PRODUCTION_CONTAINER_CONCURRENCY="${PRODUCTION_RUNTIME_FIELDS[1]}"
+PRODUCTION_ACTIVE_EXECUTION_ENVIRONMENT="${PRODUCTION_RUNTIME_FIELDS[0]}"
+PRODUCTION_ACTIVE_CONTAINER_CONCURRENCY="${PRODUCTION_RUNTIME_FIELDS[1]}"
 
-test "$STAGING_EXECUTION_ENVIRONMENT" != "__absent__"
-test "$STAGING_CONTAINER_CONCURRENCY" != "__absent__"
-test "$PRODUCTION_EXECUTION_ENVIRONMENT" != "__absent__"
-test "$PRODUCTION_CONTAINER_CONCURRENCY" != "__absent__"
-test "$STAGING_EXECUTION_ENVIRONMENT" = "$PRODUCTION_EXECUTION_ENVIRONMENT"
-test "$STAGING_CONTAINER_CONCURRENCY" = "$PRODUCTION_CONTAINER_CONCURRENCY"
+RUNTIME_PARITY_STATE="$(
+  STAGING_TEMPLATE_EXECUTION_ENVIRONMENT="$STAGING_TEMPLATE_EXECUTION_ENVIRONMENT" \
+  STAGING_TEMPLATE_CONTAINER_CONCURRENCY="$STAGING_TEMPLATE_CONTAINER_CONCURRENCY" \
+  STAGING_ACTIVE_EXECUTION_ENVIRONMENT="$STAGING_ACTIVE_EXECUTION_ENVIRONMENT" \
+  STAGING_ACTIVE_CONTAINER_CONCURRENCY="$STAGING_ACTIVE_CONTAINER_CONCURRENCY" \
+  PRODUCTION_ACTIVE_EXECUTION_ENVIRONMENT="$PRODUCTION_ACTIVE_EXECUTION_ENVIRONMENT" \
+  PRODUCTION_ACTIVE_CONTAINER_CONCURRENCY="$PRODUCTION_ACTIVE_CONTAINER_CONCURRENCY" \
+  node "$PARSER" runtime-parity
+)"
+test "$RUNTIME_PARITY_STATE" = "equal"
 
 DOMAIN_MAPPINGS_JSON="$(gcloud beta run domain-mappings list \
   --project="$PROJECT" --region="$REGION" --format=json)"
@@ -475,8 +479,8 @@ TAG_REVISION_JSON="$(gcloud run revisions describe "$TAG_REVISION" \
 REVISION_JSON="$TAG_REVISION_JSON" \
 EXPECTED_IMAGE_REF="$IMAGE_REF" \
 EXPECTED_TOKEN="$PROBE_TOKEN" \
-EXPECTED_EXECUTION_ENVIRONMENT="$STAGING_EXECUTION_ENVIRONMENT" \
-EXPECTED_CONTAINER_CONCURRENCY="$STAGING_CONTAINER_CONCURRENCY" \
+EXPECTED_EXECUTION_ENVIRONMENT="$STAGING_TEMPLATE_EXECUTION_ENVIRONMENT" \
+EXPECTED_CONTAINER_CONCURRENCY="$STAGING_TEMPLATE_CONTAINER_CONCURRENCY" \
 node --input-type=module -e '
   const revision = JSON.parse(process.env.REVISION_JSON ?? "");
   const containers = revision?.spec?.containers;
@@ -696,10 +700,12 @@ TESTED_HEAD_TO_RECORD="$TESTED_HEAD" \
 ORIGINAL_REVISION_TO_RECORD="$ORIGINAL_REVISION" \
 IMAGE_DIGEST_TO_RECORD="$DIGEST" \
 TAGGED_REVISION_TO_RECORD="$TAG_REVISION" \
-STAGING_EXECUTION_ENVIRONMENT_TO_RECORD="$STAGING_EXECUTION_ENVIRONMENT" \
-PRODUCTION_EXECUTION_ENVIRONMENT_TO_RECORD="$PRODUCTION_EXECUTION_ENVIRONMENT" \
-STAGING_CONTAINER_CONCURRENCY_TO_RECORD="$STAGING_CONTAINER_CONCURRENCY" \
-PRODUCTION_CONTAINER_CONCURRENCY_TO_RECORD="$PRODUCTION_CONTAINER_CONCURRENCY" \
+STAGING_TEMPLATE_EXECUTION_ENVIRONMENT_TO_RECORD="$STAGING_TEMPLATE_EXECUTION_ENVIRONMENT" \
+STAGING_ACTIVE_EXECUTION_ENVIRONMENT_TO_RECORD="$STAGING_ACTIVE_EXECUTION_ENVIRONMENT" \
+PRODUCTION_ACTIVE_EXECUTION_ENVIRONMENT_TO_RECORD="$PRODUCTION_ACTIVE_EXECUTION_ENVIRONMENT" \
+STAGING_TEMPLATE_CONTAINER_CONCURRENCY_TO_RECORD="$STAGING_TEMPLATE_CONTAINER_CONCURRENCY" \
+STAGING_ACTIVE_CONTAINER_CONCURRENCY_TO_RECORD="$STAGING_ACTIVE_CONTAINER_CONCURRENCY" \
+PRODUCTION_ACTIVE_CONTAINER_CONCURRENCY_TO_RECORD="$PRODUCTION_ACTIVE_CONTAINER_CONCURRENCY" \
 PRODUCTION_DOMAIN_MAPPING_COUNT_TO_RECORD="$PRODUCTION_DOMAIN_MAPPING_COUNT" \
 node --input-type=module -e '
   const required = (name) => {
@@ -710,16 +716,24 @@ node --input-type=module -e '
   const sourceHead = required("SOURCE_HEAD_TO_RECORD");
   const testedHead = required("TESTED_HEAD_TO_RECORD");
   const imageDigest = required("IMAGE_DIGEST_TO_RECORD");
-  const stagingExecutionEnvironment = required("STAGING_EXECUTION_ENVIRONMENT_TO_RECORD");
-  const productionExecutionEnvironment = required("PRODUCTION_EXECUTION_ENVIRONMENT_TO_RECORD");
-  const stagingContainerConcurrency = required("STAGING_CONTAINER_CONCURRENCY_TO_RECORD");
-  const productionContainerConcurrency = required("PRODUCTION_CONTAINER_CONCURRENCY_TO_RECORD");
+  const stagingTemplateExecutionEnvironment = required("STAGING_TEMPLATE_EXECUTION_ENVIRONMENT_TO_RECORD");
+  const stagingExecutionEnvironment = required("STAGING_ACTIVE_EXECUTION_ENVIRONMENT_TO_RECORD");
+  const productionExecutionEnvironment = required("PRODUCTION_ACTIVE_EXECUTION_ENVIRONMENT_TO_RECORD");
+  const stagingTemplateContainerConcurrency = required("STAGING_TEMPLATE_CONTAINER_CONCURRENCY_TO_RECORD");
+  const stagingContainerConcurrency = required("STAGING_ACTIVE_CONTAINER_CONCURRENCY_TO_RECORD");
+  const productionContainerConcurrency = required("PRODUCTION_ACTIVE_CONTAINER_CONCURRENCY_TO_RECORD");
   const productionDomainMappingCount = Number(required("PRODUCTION_DOMAIN_MAPPING_COUNT_TO_RECORD"));
   if (!/^[0-9a-f]{40}$/u.test(sourceHead) || testedHead !== sourceHead) process.exit(3);
   if (!/^sha256:[0-9a-f]{64}$/u.test(imageDigest)) process.exit(4);
-  if (stagingExecutionEnvironment !== productionExecutionEnvironment) process.exit(5);
-  if (stagingContainerConcurrency !== productionContainerConcurrency) process.exit(6);
-  if (!/^(?:0|[1-9][0-9]*)$/u.test(stagingContainerConcurrency)) process.exit(7);
+  if (
+    stagingTemplateExecutionEnvironment !== stagingExecutionEnvironment ||
+    stagingTemplateExecutionEnvironment !== productionExecutionEnvironment
+  ) process.exit(5);
+  if (
+    stagingTemplateContainerConcurrency !== stagingContainerConcurrency ||
+    stagingTemplateContainerConcurrency !== productionContainerConcurrency
+  ) process.exit(6);
+  if (!/^(?:0|[1-9][0-9]*)$/u.test(stagingTemplateContainerConcurrency)) process.exit(7);
   if (productionDomainMappingCount !== 0) process.exit(8);
 
   const context = {
@@ -733,13 +747,15 @@ node --input-type=module -e '
     imageDigest,
     taggedRevision: required("TAGGED_REVISION_TO_RECORD"),
     runtimeParity: {
+      stagingTemplateExecutionEnvironment,
       stagingExecutionEnvironment,
       productionExecutionEnvironment,
-      taggedExecutionEnvironment: stagingExecutionEnvironment,
+      taggedExecutionEnvironment: stagingTemplateExecutionEnvironment,
       executionEnvironmentEqual: true,
+      stagingTemplateContainerConcurrency: Number(stagingTemplateContainerConcurrency),
       stagingContainerConcurrency: Number(stagingContainerConcurrency),
       productionContainerConcurrency: Number(productionContainerConcurrency),
-      taggedContainerConcurrency: Number(stagingContainerConcurrency),
+      taggedContainerConcurrency: Number(stagingTemplateContainerConcurrency),
       containerConcurrencyEqual: true
     },
     productionDomainMappingCount,
