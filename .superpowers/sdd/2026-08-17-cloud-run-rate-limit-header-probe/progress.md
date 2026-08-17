@@ -13,3 +13,6 @@
 - Task 3: fix round 1/5 (1 addressed, 0 open — quoted Forwarded semicolon false match; commits c6b097b..a7f77d2)
 - Task 3: complete (commits abe8894..a7f77d2, review clean after fix round 1)
 - Task 4: complete (commits a171dec..dabda4a, review clean; focused batch 25/25)
+- Task 5: minor (deferred): repository-wide git diff --check awaits controller restoration of Linux-generated tracked dist/node_modules state
+- Task 5: fix round 1/5 (2 addressed, 0 open — structural-only evidence and exact-one-container token ownership; commits 03ce6f3..a0c4051)
+- Task 5: complete (commits c516749..a0c4051, review clean after fix round 1)
