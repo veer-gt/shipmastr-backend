@@ -105,7 +105,12 @@ Use fixtures containing no credential values:
 ```javascript
 test("production fingerprint is stable and changes with service state", () => {
   const original = JSON.stringify({
-    metadata: { name: "shipmastr-api", generation: 12 },
+    metadata: {
+      name: "shipmastr-api",
+      generation: 12,
+      annotations: { "run.googleapis.com/ingress": "all" },
+      labels: { "cloud.googleapis.com/location": "asia-south1" }
+    },
     spec: { traffic: [{ revisionName: "prod-r1", percent: 100 }] },
     status: { latestCreatedRevisionName: "prod-r1", latestReadyRevisionName: "prod-r1" }
   });
@@ -113,9 +118,17 @@ test("production fingerprint is stable and changes with service state", () => {
   const changed = runParser("production-fingerprint", {
     SERVICE_JSON: original.replaceAll("prod-r1", "prod-r2")
   });
+  const annotationChanged = runParser("production-fingerprint", {
+    SERVICE_JSON: original.replace('"run.googleapis.com/ingress":"all"', '"run.googleapis.com/ingress":"internal"')
+  });
+  const labelChanged = runParser("production-fingerprint", {
+    SERVICE_JSON: original.replace('"asia-south1"', '"us-central1"')
+  });
   assert.equal(same.status, 0, same.stderr);
   assert.match(same.stdout, /^[0-9a-f]{64}\n$/u);
   assert.notEqual(same.stdout, changed.stdout);
+  assert.notEqual(same.stdout, annotationChanged.stdout);
+  assert.notEqual(same.stdout, labelChanged.stdout);
 });
 
 test("owned tag requires the expected generation and concurrency", () => {
@@ -224,6 +237,8 @@ function productionFingerprint() {
   const projection = {
     name: service?.metadata?.name,
     generation: service?.metadata?.generation,
+    annotations: service?.metadata?.annotations,
+    labels: service?.metadata?.labels,
     spec: service?.spec,
     latestCreatedRevisionName: service?.status?.latestCreatedRevisionName,
     latestReadyRevisionName: service?.status?.latestReadyRevisionName,
@@ -257,6 +272,8 @@ if (
 
 Route the two new commands and remove the `runtime-parity` branch. Keep `tag-state` unchanged.
 
+The fingerprint includes service-level annotations and labels because Cloud Run's V1 service API exposes them as independently modifiable metadata, and `run.googleapis.com/ingress` is specifically a service annotation: <https://docs.cloud.google.com/run/docs/reference/rest/v1/namespaces.services> and <https://docs.cloud.google.com/run/docs/reference/rest/v1/namespaces.services/replaceService>.
+
 - [ ] **Step 5: Run GREEN tests and commit**
 
 ```bash
@@ -275,7 +292,7 @@ Expected: every script test passes; the commit changes only the parser and its t
 - Create: `scripts/rate-limit-proxy-probe-evidence.test.mjs`
 
 **Interfaces:**
-- Consumes: `MATRIX_LOGS_JSON` shaped as `{gen1: CloudLoggingEnvelope[], gen2: CloudLoggingEnvelope[]}`, `PROBE_TOKEN_TO_VERIFY`, `GEN1_REVISION`, and `GEN2_REVISION`.
+- Consumes: `MATRIX_LOGS_JSON` shaped as `{gen1: CloudLoggingEnvelope[], gen2: CloudLoggingEnvelope[]}`, `PROBE_TOKEN_FOR_LEAK_CHECK`, `GEN1_REVISION`, and `GEN2_REVISION`.
 - Produces: JSON shaped as `{schemaVersion: 1, events: MatrixEvent[10], comparison: {exactMatch: boolean, cases: CaseComparison[5]}}`; `MatrixEvent` is `{generation: "gen1" | "gen2", revision: string, event: StructuralEvent}` and `CaseComparison` is `{probeCase: string, equal: boolean}`. A valid structural mismatch exits `0` with `exactMatch:false`; malformed or sensitive input exits nonzero without output.
 
 - [ ] **Step 1: Write failing equality and mismatch-retention tests**
@@ -353,7 +370,7 @@ function runEvidence(matrix, overrides = {}) {
     env: {
       ...process.env,
       MATRIX_LOGS_JSON: JSON.stringify(matrix),
-      PROBE_TOKEN_TO_VERIFY: "a".repeat(64),
+      PROBE_TOKEN_FOR_LEAK_CHECK: "a".repeat(64),
       GEN1_REVISION: "shipmastr-api-staging-gen1",
       GEN2_REVISION: "shipmastr-api-staging-gen2",
       ...overrides
@@ -402,7 +419,7 @@ Expected: failure because `scripts/rate-limit-proxy-probe-evidence.mjs` does not
 
 - [ ] **Step 4: Implement the evidence module by extracting the existing validator**
 
-Move the existing runner's `structuralKeys`, `ordinaryPayloadKeys`, `ordinaryEnvelopeKeys`, `nullableCount`, `nullablePosition`, `forbiddenKeys`, `containsIpAddress`, and `containsSensitiveMaterial` definitions into `scripts/rate-limit-proxy-probe-evidence.mjs`. Preserve the current per-entry type, allowed-key, case-order, path, enum, count, position, boolean, IP, and token checks exactly.
+Move the existing runner's `structuralKeys`, `ordinaryPayloadKeys`, `ordinaryEnvelopeKeys`, `nullableCount`, `nullablePosition`, `forbiddenKeys`, `containsIpAddress`, and `containsSensitiveMaterial` definitions into `scripts/rate-limit-proxy-probe-evidence.mjs`. Change the last helper's signature to `containsSensitiveMaterial(value, probeToken)` and pass the same token through every recursive call. Preserve the current per-entry type, allowed-key, case-order, path, enum, count, position, boolean, IP, and token-leak checks exactly. This input proves only that the ephemeral token is absent from captured logs/evidence; revision scoping establishes log provenance.
 
 Add these exact matrix functions around that validator:
 
@@ -415,19 +432,19 @@ function requiredRevision(name) {
   return value;
 }
 
-function projectGeneration(entries) {
+function projectGeneration(entries, probeToken) {
   if (!Array.isArray(entries) || entries.length !== 5) process.exit(3);
-  if (containsSensitiveMaterial(entries)) process.exit(4);
+  if (containsSensitiveMaterial(entries, probeToken)) process.exit(4);
   return entries.map((entry, index) => projectValidatedEntry(entry, expectedCases[index]));
 }
 
 function assemble() {
   const matrix = JSON.parse(process.env.MATRIX_LOGS_JSON ?? "");
-  const token = process.env.PROBE_TOKEN_TO_VERIFY ?? "";
+  const token = process.env.PROBE_TOKEN_FOR_LEAK_CHECK ?? "";
   if (!/^[0-9a-f]{64}$/u.test(token) || matrix === null || typeof matrix !== "object") process.exit(2);
   const projected = {
-    gen1: projectGeneration(matrix.gen1),
-    gen2: projectGeneration(matrix.gen2)
+    gen1: projectGeneration(matrix.gen1, token),
+    gen2: projectGeneration(matrix.gen2, token)
   };
   const events = [
     ...projected.gen1.map((event) => ({ generation: "gen1", revision: requiredRevision("GEN1_REVISION"), event })),
@@ -442,7 +459,7 @@ function assemble() {
     events,
     comparison: { exactMatch: cases.every(({ equal }) => equal), cases }
   };
-  if (containsSensitiveMaterial(result)) process.exit(5);
+  if (containsSensitiveMaterial(result, token)) process.exit(5);
   process.stdout.write(`${JSON.stringify(result, null, 2)}\n`);
 }
 
@@ -488,6 +505,12 @@ test("actual runner self-test exercises array and two-cell bookkeeping", () => {
   assert.equal(result.stderr, "");
 });
 
+test("runner uses a lowercase-safe numeric UTC timestamp for run-owned tags", () => {
+  const source = readFileSync(runnerPath, "utf8");
+  assert.match(source, /RUN_TIMESTAMP="\$\(date -u \+%Y%m%d%H%M%S\)"/u);
+  assert.doesNotMatch(source, /RUN_TIMESTAMP="\$\(date -u \+%Y%m%dT%H%M%SZ\)"/u);
+});
+
 test("self-test and all read-only gates precede token build and deploy", () => {
   const source = readFileSync(runnerPath, "utf8");
   const selfTest = source.indexOf("--bash32-self-test");
@@ -530,6 +553,19 @@ $input
 EOF
 }
 
+create_run_identity() {
+  local timestamp="$1"
+  local commit_prefix="$2"
+  local nonce="$3"
+  RUN_ID="$timestamp-$commit_prefix-$nonce"
+  TAG_G1="rlp-$RUN_ID-g1"
+  TAG_G2="rlp-$RUN_ID-g2"
+  [[ "$RUN_ID" =~ ^[0-9]{14}-[0-9a-f]{12}-[0-9a-f]{12}$ ]]
+  [[ "$TAG_G1" =~ ^rlp-[0-9a-z-]+-g1$ && "${#TAG_G1}" -le 63 ]]
+  [[ "$TAG_G2" =~ ^rlp-[0-9a-z-]+-g2$ && "${#TAG_G2}" -le 63 ]]
+  test "$TAG_G1" != "$TAG_G2"
+}
+
 bash32_self_test() {
   local matrix_text="gen1
 40
@@ -545,6 +581,10 @@ gen2
   concurrencies[1]="${READ_FIELDS[3]}"
   test "${generations[0]}:${concurrencies[0]}" = "gen1:40"
   test "${generations[1]}:${concurrencies[1]}" = "gen2:40"
+  create_run_identity \
+    "$(date -u +%Y%m%d%H%M%S)" \
+    "$(git rev-parse --short=12 HEAD)" \
+    "001122334455"
   printf '%s\n' 'RATE_LIMIT_PROXY_PROBE_BASH32_SELF_TEST_OK'
 }
 
@@ -556,7 +596,7 @@ fi
 test "$#" -eq 0
 ```
 
-Use `read_fields` for every multiline Node output currently decoded by repeated `while read` blocks so the actual production path and self-test exercise the same array mechanism.
+Use `read_fields` for every multiline Node output currently decoded by repeated `while read` blocks so the actual production path and self-test exercise the same array mechanism. The self-test also calls the same `create_run_identity` function with the real `date` and `git rev-parse` outputs, so an uppercase or otherwise malformed timestamp fails before any cloud action.
 
 - [ ] **Step 4: Replace parity with normalized runtime state and production fingerprint**
 
@@ -591,14 +631,11 @@ After every read-only preflight passes:
 PROBE_TOKEN="$(openssl rand -hex 32)"
 RUN_NONCE="$(openssl rand -hex 6)"
 RUN_TIMESTAMP="$(date -u +%Y%m%d%H%M%S)"
-RUN_ID="$RUN_TIMESTAMP-$(git rev-parse --short=12 HEAD)-$RUN_NONCE"
-TAG_G1="rlp-$RUN_ID-g1"
-TAG_G2="rlp-$RUN_ID-g2"
 [[ "$PROBE_TOKEN" =~ ^[0-9a-f]{64}$ ]]
-[[ "$RUN_ID" =~ ^[0-9]{14}-[0-9a-f]{12}-[0-9a-f]{12}$ ]]
-[[ "$TAG_G1" =~ ^rlp-[0-9a-z-]+-g1$ && "${#TAG_G1}" -le 63 ]]
-[[ "$TAG_G2" =~ ^rlp-[0-9a-z-]+-g2$ && "${#TAG_G2}" -le 63 ]]
-test "$TAG_G1" != "$TAG_G2"
+create_run_identity \
+  "$RUN_TIMESTAMP" \
+  "$(git rev-parse --short=12 HEAD)" \
+  "$RUN_NONCE"
 ```
 
 Initialize independent state before the cleanup trap is installed:
@@ -806,7 +843,7 @@ GEN2_LOGS_JSON="$(gcloud logging read \
 MATRIX_LOGS_JSON="$(GEN1_LOGS_JSON="$GEN1_LOGS_JSON" GEN2_LOGS_JSON="$GEN2_LOGS_JSON" \
   node --input-type=module -e 'process.stdout.write(JSON.stringify({gen1:JSON.parse(process.env.GEN1_LOGS_JSON),gen2:JSON.parse(process.env.GEN2_LOGS_JSON)}))')"
 MATRIX_LOGS_JSON="$MATRIX_LOGS_JSON" \
-PROBE_TOKEN_TO_VERIFY="$PROBE_TOKEN" \
+PROBE_TOKEN_FOR_LEAK_CHECK="$PROBE_TOKEN" \
 GEN1_REVISION="${MATRIX_REVISIONS[0]}" \
 GEN2_REVISION="${MATRIX_REVISIONS[1]}" \
 node scripts/rate-limit-proxy-probe-evidence.mjs assemble > "$EVIDENCE_TMP"
@@ -825,7 +862,7 @@ MATRIX_EXACT_MATCH="$(node -e '
 ' "$(pwd)/$EVIDENCE_DIR/probe-results.json")"
 ```
 
-Generate `probe-context.json` from safe scalar inputs only. It must include `sourceHead`, `testedHead`, `imageDigest`, `originalStagingRevision`, `liveRuntime` parsed from `LIVE_RUNTIME_STATE_JSON`, `matrix` with concurrency `40`, both exact generation/revision pairs and `exactMatch`, `productionDomainMappingCount:0`, `activeTrafficUnchanged:true`, `featureDisabled:true`, and `productionMutated:false`. Reject URLs and the existing sensitive field-name regex before writing.
+Generate `probe-context.json` from safe scalar inputs only. It must include `sourceHead`, `testedHead`, `imageDigest`, `originalStagingRevision`, `liveRuntime` parsed from `LIVE_RUNTIME_STATE_JSON`, `matrix` with concurrency `40`, both exact generation/revision pairs and `exactMatch`, `productionDomainMappingCount:0`, `productionFingerprintBefore`, `activeTrafficUnchanged:true`, `featureDisabled:true`, and `productionMutated:false`. Reject URLs and the existing sensitive field-name regex before writing. The context records only the SHA-256 fingerprint, never production annotations, labels, spec, or environment material.
 
 If `EVIDENCE_CAPTURED=1`, cleanup preserves both final JSON files regardless of matrix equality. After cleanup, require:
 
@@ -992,12 +1029,20 @@ SERVICE="shipmastr-api-staging"
 gcloud run services describe "$SERVICE" \
   --project="$PROJECT" --region="$REGION" \
   --format='yaml(status.traffic,spec.template.spec.containers[0].env)'
-gcloud run services describe shipmastr-api \
-  --project="$PROJECT" --region="$REGION" \
-  --format='yaml(metadata.generation,status.latestCreatedRevisionName,status.latestReadyRevisionName,status.traffic)'
+PRODUCTION_SERVICE_JSON_AFTER="$(gcloud run services describe shipmastr-api \
+  --project="$PROJECT" --region="$REGION" --format=json)"
+PRODUCTION_FINGERPRINT_AFTER="$(SERVICE_JSON="$PRODUCTION_SERVICE_JSON_AFTER" \
+  node scripts/rate-limit-proxy-probe-parsers.mjs production-fingerprint)"
+PRODUCTION_FINGERPRINT_BEFORE="$(node -e '
+  const context=require("./.superpowers/sdd/2026-08-17-cloud-run-rate-limit-header-probe/probe-context.json");
+  if(!/^[0-9a-f]{64}$/.test(context.productionFingerprintBefore??"")) process.exit(2);
+  process.stdout.write(context.productionFingerprintBefore);
+')"
+test "$PRODUCTION_FINGERPRINT_AFTER" = "$PRODUCTION_FINGERPRINT_BEFORE"
+unset PRODUCTION_SERVICE_JSON_AFTER
 ```
 
-Require one original staging revision at 100% ordinary traffic, no `rlp-` tags, no probe token, intake absent or `false`, and production matching the recorded preflight fingerprint inputs. POST `{}` to the normal staging Courier Audit Intake route and require `404`.
+Require one original staging revision at 100% ordinary traffic, no `rlp-` tags, no probe token, intake absent or `false`, and an exact production fingerprint match. Because the fingerprint includes canonicalized service annotations and labels—including the Cloud Run ingress annotation—this check detects annotation/label-only changes without printing their values. POST `{}` to the normal staging Courier Audit Intake route and require `404`.
 
 - [ ] **Step 4: Validate evidence locally without displaying sensitive inputs**
 
