@@ -1,6 +1,59 @@
 #!/usr/bin/env bash
 set -Eeuo pipefail
 
+read_fields() {
+  local input="$1"
+  local field=""
+  READ_FIELDS=()
+  while IFS= read -r field; do
+    READ_FIELDS[${#READ_FIELDS[@]}]="$field"
+  done <<EOF
+$input
+EOF
+}
+
+create_run_identity() {
+  local timestamp="$1"
+  local commit_prefix="$2"
+  local nonce="$3"
+  RUN_ID="$timestamp-$commit_prefix-$nonce"
+  TAG_G1="rlp-$RUN_ID-g1"
+  TAG_G2="rlp-$RUN_ID-g2"
+  [[ "$RUN_ID" =~ ^[0-9]{14}-[0-9a-f]{12}-[0-9a-f]{12}$ ]]
+  [[ "$TAG_G1" =~ ^rlp-[0-9a-z-]+-g1$ && "${#TAG_G1}" -le 63 ]]
+  [[ "$TAG_G2" =~ ^rlp-[0-9a-z-]+-g2$ && "${#TAG_G2}" -le 63 ]]
+  test "$TAG_G1" != "$TAG_G2"
+}
+
+bash32_self_test() {
+  local matrix_text="gen1
+40
+gen2
+40"
+  local generations=()
+  local concurrencies=()
+  read_fields "$matrix_text"
+  test "${#READ_FIELDS[@]}" -eq 4
+  generations[0]="${READ_FIELDS[0]}"
+  concurrencies[0]="${READ_FIELDS[1]}"
+  generations[1]="${READ_FIELDS[2]}"
+  concurrencies[1]="${READ_FIELDS[3]}"
+  test "${generations[0]}:${concurrencies[0]}" = "gen1:40"
+  test "${generations[1]}:${concurrencies[1]}" = "gen2:40"
+  create_run_identity \
+    "$(date -u +%Y%m%d%H%M%S)" \
+    "$(git rev-parse --short=12 HEAD)" \
+    "001122334455"
+  printf '%s\n' 'RATE_LIMIT_PROXY_PROBE_BASH32_SELF_TEST_OK'
+}
+
+if [[ "${1:-}" == "--bash32-self-test" ]]; then
+  test "$#" -eq 1
+  bash32_self_test
+  exit 0
+fi
+test "$#" -eq 0
+
 PROJECT="shipmastr-core-prod"
 REGION="asia-south1"
 SERVICE="shipmastr-api-staging"
@@ -61,12 +114,8 @@ STAGING_SERVICE_FIELDS_OUTPUT="$(
     ].join("\n") + "\n");
   '
 )"
-STAGING_SERVICE_FIELDS=()
-while IFS= read -r field; do
-  STAGING_SERVICE_FIELDS[${#STAGING_SERVICE_FIELDS[@]}]="$field"
-done <<EOF
-$STAGING_SERVICE_FIELDS_OUTPUT
-EOF
+read_fields "$STAGING_SERVICE_FIELDS_OUTPUT"
+STAGING_SERVICE_FIELDS=("${READ_FIELDS[@]}")
 test "${#STAGING_SERVICE_FIELDS[@]}" -eq 5
 ORIGINAL_STAGING_URL="${STAGING_SERVICE_FIELDS[0]}"
 ORIGINAL_REVISION="${STAGING_SERVICE_FIELDS[1]}"
@@ -104,12 +153,8 @@ ORIGINAL_REVISION_FIELDS_OUTPUT="$(
     ].join("\n") + "\n");
   '
 )"
-ORIGINAL_REVISION_FIELDS=()
-while IFS= read -r field; do
-  ORIGINAL_REVISION_FIELDS[${#ORIGINAL_REVISION_FIELDS[@]}]="$field"
-done <<EOF
-$ORIGINAL_REVISION_FIELDS_OUTPUT
-EOF
+read_fields "$ORIGINAL_REVISION_FIELDS_OUTPUT"
+ORIGINAL_REVISION_FIELDS=("${READ_FIELDS[@]}")
 test "${#ORIGINAL_REVISION_FIELDS[@]}" -eq 5
 ORIGINAL_IMAGE_DIGEST="${ORIGINAL_REVISION_FIELDS[0]}"
 ACTIVE_COURIER_AUDIT_INTAKE="${ORIGINAL_REVISION_FIELDS[1]}"
@@ -170,26 +215,28 @@ PRODUCTION_RUNTIME_FIELDS_OUTPUT="$(
     ].join("\n") + "\n");
   '
 )"
-PRODUCTION_RUNTIME_FIELDS=()
-while IFS= read -r field; do
-  PRODUCTION_RUNTIME_FIELDS[${#PRODUCTION_RUNTIME_FIELDS[@]}]="$field"
-done <<EOF
-$PRODUCTION_RUNTIME_FIELDS_OUTPUT
-EOF
+read_fields "$PRODUCTION_RUNTIME_FIELDS_OUTPUT"
+PRODUCTION_RUNTIME_FIELDS=("${READ_FIELDS[@]}")
 test "${#PRODUCTION_RUNTIME_FIELDS[@]}" -eq 2
 PRODUCTION_ACTIVE_EXECUTION_ENVIRONMENT="${PRODUCTION_RUNTIME_FIELDS[0]}"
 PRODUCTION_ACTIVE_CONTAINER_CONCURRENCY="${PRODUCTION_RUNTIME_FIELDS[1]}"
 
-RUNTIME_PARITY_STATE="$(
+LIVE_RUNTIME_STATE_JSON="$(
   STAGING_TEMPLATE_EXECUTION_ENVIRONMENT="$STAGING_TEMPLATE_EXECUTION_ENVIRONMENT" \
   STAGING_TEMPLATE_CONTAINER_CONCURRENCY="$STAGING_TEMPLATE_CONTAINER_CONCURRENCY" \
   STAGING_ACTIVE_EXECUTION_ENVIRONMENT="$STAGING_ACTIVE_EXECUTION_ENVIRONMENT" \
   STAGING_ACTIVE_CONTAINER_CONCURRENCY="$STAGING_ACTIVE_CONTAINER_CONCURRENCY" \
   PRODUCTION_ACTIVE_EXECUTION_ENVIRONMENT="$PRODUCTION_ACTIVE_EXECUTION_ENVIRONMENT" \
   PRODUCTION_ACTIVE_CONTAINER_CONCURRENCY="$PRODUCTION_ACTIVE_CONTAINER_CONCURRENCY" \
-  node "$PARSER" runtime-parity
+  node "$PARSER" matrix-preflight
 )"
-test "$RUNTIME_PARITY_STATE" = "equal"
+node -e 'const state=JSON.parse(process.argv[1]); if(state.productionActive.concurrency!==40) process.exit(2)' \
+  "$LIVE_RUNTIME_STATE_JSON"
+
+PRODUCTION_FINGERPRINT_BEFORE="$(
+  SERVICE_JSON="$PRODUCTION_SERVICE_JSON" node "$PARSER" production-fingerprint
+)"
+[[ "$PRODUCTION_FINGERPRINT_BEFORE" =~ ^[0-9a-f]{64}$ ]]
 
 DOMAIN_MAPPINGS_JSON="$(gcloud beta run domain-mappings list \
   --project="$PROJECT" --region="$REGION" --format=json)"
@@ -210,21 +257,30 @@ PRODUCTION_DOMAIN_MAPPING_COUNT="$(
 test "$PRODUCTION_DOMAIN_MAPPING_COUNT" = "0"
 
 PROBE_TOKEN="$(openssl rand -hex 32)"
-test "${#PROBE_TOKEN}" -eq 64
-[[ "$PROBE_TOKEN" =~ ^[0-9a-f]{64}$ ]]
 RUN_NONCE="$(openssl rand -hex 6)"
-[[ "$RUN_NONCE" =~ ^[0-9a-f]{12}$ ]]
-RUN_ID="$(date -u +%Y%m%dT%H%M%SZ)-$(git rev-parse --short=12 HEAD)-$RUN_NONCE"
-TAG="rlp-$(date -u +%m%d%H%M%S)-$(git rev-parse --short=8 HEAD)-$RUN_NONCE"
+RUN_TIMESTAMP="$(date -u +%Y%m%d%H%M%S)"
+[[ "$PROBE_TOKEN" =~ ^[0-9a-f]{64}$ ]]
+create_run_identity \
+  "$RUN_TIMESTAMP" \
+  "$(git rev-parse --short=12 HEAD)" \
+  "$RUN_NONCE"
 IMAGE_TAG="rate-limit-proxy-probe-$RUN_ID"
 EVIDENCE_TMP="$EVIDENCE_DIR/.probe-results-$RUN_ID.tmp"
 PROBE_CONTEXT_PATH="$EVIDENCE_DIR/probe-context.json"
 PROBE_CONTEXT_TMP="$EVIDENCE_DIR/.probe-context-$RUN_ID.tmp"
 test ! -e "$EVIDENCE_TMP"
 test ! -e "$PROBE_CONTEXT_TMP"
+MATRIX_GENERATIONS=("gen1" "gen2")
+MATRIX_TAGS=("$TAG_G1" "$TAG_G2")
+MATRIX_REVISIONS=("" "")
+MATRIX_URLS=("" "")
 IMAGE_REF=""
-TAG_REVISION=""
+EVIDENCE_CAPTURED=0
 CLEANUP_DONE=0
+
+# Compatibility aliases for the single-generation body replaced in Task 4.
+TAG="$TAG_G1"
+TAG_REVISION=""
 
 cleanup() {
   local incoming_status="${1:-$?}"
@@ -464,12 +520,8 @@ TAG_BINDING_OUTPUT="$(
     process.stdout.write(`${tagged[0].revisionName}\n${tagged[0].url}\n`);
   '
 )"
-TAG_BINDING=()
-while IFS= read -r field; do
-  TAG_BINDING[${#TAG_BINDING[@]}]="$field"
-done <<EOF
-$TAG_BINDING_OUTPUT
-EOF
+read_fields "$TAG_BINDING_OUTPUT"
+TAG_BINDING=("${READ_FIELDS[@]}")
 test "${#TAG_BINDING[@]}" -eq 2
 TAG_REVISION="${TAG_BINDING[0]}"
 TAG_URL="${TAG_BINDING[1]}"

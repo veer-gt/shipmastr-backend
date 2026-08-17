@@ -41,6 +41,37 @@ test("runner remains compatible with macOS Bash 3.2 array parsing", () => {
   assert.equal(/\b(?:mapfile|readarray)\b/u.test(source), false);
 });
 
+test("actual runner self-test exercises array and two-cell bookkeeping", () => {
+  const result = spawnSync("bash", [runnerPath, "--bash32-self-test"], {
+    encoding: "utf8",
+    env: { PATH: process.env.PATH }
+  });
+  assert.equal(result.status, 0, result.stderr);
+  assert.equal(result.stdout, "RATE_LIMIT_PROXY_PROBE_BASH32_SELF_TEST_OK\n");
+  assert.equal(result.stderr, "");
+});
+
+test("runner uses a lowercase-safe numeric UTC timestamp for run-owned tags", () => {
+  const source = readFileSync(runnerPath, "utf8");
+  assert.match(source, /RUN_TIMESTAMP="\$\(date -u \+%Y%m%d%H%M%S\)"/u);
+  assert.doesNotMatch(source, /RUN_TIMESTAMP="\$\(date -u \+%Y%m%dT%H%M%SZ\)"/u);
+});
+
+test("self-test and all read-only gates precede token build and deploy", () => {
+  const source = readFileSync(runnerPath, "utf8");
+  const selfTest = source.indexOf("--bash32-self-test");
+  const commandPreflight = source.indexOf("for required_command");
+  const matrixPreflight = source.indexOf('node "$PARSER" matrix-preflight');
+  const domainMapping = source.indexOf("domain-mappings list");
+  const token = source.indexOf('PROBE_TOKEN="$(openssl rand -hex 32)"');
+  const build = source.indexOf("gcloud builds submit");
+  assert.ok(selfTest >= 0 && selfTest < commandPreflight);
+  assert.ok(matrixPreflight > commandPreflight && matrixPreflight < token);
+  assert.ok(domainMapping > matrixPreflight && domainMapping < token);
+  assert.ok(token < build);
+  assert.equal(source.includes('node "$PARSER" runtime-parity'), false);
+});
+
 const observedRuntime = {
   STAGING_TEMPLATE_EXECUTION_ENVIRONMENT: "__absent__",
   STAGING_TEMPLATE_CONTAINER_CONCURRENCY: "80",
