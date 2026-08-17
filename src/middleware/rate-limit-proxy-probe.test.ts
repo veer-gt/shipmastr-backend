@@ -114,6 +114,16 @@ test("quoted bracketed IPv6 remains attributable", () => {
   assert.equal(event.reqIpEqualsSocket, true);
 });
 
+test("marker text inside a quoted Forwarded value does not match", () => {
+  const event = buildRateLimitProxyProbeEvent(fakeRequest({
+    headers: { forwarded: "for=\"obf;for=192.0.2.10;tail\"" },
+    ip: "10.0.0.3",
+    socketAddress: "10.0.0.3"
+  }), "forwarded-ipv4");
+  assert.equal(event.forwardedParseStatus, "quoted");
+  assert.equal(event.forwardedMarkerPosition, null);
+});
+
 test("malformed quoted Forwarded input is classified without throwing", () => {
   const event = buildRateLimitProxyProbeEvent(fakeRequest({
     headers: { forwarded: "for=\"[2001:db8::1]" },

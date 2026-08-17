@@ -92,13 +92,42 @@ function normalizeAddress(value: string | undefined): string | undefined {
   return normalized;
 }
 
+function splitForwardedParameters(element: string): string[] {
+  const parameters: string[] = [];
+  let parameterStart = 0;
+  let inQuotes = false;
+  let escaped = false;
+
+  for (let index = 0; index < element.length; index += 1) {
+    const character = element[index];
+    if (inQuotes && escaped) {
+      escaped = false;
+      continue;
+    }
+    if (inQuotes && character === "\\") {
+      escaped = true;
+      continue;
+    }
+    if (character === "\"") {
+      inQuotes = !inQuotes;
+      continue;
+    }
+    if (character === ";" && !inQuotes) {
+      parameters.push(element.slice(parameterStart, index));
+      parameterStart = index + 1;
+    }
+  }
+
+  parameters.push(element.slice(parameterStart));
+  return parameters;
+}
+
 function findForwardedMarkerPosition(elements: string[] | null, marker: string | undefined): number | null {
   if (elements === null || marker === undefined) return null;
 
   const normalizedMarker = normalizeWhitespace(marker);
   const index = elements.findIndex((element) =>
-    element
-      .split(";")
+    splitForwardedParameters(element)
       .some((parameter) => normalizeWhitespace(parameter) === normalizedMarker)
   );
   return index === -1 ? null : index + 1;
