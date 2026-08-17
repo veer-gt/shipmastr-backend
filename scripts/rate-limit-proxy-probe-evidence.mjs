@@ -88,10 +88,21 @@ function normalizedKey(key) {
   return key.toLowerCase().replace(/[^a-z0-9]/gu, "");
 }
 
+function semanticKeyTokens(key) {
+  return key
+    .replace(/([A-Z]+)([A-Z][a-z])/gu, "$1 $2")
+    .replace(/([a-z0-9])([A-Z])/gu, "$1 $2")
+    .toLowerCase()
+    .split(/[^a-z0-9]+/gu)
+    .filter(Boolean);
+}
+
 function forbiddenKey(key) {
   const normalized = normalizedKey(key);
+  const semanticTokens = new Set(semanticKeyTokens(key));
   return (
     forbiddenNormalizedKeys.has(normalized) ||
+    ["url", "uri", "ip", "ipv4", "ipv6", "address"].some((token) => semanticTokens.has(token)) ||
     normalized.includes("authorization") ||
     normalized.includes("authentication") ||
     normalized.includes("cookie") ||

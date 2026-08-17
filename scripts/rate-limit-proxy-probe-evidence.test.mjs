@@ -151,6 +151,72 @@ test("assembler rejects prohibited fields and URL values nested under allowed wr
   }
 });
 
+test("assembler rejects URL and URI semantic tokens anywhere in composite wrapper keys", () => {
+  const valid = cloudEntries();
+  const fields = [
+    ["uriMetadata", "relative-path"],
+    ["requestUriValue", "/private/path"],
+    ["sourceURLText", "relative-path"],
+    ["request_uri_value", "relative-path"],
+    ["REQUEST-URI-VALUE", "relative-path"],
+    ["canonical_url", "relative-path"]
+  ];
+  for (const [field, value] of fields) {
+    const result = runEvidence({
+      gen1: valid.map((entry, index) => index === 0
+        ? { ...entry, labels: { [field]: value } }
+        : entry),
+      gen2: valid
+    });
+    assert.equal(result.stdout, "", field);
+    assert.notEqual(result.status, 0, field);
+  }
+});
+
+test("assembler rejects IP and address semantic tokens anywhere in composite wrapper keys", () => {
+  const valid = cloudEntries();
+  const fields = [
+    "ipMetadata",
+    "clientIpText",
+    "sourceIPAddressText",
+    "client_ip_text",
+    "remoteAddressValue",
+    "REMOTE-ADDRESS-VALUE",
+    "candidate_address"
+  ];
+  for (const field of fields) {
+    const result = runEvidence({
+      gen1: valid.map((entry, index) => index === 0
+        ? { ...entry, labels: { [field]: "redacted-text" } }
+        : entry),
+      gen2: valid
+    });
+    assert.equal(result.stdout, "", field);
+    assert.notEqual(result.status, 0, field);
+  }
+});
+
+test("assembler accepts benign wrapper names with incidental sensitive-looking substrings", () => {
+  const valid = cloudEntries();
+  const result = runEvidence({
+    gen1: valid.map((entry, index) => index === 0
+      ? {
+          ...entry,
+          labels: {
+            description: "ordinary metadata",
+            securityLevel: "standard",
+            curlVersion: "8",
+            scriptVersion: "one",
+            addressableState: "ready"
+          }
+        }
+      : entry),
+    gen2: valid
+  });
+  assert.equal(result.status, 0, result.stderr);
+  assert.equal(JSON.parse(result.stdout).events.length, 10);
+});
+
 test("assembler accepts ordinary safe Cloud Logging wrapper metadata", () => {
   const valid = cloudEntries();
   const result = runEvidence({
