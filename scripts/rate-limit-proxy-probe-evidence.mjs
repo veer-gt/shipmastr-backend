@@ -35,6 +35,12 @@ const ordinaryEnvelopeKeys = new Set([
   "trace",
   "traceSampled"
 ]);
+const structuralKeySet = new Set(structuralKeys);
+const ordinaryPayloadKeySet = new Set([...structuralKeys, ...ordinaryPayloadKeys]);
+const semanticallySafeEnvelopeKeys = new Set(
+  [...ordinaryEnvelopeKeys].filter((key) => key !== "httpRequest")
+);
+const noTrustedKeys = new Set();
 const nullableCount = (value) => value === null || (Number.isInteger(value) && value >= 0);
 const nullablePosition = (value) => value === null || (Number.isInteger(value) && value >= 1);
 const forbiddenNormalizedKeys = new Set([
@@ -86,29 +92,76 @@ function forbiddenKey(key) {
   const normalized = normalizedKey(key);
   return (
     forbiddenNormalizedKeys.has(normalized) ||
+    normalized.includes("authorization") ||
+    normalized.includes("authentication") ||
+    normalized.includes("cookie") ||
+    normalized.includes("token") ||
+    normalized.includes("header") ||
+    normalized.includes("forwarded") ||
+    normalized.includes("forwarding") ||
+    normalized.includes("signature") ||
     normalized.includes("credential") ||
-    normalized.endsWith("signature") ||
-    normalized.endsWith("body") ||
-    normalized.endsWith("url")
+    normalized.includes("environment") ||
+    normalized.includes("secret") ||
+    normalized.includes("password") ||
+    normalized.includes("passwd") ||
+    normalized.includes("apikey") ||
+    normalized.includes("accesskey") ||
+    normalized.includes("privatekey") ||
+    normalized.includes("signingkey") ||
+    normalized.includes("body") ||
+    normalized === "env" ||
+    normalized.endsWith("env") ||
+    normalized.startsWith("envvar") ||
+    normalized.endsWith("envvar") ||
+    normalized.includes("envlist") ||
+    normalized.startsWith("url") ||
+    normalized.endsWith("url") ||
+    normalized.startsWith("uri") ||
+    normalized.endsWith("uri") ||
+    normalized === "xff" ||
+    normalized.startsWith("xff") ||
+    normalized.endsWith("xff") ||
+    /^(?:client|remote|request|response|server|socket|source|destination|peer)(?:ip|address)$/u.test(normalized)
   );
 }
 
-function containsSensitiveMaterial(value, probeToken) {
+function stringContainsSensitiveMaterial(value, probeToken) {
+  const normalized = value.toLowerCase();
+  return (
+    normalized.includes(probeToken.toLowerCase()) ||
+    /https?:\/\//iu.test(value) ||
+    /(?:^|[^a-z0-9-])x-forwarded-for\s*:/iu.test(value) ||
+    /(?:^|[^a-z0-9-])forwarded\s*:/iu.test(value) ||
+    /(?:^|[^a-z0-9-])for\s*=/iu.test(value) ||
+    containsIpAddress(value)
+  );
+}
+
+function containsSensitiveValue(value, probeToken) {
   if (typeof value === "string") {
-    const normalized = value.toLowerCase();
-    return (
-      normalized.includes(probeToken.toLowerCase()) ||
-      /https?:\/\//iu.test(value) ||
-      /(?:^|[^a-z0-9-])x-forwarded-for\s*:/iu.test(value) ||
-      /(?:^|[^a-z0-9-])forwarded\s*:/iu.test(value) ||
-      /(?:^|[^a-z0-9-])for\s*=/iu.test(value) ||
-      containsIpAddress(value)
-    );
+    return stringContainsSensitiveMaterial(value, probeToken);
   }
-  if (Array.isArray(value)) return value.some((child) => containsSensitiveMaterial(child, probeToken));
+  if (Array.isArray(value)) return value.some((child) => containsSensitiveValue(child, probeToken));
+  if (value === null || typeof value !== "object") return false;
+  return Object.values(value).some((child) => containsSensitiveValue(child, probeToken));
+}
+
+function containsSensitiveMaterial(value, probeToken, trustedKeys = noTrustedKeys) {
+  if (typeof value === "string") return stringContainsSensitiveMaterial(value, probeToken);
+  if (Array.isArray(value)) {
+    return value.some((child) => containsSensitiveMaterial(child, probeToken, trustedKeys));
+  }
   if (value === null || typeof value !== "object") return false;
   return Object.entries(value).some(([key, child]) =>
-    forbiddenKey(key) || containsSensitiveMaterial(child, probeToken)
+    (!trustedKeys.has(key) && forbiddenKey(key)) ||
+    containsSensitiveMaterial(
+      child,
+      probeToken,
+      trustedKeys === semanticallySafeEnvelopeKeys && key === "jsonPayload"
+        ? ordinaryPayloadKeySet
+        : noTrustedKeys
+    )
   );
 }
 
@@ -153,9 +206,9 @@ function requiredRevision(name) {
 
 function projectGeneration(entries, probeToken) {
   if (!Array.isArray(entries) || entries.length !== 5) process.exit(3);
-  if (containsSensitiveMaterial(entries, probeToken)) process.exit(4);
+  if (containsSensitiveMaterial(entries, probeToken, semanticallySafeEnvelopeKeys)) process.exit(4);
   const projected = entries.map((entry, index) => projectValidatedEntry(entry, expectedCases[index]));
-  if (containsSensitiveMaterial(projected, probeToken)) process.exit(24);
+  if (containsSensitiveMaterial(projected, probeToken, structuralKeySet)) process.exit(24);
   return projected;
 }
 
@@ -169,7 +222,7 @@ function assemble() {
     Array.isArray(matrix) ||
     Object.keys(matrix).length !== 2 ||
     Object.keys(matrix).some((key) => key !== "gen1" && key !== "gen2") ||
-    containsSensitiveMaterial(matrix, token)
+    containsSensitiveValue(matrix, token)
   ) process.exit(2);
   const projected = {
     gen1: projectGeneration(matrix.gen1, token),
@@ -188,7 +241,7 @@ function assemble() {
     events,
     comparison: { exactMatch: cases.every(({ equal }) => equal), cases }
   };
-  if (containsSensitiveMaterial(result, token)) process.exit(5);
+  if (containsSensitiveValue(result, token)) process.exit(5);
   process.stdout.write(`${JSON.stringify(result, null, 2)}\n`);
 }
 

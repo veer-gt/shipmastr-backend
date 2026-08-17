@@ -3,6 +3,7 @@ import { readFileSync } from "node:fs";
 import { resolve } from "node:path";
 import { spawnSync } from "node:child_process";
 import test from "node:test";
+import { runFakeProbe } from "./rate-limit-proxy-probe-runner-fixture.mjs";
 
 const runnerPath = resolve("scripts/rate-limit-proxy-probe.sh");
 const parserPath = resolve("scripts/rate-limit-proxy-probe-parsers.mjs");
@@ -41,6 +42,16 @@ test("runner remains compatible with macOS Bash 3.2 array parsing", () => {
   assert.equal(/\b(?:mapfile|readarray)\b/u.test(source), false);
 });
 
+test("every gcloud boundary is routed through the portable deadline supervisor", () => {
+  const source = readFileSync(runnerPath, "utf8");
+  const gcloudBoundaryLines = source.split("\n").filter((line) =>
+    /\bgcloud\b/u.test(line) && !line.includes("for required_command")
+  );
+  assert.equal(gcloudBoundaryLines.length, 4);
+  for (const line of gcloudBoundaryLines) assert.match(line, /^\s+run_command_/u);
+  assert.doesNotMatch(source, /command -v (?:g?timeout)\b/u);
+});
+
 test("actual runner self-test exercises array and two-cell bookkeeping", () => {
   const result = spawnSync("bash", [runnerPath, "--bash32-self-test"], {
     encoding: "utf8",
@@ -53,7 +64,7 @@ test("actual runner self-test exercises array and two-cell bookkeeping", () => {
 
 test("runner builds once and deploys explicit Gen1 and Gen2 cells at concurrency 40", () => {
   const source = readFileSync(runnerPath, "utf8");
-  assert.equal((source.match(/gcloud builds submit/gu) ?? []).length, 1);
+  assert.equal((source.match(/gcloud_build builds submit/gu) ?? []).length, 1);
   assert.match(source, /deploy_matrix_cell\s+"gen1"\s+"\$TAG_G1"/u);
   assert.match(source, /deploy_matrix_cell\s+"gen2"\s+"\$TAG_G2"/u);
   assert.match(source, /--execution-environment="\$generation"/u);
@@ -83,7 +94,7 @@ test("partial deployments are recorded for ownership-safe cleanup before failure
   const ownership = source.indexOf('node --input-type=module -e "$DEPLOYED_REVISION_ENV_VALIDATOR"');
   const revisionRecord = source.indexOf('MATRIX_REVISIONS[$matrix_index]="$tag_target"');
   const bindingReadiness = source.indexOf('node --input-type=module -e "$TAG_BINDING_VALIDATOR"');
-  assert.match(source, /gcloud run deploy "\$SERVICE"[\s\S]*?\|\| deploy_status="\$\?"/u);
+  assert.match(source, /gcloud_deploy run deploy "\$SERVICE"[\s\S]*?\|\| deploy_status="\$\?"/u);
   assert.match(source, /record_matrix_cell "\$generation" "\$tag" "\$matrix_index"/u);
   assert.match(source, /if \[\[ "\$deploy_status" -ne 0 \]\]; then\s+return "\$deploy_status"/u);
   assert.match(source, /record_matrix_cell "gen1" "\$TAG_G1" "0" \|\| cleanup_failed=1/u);
@@ -99,7 +110,7 @@ test("deploy mutation is cancellation-safe and cleanup performs bounded stable d
     source.indexOf("run_five_cases()"),
   );
   const criticalStart = deployFunction.indexOf("MUTATION_CRITICAL=1");
-  const deploy = deployFunction.indexOf('gcloud run deploy "$SERVICE"');
+  const deploy = deployFunction.indexOf('gcloud_deploy run deploy "$SERVICE"');
   const stableDiscovery = deployFunction.indexOf(
     'discover_matrix_cell_stably "$generation" "$tag" "$matrix_index" "1"',
   );
@@ -189,7 +200,7 @@ test("unproven publication rollback retains lock and publication ownership state
   assert.match(source, /PUBLICATION_ROLLBACK_FAILED=0/u);
   assert.match(
     cleanupBody,
-    /if \[\[ "\$PUBLICATION_ROLLBACK_FAILED" -eq 0 \]\]; then\s+if ! release_operator_lock; then[\s\S]*?rollback_published_artifacts \|\| PUBLICATION_ROLLBACK_FAILED=1/u,
+    /if \[\[ "\$PUBLICATION_ROLLBACK_FAILED" -eq 0 && "\$REMOTE_CLEANUP_UNRESOLVED" -eq 0 \]\]; then\s+if ! release_operator_lock; then[\s\S]*?rollback_published_artifacts \|\| PUBLICATION_ROLLBACK_FAILED=1/u,
   );
   assert.match(
     cleanupBody,
@@ -203,9 +214,9 @@ test("unproven publication rollback retains lock and publication ownership state
 
 test("single-operator lock rejects foreign ownership and guards shared artifact publication", () => {
   const source = readFileSync(runnerPath, "utf8");
-  const acquire = source.indexOf("acquire_operator_lock");
+  const acquire = source.indexOf("\nacquire_operator_lock\n");
   const sharedArtifactGate = source.indexOf('test ! -e "$EVIDENCE_DIR/probe-results.json"');
-  const sharedPreflight = source.indexOf('gcloud run services describe "$SERVICE"');
+  const sharedPreflight = source.indexOf('gcloud_read_capture STAGING_SERVICE_JSON run services describe "$SERVICE"');
   const publish = source.indexOf('mv "$PROBE_CONTEXT_RUN_PATH" "$PROBE_CONTEXT_PATH"');
   const release = source.indexOf("release_operator_lock", publish);
   assert.match(source, /mkdir "\$OPERATOR_LOCK_DIR"/u);
@@ -230,7 +241,7 @@ test("self-test and all read-only gates precede token build and deploy", () => {
   const matrixPreflight = source.indexOf('node "$PARSER" matrix-preflight');
   const domainMapping = source.indexOf("domain-mappings list");
   const token = source.indexOf('PROBE_TOKEN="$(openssl rand -hex 32)"');
-  const build = source.indexOf("gcloud builds submit");
+  const build = source.indexOf("gcloud_build builds submit");
   assert.ok(selfTest >= 0 && selfTest < commandPreflight);
   assert.ok(matrixPreflight > commandPreflight && matrixPreflight < token);
   assert.ok(domainMapping > matrixPreflight && domainMapping < token);
@@ -410,4 +421,205 @@ test("owned tag requires the expected generation and concurrency", () => {
     });
     assert.notEqual(rejected.status, 0);
   }
+});
+
+function gcloudCalls(run, prefix) {
+  return run.calls.filter(({ command, args }) =>
+    command === "gcloud" && prefix.every((part, index) => args[index] === part)
+  );
+}
+
+function deployedTags(run) {
+  return gcloudCalls(run, ["run", "deploy"])
+    .map(({ args }) => args.find((arg) => arg.startsWith("--tag="))?.slice("--tag=".length))
+    .filter(Boolean);
+}
+
+function removedTags(run) {
+  return gcloudCalls(run, ["run", "services", "update-traffic"])
+    .map(({ args }) => args.find((arg) => arg.startsWith("--remove-tags="))?.slice("--remove-tags=".length))
+    .filter(Boolean);
+}
+
+function assertNoProductionMutation(run) {
+  const serviceMutations = run.calls.filter(({ command, args }) => {
+    if (command !== "gcloud" || args[0] !== "run") return false;
+    return args[1] === "deploy" ||
+      (args[1] === "services" && ["update", "update-traffic"].includes(args[2]));
+  });
+  const expectedTags = new Set(deployedTags(run));
+  for (const { args } of serviceMutations) {
+    const service = args[1] === "deploy" ? args[2] : args[3];
+    assert.equal(service, "shipmastr-api-staging");
+    assert.ok(args.includes("--project=shipmastr-core-prod"));
+    assert.ok(args.includes("--region=asia-south1"));
+    if (args[2] === "update-traffic") {
+      const tag = args.find((arg) => arg.startsWith("--remove-tags="))
+        ?.slice("--remove-tags=".length);
+      assert.ok(expectedTags.has(tag));
+    }
+  }
+}
+
+test("normal runner succeeds through fake cloud boundaries and mutates only its staging cells", {
+  timeout: 30_000
+}, async (t) => {
+  const run = await runFakeProbe();
+  t.after(() => run.dispose());
+  assert.equal(run.harnessTimedOut, false, run.stderr);
+  assert.equal(run.status, 0, run.stderr);
+  const deploys = gcloudCalls(run, ["run", "deploy"]);
+  assert.equal(deploys.length, 2);
+  assert.deepEqual(deploys.map(({ args }) => args[2]), [
+    "shipmastr-api-staging", "shipmastr-api-staging"
+  ]);
+  assert.deepEqual(new Set(deploys.map(({ args }) =>
+    args.find((arg) => arg.startsWith("--execution-environment="))
+  )), new Set(["--execution-environment=gen1", "--execution-environment=gen2"]));
+  const curls = run.calls.filter(({ command }) => command === "curl");
+  assert.equal(curls.length, 10);
+  for (const { args } of curls) {
+    assert.ok(args.includes("--connect-timeout=10"));
+    assert.ok(args.includes("--max-time=30"));
+  }
+  assert.deepEqual(new Set(removedTags(run)), new Set(deployedTags(run)));
+  assert.equal(gcloudCalls(run, ["run", "services", "update"]).length, 1);
+  assert.equal(run.resultExists, true);
+  assert.equal(run.contextExists, true);
+  assert.equal(run.lockExists, false);
+  assertNoProductionMutation(run);
+});
+
+test("timed-out partial deploy returns 124 after late owned-tag discovery and cleanup", {
+  timeout: 30_000
+}, async (t) => {
+  const run = await runFakeProbe({ scenario: "deploy_timeout_late_tag" });
+  t.after(() => run.dispose());
+  assert.equal(run.harnessTimedOut, false, run.stderr);
+  assert.equal(run.status, 124, run.stderr);
+  const [tag] = deployedTags(run);
+  assert.ok(tag);
+  assert.ok(removedTags(run).includes(tag));
+  assert.equal(run.state.cells.gen1.removed, true);
+  assert.equal(run.resultExists, false);
+  assert.equal(run.contextExists, false);
+  assert.equal(run.lockExists, false);
+  assertNoProductionMutation(run);
+});
+
+test("unresolved timed-out deploy retains its operator lock for reconciliation", {
+  timeout: 30_000
+}, async (t) => {
+  const run = await runFakeProbe({ scenario: "deploy_timeout_unresolved" });
+  t.after(() => run.dispose());
+  assert.equal(run.harnessTimedOut, false, run.stderr);
+  assert.equal(run.status, 124, run.stderr);
+  assert.deepEqual(removedTags(run), []);
+  assert.equal(run.state.cells.gen1.visible, false);
+  assert.equal(run.resultExists, false);
+  assert.equal(run.contextExists, false);
+  assert.equal(run.lockExists, true);
+  assertNoProductionMutation(run);
+});
+
+test("ambiguous tag ownership fails closed without deleting or publishing", {
+  timeout: 30_000
+}, async (t) => {
+  const run = await runFakeProbe({ scenario: "ambiguous_ownership" });
+  t.after(() => run.dispose());
+  assert.equal(run.harnessTimedOut, false, run.stderr);
+  assert.notEqual(run.status, 0);
+  assert.deepEqual(removedTags(run), []);
+  assert.equal(run.resultExists, false);
+  assert.equal(run.contextExists, false);
+  assert.equal(run.lockExists, true);
+  assertNoProductionMutation(run);
+});
+
+test("cleanup failure still attempts both exact cells and returns nonzero", {
+  timeout: 30_000
+}, async (t) => {
+  const run = await runFakeProbe({ scenario: "cleanup_failure" });
+  t.after(() => run.dispose());
+  assert.equal(run.harnessTimedOut, false, run.stderr);
+  assert.notEqual(run.status, 0);
+  const tags = deployedTags(run);
+  assert.equal(tags.length, 2);
+  for (const tag of tags) assert.ok(removedTags(run).includes(tag));
+  assert.equal(run.state.cells.gen1.removed, false);
+  assert.equal(run.state.cells.gen2.removed, true);
+  assert.equal(run.resultExists, false);
+  assert.equal(run.contextExists, false);
+  assert.equal(run.lockExists, true);
+  assertNoProductionMutation(run);
+});
+
+test("a timed-out cleanup command returns 124 after bounded successful reconciliation", {
+  timeout: 30_000
+}, async (t) => {
+  const run = await runFakeProbe({ scenario: "cleanup_timeout" });
+  t.after(() => run.dispose());
+  assert.equal(run.harnessTimedOut, false, run.stderr);
+  assert.equal(run.status, 124, run.stderr);
+  const tags = deployedTags(run);
+  assert.equal(tags.length, 2);
+  for (const tag of tags) assert.ok(removedTags(run).includes(tag));
+  assert.equal(run.state.cells.gen1.removed, true);
+  assert.equal(run.state.cells.gen2.removed, true);
+  assert.equal(run.resultExists, false);
+  assert.equal(run.contextExists, false);
+  assert.equal(run.lockExists, false);
+  assertNoProductionMutation(run);
+});
+
+for (const [signal, expectedStatus] of [["SIGINT", 130], ["SIGTERM", 143]]) {
+  test(`normal runner handles ${signal} during a stalled deploy`, { timeout: 30_000 }, async (t) => {
+    const run = await runFakeProbe({ scenario: "signal", signals: [signal] });
+    t.after(() => run.dispose());
+    assert.equal(run.harnessTimedOut, false, run.stderr);
+    assert.equal(run.status, expectedStatus, run.stderr);
+    const [tag] = deployedTags(run);
+    assert.ok(tag);
+    assert.ok(removedTags(run).includes(tag));
+    assert.equal(run.state.cells.gen1.removed, true);
+    assert.equal(run.resultExists, false);
+    assert.equal(run.contextExists, false);
+    assertNoProductionMutation(run);
+  });
+}
+
+for (const [first, second, expectedStatus] of [
+  ["SIGINT", "SIGTERM", 130],
+  ["SIGTERM", "SIGINT", 143]
+]) {
+  test(`${first} status survives a late ${second} during cleanup`, {
+    timeout: 30_000
+  }, async (t) => {
+    const run = await runFakeProbe({
+      scenario: "late_second_signal",
+      signals: [first, second]
+    });
+    t.after(() => run.dispose());
+    assert.equal(run.harnessTimedOut, false, run.stderr);
+    assert.equal(run.status, expectedStatus, run.stderr);
+    const [tag] = deployedTags(run);
+    assert.ok(removedTags(run).includes(tag));
+    assert.equal(run.state.cells.gen1.removed, true);
+    assert.equal(run.resultExists, false);
+    assert.equal(run.contextExists, false);
+    assertNoProductionMutation(run);
+  });
+}
+
+test("partial artifact publication is rolled back behaviorally", {
+  timeout: 30_000
+}, async (t) => {
+  const run = await runFakeProbe({ scenario: "partial_publication" });
+  t.after(() => run.dispose());
+  assert.equal(run.harnessTimedOut, false, run.stderr);
+  assert.notEqual(run.status, 0);
+  assert.equal(run.resultExists, false);
+  assert.equal(run.contextExists, false);
+  assert.equal(run.lockExists, false);
+  assertNoProductionMutation(run);
 });

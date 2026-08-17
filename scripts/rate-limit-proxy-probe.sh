@@ -1,5 +1,169 @@
 #!/usr/bin/env bash
 set -Eeuo pipefail
+umask 077
+
+COMMAND_TIMEOUT_STATUS=124
+GCLOUD_READ_TIMEOUT_SECONDS=60
+GCLOUD_MUTATION_TIMEOUT_SECONDS=600
+GCLOUD_BUILD_TIMEOUT_SECONDS=1800
+GCLOUD_DEPLOY_TIMEOUT_SECONDS=900
+COMMAND_KILL_GRACE_SECONDS=5
+CURL_CONNECT_TIMEOUT_SECONDS=10
+CURL_TOTAL_TIMEOUT_SECONDS=30
+ACTIVE_COMMAND_PID=""
+ACTIVE_COMMAND_PGID=""
+ACTIVE_WATCHDOG_PID=""
+ACTIVE_WATCHDOG_PGID=""
+COMMAND_TMP_DIR=""
+COMMAND_SEQUENCE=0
+LAST_COMMAND_TIMED_OUT=0
+ANY_COMMAND_TIMED_OUT=0
+
+kill_process_group() {
+  local signal_name="$1"
+  local process_group="$2"
+  if [[ ! "$process_group" =~ ^[1-9][0-9]*$ || "$process_group" == "$$" ]]; then return 1; fi
+  kill "-$signal_name" -- "-$process_group" 2>/dev/null
+}
+
+terminate_active_command() {
+  if [[ -n "$ACTIVE_COMMAND_PGID" ]]; then
+    kill_process_group TERM "$ACTIVE_COMMAND_PGID" || true
+    kill_process_group KILL "$ACTIVE_COMMAND_PGID" || true
+  fi
+  if [[ -n "$ACTIVE_WATCHDOG_PGID" ]]; then
+    kill_process_group TERM "$ACTIVE_WATCHDOG_PGID" || true
+    kill_process_group KILL "$ACTIVE_WATCHDOG_PGID" || true
+  fi
+}
+
+cleanup_command_tmp() {
+  if [[ -z "$COMMAND_TMP_DIR" ]]; then return 0; fi
+  if [[ ! -d "$COMMAND_TMP_DIR" || -L "$COMMAND_TMP_DIR" ]]; then return 1; fi
+  rm -f -- "$COMMAND_TMP_DIR"/stdout-* "$COMMAND_TMP_DIR"/timeout-* || return 1
+  rmdir "$COMMAND_TMP_DIR" || return 1
+  COMMAND_TMP_DIR=""
+}
+
+run_command_with_deadline_to_path() {
+  local deadline_seconds="$1"
+  local output_path="$2"
+  shift 2
+  local command_status=0
+  local command_pid=""
+  local command_pgid=""
+  local watchdog_pid=""
+  local watchdog_pgid=""
+  local timeout_marker=""
+  local signal_status_at_start="${SIGNAL_STATUS:-0}"
+
+  [[ "$deadline_seconds" =~ ^[1-9][0-9]*$ ]] || return 125
+  [[ -n "$COMMAND_TMP_DIR" && -d "$COMMAND_TMP_DIR" && ! -L "$COMMAND_TMP_DIR" ]] || return 125
+  [[ "$#" -gt 0 ]] || return 125
+  COMMAND_SEQUENCE=$((COMMAND_SEQUENCE + 1))
+  timeout_marker="$COMMAND_TMP_DIR/timeout-$COMMAND_SEQUENCE"
+  artifact_path_absent "$timeout_marker" || return 125
+  LAST_COMMAND_TIMED_OUT=0
+
+  set -m
+  if [[ "$output_path" == "__inherit__" ]]; then
+    "$@" &
+  else
+    "$@" > "$output_path" &
+  fi
+  command_pid="$!"
+  command_pgid="$command_pid"
+  set +m
+  [[ "$command_pgid" != "$$" ]] || return 125
+  ACTIVE_COMMAND_PID="$command_pid"
+  ACTIVE_COMMAND_PGID="$command_pgid"
+
+  set -m
+  (
+    sleep "$deadline_seconds"
+    if kill -0 -- "-$command_pgid" 2>/dev/null; then
+      : > "$timeout_marker"
+      kill -TERM -- "-$command_pgid" 2>/dev/null || true
+      sleep "$COMMAND_KILL_GRACE_SECONDS"
+      kill -KILL -- "-$command_pgid" 2>/dev/null || true
+    fi
+  ) &
+  watchdog_pid="$!"
+  watchdog_pgid="$watchdog_pid"
+  set +m
+  ACTIVE_WATCHDOG_PID="$watchdog_pid"
+  ACTIVE_WATCHDOG_PGID="$watchdog_pgid"
+
+  if wait "$command_pid"; then
+    command_status=0
+  else
+    command_status="$?"
+  fi
+  if [[ -e "$timeout_marker" ]]; then
+    LAST_COMMAND_TIMED_OUT=1
+    ANY_COMMAND_TIMED_OUT=1
+    kill_process_group KILL "$command_pgid" || true
+  fi
+  kill_process_group TERM "$watchdog_pgid" || true
+  kill_process_group KILL "$watchdog_pgid" || true
+  wait "$watchdog_pid" 2>/dev/null || true
+  ACTIVE_COMMAND_PID=""
+  ACTIVE_COMMAND_PGID=""
+  ACTIVE_WATCHDOG_PID=""
+  ACTIVE_WATCHDOG_PGID=""
+  rm -f -- "$timeout_marker" || return 125
+
+  if [[ "$signal_status_at_start" -eq 0 && "${SIGNAL_STATUS:-0}" -ne 0 ]]; then
+    return "$SIGNAL_STATUS"
+  fi
+  if [[ "$LAST_COMMAND_TIMED_OUT" -eq 1 ]]; then return "$COMMAND_TIMEOUT_STATUS"; fi
+  return "$command_status"
+}
+
+run_command_with_deadline() {
+  local deadline_seconds="$1"
+  shift
+  run_command_with_deadline_to_path "$deadline_seconds" "__inherit__" "$@"
+}
+
+run_command_capture() {
+  local variable_name="$1"
+  local deadline_seconds="$2"
+  shift 2
+  local output_path=""
+  local output_value=""
+  local command_status=0
+
+  [[ "$variable_name" =~ ^[a-zA-Z_][a-zA-Z0-9_]*$ ]] || return 125
+  COMMAND_SEQUENCE=$((COMMAND_SEQUENCE + 1))
+  output_path="$COMMAND_TMP_DIR/stdout-$COMMAND_SEQUENCE"
+  COMMAND_SEQUENCE=$((COMMAND_SEQUENCE - 1))
+  artifact_path_absent "$output_path" || return 125
+  : > "$output_path" || return 125
+  run_command_with_deadline_to_path "$deadline_seconds" "$output_path" "$@" || command_status="$?"
+  output_value="$(< "$output_path")"
+  rm -f -- "$output_path" || return 125
+  printf -v "$variable_name" '%s' "$output_value"
+  return "$command_status"
+}
+
+gcloud_read_capture() {
+  local variable_name="$1"
+  shift
+  run_command_capture "$variable_name" "$GCLOUD_READ_TIMEOUT_SECONDS" gcloud "$@"
+}
+
+gcloud_mutation() {
+  run_command_with_deadline "$GCLOUD_MUTATION_TIMEOUT_SECONDS" gcloud "$@"
+}
+
+gcloud_build() {
+  run_command_with_deadline "$GCLOUD_BUILD_TIMEOUT_SECONDS" gcloud "$@"
+}
+
+gcloud_deploy() {
+  run_command_with_deadline "$GCLOUD_DEPLOY_TIMEOUT_SECONDS" gcloud "$@"
+}
 
 read_fields() {
   local input="$1"
@@ -90,6 +254,7 @@ latch_signal() {
   if [[ "$SIGNAL_STATUS" -eq 0 ]]; then
     SIGNAL_STATUS="$signal_status"
   fi
+  terminate_active_command
 }
 
 preflight_on_exit() {
@@ -98,6 +263,9 @@ preflight_on_exit() {
   trap - EXIT
   trap 'latch_signal 130' INT
   trap 'latch_signal 143' TERM
+  if ! cleanup_command_tmp && [[ "$status" -eq 0 ]]; then
+    status=1
+  fi
   if ! release_operator_lock && [[ "$status" -eq 0 ]]; then
     status=1
   fi
@@ -113,14 +281,14 @@ preflight_on_exit() {
 preflight_on_int() {
   latch_signal 130
   if [[ "$MUTATION_CRITICAL" -eq 0 ]]; then
-    exit 130
+    exit "$SIGNAL_STATUS"
   fi
 }
 
 preflight_on_term() {
   latch_signal 143
   if [[ "$MUTATION_CRITICAL" -eq 0 ]]; then
-    exit 143
+    exit "$SIGNAL_STATUS"
   fi
 }
 
@@ -133,6 +301,8 @@ gen2
   local concurrencies=()
   local lock_test_root=""
   local saved_lock_owner=""
+  local deadline_status=0
+  local SELF_TEST_CAPTURE=""
   read_fields "$matrix_text"
   test "${#READ_FIELDS[@]}" -eq 4
   generations[0]="${READ_FIELDS[0]}"
@@ -193,6 +363,21 @@ gen2
   test "$CONTEXT_PROMOTED" -eq 0
   test "$ARTIFACTS_PUBLISHED" -eq 0
   rm -- "$PROBE_RESULTS_RUN_PATH" "$PROBE_CONTEXT_RUN_PATH"
+
+  COMMAND_TMP_DIR="$lock_test_root/commands"
+  mkdir "$COMMAND_TMP_DIR"
+  COMMAND_SEQUENCE=0
+  LAST_COMMAND_TIMED_OUT=0
+  ANY_COMMAND_TIMED_OUT=0
+  SIGNAL_STATUS=0
+  run_command_capture SELF_TEST_CAPTURE 2 "$BASH" -c "printf '%s' deadline-capture"
+  test "$SELF_TEST_CAPTURE" = "deadline-capture"
+  run_command_with_deadline 1 "$BASH" -c 'sleep 2' || deadline_status="$?"
+  test "$deadline_status" -eq "$COMMAND_TIMEOUT_STATUS"
+  test "$LAST_COMMAND_TIMED_OUT" -eq 1
+  cleanup_command_tmp
+  ANY_COMMAND_TIMED_OUT=0
+  LAST_COMMAND_TIMED_OUT=0
   rmdir "$lock_test_root"
   SIGNAL_STATUS=0
   latch_signal 130
@@ -240,15 +425,20 @@ trap preflight_on_exit EXIT
 trap preflight_on_int INT
 trap preflight_on_term TERM
 acquire_operator_lock
-test "$(gcloud config get-value project 2>/dev/null)" = "$PROJECT"
+COMMAND_TMP_DIR="$(mktemp -d "$EVIDENCE_DIR/.rate-limit-proxy-probe-command.XXXXXX")"
+[[ -d "$COMMAND_TMP_DIR" && ! -L "$COMMAND_TMP_DIR" ]]
+GCLOUD_PROJECT=""
+gcloud_read_capture GCLOUD_PROJECT config get-value project
+test "$GCLOUD_PROJECT" = "$PROJECT"
 test ! -e "$EVIDENCE_DIR/probe-results.json"
 test ! -e "$EVIDENCE_DIR/probe-context.json"
 SOURCE_HEAD="$(git rev-parse HEAD)"
 [[ "$SOURCE_HEAD" =~ ^[0-9a-f]{40}$ ]]
 TESTED_HEAD="$SOURCE_HEAD"
 
-STAGING_SERVICE_JSON="$(gcloud run services describe "$SERVICE" \
-  --project="$PROJECT" --region="$REGION" --format=json)"
+STAGING_SERVICE_JSON=""
+gcloud_read_capture STAGING_SERVICE_JSON run services describe "$SERVICE" \
+  --project="$PROJECT" --region="$REGION" --format=json
 
 STAGING_SERVICE_FIELDS_OUTPUT="$(
   SERVICE_JSON="$STAGING_SERVICE_JSON" node --input-type=module -e '
@@ -288,8 +478,9 @@ STAGING_TEMPLATE_EXECUTION_ENVIRONMENT="${STAGING_SERVICE_FIELDS[2]}"
 STAGING_TEMPLATE_CONTAINER_CONCURRENCY="${STAGING_SERVICE_FIELDS[3]}"
 ORIGINAL_TRAFFIC_JSON="${STAGING_SERVICE_FIELDS[4]}"
 
-ORIGINAL_REVISION_JSON="$(gcloud run revisions describe "$ORIGINAL_REVISION" \
-  --project="$PROJECT" --region="$REGION" --format=json)"
+ORIGINAL_REVISION_JSON=""
+gcloud_read_capture ORIGINAL_REVISION_JSON run revisions describe "$ORIGINAL_REVISION" \
+  --project="$PROJECT" --region="$REGION" --format=json
 
 ORIGINAL_REVISION_FIELDS_OUTPUT="$(
   REVISION_JSON="$ORIGINAL_REVISION_JSON" node --input-type=module -e '
@@ -347,8 +538,9 @@ SERVICE_JSON="$STAGING_SERVICE_JSON" node --input-type=module -e '
   if (intake.length > 1 || (intake.length === 1 && intake[0]?.value !== "false")) process.exit(6);
 '
 
-PRODUCTION_SERVICE_JSON="$(gcloud run services describe "$PRODUCTION_SERVICE" \
-  --project="$PROJECT" --region="$REGION" --format=json)"
+PRODUCTION_SERVICE_JSON=""
+gcloud_read_capture PRODUCTION_SERVICE_JSON run services describe "$PRODUCTION_SERVICE" \
+  --project="$PROJECT" --region="$REGION" --format=json
 
 PRODUCTION_REVISION="$(
   SERVICE_JSON="$PRODUCTION_SERVICE_JSON" node --input-type=module -e '
@@ -365,8 +557,9 @@ PRODUCTION_REVISION="$(
     process.stdout.write(positive[0].revisionName);
   '
 )"
-PRODUCTION_REVISION_JSON="$(gcloud run revisions describe "$PRODUCTION_REVISION" \
-  --project="$PROJECT" --region="$REGION" --format=json)"
+PRODUCTION_REVISION_JSON=""
+gcloud_read_capture PRODUCTION_REVISION_JSON run revisions describe "$PRODUCTION_REVISION" \
+  --project="$PROJECT" --region="$REGION" --format=json
 
 PRODUCTION_RUNTIME_FIELDS_OUTPUT="$(
   REVISION_JSON="$PRODUCTION_REVISION_JSON" node --input-type=module -e '
@@ -403,8 +596,9 @@ PRODUCTION_FINGERPRINT_BEFORE="$(
 )"
 [[ "$PRODUCTION_FINGERPRINT_BEFORE" =~ ^[0-9a-f]{64}$ ]]
 
-DOMAIN_MAPPINGS_JSON="$(gcloud beta run domain-mappings list \
-  --project="$PROJECT" --region="$REGION" --format=json)"
+DOMAIN_MAPPINGS_JSON=""
+gcloud_read_capture DOMAIN_MAPPINGS_JSON beta run domain-mappings list \
+  --project="$PROJECT" --region="$REGION" --format=json
 
 PRODUCTION_DOMAIN_MAPPING_COUNT="$(
   DOMAIN_MAPPINGS_JSON="$DOMAIN_MAPPINGS_JSON" \
@@ -445,6 +639,7 @@ MATRIX_TAGS=("$TAG_G1" "$TAG_G2")
 MATRIX_REVISIONS=("" "")
 MATRIX_URLS=("" "")
 MATRIX_DEPLOY_ATTEMPTED=(0 0)
+MATRIX_DEPLOY_UNRESOLVED=(0 0)
 IMAGE_REF=""
 EVIDENCE_CAPTURED=0
 CONTEXT_GENERATED=0
@@ -454,6 +649,7 @@ ARTIFACTS_PUBLISHED=0
 RESULTS_PROMOTED=0
 CONTEXT_PROMOTED=0
 PUBLICATION_ROLLBACK_FAILED=0
+REMOTE_CLEANUP_UNRESOLVED=0
 CLEANUP_DONE=0
 MATRIX_EXACT_MATCH=""
 DISCOVERY_MAX_ATTEMPTS=6
@@ -511,16 +707,16 @@ record_matrix_cell() {
   MATRIX_DISCOVERY_STATE="unknown"
   DEPLOYED_TAG_REVISION=""
   DEPLOYED_TAG_URL=""
-  service_json="$(gcloud run services describe "$SERVICE" \
-    --project="$PROJECT" --region="$REGION" --format=json)" || return 1
+  gcloud_read_capture service_json run services describe "$SERVICE" \
+    --project="$PROJECT" --region="$REGION" --format=json || return "$?"
   tag_target="$(SERVICE_JSON="$service_json" TAG_TO_FIND="$tag" node "$PARSER" tag-state)" || return 1
   if [[ "$tag_target" == "absent" ]]; then
     MATRIX_DISCOVERY_STATE="absent"
     return 0
   fi
   if [[ -z "$IMAGE_REF" ]]; then return 1; fi
-  revision_json="$(gcloud run revisions describe "$tag_target" \
-    --project="$PROJECT" --region="$REGION" --format=json)" || return 1
+  gcloud_read_capture revision_json run revisions describe "$tag_target" \
+    --project="$PROJECT" --region="$REGION" --format=json || return "$?"
   SERVICE_JSON="$service_json" REVISION_JSON="$revision_json" \
     TAG_TO_FIND="$tag" EXPECTED_REVISION="$tag_target" \
     EXPECTED_IMAGE_REF="$IMAGE_REF" EXPECTED_EXECUTION_ENVIRONMENT="$generation" \
@@ -549,12 +745,14 @@ discover_matrix_cell_stably() {
   local attempt=0
   local absent_streak=0
   local record_status=0
+  local saw_timeout=0
 
   [[ "$require_ready" == "0" || "$require_ready" == "1" ]] || return 1
   while [[ "$attempt" -lt "$DISCOVERY_MAX_ATTEMPTS" ]]; do
     attempt=$((attempt + 1))
     record_status=0
     record_matrix_cell "$generation" "$tag" "$matrix_index" || record_status="$?"
+    if [[ "$record_status" -eq "$COMMAND_TIMEOUT_STATUS" ]]; then saw_timeout=1; fi
     if [[ -n "${MATRIX_REVISIONS[$matrix_index]}" ]]; then
       if [[ "$require_ready" -eq 0 || "$RECORDED_MATRIX_CELL" -eq 1 ]]; then
         return 0
@@ -572,6 +770,7 @@ discover_matrix_cell_stably() {
   if [[ "$require_ready" -eq 0 && "$absent_streak" -ge "$DISCOVERY_REQUIRED_ABSENT" ]]; then
     return 0
   fi
+  if [[ "$saw_timeout" -ne 0 ]]; then return "$COMMAND_TIMEOUT_STATUS"; fi
   return 1
 }
 
@@ -583,13 +782,13 @@ cleanup_owned_tag() {
   local tag_target=""
   local revision_json=""
 
-  service_json="$(gcloud run services describe "$SERVICE" \
-    --project="$PROJECT" --region="$REGION" --format=json)" || return 1
+  gcloud_read_capture service_json run services describe "$SERVICE" \
+    --project="$PROJECT" --region="$REGION" --format=json || return "$?"
   tag_target="$(SERVICE_JSON="$service_json" TAG_TO_FIND="$tag" node "$PARSER" tag-state)" || return 1
   if [[ "$tag_target" == "absent" ]]; then return 0; fi
   if [[ -z "$expected_revision" || -z "$IMAGE_REF" || "$tag_target" != "$expected_revision" ]]; then return 1; fi
-  revision_json="$(gcloud run revisions describe "$expected_revision" \
-    --project="$PROJECT" --region="$REGION" --format=json)" || return 1
+  gcloud_read_capture revision_json run revisions describe "$expected_revision" \
+    --project="$PROJECT" --region="$REGION" --format=json || return "$?"
   SERVICE_JSON="$service_json" \
   REVISION_JSON="$revision_json" \
   TAG_TO_FIND="$tag" \
@@ -598,7 +797,7 @@ cleanup_owned_tag() {
   EXPECTED_EXECUTION_ENVIRONMENT="$expected_generation" \
   EXPECTED_CONTAINER_CONCURRENCY="40" \
   node "$PARSER" owned-tag >/dev/null || return 1
-  gcloud run services update-traffic "$SERVICE" \
+  gcloud_mutation run services update-traffic "$SERVICE" \
     --project="$PROJECT" --region="$REGION" --remove-tags="$tag" --quiet
 }
 
@@ -610,21 +809,37 @@ stabilize_owned_tag_cleanup() {
   local absent_streak=0
   local service_json=""
   local tag_target=""
+  local record_status=0
+  local cleanup_status=0
+  local read_status=0
+  local tag_status=0
+  local owned_observed=0
+
+  if [[ -n "${MATRIX_REVISIONS[$matrix_index]}" ]]; then owned_observed=1; fi
 
   while [[ "$attempt" -lt "$DISCOVERY_MAX_ATTEMPTS" ]]; do
     attempt=$((attempt + 1))
     if [[ -z "${MATRIX_REVISIONS[$matrix_index]}" ]]; then
-      record_matrix_cell "$generation" "$tag" "$matrix_index" >/dev/null 2>&1 || true
+      record_status=0
+      record_matrix_cell "$generation" "$tag" "$matrix_index" >/dev/null 2>&1 || record_status="$?"
+      if [[ "$record_status" -eq 0 && -n "${MATRIX_REVISIONS[$matrix_index]}" ]]; then
+        owned_observed=1
+      fi
     fi
-    cleanup_owned_tag "$tag" "${MATRIX_REVISIONS[$matrix_index]}" "$generation" >/dev/null 2>&1 || true
-    service_json="$(gcloud run services describe "$SERVICE" \
-      --project="$PROJECT" --region="$REGION" --format=json)" || service_json=""
-    if [[ -n "$service_json" ]]; then
-      tag_target="$(SERVICE_JSON="$service_json" TAG_TO_FIND="$tag" node "$PARSER" tag-state)" || tag_target=""
+    cleanup_status=0
+    cleanup_owned_tag "$tag" "${MATRIX_REVISIONS[$matrix_index]}" "$generation" \
+      >/dev/null 2>&1 || cleanup_status="$?"
+    read_status=0
+    gcloud_read_capture service_json run services describe "$SERVICE" \
+      --project="$PROJECT" --region="$REGION" --format=json || read_status="$?"
+    tag_status=0
+    if [[ "$read_status" -eq 0 && -n "$service_json" ]]; then
+      tag_target="$(SERVICE_JSON="$service_json" TAG_TO_FIND="$tag" node "$PARSER" tag-state)" || tag_status="$?"
     else
       tag_target=""
+      tag_status=1
     fi
-    if [[ "$tag_target" == "absent" ]]; then
+    if [[ "$tag_status" -eq 0 && "$tag_target" == "absent" ]]; then
       absent_streak=$((absent_streak + 1))
     else
       absent_streak=0
@@ -633,7 +848,11 @@ stabilize_owned_tag_cleanup() {
       sleep "$DISCOVERY_INTERVAL_SECONDS"
     fi
   done
-  test "$absent_streak" -ge "$DISCOVERY_REQUIRED_ABSENT"
+  test "$absent_streak" -ge "$DISCOVERY_REQUIRED_ABSENT" || return 1
+  if [[ "${MATRIX_DEPLOY_UNRESOLVED[$matrix_index]}" -eq 1 ]]; then
+    if [[ "$owned_observed" -ne 1 ]]; then return 1; fi
+    MATRIX_DEPLOY_UNRESOLVED[$matrix_index]=0
+  fi
 }
 
 generate_probe_context() {
@@ -789,18 +1008,29 @@ cleanup() {
     fi
   fi
   if [[ "${MATRIX_DEPLOY_ATTEMPTED[0]}" -eq 1 ]]; then
-    stabilize_owned_tag_cleanup "$TAG_G1" "0" "gen1" || cleanup_failed=1
+    stabilize_owned_tag_cleanup "$TAG_G1" "0" "gen1" || {
+      cleanup_failed=1
+      REMOTE_CLEANUP_UNRESOLVED=1
+    }
   fi
   if [[ "${MATRIX_DEPLOY_ATTEMPTED[1]}" -eq 1 ]]; then
-    stabilize_owned_tag_cleanup "$TAG_G2" "1" "gen2" || cleanup_failed=1
+    stabilize_owned_tag_cleanup "$TAG_G2" "1" "gen2" || {
+      cleanup_failed=1
+      REMOTE_CLEANUP_UNRESOLVED=1
+    }
   fi
   cleanup_owned_tag "$TAG_G1" "${MATRIX_REVISIONS[0]}" "gen1" || cleanup_failed=1
   cleanup_owned_tag "$TAG_G2" "${MATRIX_REVISIONS[1]}" "gen2" || cleanup_failed=1
+  if [[ "${MATRIX_DEPLOY_UNRESOLVED[0]}" -ne 0 || "${MATRIX_DEPLOY_UNRESOLVED[1]}" -ne 0 ]]; then
+    cleanup_failed=1
+    REMOTE_CLEANUP_UNRESOLVED=1
+  fi
 
-  current_service_json="$(gcloud run services describe "$SERVICE" \
-    --project="$PROJECT" --region="$REGION" --format=json)"
+  gcloud_read_capture current_service_json run services describe "$SERVICE" \
+    --project="$PROJECT" --region="$REGION" --format=json
   if [[ "$?" -ne 0 || -z "$current_service_json" ]]; then
     cleanup_failed=1
+    REMOTE_CLEANUP_UNRESOLVED=1
   else
     token_state="$(
       SERVICE_JSON="$current_service_json" EXPECTED_TOKEN="$PROBE_TOKEN" \
@@ -827,14 +1057,16 @@ cleanup() {
     if [[ "$?" -ne 0 ]]; then
       cleanup_failed=1
     elif [[ "$token_state" == "owned" ]]; then
-      gcloud run services update "$SERVICE" \
+      gcloud_mutation run services update "$SERVICE" \
         --project="$PROJECT" --region="$REGION" \
         --remove-env-vars=RATE_LIMIT_PROXY_PROBE_TOKEN --no-traffic --quiet
       if [[ "$?" -ne 0 ]]; then
         cleanup_failed=1
+        REMOTE_CLEANUP_UNRESOLVED=1
       fi
     elif [[ "$token_state" != "absent" ]]; then
       cleanup_failed=1
+      REMOTE_CLEANUP_UNRESOLVED=1
     fi
   fi
 
@@ -844,10 +1076,11 @@ cleanup() {
     cleanup_failed=1
   fi
 
-  current_service_json="$(gcloud run services describe "$SERVICE" \
-    --project="$PROJECT" --region="$REGION" --format=json)"
+  gcloud_read_capture current_service_json run services describe "$SERVICE" \
+    --project="$PROJECT" --region="$REGION" --format=json
   if [[ "$?" -ne 0 || -z "$current_service_json" ]]; then
     cleanup_failed=1
+    REMOTE_CLEANUP_UNRESOLVED=1
   else
     tag_g1_after="$(
       SERVICE_JSON="$current_service_json" TAG_TO_FIND="$TAG_G1" \
@@ -861,9 +1094,11 @@ cleanup() {
     tag_g2_status="$?"
     if [[ "$tag_g1_status" -ne 0 || "$tag_g1_after" != "absent" ]]; then
       cleanup_failed=1
+      REMOTE_CLEANUP_UNRESOLVED=1
     fi
     if [[ "$tag_g2_status" -ne 0 || "$tag_g2_after" != "absent" ]]; then
       cleanup_failed=1
+      REMOTE_CLEANUP_UNRESOLVED=1
     fi
     SERVICE_JSON="$current_service_json" \
     ORIGINAL_REVISION_TO_VERIFY="$ORIGINAL_REVISION" \
@@ -891,21 +1126,31 @@ cleanup() {
     '
     if [[ "$?" -ne 0 ]]; then
       cleanup_failed=1
+      REMOTE_CLEANUP_UNRESOLVED=1
     fi
   fi
 
-  PRODUCTION_SERVICE_JSON_AFTER="$(gcloud run services describe "$PRODUCTION_SERVICE" \
-    --project="$PROJECT" --region="$REGION" --format=json)"
+  gcloud_read_capture PRODUCTION_SERVICE_JSON_AFTER run services describe "$PRODUCTION_SERVICE" \
+    --project="$PROJECT" --region="$REGION" --format=json
   if [[ "$?" -ne 0 || -z "$PRODUCTION_SERVICE_JSON_AFTER" ]]; then
     cleanup_failed=1
+    REMOTE_CLEANUP_UNRESOLVED=1
   else
     PRODUCTION_FINGERPRINT_AFTER="$(
       SERVICE_JSON="$PRODUCTION_SERVICE_JSON_AFTER" node "$PARSER" production-fingerprint
     )"
     if [[ "$?" -ne 0 ]]; then
       cleanup_failed=1
+      REMOTE_CLEANUP_UNRESOLVED=1
     fi
-    test "$PRODUCTION_FINGERPRINT_AFTER" = "$PRODUCTION_FINGERPRINT_BEFORE" || cleanup_failed=1
+    if ! test "$PRODUCTION_FINGERPRINT_AFTER" = "$PRODUCTION_FINGERPRINT_BEFORE"; then
+      cleanup_failed=1
+      REMOTE_CLEANUP_UNRESOLVED=1
+    fi
+  fi
+
+  if [[ "$ANY_COMMAND_TIMED_OUT" -ne 0 ]]; then
+    cleanup_failed=1
   fi
 
   if [[ "$cleanup_failed" -eq 0 ]]; then
@@ -918,6 +1163,9 @@ cleanup() {
 
   if [[
     "$cleanup_failed" -eq 0 &&
+    "$incoming_status" -eq 0 &&
+    "$SIGNAL_STATUS" -eq 0 &&
+    "$REMOTE_CLEANUP_UNRESOLVED" -eq 0 &&
     "$EVIDENCE_CAPTURED" -eq 1 &&
     "$CONTEXT_GENERATED" -eq 1 &&
     "$CONTEXT_VALIDATED" -eq 1
@@ -943,7 +1191,16 @@ cleanup() {
     if [[ "$?" -ne 0 ]]; then cleanup_failed=1; fi
   fi
 
-  if [[ "$PUBLICATION_ROLLBACK_FAILED" -eq 0 ]]; then
+  if [[ "$SIGNAL_STATUS" -ne 0 && "$ARTIFACTS_PUBLISHED" -eq 1 ]]; then
+    rollback_published_artifacts || PUBLICATION_ROLLBACK_FAILED=1
+  fi
+
+  if ! cleanup_command_tmp; then
+    cleanup_failed=1
+    REMOTE_CLEANUP_UNRESOLVED=1
+  fi
+
+  if [[ "$PUBLICATION_ROLLBACK_FAILED" -eq 0 && "$REMOTE_CLEANUP_UNRESOLVED" -eq 0 ]]; then
     if ! release_operator_lock; then
       cleanup_failed=1
       if [[ "$ARTIFACTS_PUBLISHED" -eq 1 ]]; then
@@ -954,12 +1211,19 @@ cleanup() {
   if [[ "$PUBLICATION_ROLLBACK_FAILED" -ne 0 ]]; then
     cleanup_failed=1
   fi
+  if [[ "$REMOTE_CLEANUP_UNRESOLVED" -ne 0 ]]; then
+    cleanup_failed=1
+  fi
 
   local final_status="$incoming_status"
   if [[ "$SIGNAL_STATUS" -ne 0 ]]; then
     final_status="$SIGNAL_STATUS"
   elif [[ "$cleanup_failed" -ne 0 && "$final_status" -eq 0 ]]; then
-    final_status=1
+    if [[ "$ANY_COMMAND_TIMED_OUT" -ne 0 ]]; then
+      final_status="$COMMAND_TIMEOUT_STATUS"
+    else
+      final_status=1
+    fi
   fi
   set -e
   trap on_int INT
@@ -986,14 +1250,14 @@ on_exit() {
 on_int() {
   latch_signal 130
   if [[ "$MUTATION_CRITICAL" -eq 0 ]]; then
-    exit 130
+    exit "$SIGNAL_STATUS"
   fi
 }
 
 on_term() {
   latch_signal 143
   if [[ "$MUTATION_CRITICAL" -eq 0 ]]; then
-    exit 143
+    exit "$SIGNAL_STATUS"
   fi
 }
 
@@ -1013,8 +1277,9 @@ deploy_matrix_cell() {
   fi
 
   MATRIX_DEPLOY_ATTEMPTED[$matrix_index]=1
+  MATRIX_DEPLOY_UNRESOLVED[$matrix_index]=1
   MUTATION_CRITICAL=1
-  gcloud run deploy "$SERVICE" \
+  gcloud_deploy run deploy "$SERVICE" \
     --project="$PROJECT" \
     --region="$REGION" \
     --image="$IMAGE_REF" \
@@ -1033,22 +1298,24 @@ deploy_matrix_cell() {
   if [[ "$deploy_status" -ne 0 ]]; then
     return "$deploy_status"
   fi
-  if [[ "$record_status" -ne 0 || "$RECORDED_MATRIX_CELL" -ne 1 ]]; then
-    return 1
-  fi
+  if [[ "$record_status" -ne 0 ]]; then return "$record_status"; fi
+  if [[ "$RECORDED_MATRIX_CELL" -ne 1 ]]; then return 1; fi
+  MATRIX_DEPLOY_UNRESOLVED[$matrix_index]=0
 }
 
 run_five_cases() {
   local tag_url="$1"
 
-  BASELINE_RESULT="$(curl -sS -o /dev/null -w 'baseline=%{http_code}\n' \
+  BASELINE_RESULT="$(curl -sS --connect-timeout="$CURL_CONNECT_TIMEOUT_SECONDS" \
+    --max-time="$CURL_TOTAL_TIMEOUT_SECONDS" -o /dev/null -w 'baseline=%{http_code}\n' \
     -H "x-shipmastr-rate-limit-probe-token: $PROBE_TOKEN" \
     -H 'x-shipmastr-rate-limit-probe-case: baseline' \
     "$tag_url/api/health")"
   test "$BASELINE_RESULT" = "baseline=200"
   printf '%s\n' "$BASELINE_RESULT"
 
-  FORWARDED_IPV4_RESULT="$(curl -sS -o /dev/null -w 'forwarded_ipv4=%{http_code}\n' \
+  FORWARDED_IPV4_RESULT="$(curl -sS --connect-timeout="$CURL_CONNECT_TIMEOUT_SECONDS" \
+    --max-time="$CURL_TOTAL_TIMEOUT_SECONDS" -o /dev/null -w 'forwarded_ipv4=%{http_code}\n' \
     -H "x-shipmastr-rate-limit-probe-token: $PROBE_TOKEN" \
     -H 'x-shipmastr-rate-limit-probe-case: forwarded-ipv4' \
     -H 'Forwarded: for=192.0.2.10' \
@@ -1056,7 +1323,8 @@ run_five_cases() {
   test "$FORWARDED_IPV4_RESULT" = "forwarded_ipv4=200"
   printf '%s\n' "$FORWARDED_IPV4_RESULT"
 
-  XFF_IPV4_RESULT="$(curl -sS -o /dev/null -w 'xff_ipv4=%{http_code}\n' \
+  XFF_IPV4_RESULT="$(curl -sS --connect-timeout="$CURL_CONNECT_TIMEOUT_SECONDS" \
+    --max-time="$CURL_TOTAL_TIMEOUT_SECONDS" -o /dev/null -w 'xff_ipv4=%{http_code}\n' \
     -H "x-shipmastr-rate-limit-probe-token: $PROBE_TOKEN" \
     -H 'x-shipmastr-rate-limit-probe-case: xff-ipv4' \
     -H 'X-Forwarded-For: 198.51.100.20' \
@@ -1064,7 +1332,8 @@ run_five_cases() {
   test "$XFF_IPV4_RESULT" = "xff_ipv4=200"
   printf '%s\n' "$XFF_IPV4_RESULT"
 
-  BOTH_IPV4_RESULT="$(curl -sS -o /dev/null -w 'both_ipv4=%{http_code}\n' \
+  BOTH_IPV4_RESULT="$(curl -sS --connect-timeout="$CURL_CONNECT_TIMEOUT_SECONDS" \
+    --max-time="$CURL_TOTAL_TIMEOUT_SECONDS" -o /dev/null -w 'both_ipv4=%{http_code}\n' \
     -H "x-shipmastr-rate-limit-probe-token: $PROBE_TOKEN" \
     -H 'x-shipmastr-rate-limit-probe-case: both-ipv4' \
     -H 'Forwarded: for=192.0.2.30' \
@@ -1073,7 +1342,8 @@ run_five_cases() {
   test "$BOTH_IPV4_RESULT" = "both_ipv4=200"
   printf '%s\n' "$BOTH_IPV4_RESULT"
 
-  BOTH_IPV6_RESULT="$(curl -sS -o /dev/null -w 'both_ipv6=%{http_code}\n' \
+  BOTH_IPV6_RESULT="$(curl -sS --connect-timeout="$CURL_CONNECT_TIMEOUT_SECONDS" \
+    --max-time="$CURL_TOTAL_TIMEOUT_SECONDS" -o /dev/null -w 'both_ipv6=%{http_code}\n' \
     -H "x-shipmastr-rate-limit-probe-token: $PROBE_TOKEN" \
     -H 'x-shipmastr-rate-limit-probe-case: both-ipv6' \
     -H 'Forwarded: for="[2001:db8::1]"' \
@@ -1087,13 +1357,14 @@ trap on_exit EXIT
 trap on_int INT
 trap on_term TERM
 
-gcloud builds submit . \
+gcloud_build builds submit . \
   --project="$PROJECT" \
   --region="$REGION" \
   --tag="$IMAGE_URI:$IMAGE_TAG" \
   --quiet
-DIGEST="$(gcloud artifacts docker images describe "$IMAGE_URI:$IMAGE_TAG" \
-  --project="$PROJECT" --format='value(image_summary.digest)')"
+DIGEST=""
+gcloud_read_capture DIGEST artifacts docker images describe "$IMAGE_URI:$IMAGE_TAG" \
+  --project="$PROJECT" --format='value(image_summary.digest)'
 [[ "$DIGEST" =~ ^sha256:[0-9a-f]{64}$ ]]
 IMAGE_REF="$IMAGE_URI@$DIGEST"
 
@@ -1107,12 +1378,14 @@ MATRIX_REVISIONS[1]="$DEPLOYED_TAG_REVISION"
 MATRIX_URLS[1]="$DEPLOYED_TAG_URL"
 run_five_cases "${MATRIX_URLS[1]}"
 
-GEN1_LOGS_JSON="$(gcloud logging read \
+GEN1_LOGS_JSON=""
+gcloud_read_capture GEN1_LOGS_JSON logging read \
   "resource.type=\"cloud_run_revision\" AND resource.labels.revision_name=\"${MATRIX_REVISIONS[0]}\" AND jsonPayload.eventName=\"rate_limit_proxy_probe\"" \
-  --project="$PROJECT" --freshness=30m --order=asc --limit=20 --format=json)"
-GEN2_LOGS_JSON="$(gcloud logging read \
+  --project="$PROJECT" --freshness=30m --order=asc --limit=20 --format=json
+GEN2_LOGS_JSON=""
+gcloud_read_capture GEN2_LOGS_JSON logging read \
   "resource.type=\"cloud_run_revision\" AND resource.labels.revision_name=\"${MATRIX_REVISIONS[1]}\" AND jsonPayload.eventName=\"rate_limit_proxy_probe\"" \
-  --project="$PROJECT" --freshness=30m --order=asc --limit=20 --format=json)"
+  --project="$PROJECT" --freshness=30m --order=asc --limit=20 --format=json
 MATRIX_LOGS_JSON="$(GEN1_LOGS_JSON="$GEN1_LOGS_JSON" GEN2_LOGS_JSON="$GEN2_LOGS_JSON" \
   node --input-type=module -e 'process.stdout.write(JSON.stringify({gen1:JSON.parse(process.env.GEN1_LOGS_JSON),gen2:JSON.parse(process.env.GEN2_LOGS_JSON)}))')"
 MATRIX_LOGS_JSON="$MATRIX_LOGS_JSON" \
@@ -1124,8 +1397,9 @@ mv "$EVIDENCE_TMP" "$PROBE_RESULTS_RUN_PATH"
 EVIDENCE_CAPTURED=1
 unset GEN1_LOGS_JSON GEN2_LOGS_JSON MATRIX_LOGS_JSON
 
-MATRIX_EXACT_MATCH="$(node -e '
-  const evidence=require(process.argv[1]);
+MATRIX_EXACT_MATCH="$(node --input-type=module -e '
+  import { readFileSync } from "node:fs";
+  const evidence=JSON.parse(readFileSync(process.argv[1], "utf8"));
   if (typeof evidence?.comparison?.exactMatch!=="boolean") process.exit(2);
   process.stdout.write(String(evidence.comparison.exactMatch));
 ' "$(pwd)/$PROBE_RESULTS_RUN_PATH")"

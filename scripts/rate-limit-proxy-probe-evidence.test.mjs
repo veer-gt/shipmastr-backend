@@ -120,7 +120,20 @@ test("assembler rejects prohibited fields and URL values nested under allowed wr
   const valid = cloudEntries();
   const nestedSensitiveMaterial = [
     ["labels", { body: "raw request payload" }],
+    ["labels", { authorizationHeader: "redacted material" }],
+    ["labels", { cookieValue: "redacted material" }],
+    ["resource", { requestHeaders: { accept: "application/json" } }],
+    ["resource", { xForwardedForHeader: "redacted material" }],
+    ["operation", { probeToken: "different-token-material" }],
     ["resource", { requestUrl: "https://example.com/private" }],
+    ["resource", { requestUri: "/private/path" }],
+    ["operation", { requestBody: "raw request payload" }],
+    ["operation", { responseSignature: "deadbeef" }],
+    ["labels", { serviceCredential: "private credential" }],
+    ["labels", { apiKey: "redacted material" }],
+    ["labels", { databasePassword: "redacted material" }],
+    ["labels", { privateKey: "redacted material" }],
+    ["labels", { environmentVariables: ["PRIVATE_KEY=value"] }],
     ["operation", { "x-shipmastr-intake-signature": "deadbeef" }],
     ["labels", { credentials: "private credential" }],
     ["labels", { envList: ["PRIVATE_KEY=value"] }],
@@ -136,4 +149,30 @@ test("assembler rejects prohibited fields and URL values nested under allowed wr
     assert.equal(result.stdout, "");
     assert.notEqual(result.status, 0);
   }
+});
+
+test("assembler accepts ordinary safe Cloud Logging wrapper metadata", () => {
+  const valid = cloudEntries();
+  const result = runEvidence({
+    gen1: valid.map((entry, index) => index === 0
+      ? {
+          ...entry,
+          labels: { safeCategory: "probe" },
+          resource: {
+            type: "cloud_run_revision",
+            labels: {
+              project_id: "shipmastr-core-prod",
+              service_name: "shipmastr-api-staging",
+              revision_name: "shipmastr-api-staging-gen1",
+              location: "asia-south1"
+            }
+          },
+          operation: { id: "operation-1", producer: "cloud-run", first: true, last: true },
+          sourceLocation: { file: "logger.js", line: "10", function: "emitProbe" }
+        }
+      : entry),
+    gen2: valid
+  });
+  assert.equal(result.status, 0, result.stderr);
+  assert.equal(JSON.parse(result.stdout).events.length, 10);
 });
