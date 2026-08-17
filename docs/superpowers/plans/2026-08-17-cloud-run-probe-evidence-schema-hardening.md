@@ -640,8 +640,8 @@ node --test \
   scripts/rate-limit-proxy-probe-evidence-schema.test.mjs \
   scripts/rate-limit-proxy-probe-evidence.test.mjs \
   scripts/rate-limit-proxy-probe.test.mjs \
-  dist/config/env.test.js \
-  dist/middleware/logger.test.js \
+  dist/config/rate-limit-proxy-probe-env.test.js \
+  dist/lib/logger.test.js \
   dist/middleware/rate-limit-proxy-probe.test.js \
   dist/modules/courierAuditIntake/courier-audit-intake.routes.test.js \
   dist/server.middleware-order.test.js
