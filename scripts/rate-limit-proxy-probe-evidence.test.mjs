@@ -101,3 +101,17 @@ test("assembler rejects invalid counts, cases, keys, and sensitive material", ()
     assert.notEqual(result.status, 0);
   }
 });
+
+test("assembler rejects sensitive wrapper fields outside the two generation logs", () => {
+  const valid = { gen1: cloudEntries(), gen2: cloudEntries() };
+  const mutations = [
+    { ...valid, rawHeaders: { "x-forwarded-for": "192.0.2.99" } },
+    { ...valid, metadata: `token ${"a".repeat(64)}` },
+    { ...valid, origin: "2001:db8::1" }
+  ];
+  for (const matrix of mutations) {
+    const result = runEvidence(matrix);
+    assert.equal(result.stdout, "");
+    assert.notEqual(result.status, 0);
+  }
+});

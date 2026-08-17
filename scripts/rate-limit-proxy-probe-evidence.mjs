@@ -131,7 +131,15 @@ function projectGeneration(entries, probeToken) {
 function assemble() {
   const matrix = JSON.parse(process.env.MATRIX_LOGS_JSON ?? "");
   const token = process.env.PROBE_TOKEN_FOR_LEAK_CHECK ?? "";
-  if (!/^[0-9a-f]{64}$/u.test(token) || matrix === null || typeof matrix !== "object") process.exit(2);
+  if (
+    !/^[0-9a-f]{64}$/u.test(token) ||
+    matrix === null ||
+    typeof matrix !== "object" ||
+    Array.isArray(matrix) ||
+    Object.keys(matrix).length !== 2 ||
+    Object.keys(matrix).some((key) => key !== "gen1" && key !== "gen2") ||
+    containsSensitiveMaterial(matrix, token)
+  ) process.exit(2);
   const projected = {
     gen1: projectGeneration(matrix.gen1, token),
     gen2: projectGeneration(matrix.gen2, token)
