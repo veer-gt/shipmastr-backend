@@ -12,3 +12,4 @@
 - Task 3: minor (deferred): middleware factory relies on the Task 2 env boundary for the configured token's exact 64-hex shape
 - Task 3: fix round 1/5 (1 addressed, 0 open — quoted Forwarded semicolon false match; commits c6b097b..a7f77d2)
 - Task 3: complete (commits abe8894..a7f77d2, review clean after fix round 1)
+- Task 4: complete (commits a171dec..dabda4a, review clean; focused batch 25/25)
