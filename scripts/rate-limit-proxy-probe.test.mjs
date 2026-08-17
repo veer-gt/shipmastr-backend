@@ -21,8 +21,19 @@ function serviceJson(traffic) {
   return JSON.stringify({ status: { traffic } });
 }
 
-function revisionJson(containers = [{ image }], name = revision) {
-  return JSON.stringify({ metadata: { name }, spec: { containers } });
+function revisionJson({
+  containers = [{ image }],
+  name = revision,
+  generation = "gen1",
+  concurrency = 40
+} = {}) {
+  return JSON.stringify({
+    metadata: {
+      name,
+      annotations: { "run.googleapis.com/execution-environment": generation }
+    },
+    spec: { containers, containerConcurrency: concurrency }
+  });
 }
 
 test("runner remains compatible with macOS Bash 3.2 array parsing", () => {
@@ -30,28 +41,71 @@ test("runner remains compatible with macOS Bash 3.2 array parsing", () => {
   assert.equal(/\b(?:mapfile|readarray)\b/u.test(source), false);
 });
 
-test("runtime parity requires the staging template and both active revisions to match", () => {
-  const matching = {
-    STAGING_TEMPLATE_EXECUTION_ENVIRONMENT: "gen2",
-    STAGING_TEMPLATE_CONTAINER_CONCURRENCY: "80",
-    STAGING_ACTIVE_EXECUTION_ENVIRONMENT: "gen2",
-    STAGING_ACTIVE_CONTAINER_CONCURRENCY: "80",
-    PRODUCTION_ACTIVE_EXECUTION_ENVIRONMENT: "gen2",
-    PRODUCTION_ACTIVE_CONTAINER_CONCURRENCY: "80"
-  };
-  const accepted = runParser("runtime-parity", matching);
-  assert.equal(accepted.status, 0, accepted.stderr);
-  assert.equal(accepted.stdout, "equal\n");
+const observedRuntime = {
+  STAGING_TEMPLATE_EXECUTION_ENVIRONMENT: "__absent__",
+  STAGING_TEMPLATE_CONTAINER_CONCURRENCY: "80",
+  STAGING_ACTIVE_EXECUTION_ENVIRONMENT: "__absent__",
+  STAGING_ACTIVE_CONTAINER_CONCURRENCY: "80",
+  PRODUCTION_ACTIVE_EXECUTION_ENVIRONMENT: "__absent__",
+  PRODUCTION_ACTIVE_CONTAINER_CONCURRENCY: "40"
+};
 
-  for (const overrides of [
-    { STAGING_TEMPLATE_EXECUTION_ENVIRONMENT: "gen1" },
-    { STAGING_TEMPLATE_CONTAINER_CONCURRENCY: "40" },
-    { STAGING_TEMPLATE_EXECUTION_ENVIRONMENT: "__absent__" }
-  ]) {
-    const rejected = runParser("runtime-parity", { ...matching, ...overrides });
-    assert.equal(rejected.stderr, "");
-    assert.notEqual(rejected.status, 0);
+test("matrix preflight accepts the measured unspecified runtime shape", () => {
+  const result = runParser("matrix-preflight", observedRuntime);
+  assert.equal(result.status, 0, result.stderr);
+  assert.deepEqual(JSON.parse(result.stdout), {
+    stagingTemplate: { executionEnvironment: "unspecified", concurrency: 80 },
+    stagingActive: { executionEnvironment: "unspecified", concurrency: 80 },
+    productionActive: { executionEnvironment: "unspecified", concurrency: 40 }
+  });
+});
+
+test("matrix preflight rejects production concurrency other than 40", () => {
+  for (const concurrency of ["39", "41", "__absent__", "forty"]) {
+    const result = runParser("matrix-preflight", {
+      ...observedRuntime,
+      PRODUCTION_ACTIVE_CONTAINER_CONCURRENCY: concurrency
+    });
+    assert.equal(result.stdout, "");
+    assert.notEqual(result.status, 0);
   }
+});
+
+test("matrix preflight rejects unknown execution-environment values", () => {
+  const result = runParser("matrix-preflight", {
+    ...observedRuntime,
+    STAGING_ACTIVE_EXECUTION_ENVIRONMENT: "auto"
+  });
+  assert.equal(result.stdout, "");
+  assert.notEqual(result.status, 0);
+});
+
+test("production fingerprint is stable and changes with service state", () => {
+  const original = JSON.stringify({
+    metadata: {
+      name: "shipmastr-api",
+      generation: 12,
+      annotations: { "run.googleapis.com/ingress": "all" },
+      labels: { "cloud.googleapis.com/location": "asia-south1" }
+    },
+    spec: { traffic: [{ revisionName: "prod-r1", percent: 100 }] },
+    status: { latestCreatedRevisionName: "prod-r1", latestReadyRevisionName: "prod-r1" }
+  });
+  const same = runParser("production-fingerprint", { SERVICE_JSON: original });
+  const changed = runParser("production-fingerprint", {
+    SERVICE_JSON: original.replaceAll("prod-r1", "prod-r2")
+  });
+  const annotationChanged = runParser("production-fingerprint", {
+    SERVICE_JSON: original.replace('"run.googleapis.com/ingress":"all"', '"run.googleapis.com/ingress":"internal"')
+  });
+  const labelChanged = runParser("production-fingerprint", {
+    SERVICE_JSON: original.replace('"asia-south1"', '"us-central1"')
+  });
+  assert.equal(same.status, 0, same.stderr);
+  assert.match(same.stdout, /^[0-9a-f]{64}\n$/u);
+  assert.notEqual(same.stdout, changed.stdout);
+  assert.notEqual(same.stdout, annotationChanged.stdout);
+  assert.notEqual(same.stdout, labelChanged.stdout);
 });
 
 test("owned tag and immutable image pass cleanup ownership validation", () => {
@@ -68,7 +122,9 @@ test("owned tag and immutable image pass cleanup ownership validation", () => {
     REVISION_JSON: revisionJson(),
     TAG_TO_FIND: tag,
     EXPECTED_REVISION: revision,
-    EXPECTED_IMAGE_REF: image
+    EXPECTED_IMAGE_REF: image,
+    EXPECTED_EXECUTION_ENVIRONMENT: "gen1",
+    EXPECTED_CONTAINER_CONCURRENCY: "40"
   });
   assert.equal(ownership.status, 0, ownership.stderr);
   assert.equal(ownership.stdout, "owned\n");
@@ -113,12 +169,46 @@ test("missing or ambiguous revision images are rejected", () => {
   ]) {
     const result = runParser("owned-tag", {
       SERVICE_JSON: service,
-      REVISION_JSON: revisionJson(containers),
+      REVISION_JSON: revisionJson({ containers }),
       TAG_TO_FIND: tag,
       EXPECTED_REVISION: revision,
+      EXPECTED_EXECUTION_ENVIRONMENT: "gen1",
+      EXPECTED_CONTAINER_CONCURRENCY: "40",
       ...(expectedImage === undefined ? {} : { EXPECTED_IMAGE_REF: expectedImage })
     });
     assert.equal(result.stderr, "");
     assert.notEqual(result.status, 0);
+  }
+});
+
+test("owned tag requires the expected generation and concurrency", () => {
+  const service = serviceJson([{ tag, revisionName: revision, percent: 0 }]);
+  const accepted = runParser("owned-tag", {
+    SERVICE_JSON: service,
+    REVISION_JSON: revisionJson({ generation: "gen1", concurrency: 40 }),
+    TAG_TO_FIND: tag,
+    EXPECTED_REVISION: revision,
+    EXPECTED_IMAGE_REF: image,
+    EXPECTED_EXECUTION_ENVIRONMENT: "gen1",
+    EXPECTED_CONTAINER_CONCURRENCY: "40"
+  });
+  assert.equal(accepted.status, 0, accepted.stderr);
+  assert.equal(accepted.stdout, "owned\n");
+
+  for (const overrides of [
+    { EXPECTED_EXECUTION_ENVIRONMENT: "gen2" },
+    { EXPECTED_CONTAINER_CONCURRENCY: "80" }
+  ]) {
+    const rejected = runParser("owned-tag", {
+      SERVICE_JSON: service,
+      REVISION_JSON: revisionJson({ generation: "gen1", concurrency: 40 }),
+      TAG_TO_FIND: tag,
+      EXPECTED_REVISION: revision,
+      EXPECTED_IMAGE_REF: image,
+      EXPECTED_EXECUTION_ENVIRONMENT: "gen1",
+      EXPECTED_CONTAINER_CONCURRENCY: "40",
+      ...overrides
+    });
+    assert.notEqual(rejected.status, 0);
   }
 });
