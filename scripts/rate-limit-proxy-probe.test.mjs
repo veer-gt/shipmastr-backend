@@ -51,6 +51,47 @@ test("actual runner self-test exercises array and two-cell bookkeeping", () => {
   assert.equal(result.stderr, "");
 });
 
+test("runner builds once and deploys explicit Gen1 and Gen2 cells at concurrency 40", () => {
+  const source = readFileSync(runnerPath, "utf8");
+  assert.equal((source.match(/gcloud builds submit/gu) ?? []).length, 1);
+  assert.match(source, /deploy_matrix_cell\s+"gen1"\s+"\$TAG_G1"/u);
+  assert.match(source, /deploy_matrix_cell\s+"gen2"\s+"\$TAG_G2"/u);
+  assert.match(source, /--execution-environment="\$generation"/u);
+  assert.match(source, /--concurrency=40/u);
+  assert.match(source, /--no-traffic/u);
+  assert.match(source, /COURIER_AUDIT_INTAKE_ENABLED=false/u);
+});
+
+test("cleanup treats both run-owned cells independently and fingerprints production", () => {
+  const source = readFileSync(runnerPath, "utf8");
+  assert.match(source, /cleanup_owned_tag\s+"\$TAG_G1"\s+"\$\{MATRIX_REVISIONS\[0\]\}"\s+"gen1"/u);
+  assert.match(source, /cleanup_owned_tag\s+"\$TAG_G2"\s+"\$\{MATRIX_REVISIONS\[1\]\}"\s+"gen2"/u);
+  assert.match(source, /PRODUCTION_FINGERPRINT_AFTER/u);
+  assert.match(source, /test "\$PRODUCTION_FINGERPRINT_AFTER" = "\$PRODUCTION_FINGERPRINT_BEFORE"/u);
+  assert.equal(/gcloud run (?:deploy|services update|services update-traffic) "?\$PRODUCTION_SERVICE/u.test(source), false);
+});
+
+test("valid matrix mismatch is retained but blocks success", () => {
+  const source = readFileSync(runnerPath, "utf8");
+  assert.match(source, /EVIDENCE_CAPTURED=1/u);
+  assert.match(source, /MATRIX_EXACT_MATCH/u);
+  assert.match(source, /test "\$MATRIX_EXACT_MATCH" = "true"/u);
+});
+
+test("partial deployments are recorded for ownership-safe cleanup before failure is preserved", () => {
+  const source = readFileSync(runnerPath, "utf8");
+  const ownership = source.indexOf('node --input-type=module -e "$DEPLOYED_REVISION_ENV_VALIDATOR"');
+  const revisionRecord = source.indexOf('MATRIX_REVISIONS[$matrix_index]="$tag_target"');
+  const bindingReadiness = source.indexOf('node --input-type=module -e "$TAG_BINDING_VALIDATOR"');
+  assert.match(source, /gcloud run deploy "\$SERVICE"[\s\S]*?\|\| deploy_status="\$\?"/u);
+  assert.match(source, /record_matrix_cell "\$generation" "\$tag" "\$matrix_index"/u);
+  assert.match(source, /if \[\[ "\$deploy_status" -ne 0 \]\]; then\s+return "\$deploy_status"/u);
+  assert.match(source, /record_matrix_cell "gen1" "\$TAG_G1" "0" \|\| cleanup_failed=1/u);
+  assert.match(source, /record_matrix_cell "gen2" "\$TAG_G2" "1" \|\| cleanup_failed=1/u);
+  assert.ok(ownership >= 0 && ownership < revisionRecord);
+  assert.ok(revisionRecord < bindingReadiness);
+});
+
 test("runner uses a lowercase-safe numeric UTC timestamp for run-owned tags", () => {
   const source = readFileSync(runnerPath, "utf8");
   assert.match(source, /RUN_TIMESTAMP="\$\(date -u \+%Y%m%d%H%M%S\)"/u);

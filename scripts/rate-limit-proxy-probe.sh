@@ -277,20 +277,121 @@ MATRIX_URLS=("" "")
 IMAGE_REF=""
 EVIDENCE_CAPTURED=0
 CLEANUP_DONE=0
+MATRIX_EXACT_MATCH=""
 
-# Compatibility aliases for the single-generation body replaced in Task 4.
-TAG="$TAG_G1"
-TAG_REVISION=""
+TAG_BINDING_VALIDATOR='
+  const service = JSON.parse(process.env.SERVICE_JSON ?? "");
+  const traffic = service?.status?.traffic;
+  if (!Array.isArray(traffic)) process.exit(2);
+  const tagged = traffic.filter((entry) => entry?.tag === process.env.TAG_TO_VERIFY);
+  if (
+    tagged.length !== 1 ||
+    typeof tagged[0]?.revisionName !== "string" ||
+    !/^https:\/\/[^\s]+$/.test(tagged[0]?.url ?? "") ||
+    Number(tagged[0]?.percent ?? 0) !== 0
+  ) process.exit(3);
+  const positive = traffic.filter((entry) => Number(entry?.percent ?? 0) > 0);
+  if (
+    positive.length !== 1 ||
+    positive[0]?.revisionName !== process.env.ORIGINAL_REVISION_TO_VERIFY ||
+    Number(positive[0]?.percent) !== 100
+  ) process.exit(4);
+  const taggedNormalPercent = traffic
+    .filter((entry) => entry?.revisionName === tagged[0].revisionName && entry?.tag === undefined)
+    .reduce((sum, entry) => sum + Number(entry?.percent ?? 0), 0);
+  if (taggedNormalPercent !== 0) process.exit(5);
+  process.stdout.write(`${tagged[0].revisionName}\n${tagged[0].url}\n`);
+'
+
+DEPLOYED_REVISION_ENV_VALIDATOR='
+  const revision = JSON.parse(process.env.REVISION_JSON ?? "");
+  const containers = revision?.spec?.containers;
+  if (!Array.isArray(containers) || containers.length !== 1) process.exit(2);
+  const env = Array.isArray(containers[0]?.env) ? containers[0].env : [];
+  const exactValue = (name, value) => {
+    const matches = env.filter((entry) => entry?.name === name);
+    return matches.length === 1 && matches[0]?.value === value;
+  };
+  if (!exactValue("COURIER_AUDIT_INTAKE_ENABLED", "false")) process.exit(3);
+  if (!exactValue("RATE_LIMIT_PROXY_PROBE_TOKEN", process.env.EXPECTED_TOKEN)) process.exit(4);
+'
+
+record_matrix_cell() {
+  local generation="$1"
+  local tag="$2"
+  local matrix_index="$3"
+  local service_json=""
+  local tag_target=""
+  local revision_json=""
+  local binding_output=""
+
+  [[ "$matrix_index" == "0" || "$matrix_index" == "1" ]] || return 1
+  RECORDED_MATRIX_CELL=0
+  DEPLOYED_TAG_REVISION=""
+  DEPLOYED_TAG_URL=""
+  service_json="$(gcloud run services describe "$SERVICE" \
+    --project="$PROJECT" --region="$REGION" --format=json)" || return 1
+  tag_target="$(SERVICE_JSON="$service_json" TAG_TO_FIND="$tag" node "$PARSER" tag-state)" || return 1
+  if [[ "$tag_target" == "absent" ]]; then return 0; fi
+  if [[ -z "$IMAGE_REF" ]]; then return 1; fi
+  revision_json="$(gcloud run revisions describe "$tag_target" \
+    --project="$PROJECT" --region="$REGION" --format=json)" || return 1
+  SERVICE_JSON="$service_json" REVISION_JSON="$revision_json" \
+    TAG_TO_FIND="$tag" EXPECTED_REVISION="$tag_target" \
+    EXPECTED_IMAGE_REF="$IMAGE_REF" EXPECTED_EXECUTION_ENVIRONMENT="$generation" \
+    EXPECTED_CONTAINER_CONCURRENCY="40" node "$PARSER" owned-tag >/dev/null || return 1
+  REVISION_JSON="$revision_json" EXPECTED_TOKEN="$PROBE_TOKEN" \
+    node --input-type=module -e "$DEPLOYED_REVISION_ENV_VALIDATOR" || return 1
+  MATRIX_REVISIONS[$matrix_index]="$tag_target"
+  binding_output="$(SERVICE_JSON="$service_json" TAG_TO_VERIFY="$tag" \
+    ORIGINAL_REVISION_TO_VERIFY="$ORIGINAL_REVISION" node --input-type=module -e "$TAG_BINDING_VALIDATOR")" || return 1
+  read_fields "$binding_output"
+  test "${#READ_FIELDS[@]}" -eq 2 || return 1
+  test "${READ_FIELDS[0]}" = "$tag_target" || return 1
+  DEPLOYED_TAG_REVISION="${READ_FIELDS[0]}"
+  DEPLOYED_TAG_URL="${READ_FIELDS[1]}"
+  MATRIX_URLS[$matrix_index]="$DEPLOYED_TAG_URL"
+  RECORDED_MATRIX_CELL=1
+}
+
+cleanup_owned_tag() {
+  local tag="$1"
+  local expected_revision="$2"
+  local expected_generation="$3"
+  local service_json=""
+  local tag_target=""
+  local revision_json=""
+
+  service_json="$(gcloud run services describe "$SERVICE" \
+    --project="$PROJECT" --region="$REGION" --format=json)" || return 1
+  tag_target="$(SERVICE_JSON="$service_json" TAG_TO_FIND="$tag" node "$PARSER" tag-state)" || return 1
+  if [[ "$tag_target" == "absent" ]]; then return 0; fi
+  if [[ -z "$expected_revision" || -z "$IMAGE_REF" || "$tag_target" != "$expected_revision" ]]; then return 1; fi
+  revision_json="$(gcloud run revisions describe "$expected_revision" \
+    --project="$PROJECT" --region="$REGION" --format=json)" || return 1
+  SERVICE_JSON="$service_json" \
+  REVISION_JSON="$revision_json" \
+  TAG_TO_FIND="$tag" \
+  EXPECTED_REVISION="$expected_revision" \
+  EXPECTED_IMAGE_REF="$IMAGE_REF" \
+  EXPECTED_EXECUTION_ENVIRONMENT="$expected_generation" \
+  EXPECTED_CONTAINER_CONCURRENCY="40" \
+  node "$PARSER" owned-tag >/dev/null || return 1
+  gcloud run services update-traffic "$SERVICE" \
+    --project="$PROJECT" --region="$REGION" --remove-tags="$tag" --quiet
+}
 
 cleanup() {
   local incoming_status="${1:-$?}"
   local cleanup_failed=0
   local current_service_json=""
   local token_state=""
-  local tag_target=""
-  local tag_state_status=0
-  local owned_revision_json=""
-  local ownership_state=""
+  local tag_g1_after=""
+  local tag_g1_status=0
+  local tag_g2_after=""
+  local tag_g2_status=0
+  local PRODUCTION_SERVICE_JSON_AFTER=""
+  local PRODUCTION_FINGERPRINT_AFTER=""
 
   if [[ "$CLEANUP_DONE" -eq 1 ]]; then
     return "$incoming_status"
@@ -299,50 +400,14 @@ cleanup() {
   trap '' INT TERM
   set +e
 
-  current_service_json="$(gcloud run services describe "$SERVICE" \
-    --project="$PROJECT" --region="$REGION" --format=json)"
-  if [[ "$?" -ne 0 || -z "$current_service_json" ]]; then
-    cleanup_failed=1
-  else
-    tag_target="$(
-      SERVICE_JSON="$current_service_json" \
-      TAG_TO_FIND="$TAG" \
-      node "$PARSER" tag-state
-    )"
-    tag_state_status="$?"
-    if [[ "$tag_state_status" -ne 0 ]]; then
-      cleanup_failed=1
-    elif [[ "$tag_target" != "absent" ]]; then
-      if [[ -z "$TAG_REVISION" || -z "$IMAGE_REF" || "$tag_target" != "$TAG_REVISION" ]]; then
-        cleanup_failed=1
-      else
-        owned_revision_json="$(gcloud run revisions describe "$TAG_REVISION" \
-          --project="$PROJECT" --region="$REGION" --format=json)"
-        if [[ "$?" -ne 0 || -z "$owned_revision_json" ]]; then
-          cleanup_failed=1
-        else
-          ownership_state="$(
-            SERVICE_JSON="$current_service_json" \
-            REVISION_JSON="$owned_revision_json" \
-            TAG_TO_FIND="$TAG" \
-            EXPECTED_REVISION="$TAG_REVISION" \
-            EXPECTED_IMAGE_REF="$IMAGE_REF" \
-            node "$PARSER" owned-tag
-          )"
-          if [[ "$?" -ne 0 || "$ownership_state" != "owned" ]]; then
-            cleanup_failed=1
-          else
-            gcloud run services update-traffic "$SERVICE" \
-              --project="$PROJECT" --region="$REGION" \
-              --remove-tags="$TAG" --quiet
-            if [[ "$?" -ne 0 ]]; then
-              cleanup_failed=1
-            fi
-          fi
-        fi
-      fi
-    fi
+  if [[ -z "${MATRIX_REVISIONS[0]}" ]]; then
+    record_matrix_cell "gen1" "$TAG_G1" "0" || cleanup_failed=1
   fi
+  if [[ -z "${MATRIX_REVISIONS[1]}" ]]; then
+    record_matrix_cell "gen2" "$TAG_G2" "1" || cleanup_failed=1
+  fi
+  cleanup_owned_tag "$TAG_G1" "${MATRIX_REVISIONS[0]}" "gen1" || cleanup_failed=1
+  cleanup_owned_tag "$TAG_G2" "${MATRIX_REVISIONS[1]}" "gen2" || cleanup_failed=1
 
   current_service_json="$(gcloud run services describe "$SERVICE" \
     --project="$PROJECT" --region="$REGION" --format=json)"
@@ -385,7 +450,7 @@ cleanup() {
     fi
   fi
 
-  unset PROBE_TOKEN
+  unset PROBE_TOKEN GEN1_LOGS_JSON GEN2_LOGS_JSON MATRIX_LOGS_JSON
   rm -f -- "$EVIDENCE_TMP"
   if [[ "$?" -ne 0 ]]; then
     cleanup_failed=1
@@ -396,9 +461,24 @@ cleanup() {
   if [[ "$?" -ne 0 || -z "$current_service_json" ]]; then
     cleanup_failed=1
   else
+    tag_g1_after="$(
+      SERVICE_JSON="$current_service_json" TAG_TO_FIND="$TAG_G1" \
+      node "$PARSER" tag-state
+    )"
+    tag_g1_status="$?"
+    tag_g2_after="$(
+      SERVICE_JSON="$current_service_json" TAG_TO_FIND="$TAG_G2" \
+      node "$PARSER" tag-state
+    )"
+    tag_g2_status="$?"
+    if [[ "$tag_g1_status" -ne 0 || "$tag_g1_after" != "absent" ]]; then
+      cleanup_failed=1
+    fi
+    if [[ "$tag_g2_status" -ne 0 || "$tag_g2_after" != "absent" ]]; then
+      cleanup_failed=1
+    fi
     SERVICE_JSON="$current_service_json" \
     ORIGINAL_REVISION_TO_VERIFY="$ORIGINAL_REVISION" \
-    TAG_TO_VERIFY="$TAG" \
     node --input-type=module -e '
       const service = JSON.parse(process.env.SERVICE_JSON ?? "");
       const traffic = service?.status?.traffic;
@@ -409,32 +489,47 @@ cleanup() {
         positive[0]?.revisionName !== process.env.ORIGINAL_REVISION_TO_VERIFY ||
         Number(positive[0]?.percent) !== 100
       ) process.exit(3);
-      if (traffic.some((entry) => entry?.tag === process.env.TAG_TO_VERIFY)) process.exit(4);
       const containers = service?.spec?.template?.spec?.containers;
-      if (!Array.isArray(containers) || containers.length !== 1) process.exit(5);
+      if (!Array.isArray(containers) || containers.length !== 1) process.exit(4);
       const env = containers[0]?.env;
-      if (env !== undefined && !Array.isArray(env)) process.exit(5);
+      if (env !== undefined && !Array.isArray(env)) process.exit(4);
       const probeTokens = (env ?? []).filter((entry) => entry?.name === "RATE_LIMIT_PROXY_PROBE_TOKEN");
-      if (probeTokens.length !== 0) process.exit(6);
+      if (probeTokens.length !== 0) process.exit(5);
       const intake = (env ?? []).filter((entry) => entry?.name === "COURIER_AUDIT_INTAKE_ENABLED");
       if (
         intake.length > 1 ||
         (intake.length === 1 && intake[0]?.value !== "false")
-      ) process.exit(7);
+      ) process.exit(6);
     '
     if [[ "$?" -ne 0 ]]; then
       cleanup_failed=1
     fi
   fi
 
-  if [[ "$incoming_status" -eq 0 && "$cleanup_failed" -eq 0 ]]; then
-    mv "$PROBE_CONTEXT_TMP" "$PROBE_CONTEXT_PATH"
+  PRODUCTION_SERVICE_JSON_AFTER="$(gcloud run services describe "$PRODUCTION_SERVICE" \
+    --project="$PROJECT" --region="$REGION" --format=json)"
+  if [[ "$?" -ne 0 || -z "$PRODUCTION_SERVICE_JSON_AFTER" ]]; then
+    cleanup_failed=1
+  else
+    PRODUCTION_FINGERPRINT_AFTER="$(
+      SERVICE_JSON="$PRODUCTION_SERVICE_JSON_AFTER" node "$PARSER" production-fingerprint
+    )"
     if [[ "$?" -ne 0 ]]; then
       cleanup_failed=1
-      rm -f -- "$PROBE_CONTEXT_TMP"
+    fi
+    test "$PRODUCTION_FINGERPRINT_AFTER" = "$PRODUCTION_FINGERPRINT_BEFORE" || cleanup_failed=1
+  fi
+  if [[ "$EVIDENCE_CAPTURED" -eq 1 ]]; then
+    if [[ -e "$PROBE_CONTEXT_TMP" ]]; then
+      mv "$PROBE_CONTEXT_TMP" "$PROBE_CONTEXT_PATH"
+      if [[ "$?" -ne 0 ]]; then
+        cleanup_failed=1
+      fi
+    else
+      cleanup_failed=1
     fi
   else
-    rm -f -- "$PROBE_CONTEXT_TMP"
+    rm -f -- "$EVIDENCE_DIR/probe-results.json" "$PROBE_CONTEXT_PATH" "$PROBE_CONTEXT_TMP"
     if [[ "$?" -ne 0 ]]; then
       cleanup_failed=1
     fi
@@ -467,6 +562,86 @@ on_term() {
   exit 143
 }
 
+deploy_matrix_cell() {
+  local generation="$1"
+  local tag="$2"
+  local matrix_index=""
+  local deploy_status=0
+  local record_status=0
+
+  if [[ "$generation" == "gen1" && "$tag" == "$TAG_G1" ]]; then
+    matrix_index="0"
+  elif [[ "$generation" == "gen2" && "$tag" == "$TAG_G2" ]]; then
+    matrix_index="1"
+  else
+    return 1
+  fi
+
+  gcloud run deploy "$SERVICE" \
+    --project="$PROJECT" \
+    --region="$REGION" \
+    --image="$IMAGE_REF" \
+    --execution-environment="$generation" \
+    --concurrency=40 \
+    --update-env-vars="COURIER_AUDIT_INTAKE_ENABLED=false,RATE_LIMIT_PROXY_PROBE_TOKEN=$PROBE_TOKEN" \
+    --no-traffic \
+    --tag="$tag" \
+    --quiet || deploy_status="$?"
+
+  record_matrix_cell "$generation" "$tag" "$matrix_index" || record_status="$?"
+  if [[ "$deploy_status" -ne 0 ]]; then
+    return "$deploy_status"
+  fi
+  if [[ "$record_status" -ne 0 || "$RECORDED_MATRIX_CELL" -ne 1 ]]; then
+    return 1
+  fi
+}
+
+run_five_cases() {
+  local tag_url="$1"
+
+  BASELINE_RESULT="$(curl -sS -o /dev/null -w 'baseline=%{http_code}\n' \
+    -H "x-shipmastr-rate-limit-probe-token: $PROBE_TOKEN" \
+    -H 'x-shipmastr-rate-limit-probe-case: baseline' \
+    "$tag_url/api/health")"
+  test "$BASELINE_RESULT" = "baseline=200"
+  printf '%s\n' "$BASELINE_RESULT"
+
+  FORWARDED_IPV4_RESULT="$(curl -sS -o /dev/null -w 'forwarded_ipv4=%{http_code}\n' \
+    -H "x-shipmastr-rate-limit-probe-token: $PROBE_TOKEN" \
+    -H 'x-shipmastr-rate-limit-probe-case: forwarded-ipv4' \
+    -H 'Forwarded: for=192.0.2.10' \
+    "$tag_url/api/health")"
+  test "$FORWARDED_IPV4_RESULT" = "forwarded_ipv4=200"
+  printf '%s\n' "$FORWARDED_IPV4_RESULT"
+
+  XFF_IPV4_RESULT="$(curl -sS -o /dev/null -w 'xff_ipv4=%{http_code}\n' \
+    -H "x-shipmastr-rate-limit-probe-token: $PROBE_TOKEN" \
+    -H 'x-shipmastr-rate-limit-probe-case: xff-ipv4' \
+    -H 'X-Forwarded-For: 198.51.100.20' \
+    "$tag_url/api/health")"
+  test "$XFF_IPV4_RESULT" = "xff_ipv4=200"
+  printf '%s\n' "$XFF_IPV4_RESULT"
+
+  BOTH_IPV4_RESULT="$(curl -sS -o /dev/null -w 'both_ipv4=%{http_code}\n' \
+    -H "x-shipmastr-rate-limit-probe-token: $PROBE_TOKEN" \
+    -H 'x-shipmastr-rate-limit-probe-case: both-ipv4' \
+    -H 'Forwarded: for=192.0.2.30' \
+    -H 'X-Forwarded-For: 198.51.100.40' \
+    "$tag_url/api/health")"
+  test "$BOTH_IPV4_RESULT" = "both_ipv4=200"
+  printf '%s\n' "$BOTH_IPV4_RESULT"
+
+  BOTH_IPV6_RESULT="$(curl -sS -o /dev/null -w 'both_ipv6=%{http_code}\n' \
+    -H "x-shipmastr-rate-limit-probe-token: $PROBE_TOKEN" \
+    -H 'x-shipmastr-rate-limit-probe-case: both-ipv6' \
+    -H 'Forwarded: for="[2001:db8::1]"' \
+    -H 'X-Forwarded-For: 2001:db8::2' \
+    "$tag_url/api/health")"
+  test "$BOTH_IPV6_RESULT" = "both_ipv6=200"
+  printf '%s\n' "$BOTH_IPV6_RESULT"
+}
+
 trap on_exit EXIT
 trap on_int INT
 trap on_term TERM
@@ -481,267 +656,38 @@ DIGEST="$(gcloud artifacts docker images describe "$IMAGE_URI:$IMAGE_TAG" \
 [[ "$DIGEST" =~ ^sha256:[0-9a-f]{64}$ ]]
 IMAGE_REF="$IMAGE_URI@$DIGEST"
 
-gcloud run deploy "$SERVICE" \
-  --project="$PROJECT" \
-  --region="$REGION" \
-  --image="$IMAGE_REF" \
-  --update-env-vars="COURIER_AUDIT_INTAKE_ENABLED=false,RATE_LIMIT_PROXY_PROBE_TOKEN=$PROBE_TOKEN" \
-  --no-traffic \
-  --tag="$TAG" \
-  --quiet
+deploy_matrix_cell "gen1" "$TAG_G1"
+MATRIX_REVISIONS[0]="$DEPLOYED_TAG_REVISION"
+MATRIX_URLS[0]="$DEPLOYED_TAG_URL"
+run_five_cases "${MATRIX_URLS[0]}"
 
-DEPLOYED_SERVICE_JSON="$(gcloud run services describe "$SERVICE" \
-  --project="$PROJECT" --region="$REGION" --format=json)"
-TAG_BINDING_OUTPUT="$(
-  SERVICE_JSON="$DEPLOYED_SERVICE_JSON" \
-  TAG_TO_VERIFY="$TAG" \
-  ORIGINAL_REVISION_TO_VERIFY="$ORIGINAL_REVISION" \
-  node --input-type=module -e '
-    const service = JSON.parse(process.env.SERVICE_JSON ?? "");
-    const traffic = service?.status?.traffic;
-    if (!Array.isArray(traffic)) process.exit(2);
-    const tagged = traffic.filter((entry) => entry?.tag === process.env.TAG_TO_VERIFY);
-    if (
-      tagged.length !== 1 ||
-      typeof tagged[0]?.revisionName !== "string" ||
-      !/^https:\/\/[^\s]+$/.test(tagged[0]?.url ?? "") ||
-      Number(tagged[0]?.percent ?? 0) !== 0
-    ) process.exit(3);
-    const positive = traffic.filter((entry) => Number(entry?.percent ?? 0) > 0);
-    if (
-      positive.length !== 1 ||
-      positive[0]?.revisionName !== process.env.ORIGINAL_REVISION_TO_VERIFY ||
-      Number(positive[0]?.percent) !== 100
-    ) process.exit(4);
-    const taggedNormalPercent = traffic
-      .filter((entry) => entry?.revisionName === tagged[0].revisionName && entry?.tag === undefined)
-      .reduce((sum, entry) => sum + Number(entry?.percent ?? 0), 0);
-    if (taggedNormalPercent !== 0) process.exit(5);
-    process.stdout.write(`${tagged[0].revisionName}\n${tagged[0].url}\n`);
-  '
-)"
-read_fields "$TAG_BINDING_OUTPUT"
-TAG_BINDING=("${READ_FIELDS[@]}")
-test "${#TAG_BINDING[@]}" -eq 2
-TAG_REVISION="${TAG_BINDING[0]}"
-TAG_URL="${TAG_BINDING[1]}"
+deploy_matrix_cell "gen2" "$TAG_G2"
+MATRIX_REVISIONS[1]="$DEPLOYED_TAG_REVISION"
+MATRIX_URLS[1]="$DEPLOYED_TAG_URL"
+run_five_cases "${MATRIX_URLS[1]}"
 
-TAG_REVISION_JSON="$(gcloud run revisions describe "$TAG_REVISION" \
-  --project="$PROJECT" --region="$REGION" --format=json)"
-REVISION_JSON="$TAG_REVISION_JSON" \
-EXPECTED_IMAGE_REF="$IMAGE_REF" \
-EXPECTED_TOKEN="$PROBE_TOKEN" \
-EXPECTED_EXECUTION_ENVIRONMENT="$STAGING_TEMPLATE_EXECUTION_ENVIRONMENT" \
-EXPECTED_CONTAINER_CONCURRENCY="$STAGING_TEMPLATE_CONTAINER_CONCURRENCY" \
-node --input-type=module -e '
-  const revision = JSON.parse(process.env.REVISION_JSON ?? "");
-  const containers = revision?.spec?.containers;
-  if (!Array.isArray(containers) || containers.length !== 1) process.exit(2);
-  if (containers[0]?.image !== process.env.EXPECTED_IMAGE_REF) process.exit(3);
-  const executionEnvironment =
-    revision?.metadata?.annotations?.["run.googleapis.com/execution-environment"];
-  if (String(executionEnvironment ?? "") !== process.env.EXPECTED_EXECUTION_ENVIRONMENT) process.exit(4);
-  if (String(revision?.spec?.containerConcurrency ?? "") !== process.env.EXPECTED_CONTAINER_CONCURRENCY) {
-    process.exit(5);
-  }
-  const env = Array.isArray(containers[0]?.env) ? containers[0].env : [];
-  const exactValue = (name, value) => {
-    const matches = env.filter((entry) => entry?.name === name);
-    return matches.length === 1 && matches[0]?.value === value;
-  };
-  if (!exactValue("COURIER_AUDIT_INTAKE_ENABLED", "false")) process.exit(6);
-  if (!exactValue("RATE_LIMIT_PROXY_PROBE_TOKEN", process.env.EXPECTED_TOKEN)) process.exit(7);
-'
-
-require_http_status() {
-  local expected_status="$1"
-  shift
-  local actual_status
-  actual_status="$(curl -sS -o /dev/null -w '%{http_code}' "$@")"
-  test "$actual_status" = "$expected_status"
-}
-
-require_http_status 200 "$ORIGINAL_STAGING_URL/api/health"
-require_http_status 404 \
-  -X POST -H 'content-type: application/json' --data '{}' \
-  "$ORIGINAL_STAGING_URL/api/v1/integrations/intakes/courier-audit"
-require_http_status 200 "$TAG_URL/api/health"
-require_http_status 404 \
-  -X POST -H 'content-type: application/json' --data '{}' \
-  "$TAG_URL/api/v1/integrations/intakes/courier-audit"
-
-BASELINE_RESULT="$(curl -sS -o /dev/null -w 'baseline=%{http_code}\n' \
-  -H "x-shipmastr-rate-limit-probe-token: $PROBE_TOKEN" \
-  -H 'x-shipmastr-rate-limit-probe-case: baseline' \
-  "$TAG_URL/api/health")"
-test "$BASELINE_RESULT" = "baseline=200"
-printf '%s\n' "$BASELINE_RESULT"
-
-FORWARDED_IPV4_RESULT="$(curl -sS -o /dev/null -w 'forwarded_ipv4=%{http_code}\n' \
-  -H "x-shipmastr-rate-limit-probe-token: $PROBE_TOKEN" \
-  -H 'x-shipmastr-rate-limit-probe-case: forwarded-ipv4' \
-  -H 'Forwarded: for=192.0.2.10' \
-  "$TAG_URL/api/health")"
-test "$FORWARDED_IPV4_RESULT" = "forwarded_ipv4=200"
-printf '%s\n' "$FORWARDED_IPV4_RESULT"
-
-XFF_IPV4_RESULT="$(curl -sS -o /dev/null -w 'xff_ipv4=%{http_code}\n' \
-  -H "x-shipmastr-rate-limit-probe-token: $PROBE_TOKEN" \
-  -H 'x-shipmastr-rate-limit-probe-case: xff-ipv4' \
-  -H 'X-Forwarded-For: 198.51.100.20' \
-  "$TAG_URL/api/health")"
-test "$XFF_IPV4_RESULT" = "xff_ipv4=200"
-printf '%s\n' "$XFF_IPV4_RESULT"
-
-BOTH_IPV4_RESULT="$(curl -sS -o /dev/null -w 'both_ipv4=%{http_code}\n' \
-  -H "x-shipmastr-rate-limit-probe-token: $PROBE_TOKEN" \
-  -H 'x-shipmastr-rate-limit-probe-case: both-ipv4' \
-  -H 'Forwarded: for=192.0.2.30' \
-  -H 'X-Forwarded-For: 198.51.100.40' \
-  "$TAG_URL/api/health")"
-test "$BOTH_IPV4_RESULT" = "both_ipv4=200"
-printf '%s\n' "$BOTH_IPV4_RESULT"
-
-BOTH_IPV6_RESULT="$(curl -sS -o /dev/null -w 'both_ipv6=%{http_code}\n' \
-  -H "x-shipmastr-rate-limit-probe-token: $PROBE_TOKEN" \
-  -H 'x-shipmastr-rate-limit-probe-case: both-ipv6' \
-  -H 'Forwarded: for="[2001:db8::1]"' \
-  -H 'X-Forwarded-For: 2001:db8::2' \
-  "$TAG_URL/api/health")"
-test "$BOTH_IPV6_RESULT" = "both_ipv6=200"
-printf '%s\n' "$BOTH_IPV6_RESULT"
-
-gcloud logging read \
-  "resource.type=\"cloud_run_revision\" AND resource.labels.revision_name=\"$TAG_REVISION\" AND jsonPayload.eventName=\"rate_limit_proxy_probe\"" \
-  --project="$PROJECT" \
-  --freshness=30m \
-  --order=asc \
-  --limit=20 \
-  --format=json | \
-PROBE_TOKEN_TO_VERIFY="$PROBE_TOKEN" \
-node --input-type=module -e '
-  import { readFileSync } from "node:fs";
-  import { isIP } from "node:net";
-
-  const evidence = JSON.parse(readFileSync(0, "utf8"));
-  const expectedCases = ["baseline", "forwarded-ipv4", "xff-ipv4", "both-ipv4", "both-ipv6"];
-  const structuralKeys = [
-    "eventName",
-    "probeCase",
-    "path",
-    "forwardedPresent",
-    "forwardedParseStatus",
-    "forwardedElementCount",
-    "forwardedMarkerPosition",
-    "xForwardedForPresent",
-    "xForwardedForElementCount",
-    "xForwardedForMarkerPosition",
-    "reqIpEqualsSocket",
-    "reqIpXForwardedForPosition",
-    "socketXForwardedForPosition",
-  ];
-  const ordinaryPayloadKeys = ["hostname", "level", "msg", "pid", "time"];
-  const ordinaryEnvelopeKeys = new Set([
-    "errorGroups",
-    "httpRequest",
-    "insertId",
-    "jsonPayload",
-    "labels",
-    "logName",
-    "operation",
-    "receiveTimestamp",
-    "resource",
-    "severity",
-    "sourceLocation",
-    "spanId",
-    "split",
-    "timestamp",
-    "trace",
-    "traceSampled",
-  ]);
-  const nullableCount = (value) => value === null || (Number.isInteger(value) && value >= 0);
-  const nullablePosition = (value) => value === null || (Number.isInteger(value) && value >= 1);
-  const forbiddenKeys = new Set([
-    "authorization",
-    "clientip",
-    "cookie",
-    "forwarded",
-    "headers",
-    "httprequest",
-    "rawheaders",
-    "remoteip",
-    "serverip",
-    "x-forwarded-for",
-    "x-shipmastr-rate-limit-probe-token",
-  ]);
-  const containsIpAddress = (value) => {
-    const ipv4Candidates = value.match(/(?:^|[^0-9])((?:[0-9]{1,3}\.){3}[0-9]{1,3})(?=$|[^0-9])/gu) ?? [];
-    if (ipv4Candidates.some((candidate) =>
-      isIP(candidate.replace(/^[^0-9]+|[^0-9]+$/gu, "")) === 4
-    )) return true;
-    const addressCandidates = value.match(/[0-9a-f:.%\[\]]+/giu) ?? [];
-    return addressCandidates.some((candidate) => {
-      const normalized = candidate.replace(/^\[|\]$/gu, "").split("%", 1)[0];
-      return isIP(normalized) === 6;
-    });
-  };
-  const containsSensitiveMaterial = (value) => {
-    if (typeof value === "string") {
-      const normalized = value.toLowerCase();
-      return (
-        normalized.includes((process.env.PROBE_TOKEN_TO_VERIFY ?? "").toLowerCase()) ||
-        /(?:^|[^a-z0-9-])x-forwarded-for\s*:/iu.test(value) ||
-        /(?:^|[^a-z0-9-])forwarded\s*:/iu.test(value) ||
-        /(?:^|[^a-z0-9-])for\s*=/iu.test(value) ||
-        containsIpAddress(value)
-      );
-    }
-    if (Array.isArray(value)) return value.some(containsSensitiveMaterial);
-    if (value === null || typeof value !== "object") return false;
-    return Object.entries(value).some(([key, child]) =>
-      forbiddenKeys.has(key.toLowerCase()) || containsSensitiveMaterial(child)
-    );
-  };
-
-  if (!Array.isArray(evidence) || evidence.length !== 5) process.exit(2);
-  if (containsSensitiveMaterial(evidence)) process.exit(3);
-  evidence.forEach((entry, index) => {
-    if (entry === null || typeof entry !== "object" || Array.isArray(entry)) process.exit(4);
-    if (Object.keys(entry).some((key) => !ordinaryEnvelopeKeys.has(key))) process.exit(5);
-    const payload = entry.jsonPayload;
-    if (payload === null || typeof payload !== "object" || Array.isArray(payload)) process.exit(6);
-    const payloadKeys = Object.keys(payload).sort();
-    const allowedPayloadKeys = [...structuralKeys, ...ordinaryPayloadKeys].sort();
-    if (payloadKeys.some((key) => !allowedPayloadKeys.includes(key))) process.exit(7);
-    if (structuralKeys.some((key) => !Object.hasOwn(payload, key))) process.exit(8);
-    if (payload.msg !== undefined && payload.msg !== "rate limit proxy probe") process.exit(9);
-    if (payload.eventName !== "rate_limit_proxy_probe") process.exit(10);
-    if (payload.probeCase !== expectedCases[index]) process.exit(11);
-    if (payload.path !== "/api/health") process.exit(12);
-    if (typeof payload.forwardedPresent !== "boolean") process.exit(13);
-    if (!["absent", "simple", "quoted", "malformed"].includes(payload.forwardedParseStatus)) process.exit(14);
-    if (!nullableCount(payload.forwardedElementCount)) process.exit(15);
-    if (!nullablePosition(payload.forwardedMarkerPosition)) process.exit(16);
-    if (typeof payload.xForwardedForPresent !== "boolean") process.exit(17);
-    if (!Number.isInteger(payload.xForwardedForElementCount) || payload.xForwardedForElementCount < 0) process.exit(18);
-    if (!nullablePosition(payload.xForwardedForMarkerPosition)) process.exit(19);
-    if (typeof payload.reqIpEqualsSocket !== "boolean") process.exit(20);
-    if (!nullablePosition(payload.reqIpXForwardedForPosition)) process.exit(21);
-    if (!nullablePosition(payload.socketXForwardedForPosition)) process.exit(22);
-  });
-
-  const projected = evidence.map(({ jsonPayload }) => Object.fromEntries(
-    structuralKeys.map((key) => [key, jsonPayload[key]])
-  ));
-  const projectedKeys = structuralKeys.slice().sort();
-  if (projected.some((event) => {
-    const keys = Object.keys(event).sort();
-    return keys.length !== projectedKeys.length || keys.some((key, index) => key !== projectedKeys[index]);
-  })) process.exit(23);
-  if (containsSensitiveMaterial(projected)) process.exit(24);
-  process.stdout.write(`${JSON.stringify(projected, null, 2)}\n`);
-' > "$EVIDENCE_TMP"
+GEN1_LOGS_JSON="$(gcloud logging read \
+  "resource.type=\"cloud_run_revision\" AND resource.labels.revision_name=\"${MATRIX_REVISIONS[0]}\" AND jsonPayload.eventName=\"rate_limit_proxy_probe\"" \
+  --project="$PROJECT" --freshness=30m --order=asc --limit=20 --format=json)"
+GEN2_LOGS_JSON="$(gcloud logging read \
+  "resource.type=\"cloud_run_revision\" AND resource.labels.revision_name=\"${MATRIX_REVISIONS[1]}\" AND jsonPayload.eventName=\"rate_limit_proxy_probe\"" \
+  --project="$PROJECT" --freshness=30m --order=asc --limit=20 --format=json)"
+MATRIX_LOGS_JSON="$(GEN1_LOGS_JSON="$GEN1_LOGS_JSON" GEN2_LOGS_JSON="$GEN2_LOGS_JSON" \
+  node --input-type=module -e 'process.stdout.write(JSON.stringify({gen1:JSON.parse(process.env.GEN1_LOGS_JSON),gen2:JSON.parse(process.env.GEN2_LOGS_JSON)}))')"
+MATRIX_LOGS_JSON="$MATRIX_LOGS_JSON" \
+PROBE_TOKEN_FOR_LEAK_CHECK="$PROBE_TOKEN" \
+GEN1_REVISION="${MATRIX_REVISIONS[0]}" \
+GEN2_REVISION="${MATRIX_REVISIONS[1]}" \
+node scripts/rate-limit-proxy-probe-evidence.mjs assemble > "$EVIDENCE_TMP"
 mv "$EVIDENCE_TMP" "$EVIDENCE_DIR/probe-results.json"
+EVIDENCE_CAPTURED=1
+unset GEN1_LOGS_JSON GEN2_LOGS_JSON MATRIX_LOGS_JSON
+
+MATRIX_EXACT_MATCH="$(node -e '
+  const evidence=require(process.argv[1]);
+  if (typeof evidence?.comparison?.exactMatch!=="boolean") process.exit(2);
+  process.stdout.write(String(evidence.comparison.exactMatch));
+' "$(pwd)/$EVIDENCE_DIR/probe-results.json")"
 
 PROJECT_TO_RECORD="$PROJECT" \
 REGION_TO_RECORD="$REGION" \
@@ -751,14 +697,12 @@ SOURCE_HEAD_TO_RECORD="$SOURCE_HEAD" \
 TESTED_HEAD_TO_RECORD="$TESTED_HEAD" \
 ORIGINAL_REVISION_TO_RECORD="$ORIGINAL_REVISION" \
 IMAGE_DIGEST_TO_RECORD="$DIGEST" \
-TAGGED_REVISION_TO_RECORD="$TAG_REVISION" \
-STAGING_TEMPLATE_EXECUTION_ENVIRONMENT_TO_RECORD="$STAGING_TEMPLATE_EXECUTION_ENVIRONMENT" \
-STAGING_ACTIVE_EXECUTION_ENVIRONMENT_TO_RECORD="$STAGING_ACTIVE_EXECUTION_ENVIRONMENT" \
-PRODUCTION_ACTIVE_EXECUTION_ENVIRONMENT_TO_RECORD="$PRODUCTION_ACTIVE_EXECUTION_ENVIRONMENT" \
-STAGING_TEMPLATE_CONTAINER_CONCURRENCY_TO_RECORD="$STAGING_TEMPLATE_CONTAINER_CONCURRENCY" \
-STAGING_ACTIVE_CONTAINER_CONCURRENCY_TO_RECORD="$STAGING_ACTIVE_CONTAINER_CONCURRENCY" \
-PRODUCTION_ACTIVE_CONTAINER_CONCURRENCY_TO_RECORD="$PRODUCTION_ACTIVE_CONTAINER_CONCURRENCY" \
+LIVE_RUNTIME_STATE_JSON_TO_RECORD="$LIVE_RUNTIME_STATE_JSON" \
+GEN1_REVISION_TO_RECORD="${MATRIX_REVISIONS[0]}" \
+GEN2_REVISION_TO_RECORD="${MATRIX_REVISIONS[1]}" \
+MATRIX_EXACT_MATCH_TO_RECORD="$MATRIX_EXACT_MATCH" \
 PRODUCTION_DOMAIN_MAPPING_COUNT_TO_RECORD="$PRODUCTION_DOMAIN_MAPPING_COUNT" \
+PRODUCTION_FINGERPRINT_BEFORE_TO_RECORD="$PRODUCTION_FINGERPRINT_BEFORE" \
 node --input-type=module -e '
   const required = (name) => {
     const value = process.env[name];
@@ -768,25 +712,25 @@ node --input-type=module -e '
   const sourceHead = required("SOURCE_HEAD_TO_RECORD");
   const testedHead = required("TESTED_HEAD_TO_RECORD");
   const imageDigest = required("IMAGE_DIGEST_TO_RECORD");
-  const stagingTemplateExecutionEnvironment = required("STAGING_TEMPLATE_EXECUTION_ENVIRONMENT_TO_RECORD");
-  const stagingExecutionEnvironment = required("STAGING_ACTIVE_EXECUTION_ENVIRONMENT_TO_RECORD");
-  const productionExecutionEnvironment = required("PRODUCTION_ACTIVE_EXECUTION_ENVIRONMENT_TO_RECORD");
-  const stagingTemplateContainerConcurrency = required("STAGING_TEMPLATE_CONTAINER_CONCURRENCY_TO_RECORD");
-  const stagingContainerConcurrency = required("STAGING_ACTIVE_CONTAINER_CONCURRENCY_TO_RECORD");
-  const productionContainerConcurrency = required("PRODUCTION_ACTIVE_CONTAINER_CONCURRENCY_TO_RECORD");
+  const gen1Revision = required("GEN1_REVISION_TO_RECORD");
+  const gen2Revision = required("GEN2_REVISION_TO_RECORD");
+  const matrixExactMatchText = required("MATRIX_EXACT_MATCH_TO_RECORD");
+  const productionFingerprintBefore = required("PRODUCTION_FINGERPRINT_BEFORE_TO_RECORD");
   const productionDomainMappingCount = Number(required("PRODUCTION_DOMAIN_MAPPING_COUNT_TO_RECORD"));
   if (!/^[0-9a-f]{40}$/u.test(sourceHead) || testedHead !== sourceHead) process.exit(3);
   if (!/^sha256:[0-9a-f]{64}$/u.test(imageDigest)) process.exit(4);
-  if (
-    stagingTemplateExecutionEnvironment !== stagingExecutionEnvironment ||
-    stagingTemplateExecutionEnvironment !== productionExecutionEnvironment
-  ) process.exit(5);
-  if (
-    stagingTemplateContainerConcurrency !== stagingContainerConcurrency ||
-    stagingTemplateContainerConcurrency !== productionContainerConcurrency
-  ) process.exit(6);
-  if (!/^(?:0|[1-9][0-9]*)$/u.test(stagingTemplateContainerConcurrency)) process.exit(7);
+  if (!/^shipmastr-api-staging-[a-z0-9-]+$/u.test(gen1Revision)) process.exit(5);
+  if (!/^shipmastr-api-staging-[a-z0-9-]+$/u.test(gen2Revision)) process.exit(5);
+  if (matrixExactMatchText !== "true" && matrixExactMatchText !== "false") process.exit(6);
+  if (!/^[0-9a-f]{64}$/u.test(productionFingerprintBefore)) process.exit(7);
   if (productionDomainMappingCount !== 0) process.exit(8);
+  const liveRuntime = JSON.parse(required("LIVE_RUNTIME_STATE_JSON_TO_RECORD"));
+  if (
+    liveRuntime === null ||
+    typeof liveRuntime !== "object" ||
+    Array.isArray(liveRuntime) ||
+    liveRuntime?.productionActive?.concurrency !== 40
+  ) process.exit(9);
 
   const context = {
     project: required("PROJECT_TO_RECORD"),
@@ -797,27 +741,22 @@ node --input-type=module -e '
     testedHead,
     originalStagingRevision: required("ORIGINAL_REVISION_TO_RECORD"),
     imageDigest,
-    taggedRevision: required("TAGGED_REVISION_TO_RECORD"),
-    runtimeParity: {
-      stagingTemplateExecutionEnvironment,
-      stagingExecutionEnvironment,
-      productionExecutionEnvironment,
-      taggedExecutionEnvironment: stagingTemplateExecutionEnvironment,
-      executionEnvironmentEqual: true,
-      stagingTemplateContainerConcurrency: Number(stagingTemplateContainerConcurrency),
-      stagingContainerConcurrency: Number(stagingContainerConcurrency),
-      productionContainerConcurrency: Number(productionContainerConcurrency),
-      taggedContainerConcurrency: Number(stagingTemplateContainerConcurrency),
-      containerConcurrencyEqual: true
+    liveRuntime,
+    matrix: {
+      concurrency: 40,
+      gen1: { generation: "gen1", revision: gen1Revision },
+      gen2: { generation: "gen2", revision: gen2Revision },
+      exactMatch: matrixExactMatchText === "true"
     },
     productionDomainMappingCount,
+    productionFingerprintBefore,
     activeTrafficUnchanged: true,
     featureDisabled: true,
     productionMutated: false
   };
   const serialized = JSON.stringify(context, null, 2);
-  if (/https?:\/\//iu.test(serialized)) process.exit(9);
-  if (/\b(?:headers?|token|credential|secretRef|body|envList)\b/iu.test(serialized)) process.exit(10);
+  if (/https?:\/\//iu.test(serialized)) process.exit(10);
+  if (/\b(?:headers?|token|credential|secretRef|body|envList)\b/iu.test(serialized)) process.exit(11);
   process.stdout.write(`${serialized}\n`);
 ' > "$PROBE_CONTEXT_TMP"
 
@@ -834,13 +773,18 @@ PROBE_CONTEXT_PATH_TO_VERIFY="$PROBE_CONTEXT_PATH" node --input-type=module -e '
   const context = JSON.parse(readFileSync(process.env.PROBE_CONTEXT_PATH_TO_VERIFY, "utf8"));
   if (
     context?.productionDomainMappingCount !== 0 ||
-    context?.runtimeParity?.executionEnvironmentEqual !== true ||
-    context?.runtimeParity?.containerConcurrencyEqual !== true ||
+    context?.productionFingerprintBefore === undefined ||
+    context?.matrix?.concurrency !== 40 ||
+    context?.matrix?.gen1?.generation !== "gen1" ||
+    context?.matrix?.gen2?.generation !== "gen2" ||
+    typeof context?.matrix?.exactMatch !== "boolean" ||
     context?.activeTrafficUnchanged !== true ||
     context?.featureDisabled !== true ||
     context?.productionMutated !== false
   ) process.exit(2);
 '
+
+test "$MATRIX_EXACT_MATCH" = "true"
 
 printf '%s\n' \
   'PROBE_COMPLETE' \
