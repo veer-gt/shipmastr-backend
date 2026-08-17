@@ -9,10 +9,12 @@ EXPECTED_BASE="a965f4314d7af02dc45c05733efaea322acb87eb"
 BRANCH="hotfix/rate-limit-proxy-probe"
 IMAGE_URI="asia-south1-docker.pkg.dev/shipmastr-core-prod/shipmastr/shipmastr-api"
 EVIDENCE_DIR=".superpowers/sdd/2026-08-17-cloud-run-rate-limit-header-probe"
+PARSER="scripts/rate-limit-proxy-probe-parsers.mjs"
 
 for required_command in git gcloud node openssl curl date mv rm; do
   command -v "$required_command" >/dev/null 2>&1
 done
+test -f "$PARSER"
 
 test "$(git branch --show-current)" = "$BRANCH"
 test "$(git merge-base HEAD "$EXPECTED_BASE")" = "$EXPECTED_BASE"
@@ -22,11 +24,15 @@ test -z "$(git status --porcelain --untracked-files=normal)"
 test "$(gcloud config get-value project 2>/dev/null)" = "$PROJECT"
 test -d "$EVIDENCE_DIR"
 test ! -e "$EVIDENCE_DIR/probe-results.json"
+test ! -e "$EVIDENCE_DIR/probe-context.json"
+SOURCE_HEAD="$(git rev-parse HEAD)"
+[[ "$SOURCE_HEAD" =~ ^[0-9a-f]{40}$ ]]
+TESTED_HEAD="$SOURCE_HEAD"
 
 STAGING_SERVICE_JSON="$(gcloud run services describe "$SERVICE" \
   --project="$PROJECT" --region="$REGION" --format=json)"
 
-mapfile -t STAGING_SERVICE_FIELDS < <(
+STAGING_SERVICE_FIELDS_OUTPUT="$(
   SERVICE_JSON="$STAGING_SERVICE_JSON" node --input-type=module -e '
     const service = JSON.parse(process.env.SERVICE_JSON ?? "");
     const traffic = service?.status?.traffic;
@@ -54,7 +60,13 @@ mapfile -t STAGING_SERVICE_FIELDS < <(
       JSON.stringify(traffic),
     ].join("\n") + "\n");
   '
-)
+)"
+STAGING_SERVICE_FIELDS=()
+while IFS= read -r field; do
+  STAGING_SERVICE_FIELDS[${#STAGING_SERVICE_FIELDS[@]}]="$field"
+done <<EOF
+$STAGING_SERVICE_FIELDS_OUTPUT
+EOF
 test "${#STAGING_SERVICE_FIELDS[@]}" -eq 5
 ORIGINAL_STAGING_URL="${STAGING_SERVICE_FIELDS[0]}"
 ORIGINAL_REVISION="${STAGING_SERVICE_FIELDS[1]}"
@@ -65,7 +77,7 @@ ORIGINAL_TRAFFIC_JSON="${STAGING_SERVICE_FIELDS[4]}"
 ORIGINAL_REVISION_JSON="$(gcloud run revisions describe "$ORIGINAL_REVISION" \
   --project="$PROJECT" --region="$REGION" --format=json)"
 
-mapfile -t ORIGINAL_REVISION_FIELDS < <(
+ORIGINAL_REVISION_FIELDS_OUTPUT="$(
   REVISION_JSON="$ORIGINAL_REVISION_JSON" node --input-type=module -e '
     const revision = JSON.parse(process.env.REVISION_JSON ?? "");
     const containers = revision?.spec?.containers;
@@ -91,7 +103,13 @@ mapfile -t ORIGINAL_REVISION_FIELDS < <(
       concurrency === undefined ? "__absent__" : String(concurrency),
     ].join("\n") + "\n");
   '
-)
+)"
+ORIGINAL_REVISION_FIELDS=()
+while IFS= read -r field; do
+  ORIGINAL_REVISION_FIELDS[${#ORIGINAL_REVISION_FIELDS[@]}]="$field"
+done <<EOF
+$ORIGINAL_REVISION_FIELDS_OUTPUT
+EOF
 test "${#ORIGINAL_REVISION_FIELDS[@]}" -eq 5
 ORIGINAL_IMAGE_DIGEST="${ORIGINAL_REVISION_FIELDS[0]}"
 ACTIVE_COURIER_AUDIT_INTAKE="${ORIGINAL_REVISION_FIELDS[1]}"
@@ -125,15 +143,22 @@ PRODUCTION_SERVICE_JSON="$(gcloud run services describe "$PRODUCTION_SERVICE" \
 PRODUCTION_REVISION="$(
   SERVICE_JSON="$PRODUCTION_SERVICE_JSON" node --input-type=module -e '
     const service = JSON.parse(process.env.SERVICE_JSON ?? "");
-    const revision = service?.status?.latestReadyRevisionName;
-    if (typeof revision !== "string" || revision.length === 0) process.exit(2);
-    process.stdout.write(revision);
+    const traffic = service?.status?.traffic;
+    const positive = Array.isArray(traffic)
+      ? traffic.filter((entry) => Number(entry?.percent ?? 0) > 0)
+      : [];
+    if (
+      positive.length !== 1 ||
+      typeof positive[0]?.revisionName !== "string" ||
+      Number(positive[0]?.percent) !== 100
+    ) process.exit(2);
+    process.stdout.write(positive[0].revisionName);
   '
 )"
 PRODUCTION_REVISION_JSON="$(gcloud run revisions describe "$PRODUCTION_REVISION" \
   --project="$PROJECT" --region="$REGION" --format=json)"
 
-mapfile -t PRODUCTION_RUNTIME_FIELDS < <(
+PRODUCTION_RUNTIME_FIELDS_OUTPUT="$(
   REVISION_JSON="$PRODUCTION_REVISION_JSON" node --input-type=module -e '
     const revision = JSON.parse(process.env.REVISION_JSON ?? "");
     const executionEnvironment =
@@ -144,45 +169,57 @@ mapfile -t PRODUCTION_RUNTIME_FIELDS < <(
       concurrency === undefined ? "__absent__" : String(concurrency),
     ].join("\n") + "\n");
   '
-)
+)"
+PRODUCTION_RUNTIME_FIELDS=()
+while IFS= read -r field; do
+  PRODUCTION_RUNTIME_FIELDS[${#PRODUCTION_RUNTIME_FIELDS[@]}]="$field"
+done <<EOF
+$PRODUCTION_RUNTIME_FIELDS_OUTPUT
+EOF
 test "${#PRODUCTION_RUNTIME_FIELDS[@]}" -eq 2
 PRODUCTION_EXECUTION_ENVIRONMENT="${PRODUCTION_RUNTIME_FIELDS[0]}"
 PRODUCTION_CONTAINER_CONCURRENCY="${PRODUCTION_RUNTIME_FIELDS[1]}"
 
-DOMAIN_MAPPINGS_OUTPUT="$(gcloud beta run domain-mappings list \
-  --project="$PROJECT" --region="$REGION" \
-  --format='table(metadata.name,spec.routeName,status.conditions[0].status)')"
+test "$STAGING_EXECUTION_ENVIRONMENT" != "__absent__"
+test "$STAGING_CONTAINER_CONCURRENCY" != "__absent__"
+test "$PRODUCTION_EXECUTION_ENVIRONMENT" != "__absent__"
+test "$PRODUCTION_CONTAINER_CONCURRENCY" != "__absent__"
+test "$STAGING_EXECUTION_ENVIRONMENT" = "$PRODUCTION_EXECUTION_ENVIRONMENT"
+test "$STAGING_CONTAINER_CONCURRENCY" = "$PRODUCTION_CONTAINER_CONCURRENCY"
+
 DOMAIN_MAPPINGS_JSON="$(gcloud beta run domain-mappings list \
   --project="$PROJECT" --region="$REGION" --format=json)"
 
-DOMAIN_MAPPINGS_JSON="$DOMAIN_MAPPINGS_JSON" \
-PRODUCTION_SERVICE_TO_CHECK="$PRODUCTION_SERVICE" \
-STAGING_SERVICE_TO_CHECK="$SERVICE" \
-node --input-type=module -e '
-  const mappings = JSON.parse(process.env.DOMAIN_MAPPINGS_JSON ?? "");
-  if (!Array.isArray(mappings)) process.exit(2);
-  const production = process.env.PRODUCTION_SERVICE_TO_CHECK;
-  const staging = process.env.STAGING_SERVICE_TO_CHECK;
-  const productionMappings = mappings.filter((mapping) => mapping?.spec?.routeName === production);
-  if (productionMappings.length === 0) process.exit(0);
-  const stagingEquivalent = mappings.some((mapping) =>
-    mapping?.spec?.routeName === staging &&
-    Array.isArray(mapping?.status?.conditions) &&
-    mapping.status.conditions.some((condition) =>
-      condition?.type === "Ready" && String(condition?.status).toLowerCase() === "true"
-    )
-  );
-  if (!stagingEquivalent) process.exit(3);
-'
+PRODUCTION_DOMAIN_MAPPING_COUNT="$(
+  DOMAIN_MAPPINGS_JSON="$DOMAIN_MAPPINGS_JSON" \
+  PRODUCTION_SERVICE_TO_CHECK="$PRODUCTION_SERVICE" \
+  node --input-type=module -e '
+    const mappings = JSON.parse(process.env.DOMAIN_MAPPINGS_JSON ?? "");
+    if (!Array.isArray(mappings)) process.exit(2);
+    const production = process.env.PRODUCTION_SERVICE_TO_CHECK;
+    if (typeof production !== "string" || production.length === 0) process.exit(2);
+    const count = mappings.filter((mapping) => mapping?.spec?.routeName === production).length;
+    if (count !== 0) process.exit(3);
+    process.stdout.write(String(count));
+  '
+)"
+test "$PRODUCTION_DOMAIN_MAPPING_COUNT" = "0"
 
 PROBE_TOKEN="$(openssl rand -hex 32)"
 test "${#PROBE_TOKEN}" -eq 64
 [[ "$PROBE_TOKEN" =~ ^[0-9a-f]{64}$ ]]
-RUN_ID="$(date -u +%Y%m%dT%H%M%SZ)-$(git rev-parse --short=12 HEAD)"
-TAG="rlp-$(date -u +%m%d%H%M%S)"
+RUN_NONCE="$(openssl rand -hex 6)"
+[[ "$RUN_NONCE" =~ ^[0-9a-f]{12}$ ]]
+RUN_ID="$(date -u +%Y%m%dT%H%M%SZ)-$(git rev-parse --short=12 HEAD)-$RUN_NONCE"
+TAG="rlp-$(date -u +%m%d%H%M%S)-$(git rev-parse --short=8 HEAD)-$RUN_NONCE"
 IMAGE_TAG="rate-limit-proxy-probe-$RUN_ID"
 EVIDENCE_TMP="$EVIDENCE_DIR/.probe-results-$RUN_ID.tmp"
+PROBE_CONTEXT_PATH="$EVIDENCE_DIR/probe-context.json"
+PROBE_CONTEXT_TMP="$EVIDENCE_DIR/.probe-context-$RUN_ID.tmp"
 test ! -e "$EVIDENCE_TMP"
+test ! -e "$PROBE_CONTEXT_TMP"
+IMAGE_REF=""
+TAG_REVISION=""
 CLEANUP_DONE=0
 
 cleanup() {
@@ -190,6 +227,10 @@ cleanup() {
   local cleanup_failed=0
   local current_service_json=""
   local token_state=""
+  local tag_target=""
+  local tag_state_status=0
+  local owned_revision_json=""
+  local ownership_state=""
 
   if [[ "$CLEANUP_DONE" -eq 1 ]]; then
     return "$incoming_status"
@@ -203,18 +244,42 @@ cleanup() {
   if [[ "$?" -ne 0 || -z "$current_service_json" ]]; then
     cleanup_failed=1
   else
-    SERVICE_JSON="$current_service_json" TAG_TO_FIND="$TAG" node --input-type=module -e '
-      const service = JSON.parse(process.env.SERVICE_JSON ?? "");
-      const traffic = service?.status?.traffic;
-      if (!Array.isArray(traffic)) process.exit(2);
-      process.exit(traffic.some((entry) => entry?.tag === process.env.TAG_TO_FIND) ? 0 : 1);
-    '
-    if [[ "$?" -eq 0 ]]; then
-      gcloud run services update-traffic "$SERVICE" \
-        --project="$PROJECT" --region="$REGION" \
-        --remove-tags="$TAG" --quiet
-      if [[ "$?" -ne 0 ]]; then
+    tag_target="$(
+      SERVICE_JSON="$current_service_json" \
+      TAG_TO_FIND="$TAG" \
+      node "$PARSER" tag-state
+    )"
+    tag_state_status="$?"
+    if [[ "$tag_state_status" -ne 0 ]]; then
+      cleanup_failed=1
+    elif [[ "$tag_target" != "absent" ]]; then
+      if [[ -z "$TAG_REVISION" || -z "$IMAGE_REF" || "$tag_target" != "$TAG_REVISION" ]]; then
         cleanup_failed=1
+      else
+        owned_revision_json="$(gcloud run revisions describe "$TAG_REVISION" \
+          --project="$PROJECT" --region="$REGION" --format=json)"
+        if [[ "$?" -ne 0 || -z "$owned_revision_json" ]]; then
+          cleanup_failed=1
+        else
+          ownership_state="$(
+            SERVICE_JSON="$current_service_json" \
+            REVISION_JSON="$owned_revision_json" \
+            TAG_TO_FIND="$TAG" \
+            EXPECTED_REVISION="$TAG_REVISION" \
+            EXPECTED_IMAGE_REF="$IMAGE_REF" \
+            node "$PARSER" owned-tag
+          )"
+          if [[ "$?" -ne 0 || "$ownership_state" != "owned" ]]; then
+            cleanup_failed=1
+          else
+            gcloud run services update-traffic "$SERVICE" \
+              --project="$PROJECT" --region="$REGION" \
+              --remove-tags="$TAG" --quiet
+            if [[ "$?" -ne 0 ]]; then
+              cleanup_failed=1
+            fi
+          fi
+        fi
       fi
     fi
   fi
@@ -302,6 +367,19 @@ cleanup() {
     fi
   fi
 
+  if [[ "$incoming_status" -eq 0 && "$cleanup_failed" -eq 0 ]]; then
+    mv "$PROBE_CONTEXT_TMP" "$PROBE_CONTEXT_PATH"
+    if [[ "$?" -ne 0 ]]; then
+      cleanup_failed=1
+      rm -f -- "$PROBE_CONTEXT_TMP"
+    fi
+  else
+    rm -f -- "$PROBE_CONTEXT_TMP"
+    if [[ "$?" -ne 0 ]]; then
+      cleanup_failed=1
+    fi
+  fi
+
   local final_status="$incoming_status"
   if [[ "$cleanup_failed" -ne 0 && "$final_status" -eq 0 ]]; then
     final_status=1
@@ -354,7 +432,7 @@ gcloud run deploy "$SERVICE" \
 
 DEPLOYED_SERVICE_JSON="$(gcloud run services describe "$SERVICE" \
   --project="$PROJECT" --region="$REGION" --format=json)"
-mapfile -t TAG_BINDING < <(
+TAG_BINDING_OUTPUT="$(
   SERVICE_JSON="$DEPLOYED_SERVICE_JSON" \
   TAG_TO_VERIFY="$TAG" \
   ORIGINAL_REVISION_TO_VERIFY="$ORIGINAL_REVISION" \
@@ -381,7 +459,13 @@ mapfile -t TAG_BINDING < <(
     if (taggedNormalPercent !== 0) process.exit(5);
     process.stdout.write(`${tagged[0].revisionName}\n${tagged[0].url}\n`);
   '
-)
+)"
+TAG_BINDING=()
+while IFS= read -r field; do
+  TAG_BINDING[${#TAG_BINDING[@]}]="$field"
+done <<EOF
+$TAG_BINDING_OUTPUT
+EOF
 test "${#TAG_BINDING[@]}" -eq 2
 TAG_REVISION="${TAG_BINDING[0]}"
 TAG_URL="${TAG_BINDING[1]}"
@@ -391,18 +475,26 @@ TAG_REVISION_JSON="$(gcloud run revisions describe "$TAG_REVISION" \
 REVISION_JSON="$TAG_REVISION_JSON" \
 EXPECTED_IMAGE_REF="$IMAGE_REF" \
 EXPECTED_TOKEN="$PROBE_TOKEN" \
+EXPECTED_EXECUTION_ENVIRONMENT="$STAGING_EXECUTION_ENVIRONMENT" \
+EXPECTED_CONTAINER_CONCURRENCY="$STAGING_CONTAINER_CONCURRENCY" \
 node --input-type=module -e '
   const revision = JSON.parse(process.env.REVISION_JSON ?? "");
   const containers = revision?.spec?.containers;
   if (!Array.isArray(containers) || containers.length !== 1) process.exit(2);
   if (containers[0]?.image !== process.env.EXPECTED_IMAGE_REF) process.exit(3);
+  const executionEnvironment =
+    revision?.metadata?.annotations?.["run.googleapis.com/execution-environment"];
+  if (String(executionEnvironment ?? "") !== process.env.EXPECTED_EXECUTION_ENVIRONMENT) process.exit(4);
+  if (String(revision?.spec?.containerConcurrency ?? "") !== process.env.EXPECTED_CONTAINER_CONCURRENCY) {
+    process.exit(5);
+  }
   const env = Array.isArray(containers[0]?.env) ? containers[0].env : [];
   const exactValue = (name, value) => {
     const matches = env.filter((entry) => entry?.name === name);
     return matches.length === 1 && matches[0]?.value === value;
   };
-  if (!exactValue("COURIER_AUDIT_INTAKE_ENABLED", "false")) process.exit(4);
-  if (!exactValue("RATE_LIMIT_PROXY_PROBE_TOKEN", process.env.EXPECTED_TOKEN)) process.exit(5);
+  if (!exactValue("COURIER_AUDIT_INTAKE_ENABLED", "false")) process.exit(6);
+  if (!exactValue("RATE_LIMIT_PROXY_PROBE_TOKEN", process.env.EXPECTED_TOKEN)) process.exit(7);
 '
 
 require_http_status() {
@@ -595,6 +687,72 @@ node --input-type=module -e '
 ' > "$EVIDENCE_TMP"
 mv "$EVIDENCE_TMP" "$EVIDENCE_DIR/probe-results.json"
 
+PROJECT_TO_RECORD="$PROJECT" \
+REGION_TO_RECORD="$REGION" \
+SERVICE_TO_RECORD="$SERVICE" \
+PRODUCTION_SERVICE_TO_RECORD="$PRODUCTION_SERVICE" \
+SOURCE_HEAD_TO_RECORD="$SOURCE_HEAD" \
+TESTED_HEAD_TO_RECORD="$TESTED_HEAD" \
+ORIGINAL_REVISION_TO_RECORD="$ORIGINAL_REVISION" \
+IMAGE_DIGEST_TO_RECORD="$DIGEST" \
+TAGGED_REVISION_TO_RECORD="$TAG_REVISION" \
+STAGING_EXECUTION_ENVIRONMENT_TO_RECORD="$STAGING_EXECUTION_ENVIRONMENT" \
+PRODUCTION_EXECUTION_ENVIRONMENT_TO_RECORD="$PRODUCTION_EXECUTION_ENVIRONMENT" \
+STAGING_CONTAINER_CONCURRENCY_TO_RECORD="$STAGING_CONTAINER_CONCURRENCY" \
+PRODUCTION_CONTAINER_CONCURRENCY_TO_RECORD="$PRODUCTION_CONTAINER_CONCURRENCY" \
+PRODUCTION_DOMAIN_MAPPING_COUNT_TO_RECORD="$PRODUCTION_DOMAIN_MAPPING_COUNT" \
+node --input-type=module -e '
+  const required = (name) => {
+    const value = process.env[name];
+    if (typeof value !== "string" || value.length === 0) process.exit(2);
+    return value;
+  };
+  const sourceHead = required("SOURCE_HEAD_TO_RECORD");
+  const testedHead = required("TESTED_HEAD_TO_RECORD");
+  const imageDigest = required("IMAGE_DIGEST_TO_RECORD");
+  const stagingExecutionEnvironment = required("STAGING_EXECUTION_ENVIRONMENT_TO_RECORD");
+  const productionExecutionEnvironment = required("PRODUCTION_EXECUTION_ENVIRONMENT_TO_RECORD");
+  const stagingContainerConcurrency = required("STAGING_CONTAINER_CONCURRENCY_TO_RECORD");
+  const productionContainerConcurrency = required("PRODUCTION_CONTAINER_CONCURRENCY_TO_RECORD");
+  const productionDomainMappingCount = Number(required("PRODUCTION_DOMAIN_MAPPING_COUNT_TO_RECORD"));
+  if (!/^[0-9a-f]{40}$/u.test(sourceHead) || testedHead !== sourceHead) process.exit(3);
+  if (!/^sha256:[0-9a-f]{64}$/u.test(imageDigest)) process.exit(4);
+  if (stagingExecutionEnvironment !== productionExecutionEnvironment) process.exit(5);
+  if (stagingContainerConcurrency !== productionContainerConcurrency) process.exit(6);
+  if (!/^(?:0|[1-9][0-9]*)$/u.test(stagingContainerConcurrency)) process.exit(7);
+  if (productionDomainMappingCount !== 0) process.exit(8);
+
+  const context = {
+    project: required("PROJECT_TO_RECORD"),
+    region: required("REGION_TO_RECORD"),
+    service: required("SERVICE_TO_RECORD"),
+    productionService: required("PRODUCTION_SERVICE_TO_RECORD"),
+    sourceHead,
+    testedHead,
+    originalStagingRevision: required("ORIGINAL_REVISION_TO_RECORD"),
+    imageDigest,
+    taggedRevision: required("TAGGED_REVISION_TO_RECORD"),
+    runtimeParity: {
+      stagingExecutionEnvironment,
+      productionExecutionEnvironment,
+      taggedExecutionEnvironment: stagingExecutionEnvironment,
+      executionEnvironmentEqual: true,
+      stagingContainerConcurrency: Number(stagingContainerConcurrency),
+      productionContainerConcurrency: Number(productionContainerConcurrency),
+      taggedContainerConcurrency: Number(stagingContainerConcurrency),
+      containerConcurrencyEqual: true
+    },
+    productionDomainMappingCount,
+    activeTrafficUnchanged: true,
+    featureDisabled: true,
+    productionMutated: false
+  };
+  const serialized = JSON.stringify(context, null, 2);
+  if (/https?:\/\//iu.test(serialized)) process.exit(9);
+  if (/\b(?:headers?|token|credential|secretRef|body|envList)\b/iu.test(serialized)) process.exit(10);
+  process.stdout.write(`${serialized}\n`);
+' > "$PROBE_CONTEXT_TMP"
+
 if cleanup 0; then
   :
 else
@@ -602,6 +760,19 @@ else
   exit "$cleanup_status"
 fi
 trap - EXIT INT TERM
+
+PROBE_CONTEXT_PATH_TO_VERIFY="$PROBE_CONTEXT_PATH" node --input-type=module -e '
+  import { readFileSync } from "node:fs";
+  const context = JSON.parse(readFileSync(process.env.PROBE_CONTEXT_PATH_TO_VERIFY, "utf8"));
+  if (
+    context?.productionDomainMappingCount !== 0 ||
+    context?.runtimeParity?.executionEnvironmentEqual !== true ||
+    context?.runtimeParity?.containerConcurrencyEqual !== true ||
+    context?.activeTrafficUnchanged !== true ||
+    context?.featureDisabled !== true ||
+    context?.productionMutated !== false
+  ) process.exit(2);
+'
 
 printf '%s\n' \
   'PROBE_COMPLETE' \
