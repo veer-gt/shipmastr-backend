@@ -264,3 +264,85 @@ test("assembler accepts exact comparison cases and configured-label map boundari
   assert.equal(result.status, 0, result.stderr);
   assert.equal(JSON.parse(result.stdout).events.length, 10);
 });
+
+test("Task 1 structural-field and receiveTimestamp matrix fails closed per mutation", () => {
+  const structuralWrongTypes = [
+    ["eventName", []], ["probeCase", {}], ["path", false], ["forwardedPresent", null],
+    ["forwardedParseStatus", false], ["forwardedElementCount", "0"], ["forwardedMarkerPosition", {}],
+    ["xForwardedForPresent", null], ["xForwardedForElementCount", "0"], ["xForwardedForMarkerPosition", {}],
+    ["reqIpEqualsSocket", "true"], ["reqIpXForwardedForPosition", {}], ["socketXForwardedForPosition", []]
+  ];
+  for (const [key, value] of structuralWrongTypes) {
+    assertRejected(mutateOne((entry) => { entry.jsonPayload[key] = value; }), `structural ${key}`);
+  }
+  const structuralBounds = [
+    ["forwardedElementCount", -1], ["forwardedElementCount", 2_147_483_648],
+    ["forwardedMarkerPosition", 0], ["forwardedMarkerPosition", 2_147_483_648],
+    ["xForwardedForElementCount", 2_147_483_648], ["xForwardedForMarkerPosition", 0],
+    ["reqIpXForwardedForPosition", 0], ["socketXForwardedForPosition", 0]
+  ];
+  for (const [key, value] of structuralBounds) {
+    assertRejected(mutateOne((entry) => { entry.jsonPayload[key] = value; }), `structural bound ${key}`);
+  }
+  for (const value of ["", "2026-08-17", "2026-08-17T06:00:00.1234567890Z", "2026-02-31T06:00:00Z", "2026-08-17T24:00:00Z"]) {
+    assertRejected(mutateOne((entry) => { entry.receiveTimestamp = value; }), `receiveTimestamp ${value.length}`);
+  }
+  for (const value of ["2026-08-17T06:00:00Z", "2026-08-17T06:00:00.1Z", "2026-08-17T06:00:00.123456789+05:30"]) {
+    const matrix = { gen1: cloudEntries("gen1"), gen2: cloudEntries("gen2") };
+    matrix.gen1[0].receiveTimestamp = value;
+    const result = runEvidence(matrix);
+    assert.equal(result.status, 0, `valid receiveTimestamp ${value}`);
+    assert.equal(JSON.parse(result.stdout).events.length, 10);
+  }
+});
+
+test("Task 1 envelope resource optional and Pino matrix fails closed per mutation", () => {
+  const invalid = [
+    (entry) => { entry.insertId = false; }, (entry) => { entry.logName = {}; },
+    (entry) => { entry.receiveTimestamp = false; }, (entry) => { entry.severity = []; }, (entry) => { entry.timestamp = {}; },
+    (entry) => { entry.resource.labels = []; }, (entry) => { entry.resource.labels.project_id = 1; },
+    (entry) => { delete entry.resource.labels.service_name; }, (entry) => { delete entry.resource.labels.configuration_name; },
+    (entry) => { delete entry.resource.labels.location; }, (entry) => { delete entry.resource.labels.revision_name; },
+    (entry) => { entry.resource.labels.extra = "x"; },
+    (entry) => { entry.trace = "x".repeat(80); }, (entry) => { entry.spanId = "A".repeat(16); },
+    (entry) => { entry.traceSampled = 0; },
+    (entry) => { entry.operation = { id: "i\u0001", producer: "p", first: true, last: true }; },
+    (entry) => { entry.operation = { id: "i", producer: "p\u0001", first: true, last: true }; },
+    (entry) => { entry.sourceLocation = { file: "f\u0001", line: "1", function: "n" }; },
+    (entry) => { entry.sourceLocation = { file: "f", line: "1", function: "n".repeat(513) }; },
+    (entry) => { entry.jsonPayload.hostname = null; }, (entry) => { entry.jsonPayload.level = 30.5; },
+    (entry) => { entry.jsonPayload.msg = "other"; }, (entry) => { entry.jsonPayload.pid = -1; }, (entry) => { entry.jsonPayload.time = -1; }
+  ];
+  for (const change of invalid) assertRejected(mutateOne(change));
+});
+
+test("Task 1 expected-label-map real-process matrix handles key and size boundaries", () => {
+  const valid = { gen1: cloudEntries("gen1"), gen2: cloudEntries("gen2") };
+  const exactSize = Object.fromEntries(Array.from({ length: 64 }, (_, index) => [`k${String(index).padStart(3, "0")}`, "v".repeat(index === 63 ? 245 : 246)]));
+  const oversized = { ...exactSize, k000: "v".repeat(247) };
+  const invalidMaps = [
+    { "": "v" }, { ["k".repeat(129)]: "v" }, { "k\u0001": "v" }, { key: null },
+    { key: "v".repeat(257) }, oversized
+  ];
+  for (const labels of invalidMaps) {
+    const result = runEvidence(valid, { GEN1_EXPECTED_LOG_LABELS_JSON: JSON.stringify(labels) });
+    assert.equal(result.stdout, ""); assert.equal(result.stderr, ""); assert.notEqual(result.status, 0);
+  }
+  const matrix = { gen1: cloudEntries("gen1"), gen2: cloudEntries("gen2") };
+  for (const entry of [...matrix.gen1, ...matrix.gen2]) { delete entry.labels.environment; delete entry.labels.generation; }
+  const validMaps = [{ ["k".repeat(128)]: "v".repeat(256) }, exactSize];
+  for (const labels of validMaps) {
+    const result = runEvidence(matrix, { GEN1_EXPECTED_LOG_LABELS_JSON: JSON.stringify(labels), GEN2_EXPECTED_LOG_LABELS_JSON: JSON.stringify(labels) });
+    assert.equal(result.status, 0, "valid expected labels");
+    assert.equal(JSON.parse(result.stdout).events.length, 10);
+  }
+});
+
+test("Task 1 sensitive values reach the real assembler scanner through allowed labels", () => {
+  for (const value of ["https://example.invalid/", "192.0.2.1", "2001:db8::1", "Forwarded: for=x", "X-Forwarded-For: x", "for=x", "b".repeat(64)]) {
+    const matrix = { gen1: cloudEntries("gen1"), gen2: cloudEntries("gen2") };
+    matrix.gen1[0].labels.note = value;
+    const result = runEvidence(matrix, { GEN1_EXPECTED_LOG_LABELS_JSON: JSON.stringify({ ...configuredLabels.gen1, note: value }) });
+    assert.equal(result.stdout, ""); assert.equal(result.stderr, ""); assert.notEqual(result.status, 0, value);
+  }
+});
