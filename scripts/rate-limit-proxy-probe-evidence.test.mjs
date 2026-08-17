@@ -159,7 +159,9 @@ test("assembler rejects URL and URI semantic tokens anywhere in composite wrappe
     ["sourceURLText", "relative-path"],
     ["request_uri_value", "relative-path"],
     ["REQUEST-URI-VALUE", "relative-path"],
-    ["canonical_url", "relative-path"]
+    ["canonical_url", "relative-path"],
+    ["requesturivalue", "relative-path"],
+    ["sourceurltext", "relative-path"]
   ];
   for (const [field, value] of fields) {
     const result = runEvidence({
@@ -182,7 +184,11 @@ test("assembler rejects IP and address semantic tokens anywhere in composite wra
     "client_ip_text",
     "remoteAddressValue",
     "REMOTE-ADDRESS-VALUE",
-    "candidate_address"
+    "candidate_address",
+    "clientiptext",
+    "remoteaddressvalue",
+    "sourceipaddresstext",
+    "candidateaddress"
   ];
   for (const field of fields) {
     const result = runEvidence({

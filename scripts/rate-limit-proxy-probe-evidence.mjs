@@ -41,6 +41,17 @@ const semanticallySafeEnvelopeKeys = new Set(
   [...ordinaryEnvelopeKeys].filter((key) => key !== "httpRequest")
 );
 const noTrustedKeys = new Set();
+const forbiddenSemanticKeyTokens = new Set(["url", "uri", "ip", "ipv4", "ipv6", "address"]);
+const normalizedSemanticContextTokens = [
+  ...forbiddenSemanticKeyTokens,
+  "candidate",
+  "client",
+  "remote",
+  "request",
+  "source",
+  "text",
+  "value"
+];
 const nullableCount = (value) => value === null || (Number.isInteger(value) && value >= 0);
 const nullablePosition = (value) => value === null || (Number.isInteger(value) && value >= 1);
 const forbiddenNormalizedKeys = new Set([
@@ -97,12 +108,30 @@ function semanticKeyTokens(key) {
     .filter(Boolean);
 }
 
+function containsForbiddenNormalizedSemanticSequence(normalized) {
+  const states = Array.from({ length: normalized.length + 1 }, () => [false, false]);
+  states[0][0] = true;
+  for (let index = 0; index < normalized.length; index += 1) {
+    if (!states[index][0] && !states[index][1]) continue;
+    for (const token of normalizedSemanticContextTokens) {
+      if (!normalized.startsWith(token, index)) continue;
+      const nextIndex = index + token.length;
+      if (states[index][0]) {
+        states[nextIndex][forbiddenSemanticKeyTokens.has(token) ? 1 : 0] = true;
+      }
+      if (states[index][1]) states[nextIndex][1] = true;
+    }
+  }
+  return states[normalized.length][1];
+}
+
 function forbiddenKey(key) {
   const normalized = normalizedKey(key);
   const semanticTokens = new Set(semanticKeyTokens(key));
   return (
     forbiddenNormalizedKeys.has(normalized) ||
-    ["url", "uri", "ip", "ipv4", "ipv6", "address"].some((token) => semanticTokens.has(token)) ||
+    [...forbiddenSemanticKeyTokens].some((token) => semanticTokens.has(token)) ||
+    containsForbiddenNormalizedSemanticSequence(normalized) ||
     normalized.includes("authorization") ||
     normalized.includes("authentication") ||
     normalized.includes("cookie") ||
