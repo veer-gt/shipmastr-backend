@@ -11,8 +11,10 @@ describe("logger redaction", () => {
       "req.headers.x-shipmastr-task-secret",
       "req.headers.x-shipmastr-courier-key",
       "req.headers.x-shipmastr-signature",
+      "req.headers.x-shipmastr-rate-limit-probe-token",
       "req.headers['x-internal-secret']",
-      "req.headers['x-shipmastr-task-secret']"
+      "req.headers['x-shipmastr-task-secret']",
+      "req.headers['x-shipmastr-rate-limit-probe-token']"
     ]) {
       assert.ok(loggerRedactPaths.includes(path), `${path} should be redacted`);
     }

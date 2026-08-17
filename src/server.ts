@@ -11,6 +11,7 @@ import { logger } from "./lib/logger.js";
 import { codDashboardRouter } from "./modules/codDashboard/cod-dashboard.routes.js";
 import { apiRouter } from "./routes/index.js";
 import { errorHandler } from "./middleware/error.js";
+import { createRateLimitProxyProbe } from "./middleware/rate-limit-proxy-probe.js";
 import { validateRequestTarget } from "./middleware/request-target.js";
 
 declare global {
@@ -39,6 +40,13 @@ app.use(
     credentials: true
   })
 );
+
+app.use(createRateLimitProxyProbe({
+  ...(env.RATE_LIMIT_PROXY_PROBE_TOKEN === undefined
+    ? {}
+    : { token: env.RATE_LIMIT_PROXY_PROBE_TOKEN }),
+  log: (event) => logger.info(event, "rate limit proxy probe")
+}));
 
 app.use(
   rateLimit({
