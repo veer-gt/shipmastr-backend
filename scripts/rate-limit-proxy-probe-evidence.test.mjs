@@ -287,7 +287,12 @@ test("Task 1 structural-field and receiveTimestamp matrix fails closed per mutat
   for (const value of ["", "2026-08-17", "2026-08-17T06:00:00.1234567890Z", "2026-02-31T06:00:00Z", "2026-08-17T24:00:00Z"]) {
     assertRejected(mutateOne((entry) => { entry.receiveTimestamp = value; }), `receiveTimestamp ${value.length}`);
   }
-  for (const value of ["2026-08-17T06:00:00Z", "2026-08-17T06:00:00.1Z", "2026-08-17T06:00:00.123456789+05:30"]) {
+  for (const value of [
+    "2026-08-17T06:00:00Z", "2026-08-17T06:00:00+05:30",
+    "2026-08-17T06:00:00.1Z", "2026-08-17T06:00:00.12Z", "2026-08-17T06:00:00.123Z",
+    "2026-08-17T06:00:00.1234Z", "2026-08-17T06:00:00.12345Z", "2026-08-17T06:00:00.123456Z",
+    "2026-08-17T06:00:00.1234567Z", "2026-08-17T06:00:00.12345678Z", "2026-08-17T06:00:00.123456789Z"
+  ]) {
     const matrix = { gen1: cloudEntries("gen1"), gen2: cloudEntries("gen2") };
     matrix.gen1[0].receiveTimestamp = value;
     const result = runEvidence(matrix);
@@ -300,15 +305,20 @@ test("Task 1 envelope resource optional and Pino matrix fails closed per mutatio
   const invalid = [
     (entry) => { entry.insertId = false; }, (entry) => { entry.logName = {}; },
     (entry) => { entry.receiveTimestamp = false; }, (entry) => { entry.severity = []; }, (entry) => { entry.timestamp = {}; },
-    (entry) => { entry.resource.labels = []; }, (entry) => { entry.resource.labels.project_id = 1; },
+    (entry) => { entry.resource.type = []; }, (entry) => { entry.resource.labels = []; },
+    (entry) => { entry.resource.labels.project_id = 1; }, (entry) => { entry.resource.labels.service_name = 1; },
+    (entry) => { entry.resource.labels.configuration_name = 1; }, (entry) => { entry.resource.labels.location = 1; },
+    (entry) => { entry.resource.labels.revision_name = 1; },
     (entry) => { delete entry.resource.labels.service_name; }, (entry) => { delete entry.resource.labels.configuration_name; },
     (entry) => { delete entry.resource.labels.location; }, (entry) => { delete entry.resource.labels.revision_name; },
     (entry) => { entry.resource.labels.extra = "x"; },
     (entry) => { entry.trace = "x".repeat(80); }, (entry) => { entry.spanId = "A".repeat(16); },
     (entry) => { entry.traceSampled = 0; },
     (entry) => { entry.operation = { id: "i\u0001", producer: "p", first: true, last: true }; },
+    (entry) => { entry.operation = { id: "i", producer: "", first: true, last: true }; },
     (entry) => { entry.operation = { id: "i", producer: "p\u0001", first: true, last: true }; },
     (entry) => { entry.sourceLocation = { file: "f\u0001", line: "1", function: "n" }; },
+    (entry) => { entry.sourceLocation = { file: "f", line: "1", function: "" }; },
     (entry) => { entry.sourceLocation = { file: "f", line: "1", function: "n".repeat(513) }; },
     (entry) => { entry.jsonPayload.hostname = null; }, (entry) => { entry.jsonPayload.level = 30.5; },
     (entry) => { entry.jsonPayload.msg = "other"; }, (entry) => { entry.jsonPayload.pid = -1; }, (entry) => { entry.jsonPayload.time = -1; }
