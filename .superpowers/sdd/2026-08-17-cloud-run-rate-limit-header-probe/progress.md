@@ -9,3 +9,6 @@
 - Status: implementation not started
 - Task 1: complete (commits a965f43..36fcca5, review clean; controller verified branch, direct parent, and clean-worktree invariants)
 - Task 2: complete (commits 024fd8d..356481b, review clean; RED 1/4, GREEN 4/4)
+- Task 3: minor (deferred): middleware factory relies on the Task 2 env boundary for the configured token's exact 64-hex shape
+- Task 3: fix round 1/5 (1 addressed, 0 open — quoted Forwarded semicolon false match; commits c6b097b..a7f77d2)
+- Task 3: complete (commits abe8894..a7f77d2, review clean after fix round 1)
