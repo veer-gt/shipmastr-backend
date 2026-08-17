@@ -8,3 +8,4 @@
 - Courier Audit Intake: disabled
 - Status: implementation not started
 - Task 1: complete (commits a965f43..36fcca5, review clean; controller verified branch, direct parent, and clean-worktree invariants)
+- Task 2: complete (commits 024fd8d..356481b, review clean; RED 1/4, GREEN 4/4)
