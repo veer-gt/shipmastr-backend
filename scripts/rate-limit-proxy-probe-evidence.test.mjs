@@ -5,246 +5,212 @@ import test from "node:test";
 
 const evidencePath = resolve("scripts/rate-limit-proxy-probe-evidence.mjs");
 const cases = ["baseline", "forwarded-ipv4", "xff-ipv4", "both-ipv4", "both-ipv6"];
+const revisions = { gen1: "shipmastr-api-staging-gen1", gen2: "shipmastr-api-staging-gen2" };
+const configuredLabels = {
+  gen1: { environment: "diagnostic", generation: "one" },
+  gen2: { environment: "diagnostic", generation: "two" }
+};
 
 function structuralEvent(probeCase, overrides = {}) {
   return {
-    eventName: "rate_limit_proxy_probe",
-    probeCase,
-    path: "/api/health",
+    eventName: "rate_limit_proxy_probe", probeCase, path: "/api/health",
     forwardedPresent: probeCase.includes("forwarded") || probeCase.includes("both"),
     forwardedParseStatus: probeCase === "baseline" || probeCase === "xff-ipv4" ? "absent" : "simple",
     forwardedElementCount: probeCase === "baseline" || probeCase === "xff-ipv4" ? null : 1,
     forwardedMarkerPosition: null,
     xForwardedForPresent: probeCase !== "baseline" && probeCase !== "forwarded-ipv4",
     xForwardedForElementCount: probeCase === "baseline" || probeCase === "forwarded-ipv4" ? 0 : 1,
-    xForwardedForMarkerPosition: null,
-    reqIpEqualsSocket: true,
-    reqIpXForwardedForPosition: null,
-    socketXForwardedForPosition: null,
-    ...overrides
+    xForwardedForMarkerPosition: null, reqIpEqualsSocket: true,
+    reqIpXForwardedForPosition: null, socketXForwardedForPosition: null, ...overrides
   };
 }
 
-function cloudEntries(overrides = {}) {
-  return cases.map((probeCase) => ({
-    jsonPayload: {
-      ...structuralEvent(probeCase),
-      level: 30,
-      msg: "rate limit proxy probe",
-      ...overrides[probeCase]
-    }
-  }));
+function isPlainObject(value) {
+  return value !== null && typeof value === "object" && !Array.isArray(value);
+}
+
+function deepMergeForTest(base, overrides) {
+  const result = { ...base };
+  for (const [key, value] of Object.entries(overrides)) {
+    result[key] = isPlainObject(value) && isPlainObject(base[key])
+      ? deepMergeForTest(base[key], value) : value;
+  }
+  return result;
+}
+
+function fullLogEntry(generation, probeCase, overrides = {}) {
+  const entry = {
+    insertId: `${generation}-${probeCase}`,
+    jsonPayload: { ...structuralEvent(probeCase), hostname: "probe-host", level: 30, msg: "rate limit proxy probe", pid: 42, time: 1_787_000_000_000 },
+    labels: { instanceId: "a".repeat(145), environment: "diagnostic", generation: generation === "gen1" ? "one" : "two" },
+    logName: "projects/shipmastr-core-prod/logs/run.googleapis.com%2Fstdout",
+    receiveTimestamp: "2026-08-17T06:00:00.123456789Z",
+    resource: { type: "cloud_run_revision", labels: {
+      project_id: "shipmastr-core-prod", service_name: "shipmastr-api-staging",
+      configuration_name: "shipmastr-api-staging", location: "asia-south1", revision_name: revisions[generation]
+    } },
+    severity: "INFO", timestamp: "2026-08-17T06:00:00Z"
+  };
+  return deepMergeForTest(entry, overrides);
+}
+
+function cloudEntries(generation, overrides = {}) {
+  return cases.map((probeCase) => fullLogEntry(generation, probeCase, overrides[probeCase]));
 }
 
 function runEvidence(matrix, overrides = {}) {
-  return spawnSync(process.execPath, [evidencePath, "assemble"], {
-    encoding: "utf8",
-    env: {
-      ...process.env,
-      MATRIX_LOGS_JSON: JSON.stringify(matrix),
-      PROBE_TOKEN_FOR_LEAK_CHECK: "a".repeat(64),
-      GEN1_REVISION: "shipmastr-api-staging-gen1",
-      GEN2_REVISION: "shipmastr-api-staging-gen2",
-      ...overrides
-    }
-  });
+  return spawnSync(process.execPath, [evidencePath, "assemble"], { encoding: "utf8", env: {
+    ...process.env, MATRIX_LOGS_JSON: JSON.stringify(matrix), PROBE_TOKEN_FOR_LEAK_CHECK: "b".repeat(64),
+    GEN1_REVISION: revisions.gen1, GEN2_REVISION: revisions.gen2,
+    GEN1_EXPECTED_LOG_LABELS_JSON: JSON.stringify(configuredLabels.gen1),
+    GEN2_EXPECTED_LOG_LABELS_JSON: JSON.stringify(configuredLabels.gen2), ...overrides
+  } });
 }
 
-test("assembler emits ten events and five exact matches", () => {
-  const result = runEvidence({ gen1: cloudEntries(), gen2: cloudEntries() });
+function assertRejected(matrix, message) {
+  const result = runEvidence(matrix);
+  assert.equal(result.stdout, "", message);
+  assert.equal(result.stderr, "", message);
+  assert.notEqual(result.status, 0, message);
+}
+
+function mutateOne(mutator) {
+  const matrix = { gen1: cloudEntries("gen1"), gen2: cloudEntries("gen2") };
+  mutator(matrix.gen1[0]);
+  return matrix;
+}
+
+test("assembler emits ten projected events and exact matches from complete log entries", () => {
+  const result = runEvidence({ gen1: cloudEntries("gen1"), gen2: cloudEntries("gen2") });
   assert.equal(result.status, 0, result.stderr);
   const evidence = JSON.parse(result.stdout);
+  assert.equal(evidence.schemaVersion, 1);
   assert.equal(evidence.events.length, 10);
-  assert.deepEqual(evidence.events.map(({ generation }) => generation), [
-    "gen1", "gen1", "gen1", "gen1", "gen1",
-    "gen2", "gen2", "gen2", "gen2", "gen2"
-  ]);
+  assert.deepEqual(evidence.events.map(({ generation }) => generation), ["gen1", "gen1", "gen1", "gen1", "gen1", "gen2", "gen2", "gen2", "gen2", "gen2"]);
   assert.equal(evidence.comparison.exactMatch, true);
-  assert.deepEqual(evidence.comparison.cases, cases.map((probeCase) => ({ probeCase, equal: true })));
+  assert.doesNotMatch(result.stdout, /instanceId|"environment"|"labels"|logName/u);
 });
 
-test("assembler retains both generations when one structural field differs", () => {
-  const result = runEvidence({
-    gen1: cloudEntries(),
-    gen2: cloudEntries({ "xff-ipv4": { xForwardedForElementCount: 2 } })
-  });
+test("assembler retains all events for a legitimate structural mismatch", () => {
+  const result = runEvidence({ gen1: cloudEntries("gen1"), gen2: cloudEntries("gen2", { "xff-ipv4": { jsonPayload: { xForwardedForElementCount: 2 } } }) });
   assert.equal(result.status, 0, result.stderr);
   const evidence = JSON.parse(result.stdout);
   assert.equal(evidence.events.length, 10);
-  assert.equal(evidence.comparison.exactMatch, false);
-  assert.deepEqual(
-    evidence.comparison.cases.filter(({ equal }) => !equal),
-    [{ probeCase: "xff-ipv4", equal: false }]
-  );
+  assert.deepEqual(evidence.comparison.cases.filter(({ equal }) => !equal), [{ probeCase: "xff-ipv4", equal: false }]);
 });
 
-test("assembler rejects invalid counts, cases, keys, and sensitive material", () => {
-  const valid = cloudEntries();
+test("assembler fail-closes complete-envelope violations", () => {
   const mutations = [
-    { gen1: valid.slice(0, 4), gen2: valid },
-    { gen1: valid, gen2: valid.map((entry, index) => index === 4
-      ? { jsonPayload: { ...entry.jsonPayload, probeCase: "baseline" } }
-      : entry) },
-    { gen1: valid, gen2: valid.map((entry, index) => index === 0
-      ? { jsonPayload: { ...entry.jsonPayload, unexpected: true } }
-      : entry) },
-    { gen1: valid, gen2: valid.map((entry, index) => index === 0
-      ? { ...entry, httpRequest: { remoteIp: "192.0.2.99" } }
-      : entry) },
-    { gen1: valid, gen2: valid.map((entry, index) => index === 0
-      ? { jsonPayload: { ...entry.jsonPayload, msg: `token ${"a".repeat(64)}` } }
-      : entry) }
+    ...["insertId", "jsonPayload", "labels", "logName", "receiveTimestamp", "resource", "severity", "timestamp"].map((key) => (entry) => { delete entry[key]; }),
+    ...["httpRequest", "metadata", "split", "errorGroups", "apphub", "apphubDestination", "apphubSource", "otel", "protoPayload", "textPayload", "futureLoggingField"].map((key) => (entry) => { entry[key] = "synthetic"; }),
+    (entry) => { entry.resource.extra = true; },
+    (entry) => { entry.resource.labels.extra = "x"; },
+    (entry) => { entry.operation = { id: "x", producer: "y", first: true, last: true, extra: true }; },
+    (entry) => { entry.sourceLocation = { file: "a", line: "1", function: "b", extra: true }; },
+    (entry) => { entry.jsonPayload.extra = true; },
+    (entry) => { entry.insertId = ""; }, (entry) => { entry.insertId = "a".repeat(257); }, (entry) => { entry.insertId = "bad\u0001"; },
+    (entry) => { entry.timestamp = "2026-02-31T00:00:00Z"; }, (entry) => { entry.receiveTimestamp = "2026-08-17T06:00:00.1234567890Z"; },
+    (entry) => { entry.logName = "projects/other/logs/stdout"; }, (entry) => { entry.severity = "ERROR"; },
+    (entry) => { entry.trace = "projects/shipmastr-core-prod/traces/" + "A".repeat(32); }, (entry) => { entry.spanId = "A".repeat(16); }, (entry) => { entry.traceSampled = "true"; },
+    (entry) => { entry.resource.labels.revision_name = revisions.gen2; }, (entry) => { entry.labels.instanceId = "g"; },
+    (entry) => { entry.labels.environment = "not-diagnostic"; }, (entry) => { entry.labels.unexpected = "x"; },
+    (entry) => { entry.operation = {}; }, (entry) => { entry.sourceLocation = {}; },
+    (entry) => { entry.jsonPayload.hostname = ""; }, (entry) => { entry.jsonPayload.level = 31; }, (entry) => { entry.jsonPayload.pid = 0; }, (entry) => { entry.jsonPayload.time = -1; }
   ];
-  for (const matrix of mutations) {
-    const result = runEvidence(matrix);
-    assert.equal(result.stdout, "");
-    assert.notEqual(result.status, 0);
-  }
+  for (const change of mutations) assertRejected(mutateOne(change));
 });
 
-test("assembler rejects sensitive wrapper fields outside the two generation logs", () => {
-  const valid = { gen1: cloudEntries(), gen2: cloudEntries() };
-  const mutations = [
-    { ...valid, rawHeaders: { "x-forwarded-for": "192.0.2.99" } },
-    { ...valid, metadata: `token ${"a".repeat(64)}` },
-    { ...valid, origin: "2001:db8::1" }
-  ];
-  for (const matrix of mutations) {
-    const result = runEvidence(matrix);
-    assert.equal(result.stdout, "");
-    assert.notEqual(result.status, 0);
-  }
-});
-
-test("assembler rejects prohibited fields and URL values nested under allowed wrappers", () => {
-  const valid = cloudEntries();
-  const nestedSensitiveMaterial = [
-    ["labels", { body: "raw request payload" }],
-    ["labels", { authorizationHeader: "redacted material" }],
-    ["labels", { cookieValue: "redacted material" }],
-    ["resource", { requestHeaders: { accept: "application/json" } }],
-    ["resource", { xForwardedForHeader: "redacted material" }],
-    ["operation", { probeToken: "different-token-material" }],
-    ["resource", { requestUrl: "https://example.com/private" }],
-    ["resource", { requestUri: "/private/path" }],
-    ["operation", { requestBody: "raw request payload" }],
-    ["operation", { responseSignature: "deadbeef" }],
-    ["labels", { serviceCredential: "private credential" }],
-    ["labels", { apiKey: "redacted material" }],
-    ["labels", { databasePassword: "redacted material" }],
-    ["labels", { privateKey: "redacted material" }],
-    ["labels", { environmentVariables: ["PRIVATE_KEY=value"] }],
-    ["operation", { "x-shipmastr-intake-signature": "deadbeef" }],
-    ["labels", { credentials: "private credential" }],
-    ["labels", { envList: ["PRIVATE_KEY=value"] }],
-    ["labels", { note: "https://example.com/private" }]
-  ];
-  for (const [wrapperKey, wrapperValue] of nestedSensitiveMaterial) {
-    const result = runEvidence({
-      gen1: valid.map((entry, index) => index === 0
-        ? { ...entry, [wrapperKey]: wrapperValue }
-        : entry),
-      gen2: valid
-    });
-    assert.equal(result.stdout, "");
-    assert.notEqual(result.status, 0);
-  }
-});
-
-test("assembler rejects URL and URI semantic tokens anywhere in composite wrapper keys", () => {
-  const valid = cloudEntries();
-  const fields = [
-    ["uriMetadata", "relative-path"],
-    ["requestUriValue", "/private/path"],
-    ["sourceURLText", "relative-path"],
-    ["request_uri_value", "relative-path"],
-    ["REQUEST-URI-VALUE", "relative-path"],
-    ["canonical_url", "relative-path"],
-    ["requesturivalue", "relative-path"],
-    ["sourceurltext", "relative-path"]
-  ];
-  for (const [field, value] of fields) {
-    const result = runEvidence({
-      gen1: valid.map((entry, index) => index === 0
-        ? { ...entry, labels: { [field]: value } }
-        : entry),
-      gen2: valid
-    });
-    assert.equal(result.stdout, "", field);
-    assert.notEqual(result.status, 0, field);
-  }
-});
-
-test("assembler rejects IP and address semantic tokens anywhere in composite wrapper keys", () => {
-  const valid = cloudEntries();
-  const fields = [
-    "ipMetadata",
-    "clientIpText",
-    "sourceIPAddressText",
-    "client_ip_text",
-    "remoteAddressValue",
-    "REMOTE-ADDRESS-VALUE",
-    "candidate_address",
-    "clientiptext",
-    "remoteaddressvalue",
-    "sourceipaddresstext",
-    "candidateaddress"
-  ];
-  for (const field of fields) {
-    const result = runEvidence({
-      gen1: valid.map((entry, index) => index === 0
-        ? { ...entry, labels: { [field]: "redacted-text" } }
-        : entry),
-      gen2: valid
-    });
-    assert.equal(result.stdout, "", field);
-    assert.notEqual(result.status, 0, field);
-  }
-});
-
-test("assembler accepts benign wrapper names with incidental sensitive-looking substrings", () => {
-  const valid = cloudEntries();
-  const result = runEvidence({
-    gen1: valid.map((entry, index) => index === 0
-      ? {
-          ...entry,
-          labels: {
-            description: "ordinary metadata",
-            securityLevel: "standard",
-            curlVersion: "8",
-            scriptVersion: "one",
-            addressableState: "ready"
-          }
-        }
-      : entry),
-    gen2: valid
-  });
+test("assembler accepts bounded optional Cloud Logging fields and keeps labels out of evidence", () => {
+  const optional = { operation: { id: "o".repeat(256), producer: "p".repeat(256), first: true, last: false }, sourceLocation: { file: "f".repeat(512), line: "4294967295", function: "n".repeat(512) }, spanId: "b".repeat(16), trace: "projects/shipmastr-core-prod/traces/" + "c".repeat(32), traceSampled: false, labels: { instanceId: "d".repeat(256), environment: "diagnostic", generation: "one" } };
+  const result = runEvidence({ gen1: cloudEntries("gen1", { baseline: optional }), gen2: cloudEntries("gen2") });
   assert.equal(result.status, 0, result.stderr);
-  assert.equal(JSON.parse(result.stdout).events.length, 10);
+  assert.doesNotMatch(result.stdout, /"labels"/u);
 });
 
-test("assembler accepts ordinary safe Cloud Logging wrapper metadata", () => {
-  const valid = cloudEntries();
-  const result = runEvidence({
-    gen1: valid.map((entry, index) => index === 0
-      ? {
-          ...entry,
-          labels: { safeCategory: "probe" },
-          resource: {
-            type: "cloud_run_revision",
-            labels: {
-              project_id: "shipmastr-core-prod",
-              service_name: "shipmastr-api-staging",
-              revision_name: "shipmastr-api-staging-gen1",
-              location: "asia-south1"
-            }
-          },
-          operation: { id: "operation-1", producer: "cloud-run", first: true, last: true },
-          sourceLocation: { file: "logger.js", line: "10", function: "emitProbe" }
-        }
-      : entry),
-    gen2: valid
-  });
+test("assembler rejects invalid label maps and sensitive values without output", () => {
+  const valid = { gen1: cloudEntries("gen1"), gen2: cloudEntries("gen2") };
+  for (const rawLabels of ["", "[]", "{", JSON.stringify({ key: 1 })]) {
+    const result = runEvidence(valid, { GEN1_EXPECTED_LOG_LABELS_JSON: rawLabels });
+    assert.equal(result.stdout, ""); assert.equal(result.stderr, ""); assert.notEqual(result.status, 0);
+  }
+  for (const value of ["https://example.invalid/", "192.0.2.1", "2001:db8::1", "Forwarded: for=x", "X-Forwarded-For: x", "for=x", "b".repeat(64)]) {
+    assertRejected(mutateOne((entry) => { entry.jsonPayload.msg = value; }), value);
+  }
+});
+
+test("assembler validates every remaining Cloud Logging boundary fail-closed", () => {
+  const invalid = [
+    (entry) => { entry.insertId = null; }, (entry) => { entry.jsonPayload = null; },
+    (entry) => { entry.labels = null; }, (entry) => { entry.logName = 1; },
+    (entry) => { entry.receiveTimestamp = null; }, (entry) => { entry.resource = null; },
+    (entry) => { entry.severity = null; }, (entry) => { entry.timestamp = null; },
+    (entry) => { entry.operation = null; }, (entry) => { entry.sourceLocation = null; },
+    (entry) => { entry.spanId = null; }, (entry) => { entry.trace = null; },
+    (entry) => { entry.traceSampled = null; },
+    (entry) => { entry.timestamp = "2026-08-17"; }, (entry) => { entry.timestamp = "2026-08-17T06:00:00.1234567890+05:30"; },
+    (entry) => { entry.timestamp = "2026-13-17T06:00:00Z"; }, (entry) => { entry.timestamp = "2026-08-17T24:00:00Z"; },
+    (entry) => { delete entry.resource.labels.project_id; }, (entry) => { entry.resource.labels.project_id = "other"; },
+    (entry) => { entry.resource.labels.service_name = "other"; }, (entry) => { entry.resource.labels.configuration_name = "other"; },
+    (entry) => { entry.resource.labels.location = "other"; }, (entry) => { entry.resource.type = "other"; },
+    (entry) => { entry.labels.instanceId = ""; }, (entry) => { entry.labels.instanceId = "a".repeat(257); },
+    (entry) => { entry.labels.instanceId = "a\u0001"; }, (entry) => { delete entry.labels.instanceId; },
+    (entry) => { entry.operation = { id: "", producer: "p", first: true, last: true }; },
+    (entry) => { entry.operation = { id: "i", producer: "p", first: "true", last: true }; },
+    (entry) => { entry.operation = { id: "i\u0001", producer: "p", first: true, last: true }; },
+    (entry) => { entry.sourceLocation = { file: "f", line: "-1", function: "n" }; },
+    (entry) => { entry.sourceLocation = { file: "f", line: 1, function: "n" }; },
+    (entry) => { entry.sourceLocation = { file: "f", line: "4294967296", function: "n" }; },
+    (entry) => { entry.sourceLocation = { file: "f".repeat(513), line: "1", function: "n" }; },
+    (entry) => { entry.jsonPayload.hostname = 1; }, (entry) => { entry.jsonPayload.level = "30"; },
+    (entry) => { entry.jsonPayload.msg = 1; }, (entry) => { entry.jsonPayload.pid = 2_147_483_648; },
+    (entry) => { entry.jsonPayload.time = Number.MAX_SAFE_INTEGER + 1; },
+    (entry) => { entry.jsonPayload.forwardedPresent = "false"; }, (entry) => { entry.jsonPayload.forwardedElementCount = -1; },
+    (entry) => { entry.jsonPayload.forwardedMarkerPosition = 0; }, (entry) => { entry.jsonPayload.xForwardedForPresent = 0; },
+    (entry) => { entry.jsonPayload.xForwardedForElementCount = -1; }, (entry) => { entry.jsonPayload.reqIpEqualsSocket = null; }
+  ];
+  for (const change of invalid) assertRejected(mutateOne(change));
+  const inverse = { gen1: cloudEntries("gen1"), gen2: cloudEntries("gen2") };
+  inverse.gen2[0].resource.labels.revision_name = revisions.gen1;
+  assertRejected(inverse, "gen2 revision must not cross into gen1");
+});
+
+test("assembler accepts RFC 3339 variants and absent allowed fields", () => {
+  for (const timestamp of ["2026-08-17T06:00:00Z", "2026-08-17T06:00:00.1Z", "2026-08-17T06:00:00.123456789+05:30"]) {
+    const matrix = { gen1: cloudEntries("gen1"), gen2: cloudEntries("gen2") };
+    matrix.gen1[0].timestamp = timestamp;
+    const result = runEvidence(matrix);
+    assert.equal(result.status, 0, timestamp);
+  }
+  const matrix = { gen1: cloudEntries("gen1"), gen2: cloudEntries("gen2") };
+  for (const entry of [...matrix.gen1, ...matrix.gen2]) {
+    for (const key of ["hostname", "level", "msg", "pid", "time"]) delete entry.jsonPayload[key];
+    delete entry.labels.environment; delete entry.labels.generation;
+  }
+  const result = runEvidence(matrix, { GEN1_EXPECTED_LOG_LABELS_JSON: "{}", GEN2_EXPECTED_LOG_LABELS_JSON: "{}" });
   assert.equal(result.status, 0, result.stderr);
-  assert.equal(JSON.parse(result.stdout).events.length, 10);
+});
+
+test("assembler enforces raw-matrix and expected-label-map bounds", () => {
+  const valid = { gen1: cloudEntries("gen1"), gen2: cloudEntries("gen2") };
+  for (const rawMatrix of ["", " "]) {
+    const result = runEvidence(valid, { MATRIX_LOGS_JSON: rawMatrix });
+    assert.equal(result.stdout, ""); assert.equal(result.stderr, ""); assert.notEqual(result.status, 0);
+  }
+  const oversized = spawnSync(process.execPath, ["--input-type=module", "-e", `
+    process.argv[2] = "assemble";
+    process.env.MATRIX_LOGS_JSON = "{".repeat(262145);
+    process.env.PROBE_TOKEN_FOR_LEAK_CHECK = "b".repeat(64);
+    process.env.GEN1_REVISION = "shipmastr-api-staging-gen1";
+    process.env.GEN2_REVISION = "shipmastr-api-staging-gen2";
+    process.env.GEN1_EXPECTED_LOG_LABELS_JSON = "{}";
+    process.env.GEN2_EXPECTED_LOG_LABELS_JSON = "{}";
+    await import(${JSON.stringify(new URL("./rate-limit-proxy-probe-evidence.mjs", import.meta.url).href)});
+  `], { encoding: "utf8" });
+  assert.equal(oversized.stdout, ""); assert.equal(oversized.stderr, ""); assert.notEqual(oversized.status, 0);
+  const tooMany = Object.fromEntries(Array.from({ length: 65 }, (_, index) => [`k${index}`, "v"]));
+  const invalidMaps = [JSON.stringify(tooMany), JSON.stringify({ "a\u0001": "v" }), JSON.stringify({ key: "v\u0001" }), JSON.stringify({ key: "v".repeat(257) })];
+  for (const rawLabels of invalidMaps) {
+    const result = runEvidence(valid, { GEN1_EXPECTED_LOG_LABELS_JSON: rawLabels });
+    assert.equal(result.stdout, ""); assert.equal(result.stderr, ""); assert.notEqual(result.status, 0);
+  }
 });
