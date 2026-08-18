@@ -108,10 +108,14 @@ test("assembler retains all events for a legitimate structural mismatch", () => 
   assert.deepEqual(evidence.comparison.cases.filter(({ equal }) => !equal), [{ probeCase: "xff-ipv4", equal: false }]);
 });
 
-test("assembler accepts the observed null stdout severity but rejects other levels", () => {
+test("assembler accepts omitted or null stdout severity but rejects other levels", () => {
   const matrix = { gen1: cloudEntries("gen1"), gen2: cloudEntries("gen2") };
   for (const entry of [...matrix.gen1, ...matrix.gen2]) entry.severity = null;
   assertAccepted(matrix, "Cloud Logging stdout entries with null severity");
+
+  const omitted = { gen1: cloudEntries("gen1"), gen2: cloudEntries("gen2") };
+  for (const entry of [...omitted.gen1, ...omitted.gen2]) delete entry.severity;
+  assertAccepted(omitted, "Cloud Logging stdout entries with omitted severity");
 
   const invalid = { gen1: cloudEntries("gen1"), gen2: cloudEntries("gen2") };
   invalid.gen1[0].severity = "WARNING";
@@ -120,7 +124,7 @@ test("assembler accepts the observed null stdout severity but rejects other leve
 
 test("assembler fail-closes complete-envelope violations", () => {
   const mutations = [
-    ...["insertId", "jsonPayload", "labels", "logName", "receiveTimestamp", "resource", "severity", "timestamp"].map((key) => (entry) => { delete entry[key]; }),
+    ...["insertId", "jsonPayload", "labels", "logName", "receiveTimestamp", "resource", "timestamp"].map((key) => (entry) => { delete entry[key]; }),
     ...["httpRequest", "metadata", "split", "errorGroups", "apphub", "apphubDestination", "apphubSource", "otel", "protoPayload", "textPayload", "futureLoggingField"].map((key) => (entry) => { entry[key] = "synthetic"; }),
     (entry) => { entry.resource.extra = true; },
     (entry) => { entry.resource.labels.extra = "x"; },

@@ -21,8 +21,8 @@ const structuralKeys = [
   "xForwardedForElementCount", "xForwardedForMarkerPosition", "reqIpEqualsSocket",
   "reqIpXForwardedForPosition", "socketXForwardedForPosition"
 ];
-const requiredEnvelopeKeys = ["insertId", "jsonPayload", "labels", "logName", "receiveTimestamp", "resource", "severity", "timestamp"];
-const optionalEnvelopeKeys = ["operation", "sourceLocation", "spanId", "trace", "traceSampled"];
+const requiredEnvelopeKeys = ["insertId", "jsonPayload", "labels", "logName", "receiveTimestamp", "resource", "timestamp"];
+const optionalEnvelopeKeys = ["operation", "severity", "sourceLocation", "spanId", "trace", "traceSampled"];
 const rfc3339 = /^[0-9]{4}-(?:0[1-9]|1[0-2])-(?:0[1-9]|[12][0-9]|3[01])T(?:[01][0-9]|2[0-3]):[0-5][0-9]:[0-5][0-9](?:\.[0-9]{1,9})?(?:Z|[+-](?:[01][0-9]|2[0-3]):[0-5][0-9])$/u;
 const hostname = /^(?=.{1,253}$)[A-Za-z0-9](?:[A-Za-z0-9._-]*[A-Za-z0-9])?$/u;
 const int64Maximum = "9223372036854775807";
@@ -124,9 +124,9 @@ function validateEnvelopeScalars(entry) {
   if (entry.logName !== "projects/shipmastr-core-prod/logs/run.googleapis.com%2Fstdout") fail("LOG_NAME");
   validateRfc3339(entry.timestamp, "TIMESTAMP");
   validateRfc3339(entry.receiveTimestamp, "RECEIVE_TIMESTAMP");
-  // Cloud Logging may represent the default stdout severity as null; retain
-  // the strict INFO/null boundary and reject every explicit other level.
-  if (entry.severity !== null && entry.severity !== "INFO") fail("SEVERITY");
+  // Cloud Logging may omit or represent the default stdout severity as null;
+  // retain the strict INFO/null boundary and reject every explicit other level.
+  if (Object.hasOwn(entry, "severity") && entry.severity !== null && entry.severity !== "INFO") fail("SEVERITY");
   if (Object.hasOwn(entry, "trace") && !/^projects\/shipmastr-core-prod\/traces\/[0-9a-f]{32}$/u.test(entry.trace)) fail("TRACE");
   if (Object.hasOwn(entry, "spanId") && !/^[0-9a-f]{16}$/u.test(entry.spanId)) fail("SPAN_ID");
   if (Object.hasOwn(entry, "traceSampled")) exactBoolean(entry.traceSampled, "TRACE_SAMPLED");
