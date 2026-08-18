@@ -108,6 +108,16 @@ test("assembler retains all events for a legitimate structural mismatch", () => 
   assert.deepEqual(evidence.comparison.cases.filter(({ equal }) => !equal), [{ probeCase: "xff-ipv4", equal: false }]);
 });
 
+test("assembler accepts the observed null stdout severity but rejects other levels", () => {
+  const matrix = { gen1: cloudEntries("gen1"), gen2: cloudEntries("gen2") };
+  for (const entry of [...matrix.gen1, ...matrix.gen2]) entry.severity = null;
+  assertAccepted(matrix, "Cloud Logging stdout entries with null severity");
+
+  const invalid = { gen1: cloudEntries("gen1"), gen2: cloudEntries("gen2") };
+  invalid.gen1[0].severity = "WARNING";
+  assertRejected(invalid, "non-INFO severity remains rejected");
+});
+
 test("assembler fail-closes complete-envelope violations", () => {
   const mutations = [
     ...["insertId", "jsonPayload", "labels", "logName", "receiveTimestamp", "resource", "severity", "timestamp"].map((key) => (entry) => { delete entry[key]; }),
@@ -152,7 +162,7 @@ test("assembler validates every remaining Cloud Logging boundary fail-closed", (
     (entry) => { entry.insertId = null; }, (entry) => { entry.jsonPayload = null; },
     (entry) => { entry.labels = null; }, (entry) => { entry.logName = 1; },
     (entry) => { entry.receiveTimestamp = null; }, (entry) => { entry.resource = null; },
-    (entry) => { entry.severity = null; }, (entry) => { entry.timestamp = null; },
+    (entry) => { entry.severity = "WARNING"; }, (entry) => { entry.timestamp = null; },
     (entry) => { entry.operation = null; }, (entry) => { entry.sourceLocation = null; },
     (entry) => { entry.spanId = null; }, (entry) => { entry.trace = null; },
     (entry) => { entry.traceSampled = null; },

@@ -124,7 +124,9 @@ function validateEnvelopeScalars(entry) {
   if (entry.logName !== "projects/shipmastr-core-prod/logs/run.googleapis.com%2Fstdout") fail("LOG_NAME");
   validateRfc3339(entry.timestamp, "TIMESTAMP");
   validateRfc3339(entry.receiveTimestamp, "RECEIVE_TIMESTAMP");
-  if (entry.severity !== "INFO") fail("SEVERITY");
+  // Cloud Logging may represent the default stdout severity as null; retain
+  // the strict INFO/null boundary and reject every explicit other level.
+  if (entry.severity !== null && entry.severity !== "INFO") fail("SEVERITY");
   if (Object.hasOwn(entry, "trace") && !/^projects\/shipmastr-core-prod\/traces\/[0-9a-f]{32}$/u.test(entry.trace)) fail("TRACE");
   if (Object.hasOwn(entry, "spanId") && !/^[0-9a-f]{16}$/u.test(entry.spanId)) fail("SPAN_ID");
   if (Object.hasOwn(entry, "traceSampled")) exactBoolean(entry.traceSampled, "TRACE_SAMPLED");
