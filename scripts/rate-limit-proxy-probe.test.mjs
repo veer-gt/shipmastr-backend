@@ -49,9 +49,17 @@ test("every gcloud boundary is routed through the portable deadline supervisor",
   const gcloudBoundaryLines = source.split("\n").filter((line) =>
     /\bgcloud\b/u.test(line) && !line.includes("for required_command")
   );
-  assert.equal(gcloudBoundaryLines.length, 4);
+  assert.equal(gcloudBoundaryLines.length, 5);
   for (const line of gcloudBoundaryLines) assert.match(line, /^\s+run_command_/u);
   assert.doesNotMatch(source, /command -v (?:g?timeout)\b/u);
+});
+
+test("Cloud Logging matrix reads use a separate bounded deadline", () => {
+  const source = readFileSync(runnerPath, "utf8");
+  assert.match(source, /GCLOUD_LOG_READ_TIMEOUT_SECONDS=300\b/u);
+  assert.match(source, /gcloud_log_read_capture\(\) \{[\s\S]*?GCLOUD_LOG_READ_TIMEOUT_SECONDS/u);
+  assert.equal((source.match(/gcloud_log_read_capture GEN[12]_LOGS_JSON/gu) ?? []).length, 2);
+  assert.equal((source.match(/gcloud_read_capture GEN[12]_LOGS_JSON/gu) ?? []).length, 0);
 });
 
 test("actual runner self-test exercises array and two-cell bookkeeping", () => {

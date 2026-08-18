@@ -4,6 +4,7 @@ umask 077
 
 COMMAND_TIMEOUT_STATUS=124
 GCLOUD_READ_TIMEOUT_SECONDS=60
+GCLOUD_LOG_READ_TIMEOUT_SECONDS=300
 GCLOUD_MUTATION_TIMEOUT_SECONDS=600
 GCLOUD_BUILD_TIMEOUT_SECONDS=1800
 GCLOUD_DEPLOY_TIMEOUT_SECONDS=900
@@ -151,6 +152,12 @@ gcloud_read_capture() {
   local variable_name="$1"
   shift
   run_command_capture "$variable_name" "$GCLOUD_READ_TIMEOUT_SECONDS" gcloud "$@"
+}
+
+gcloud_log_read_capture() {
+  local variable_name="$1"
+  shift
+  run_command_capture "$variable_name" "$GCLOUD_LOG_READ_TIMEOUT_SECONDS" gcloud "$@"
 }
 
 gcloud_mutation() {
@@ -1448,11 +1455,11 @@ MATRIX_URLS[1]="$DEPLOYED_TAG_URL"
 run_five_cases "${MATRIX_URLS[1]}"
 
 GEN1_LOGS_JSON=""
-gcloud_read_capture GEN1_LOGS_JSON logging read \
+gcloud_log_read_capture GEN1_LOGS_JSON logging read \
   "resource.type=\"cloud_run_revision\" AND resource.labels.revision_name=\"${MATRIX_REVISIONS[0]}\" AND jsonPayload.eventName=\"rate_limit_proxy_probe\"" \
   --project="$PROJECT" --freshness=30m --order=asc --limit=20 --format=json
 GEN2_LOGS_JSON=""
-gcloud_read_capture GEN2_LOGS_JSON logging read \
+gcloud_log_read_capture GEN2_LOGS_JSON logging read \
   "resource.type=\"cloud_run_revision\" AND resource.labels.revision_name=\"${MATRIX_REVISIONS[1]}\" AND jsonPayload.eventName=\"rate_limit_proxy_probe\"" \
   --project="$PROJECT" --freshness=30m --order=asc --limit=20 --format=json
 MATRIX_LOGS_JSON="$(GEN1_LOGS_JSON="$GEN1_LOGS_JSON" GEN2_LOGS_JSON="$GEN2_LOGS_JSON" \
