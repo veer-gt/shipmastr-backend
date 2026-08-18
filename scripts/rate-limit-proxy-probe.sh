@@ -180,12 +180,21 @@ create_run_identity() {
   local timestamp="$1"
   local commit_prefix="$2"
   local nonce="$3"
+  local service_name="$4"
+  local compact_identity=""
+  [[ "$timestamp" =~ ^[0-9]{14}$ ]]
+  [[ "$commit_prefix" =~ ^[0-9a-f]{12}$ ]]
+  [[ "$nonce" =~ ^[0-9a-f]{12}$ ]]
+  test -n "$service_name"
   RUN_ID="$timestamp-$commit_prefix-$nonce"
-  TAG_G1="rlp-$RUN_ID-g1"
-  TAG_G2="rlp-$RUN_ID-g2"
+  compact_identity="${timestamp:6:6}${commit_prefix:0:4}${nonce:0:8}"
+  TAG_G1="rlp-$compact_identity-g1"
+  TAG_G2="rlp-$compact_identity-g2"
   [[ "$RUN_ID" =~ ^[0-9]{14}-[0-9a-f]{12}-[0-9a-f]{12}$ ]]
-  [[ "$TAG_G1" =~ ^rlp-[0-9a-z-]+-g1$ && "${#TAG_G1}" -le 63 ]]
-  [[ "$TAG_G2" =~ ^rlp-[0-9a-z-]+-g2$ && "${#TAG_G2}" -le 63 ]]
+  [[ "$TAG_G1" =~ ^rlp-[0-9a-f]{18}-g1$ ]]
+  [[ "$TAG_G2" =~ ^rlp-[0-9a-f]{18}-g2$ ]]
+  test "$(( ${#service_name} + ${#TAG_G1} ))" -le 46
+  test "$(( ${#service_name} + ${#TAG_G2} ))" -le 46
   test "$TAG_G1" != "$TAG_G2"
 }
 
@@ -314,7 +323,9 @@ gen2
   create_run_identity \
     "$(date -u +%Y%m%d%H%M%S)" \
     "$(git rev-parse --short=12 HEAD)" \
-    "001122334455"
+    "001122334455" \
+    "shipmastr-api-staging"
+  test "$(( ${#TAG_G1} + ${#TAG_G2} ))" -eq 50
   lock_test_root="$(mktemp -d)"
   OPERATOR_LOCK_DIR="$lock_test_root/operator.lock"
   OPERATOR_LOCK_OWNER_FILE="$OPERATOR_LOCK_DIR/owner"
@@ -622,7 +633,8 @@ RUN_TIMESTAMP="$(date -u +%Y%m%d%H%M%S)"
 create_run_identity \
   "$RUN_TIMESTAMP" \
   "$(git rev-parse --short=12 HEAD)" \
-  "$RUN_NONCE"
+  "$RUN_NONCE" \
+  "$SERVICE"
 IMAGE_TAG="rate-limit-proxy-probe-$RUN_ID"
 EVIDENCE_TMP="$EVIDENCE_DIR/.probe-results-$RUN_ID.tmp"
 PROBE_RESULTS_RUN_PATH="$EVIDENCE_DIR/.probe-results-$RUN_ID.ready"

@@ -236,6 +236,34 @@ test("runner uses a lowercase-safe numeric UTC timestamp for run-owned tags", ()
   assert.doesNotMatch(source, /RUN_TIMESTAMP="\$\(date -u \+%Y%m%dT%H%M%SZ\)"/u);
 });
 
+function extractedRunIdentityFunction(source) {
+  const start = source.indexOf("create_run_identity() {");
+  const end = source.indexOf("\n\nacquire_operator_lock()", start);
+  assert.ok(start >= 0 && end > start);
+  return source.slice(start, end);
+}
+
+test("run-owned tags fit the observed staging service budget", () => {
+  const source = readFileSync(runnerPath, "utf8");
+  const service = source.match(/^SERVICE="([^"]+)"$/mu)?.[1];
+  assert.equal(service, "shipmastr-api-staging");
+  const script = `${extractedRunIdentityFunction(source)}
+create_run_identity 20260818051610 13123c4ebf2a 5004c74d6a49 ${JSON.stringify(service)}
+printf '%s\\n%s\\n%s\\n' "$RUN_ID" "$TAG_G1" "$TAG_G2"
+`;
+  const result = spawnSync("bash", ["-c", script], { encoding: "utf8" });
+  assert.equal(result.status, 0, result.stderr);
+  const [runId, tagG1, tagG2] = result.stdout.trim().split("\n");
+  assert.equal(runId, "20260818051610-13123c4ebf2a-5004c74d6a49");
+  assert.equal(tagG1, "rlp-18051613125004c74d-g1");
+  assert.equal(tagG2, "rlp-18051613125004c74d-g2");
+  assert.match(tagG1, /^rlp-[0-9a-f]{18}-g1$/u);
+  assert.match(tagG2, /^rlp-[0-9a-f]{18}-g2$/u);
+  assert.notEqual(tagG1, tagG2);
+  assert.equal(service.length + tagG1.length <= 46, true);
+  assert.equal(service.length + tagG2.length <= 46, true);
+});
+
 test("self-test and all read-only gates precede token build and deploy", () => {
   const source = readFileSync(runnerPath, "utf8");
   const selfTest = source.indexOf("--bash32-self-test");
