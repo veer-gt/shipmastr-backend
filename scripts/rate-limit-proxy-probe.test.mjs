@@ -588,8 +588,12 @@ test("normal runner succeeds through fake cloud boundaries and mutates only its 
   const curls = run.calls.filter(({ command }) => command === "curl");
   assert.equal(curls.length, 10);
   for (const { args } of curls) {
-    assert.ok(args.includes("--connect-timeout=10"));
-    assert.ok(args.includes("--max-time=30"));
+    assert.deepEqual(args.slice(args.indexOf("--connect-timeout"), args.indexOf("--connect-timeout") + 2), [
+      "--connect-timeout", "10"
+    ]);
+    assert.deepEqual(args.slice(args.indexOf("--max-time"), args.indexOf("--max-time") + 2), [
+      "--max-time", "30"
+    ]);
   }
   assert.deepEqual(new Set(removedTags(run)), new Set(deployedTags(run)));
   assert.equal(gcloudCalls(run, ["run", "services", "update"]).length, 1);

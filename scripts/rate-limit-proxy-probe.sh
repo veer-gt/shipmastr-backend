@@ -1375,16 +1375,16 @@ deploy_matrix_cell() {
 run_five_cases() {
   local tag_url="$1"
 
-  BASELINE_RESULT="$(curl -sS --connect-timeout="$CURL_CONNECT_TIMEOUT_SECONDS" \
-    --max-time="$CURL_TOTAL_TIMEOUT_SECONDS" -o /dev/null -w 'baseline=%{http_code}\n' \
+  BASELINE_RESULT="$(curl -sS --connect-timeout "$CURL_CONNECT_TIMEOUT_SECONDS" \
+    --max-time "$CURL_TOTAL_TIMEOUT_SECONDS" -o /dev/null -w 'baseline=%{http_code}\n' \
     -H "x-shipmastr-rate-limit-probe-token: $PROBE_TOKEN" \
     -H 'x-shipmastr-rate-limit-probe-case: baseline' \
     "$tag_url/api/health")"
   test "$BASELINE_RESULT" = "baseline=200"
   printf '%s\n' "$BASELINE_RESULT"
 
-  FORWARDED_IPV4_RESULT="$(curl -sS --connect-timeout="$CURL_CONNECT_TIMEOUT_SECONDS" \
-    --max-time="$CURL_TOTAL_TIMEOUT_SECONDS" -o /dev/null -w 'forwarded_ipv4=%{http_code}\n' \
+  FORWARDED_IPV4_RESULT="$(curl -sS --connect-timeout "$CURL_CONNECT_TIMEOUT_SECONDS" \
+    --max-time "$CURL_TOTAL_TIMEOUT_SECONDS" -o /dev/null -w 'forwarded_ipv4=%{http_code}\n' \
     -H "x-shipmastr-rate-limit-probe-token: $PROBE_TOKEN" \
     -H 'x-shipmastr-rate-limit-probe-case: forwarded-ipv4' \
     -H 'Forwarded: for=192.0.2.10' \
@@ -1392,8 +1392,8 @@ run_five_cases() {
   test "$FORWARDED_IPV4_RESULT" = "forwarded_ipv4=200"
   printf '%s\n' "$FORWARDED_IPV4_RESULT"
 
-  XFF_IPV4_RESULT="$(curl -sS --connect-timeout="$CURL_CONNECT_TIMEOUT_SECONDS" \
-    --max-time="$CURL_TOTAL_TIMEOUT_SECONDS" -o /dev/null -w 'xff_ipv4=%{http_code}\n' \
+  XFF_IPV4_RESULT="$(curl -sS --connect-timeout "$CURL_CONNECT_TIMEOUT_SECONDS" \
+    --max-time "$CURL_TOTAL_TIMEOUT_SECONDS" -o /dev/null -w 'xff_ipv4=%{http_code}\n' \
     -H "x-shipmastr-rate-limit-probe-token: $PROBE_TOKEN" \
     -H 'x-shipmastr-rate-limit-probe-case: xff-ipv4' \
     -H 'X-Forwarded-For: 198.51.100.20' \
@@ -1401,8 +1401,8 @@ run_five_cases() {
   test "$XFF_IPV4_RESULT" = "xff_ipv4=200"
   printf '%s\n' "$XFF_IPV4_RESULT"
 
-  BOTH_IPV4_RESULT="$(curl -sS --connect-timeout="$CURL_CONNECT_TIMEOUT_SECONDS" \
-    --max-time="$CURL_TOTAL_TIMEOUT_SECONDS" -o /dev/null -w 'both_ipv4=%{http_code}\n' \
+  BOTH_IPV4_RESULT="$(curl -sS --connect-timeout "$CURL_CONNECT_TIMEOUT_SECONDS" \
+    --max-time "$CURL_TOTAL_TIMEOUT_SECONDS" -o /dev/null -w 'both_ipv4=%{http_code}\n' \
     -H "x-shipmastr-rate-limit-probe-token: $PROBE_TOKEN" \
     -H 'x-shipmastr-rate-limit-probe-case: both-ipv4' \
     -H 'Forwarded: for=192.0.2.30' \
@@ -1411,8 +1411,8 @@ run_five_cases() {
   test "$BOTH_IPV4_RESULT" = "both_ipv4=200"
   printf '%s\n' "$BOTH_IPV4_RESULT"
 
-  BOTH_IPV6_RESULT="$(curl -sS --connect-timeout="$CURL_CONNECT_TIMEOUT_SECONDS" \
-    --max-time="$CURL_TOTAL_TIMEOUT_SECONDS" -o /dev/null -w 'both_ipv6=%{http_code}\n' \
+  BOTH_IPV6_RESULT="$(curl -sS --connect-timeout "$CURL_CONNECT_TIMEOUT_SECONDS" \
+    --max-time "$CURL_TOTAL_TIMEOUT_SECONDS" -o /dev/null -w 'both_ipv6=%{http_code}\n' \
     -H "x-shipmastr-rate-limit-probe-token: $PROBE_TOKEN" \
     -H 'x-shipmastr-rate-limit-probe-case: both-ipv6' \
     -H 'Forwarded: for="[2001:db8::1]"' \
