@@ -24,3 +24,19 @@ for (const policy of [
     assert.equal(evaluateActivationPolicy({ ...base, policy } as never).enabled, false);
   });
 }
+
+for (const [field, value] of [
+  ['merchantId', 'm_2'],
+  ['provider', 'CASHFREE'],
+  ['environment', 'LIVE'],
+  ['operation', 'STATUS_QUERY'],
+] as const) {
+  it(`fails disabled for mismatched ${field}`, () => {
+    const policy = {
+      version: 'mock-v1', approved: true, merchantId: 'm_1', provider: 'MOCK',
+      environment: 'TEST', operation: 'CREATE_ATTEMPT', maxAmountPaise: 10_000n,
+      [field]: value,
+    };
+    assert.equal(evaluateActivationPolicy({ ...base, policy } as never).enabled, false);
+  });
+}
