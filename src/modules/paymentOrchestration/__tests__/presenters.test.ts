@@ -154,6 +154,24 @@ describe('payment orchestration presenters', () => {
     assert.doesNotMatch(JSON.stringify(model), /rawBody|credentialVersionId|secret|buyerPhone|buyerEmail/i);
   });
 
+  it('never exposes free-form read-only query notes in the operator read model', () => {
+    const model = toOperatorPaymentReadModel(
+      operatorContext({
+        readOnlyQueryRequests: [
+          {
+            requestId: 'query_sensitive',
+            note: 'buyer@example.test +919999999999 token=sekret card 4111111111111111',
+          },
+        ],
+      }),
+    );
+
+    const serialized = JSON.stringify(model);
+    assert.ok(model.timeline.some((entry) => entry.category === 'READ_ONLY_QUERY' && entry.requestId === 'query_sensitive'));
+    assert.doesNotMatch(serialized, /buyer@example\.test|\+919999999999|sekret|4111111111111111|token=/i);
+    assert.doesNotMatch(serialized, /"note":/i);
+  });
+
   it('shows refund accountability without an execution control', (t) => {
     t.mock.method(Date, 'now', () => Date.parse('2026-08-28T10:00:00.000Z'));
 

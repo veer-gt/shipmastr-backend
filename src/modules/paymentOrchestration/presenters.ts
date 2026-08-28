@@ -224,7 +224,7 @@ export function toOperatorPaymentReadModel(context: OperatorPaymentReadModelCont
         category: 'READ_ONLY_QUERY',
         at: '',
         requestId: request.requestId,
-        note: request.note ?? 'NONE',
+        state: 'REQUESTED',
       }),
     );
   }
