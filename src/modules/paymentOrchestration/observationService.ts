@@ -11,6 +11,10 @@ import type {
   ReductionPersistenceContext,
   ReviewStatus,
 } from './types.js';
+import type {
+  SlaEscalationRequest,
+  SlaEscalationResult,
+} from './reconciliationWorker.js';
 
 type Tx = Parameters<PrismaClient['$transaction']>[0] extends (tx: infer T) => unknown ? T : never;
 
@@ -86,6 +90,93 @@ export async function ingestObservation(
       resolvedAt: plan.resolved
         ? context.targetAttempt.resolvedAt ?? effectiveObservationTime(context.triggeringObservation)
         : null,
+    };
+  });
+}
+
+/**
+ * Persist the policy-driven SLA transition under the same serialized lock
+ * order as observation ingestion. The worker passes identifiers rather than
+ * mutating a listed attempt snapshot, so a query that resolves concurrently
+ * wins and the escalation becomes a no-op.
+ */
+export async function persistSlaEscalation(
+  prisma: PrismaClient,
+  input: SlaEscalationRequest,
+): Promise<SlaEscalationResult> {
+  return prisma.$transaction(async (tx) => {
+    await lockObligation(tx, input.obligationId, input.merchantId);
+    await lockAttemptsForObligation(tx, input.obligationId, input.merchantId);
+
+    const attempt = await tx.paymentAttempt.findFirst({
+      where: {
+        id: input.attemptId,
+        obligationId: input.obligationId,
+        merchantId: input.merchantId,
+        resolvedAt: null,
+      },
+    });
+
+    if (!attempt) {
+      return { kind: 'NO_LONGER_UNRESOLVED' };
+    }
+
+    const nextOutcomeStatus = attempt.outcomeStatus === 'PENDING'
+      ? 'UNKNOWN'
+      : attempt.outcomeStatus;
+    const nextReviewStatus = attempt.reviewStatus === 'IN_PROGRESS'
+      ? 'IN_PROGRESS'
+      : 'REQUIRED';
+    const outcomeChanged = attempt.outcomeStatus !== nextOutcomeStatus;
+    const reviewChanged = attempt.reviewStatus !== nextReviewStatus;
+
+    await tx.paymentAttempt.update({
+      where: { id: attempt.id },
+      data: {
+        outcomeStatus: nextOutcomeStatus,
+        reviewStatus: nextReviewStatus,
+        resolvedAt: null,
+        lastOutcomeChangedAt: outcomeChanged
+          ? input.observedAt
+          : attempt.lastOutcomeChangedAt,
+      },
+    });
+
+    if (outcomeChanged) {
+      await tx.paymentOutcomeTransition.create({
+        data: {
+          attemptId: attempt.id,
+          obligationId: attempt.obligationId,
+          merchantId: attempt.merchantId,
+          priorOutcomeStatus: attempt.outcomeStatus,
+          nextOutcomeStatus,
+          reasonCode: input.reason,
+          triggeringObservationId: null,
+        },
+      });
+    }
+
+    if (reviewChanged) {
+      await tx.reconciliationReviewHistory.create({
+        data: {
+          attemptId: attempt.id,
+          obligationId: attempt.obligationId,
+          merchantId: attempt.merchantId,
+          priorReviewStatus: attempt.reviewStatus,
+          nextReviewStatus,
+          completedByType: null,
+          actorId: null,
+          reasonCode: input.reason,
+          triggeringObservationId: null,
+          correlationId: null,
+        },
+      });
+    }
+
+    return {
+      kind: 'ESCALATED',
+      outcomeStatus: nextOutcomeStatus,
+      reviewStatus: nextReviewStatus,
     };
   });
 }

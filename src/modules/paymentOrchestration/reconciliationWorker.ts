@@ -1,3 +1,4 @@
+import type { PaymentAttempt } from '@prisma/client';
 import type {
   MockStatusQueryInput,
   RawIngestionRejection,
@@ -34,32 +35,53 @@ export interface Clock {
   now(): Date;
 }
 
-export interface ReconciliationAttempt {
-  id: string;
-  obligationId: string;
-  merchantId: string;
-  provider: 'MOCK';
-  environment: 'TEST' | 'LIVE';
-  credentialBindingId: string;
-  credentialVersionId: string;
+export type ReconciliationAttempt = Pick<
+  PaymentAttempt,
+  | 'id'
+  | 'obligationId'
+  | 'merchantId'
+  | 'provider'
+  | 'environment'
+  | 'credentialBindingId'
+  | 'credentialVersionId'
+  | 'createdAt'
+  | 'resolvedAt'
+  | 'lastObservationAt'
+  | 'outcomeStatus'
+  | 'reviewStatus'
+>;
+
+export interface DerivedReconciliationState {
   amountPaise: bigint;
   currency: 'INR';
-  createdAt: Date;
-  resolvedAt: Date | null;
-  lastObservedAt: Date | null;
-  lastReconciledAt: Date | null;
   queryCount: number;
-  outcomeStatus: OutcomeStatus;
-  reviewStatus: ReviewStatus;
-  scenario?: MockStatusQueryInput['scenario'];
+  lastReconciledAt: Date | null;
 }
+
+export interface SlaEscalationRequest {
+  attemptId: string;
+  obligationId: string;
+  merchantId: string;
+  observedAt: Date;
+  reason: 'SLA_EXCEEDED';
+}
+
+export type SlaEscalationResult =
+  | {
+      kind: 'ESCALATED';
+      outcomeStatus: OutcomeStatus;
+      reviewStatus: ReviewStatus;
+    }
+  | { kind: 'NO_LONGER_UNRESOLVED' };
 
 export interface ReconciliationDeps {
   clock: Clock;
   policy?: ReconciliationPolicy;
+  getReconciliationState(attempt: ReconciliationAttempt): Promise<DerivedReconciliationState>;
   queryStatus(input: MockStatusQueryInput): Promise<RawObservationInput>;
   ingestRawObservation(input: RawObservationInput): Promise<IngestionResult | RawIngestionRejection>;
   decideCredentialUse(): { allowed: true; operation: 'STATUS_QUERY' } | { allowed: false; reason: string };
+  persistSlaEscalation(input: SlaEscalationRequest): Promise<SlaEscalationResult>;
 }
 
 export interface ReconciliationWorkerDeps extends ReconciliationDeps {
@@ -82,12 +104,18 @@ export async function reconcileAttempt(
     return { kind: 'QUERY_BLOCKED', reason: 'ATTEMPT_RESOLVED' };
   }
 
-  const ageMs = deps.clock.now().getTime() - attempt.createdAt.getTime();
+  const now = deps.clock.now();
+  const state = await deps.getReconciliationState(attempt);
+  if (!isValidReconciliationState(state)) {
+    return { kind: 'QUERY_BLOCKED', reason: 'RECONCILIATION_STATE_INVALID' };
+  }
+
+  const ageMs = now.getTime() - attempt.createdAt.getTime();
   if (ageMs > deps.policy.maxAutomatedQueryMs) {
     return { kind: 'QUERY_BLOCKED', reason: 'AUTOMATED_WINDOW_EXPIRED' };
   }
 
-  if (deps.clock.now().getTime() < nextDueAt(attempt, deps.policy).getTime()) {
+  if (now.getTime() < nextDueAt(attempt, state, deps.policy).getTime()) {
     return { kind: 'NOT_DUE' };
   }
 
@@ -100,10 +128,10 @@ export async function reconcileAttempt(
     attemptId: attempt.id,
     obligationId: attempt.obligationId,
     merchantId: attempt.merchantId,
-    amountPaise: attempt.amountPaise,
-    currency: attempt.currency,
-    scenario: attempt.scenario ?? 'TIMEOUT',
-    querySequence: attempt.queryCount + 1,
+    amountPaise: state.amountPaise,
+    currency: state.currency,
+    scenario: 'TIMEOUT',
+    querySequence: state.queryCount + 1,
   });
   const result = await deps.ingestRawObservation(raw);
   if ('kind' in result) {
@@ -126,11 +154,14 @@ export function reconciliationWorker(deps: ReconciliationWorkerDeps) {
         const result = await reconcileAttempt(deps, attempt);
         results.push(result);
 
-        if (isValidPolicy(deps.policy) && isSlaBreached(deps.clock, deps.policy, attempt) && attempt.resolvedAt === null) {
-          if (attempt.outcomeStatus === 'PENDING') {
-            attempt.outcomeStatus = 'UNKNOWN';
-          }
-          attempt.reviewStatus = escalateReviewStatus(attempt.reviewStatus);
+        if (isValidPolicy(deps.policy) && isSlaBreached(deps.clock, deps.policy, attempt)) {
+          await deps.persistSlaEscalation({
+            attemptId: attempt.id,
+            obligationId: attempt.obligationId,
+            merchantId: attempt.merchantId,
+            observedAt: deps.clock.now(),
+            reason: 'SLA_EXCEEDED',
+          });
         }
       }
 
@@ -139,14 +170,18 @@ export function reconciliationWorker(deps: ReconciliationWorkerDeps) {
   };
 }
 
-function nextDueAt(attempt: ReconciliationAttempt, policy: ReconciliationPolicy): Date {
-  if (attempt.queryCount <= 0) {
+function nextDueAt(
+  attempt: ReconciliationAttempt,
+  state: DerivedReconciliationState,
+  policy: ReconciliationPolicy,
+): Date {
+  if (state.queryCount <= 0) {
     return new Date(attempt.createdAt.getTime() + policy.initialDelayMs);
   }
 
-  const base = attempt.lastReconciledAt ?? attempt.lastObservedAt ?? attempt.createdAt;
+  const base = state.lastReconciledAt ?? attempt.lastObservationAt ?? attempt.createdAt;
   let delayMs = policy.cadenceMs;
-  for (let index = 1; index < attempt.queryCount; index += 1) {
+  for (let index = 1; index < state.queryCount; index += 1) {
     delayMs = Math.min(policy.maxDelayMs, Math.floor(delayMs * policy.backoffMultiplier));
   }
   return new Date(base.getTime() + delayMs);
@@ -203,10 +238,15 @@ function isValidPolicy(policy: ReconciliationPolicy | undefined): policy is Reco
   return true;
 }
 
-function escalateReviewStatus(reviewStatus: ReviewStatus): ReviewStatus {
-  if (reviewStatus === 'IN_PROGRESS') {
-    return 'IN_PROGRESS';
-  }
-
-  return 'REQUIRED';
+function isValidReconciliationState(
+  state: DerivedReconciliationState,
+): state is DerivedReconciliationState {
+  return (
+    typeof state.amountPaise === 'bigint' &&
+    state.amountPaise > 0n &&
+    state.currency === 'INR' &&
+    Number.isSafeInteger(state.queryCount) &&
+    state.queryCount >= 0 &&
+    (state.lastReconciledAt === null || state.lastReconciledAt instanceof Date)
+  );
 }

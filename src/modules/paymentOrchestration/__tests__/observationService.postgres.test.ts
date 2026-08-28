@@ -7,6 +7,10 @@ import type {
   OutcomeStatus,
   ReviewStatus,
 } from '../types.js';
+import type {
+  SlaEscalationRequest,
+  SlaEscalationResult,
+} from '../reconciliationWorker.js';
 
 const enabled = process.env.RUN_PGO1_POSTGRES_TESTS === '1';
 const prisma = new PrismaClient();
@@ -159,9 +163,20 @@ function candidate(
   };
 }
 
-async function loadObservationService(): Promise<{ ingestObservation: IngestObservation }> {
+type PersistSlaEscalation = (
+  client: PrismaClient,
+  input: SlaEscalationRequest,
+) => Promise<SlaEscalationResult>;
+
+async function loadObservationService(): Promise<{
+  ingestObservation: IngestObservation;
+  persistSlaEscalation: PersistSlaEscalation;
+}> {
   const modulePath = '../observationService.js';
-  return import(modulePath) as Promise<{ ingestObservation: IngestObservation }>;
+  return import(modulePath) as Promise<{
+    ingestObservation: IngestObservation;
+    persistSlaEscalation: PersistSlaEscalation;
+  }>;
 }
 
 async function createAttemptWithObligation(
@@ -573,6 +588,83 @@ if (enabled) {
       assert.equal(await prisma.paymentOutcomeTransition.count(), 1);
       assert.equal(await prisma.paymentNormalizedFactOutbox.count(), 1);
       assert.equal(await prisma.paymentAttentionSignal.count(), 1);
+    });
+
+    it('persists SLA escalation through the serialized Task 5 boundary with history', async () => {
+      const { persistSlaEscalation } = await loadObservationService();
+      const seeded = await createAttemptWithObligation({
+        obligation: {
+          id: 'obligation_sla_escalation',
+          merchantId: 'merchant_sla_escalation',
+        },
+        attempt: {
+          id: 'attempt_sla_escalation',
+          providerOrderRef: 'order_sla_escalation',
+        },
+      });
+      const input: SlaEscalationRequest = {
+        attemptId: seeded.attempt.id,
+        obligationId: seeded.obligation.id,
+        merchantId: seeded.obligation.merchantId,
+        observedAt: new Date('2026-08-28T00:01:00.000Z'),
+        reason: 'SLA_EXCEEDED',
+      };
+
+      const first = await persistSlaEscalation(prisma, input);
+      const second = await persistSlaEscalation(prisma, input);
+      const persisted = await loadAttempt(seeded.attempt.id);
+
+      assert.deepEqual(first, {
+        kind: 'ESCALATED',
+        outcomeStatus: 'UNKNOWN',
+        reviewStatus: 'REQUIRED',
+      });
+      assert.deepEqual(second, {
+        kind: 'ESCALATED',
+        outcomeStatus: 'UNKNOWN',
+        reviewStatus: 'REQUIRED',
+      });
+      assert.equal(persisted.outcomeStatus, 'UNKNOWN');
+      assert.equal(persisted.reviewStatus, 'REQUIRED');
+      assert.equal(persisted.resolvedAt, null);
+      assert.deepEqual(
+        await prisma.paymentOutcomeTransition.findMany({
+          where: { attemptId: seeded.attempt.id },
+          select: {
+            priorOutcomeStatus: true,
+            nextOutcomeStatus: true,
+            reasonCode: true,
+            triggeringObservationId: true,
+          },
+        }),
+        [{
+          priorOutcomeStatus: 'PENDING',
+          nextOutcomeStatus: 'UNKNOWN',
+          reasonCode: 'SLA_EXCEEDED',
+          triggeringObservationId: null,
+        }],
+      );
+      assert.deepEqual(
+        await prisma.reconciliationReviewHistory.findMany({
+          where: { attemptId: seeded.attempt.id },
+          select: {
+            priorReviewStatus: true,
+            nextReviewStatus: true,
+            completedByType: true,
+            actorId: true,
+            reasonCode: true,
+            triggeringObservationId: true,
+          },
+        }),
+        [{
+          priorReviewStatus: 'NOT_REQUIRED',
+          nextReviewStatus: 'REQUIRED',
+          completedByType: null,
+          actorId: null,
+          reasonCode: 'SLA_EXCEEDED',
+          triggeringObservationId: null,
+        }],
+      );
     });
   });
 }
