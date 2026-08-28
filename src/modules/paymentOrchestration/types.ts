@@ -33,6 +33,14 @@ export type ReductionAttentionType =
   | 'MAPPING_GAP';
 export type RelatedAttemptAction = 'KEEP_UNRESOLVED_LOCKED' | 'PRESERVE_TERMINAL';
 
+export interface RefundDueEntry {
+  providerTransactionRef: string;
+  reason: RefundDueReason;
+  sourceAttemptId: string;
+  sourceObservationId: string;
+  provider: PaymentProvider;
+}
+
 export interface ProviderActivationPolicy {
   version: string;
   approved: boolean;
@@ -107,7 +115,7 @@ export interface ReductionPlan {
   completedByType: 'SYSTEM' | null;
   disposition: string;
   factTypes: ReductionFactType[];
-  refundDue: Array<{ providerTransactionRef: string; reason: RefundDueReason }>;
+  refundDue: RefundDueEntry[];
   attention: Array<{ type: ReductionAttentionType }>;
   relatedAttemptActions: Array<{ attemptId: string; action: RelatedAttemptAction }>;
 }

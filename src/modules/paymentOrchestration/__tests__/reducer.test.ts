@@ -6,7 +6,6 @@ import type {
   ReduceEvidenceInput,
   ReductionPlan,
   RelatedAttemptAction,
-  RefundDueReason,
 } from '../types.js';
 
 function buildAttempt(
@@ -236,7 +235,7 @@ function terminalFailureAndMappingGapSet(): ReduceEvidenceInput {
   });
 }
 
-function assertRefund(plan: ReductionPlan, expected: Array<{ providerTransactionRef: string; reason: RefundDueReason }>) {
+function assertRefund(plan: ReductionPlan, expected: ReductionPlan['refundDue']) {
   assert.deepEqual(plan.refundDue, expected);
 }
 
@@ -366,7 +365,13 @@ describe('reduceEvidence', () => {
     assert.equal(plan.satisfyObligation, false);
     assert.deepEqual(plan.factTypes, ['PAYMENT_SUCCEEDED', 'REFUND_DUE_DETECTED']);
     assertRefund(plan, [
-      { providerTransactionRef: 'txn_late_1', reason: 'LATE_SUCCESS_AFTER_CLOSURE' },
+      {
+        providerTransactionRef: 'txn_late_1',
+        reason: 'LATE_SUCCESS_AFTER_CLOSURE',
+        sourceAttemptId: 'attempt_1',
+        sourceObservationId: 'late_success_1',
+        provider: 'MOCK',
+      },
     ]);
   });
 
@@ -411,9 +416,66 @@ describe('reduceEvidence', () => {
     assert.deepEqual(plan.attention, [{ type: 'DOUBLE_SUCCESS_DETECTED' }]);
     assert.deepEqual(plan.factTypes, ['PAYMENT_SUCCEEDED', 'REFUND_DUE_DETECTED']);
     assertRefund(plan, [
-      { providerTransactionRef: 'txn_b', reason: 'SURPLUS_DOUBLE_SUCCESS' },
+      {
+        providerTransactionRef: 'txn_b',
+        reason: 'SURPLUS_DOUBLE_SUCCESS',
+        sourceAttemptId: 'attempt_b',
+        sourceObservationId: 'success_b',
+        provider: 'MOCK',
+      },
     ]);
     assertRelatedActions(plan, [{ attemptId: 'attempt_a', action: 'PRESERVE_TERMINAL' }]);
+  });
+
+  it('attributes a surplus refund entry to the non-target success when the target success is already legitimate', () => {
+    const attemptA = buildAttempt({
+      id: 'attempt_legit_a',
+      providerOrderRef: 'order_legit_a',
+      outcomeStatus: 'SUCCEEDED',
+      resolvedAt: new Date('2026-08-27T10:00:00.000Z'),
+    });
+    const attemptB = buildAttempt({
+      id: 'attempt_legit_b',
+      providerOrderRef: 'order_legit_b',
+      outcomeStatus: 'SUCCEEDED',
+      resolvedAt: new Date('2026-08-27T11:00:00.000Z'),
+    });
+
+    const plan = reduceEvidence(
+      buildInput({
+        obligation: { status: 'SATISFIED' },
+        attempts: [attemptA, attemptB],
+        targetAttemptId: attemptB.id,
+        observations: [
+          buildObservation({
+            id: 'success_legit_a',
+            attemptId: attemptA.id,
+            providerOrderRef: attemptA.providerOrderRef!,
+            providerEventId: 'event_success_legit_a',
+            providerTransactionRef: 'txn_legit_a',
+          }),
+          buildObservation({
+            id: 'success_legit_b',
+            attemptId: attemptB.id,
+            providerOrderRef: attemptB.providerOrderRef!,
+            providerEventId: 'event_success_legit_b',
+            providerTransactionRef: 'txn_legit_b',
+          }),
+        ],
+      }),
+    );
+
+    assert.equal(plan.outcomeStatus, 'SUCCEEDED');
+    assert.equal(plan.disposition, 'DOUBLE_SUCCESS_DETECTED');
+    assertRefund(plan, [
+      {
+        providerTransactionRef: 'txn_legit_a',
+        reason: 'SURPLUS_DOUBLE_SUCCESS',
+        sourceAttemptId: 'attempt_legit_a',
+        sourceObservationId: 'success_legit_a',
+        provider: 'MOCK',
+      },
+    ]);
   });
 
   it('satisfies an open obligation on verified success after prior failure without refund case', () => {

@@ -97,8 +97,8 @@ function semantic(plan: ReductionPlan) {
     ...plan,
     factTypes: [...plan.factTypes].sort(),
     refundDue: [...plan.refundDue].sort((left, right) =>
-      `${left.providerTransactionRef}:${left.reason}`.localeCompare(
-        `${right.providerTransactionRef}:${right.reason}`,
+      `${left.providerTransactionRef}:${left.reason}:${left.sourceAttemptId}:${left.sourceObservationId}`.localeCompare(
+        `${right.providerTransactionRef}:${right.reason}:${right.sourceAttemptId}:${right.sourceObservationId}`,
       ),
     ),
     attention: [...plan.attention].sort((left, right) => left.type.localeCompare(right.type)),

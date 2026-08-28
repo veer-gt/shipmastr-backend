@@ -5,6 +5,7 @@ import type {
   ReductionFactType,
   ReductionPersistenceContext,
   ReductionPlan,
+  RefundDueEntry,
   ReviewStatus,
 } from './types.js';
 
@@ -142,21 +143,24 @@ export async function persistReduction(
   }
 
   for (const refund of plan.refundDue) {
+    requireRefundSourceObservation(context, refund);
     await tx.refundDueCase.upsert({
       where: {
         dedupeKey: refundDedupeKey(
           context.obligation.merchantId,
           context.obligation.id,
-          context.targetAttempt.provider,
+          refund.provider,
           refund.providerTransactionRef,
+          refund.sourceAttemptId,
+          refund.sourceObservationId,
         ),
       },
       update: {},
       create: {
         merchantId: context.obligation.merchantId,
         obligationId: context.obligation.id,
-        attemptId: context.targetAttempt.id,
-        provider: context.targetAttempt.provider,
+        attemptId: refund.sourceAttemptId,
+        provider: refund.provider,
         providerTransactionRef: refund.providerTransactionRef,
         amountPaise: context.obligation.amountPaise,
         currency: context.obligation.currency,
@@ -165,8 +169,10 @@ export async function persistReduction(
         dedupeKey: refundDedupeKey(
           context.obligation.merchantId,
           context.obligation.id,
-          context.targetAttempt.provider,
+          refund.provider,
           refund.providerTransactionRef,
+          refund.sourceAttemptId,
+          refund.sourceObservationId,
         ),
         detectedAt: effectiveAt,
         acknowledgedAt: null,
@@ -217,14 +223,25 @@ function buildFactInserts(
   for (const factType of plan.factTypes) {
     if (factType === 'REFUND_DUE_DETECTED') {
       for (const refund of plan.refundDue) {
+        const sourceObservation = requireRefundSourceObservation(context, refund);
         rows.push({
-          ...base,
+          schemaVersion: FACT_SCHEMA_VERSION,
+          merchantId: context.obligation.merchantId,
+          obligationId: context.obligation.id,
+          attemptId: refund.sourceAttemptId,
+          triggeringObservationId: refund.sourceObservationId,
           factType,
+          amountPaise: context.obligation.amountPaise,
+          currency: context.obligation.currency,
+          provider: refund.provider,
           providerReferenceId: refund.providerTransactionRef,
+          reducerVersion: REDUCER_VERSION,
+          adapterVersion: sourceObservation.adapterVersion,
+          mappingVersion: sourceObservation.mappingVersion,
           dedupeKey: factDedupeKey(
             factType,
-            context.targetAttempt.id,
-            context.triggeringObservation.id,
+            refund.sourceAttemptId,
+            refund.sourceObservationId,
             refund.providerTransactionRef,
           ),
         });
@@ -246,6 +263,24 @@ function buildFactInserts(
   }
 
   return rows;
+}
+
+function requireRefundSourceObservation(
+  context: ReductionPersistenceContext,
+  refund: RefundDueEntry,
+) {
+  const observation = context.observations.find((entry) =>
+    entry.id === refund.sourceObservationId &&
+    entry.attemptId === refund.sourceAttemptId &&
+    entry.provider === refund.provider &&
+    entry.providerTransactionRef === refund.providerTransactionRef,
+  );
+
+  if (!observation) {
+    throw new Error('REFUND_SOURCE_OBSERVATION_NOT_FOUND');
+  }
+
+  return observation;
 }
 
 function providerReferenceIdForFact(
@@ -313,8 +348,12 @@ function refundDedupeKey(
   obligationId: string,
   provider: PaymentProvider,
   transactionRef: string,
+  sourceAttemptId: string,
+  sourceObservationId: string,
 ) {
-  return sha256(`pgo1:refund-due:${merchantId}:${obligationId}:${provider}:${transactionRef}`);
+  return sha256(
+    `pgo1:refund-due:${merchantId}:${obligationId}:${provider}:${transactionRef}:${sourceAttemptId}:${sourceObservationId}`,
+  );
 }
 
 function sha256(value: string) {

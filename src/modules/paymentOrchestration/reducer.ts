@@ -6,6 +6,7 @@ import type {
   ReductionAttentionType,
   ReductionFactType,
   ReductionPlan,
+  RefundDueEntry,
 } from './types.js';
 
 type AttemptSnapshot = ReduceEvidenceInput['attempts'][number];
@@ -214,7 +215,7 @@ function reduceSuccesses(
   const mappingGap = classified.some((entry) => entry.kind === 'MAPPING_GAP');
   const facts: ReductionFactType[] = targetHasSuccess ? ['PAYMENT_SUCCEEDED'] : [];
   const attention = new Set<ReductionAttentionType>();
-  const refundDue = new Map<string, { providerTransactionRef: string; reason: 'LATE_SUCCESS_AFTER_CLOSURE' | 'SURPLUS_DOUBLE_SUCCESS' }>();
+  const refundDue = new Map<string, RefundDueEntry>();
 
   if (contradictory) {
     attention.add('CONTRADICTORY_EVIDENCE');
@@ -242,6 +243,9 @@ function reduceSuccesses(
       refundDue.set(entry.observation.providerTransactionRef!, {
         providerTransactionRef: entry.observation.providerTransactionRef!,
         reason: 'SURPLUS_DOUBLE_SUCCESS',
+        sourceAttemptId: entry.attempt.id,
+        sourceObservationId: entry.observation.id,
+        provider: entry.attempt.provider,
       });
     }
   } else if (
@@ -252,6 +256,9 @@ function reduceSuccesses(
       refundDue.set(entry.observation.providerTransactionRef!, {
         providerTransactionRef: entry.observation.providerTransactionRef!,
         reason: 'LATE_SUCCESS_AFTER_CLOSURE',
+        sourceAttemptId: entry.attempt.id,
+        sourceObservationId: entry.observation.id,
+        provider: entry.attempt.provider,
       });
     }
   }
@@ -440,7 +447,7 @@ function preserveUnresolvedReviewStatus(reviewStatus: AttemptSnapshot['reviewSta
 }
 
 function deriveSuccessDisposition(
-  refundDue: Map<string, { providerTransactionRef: string; reason: 'LATE_SUCCESS_AFTER_CLOSURE' | 'SURPLUS_DOUBLE_SUCCESS' }>,
+  refundDue: Map<string, RefundDueEntry>,
   attention: Set<ReductionAttentionType>,
 ): string {
   const refundReasons = [...refundDue.values()].map((entry) => entry.reason);
@@ -465,8 +472,8 @@ function finalizePlan(plan: ReductionPlan): ReductionPlan {
     ...plan,
     factTypes: sortFactTypes(plan.factTypes),
     refundDue: [...plan.refundDue].sort((left, right) =>
-      `${left.providerTransactionRef}:${left.reason}`.localeCompare(
-        `${right.providerTransactionRef}:${right.reason}`,
+      `${left.providerTransactionRef}:${left.reason}:${left.sourceAttemptId}:${left.sourceObservationId}`.localeCompare(
+        `${right.providerTransactionRef}:${right.reason}:${right.sourceAttemptId}:${right.sourceObservationId}`,
       ),
     ),
     attention: [...plan.attention].sort((left, right) => left.type.localeCompare(right.type)),

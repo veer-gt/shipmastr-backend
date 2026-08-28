@@ -387,6 +387,83 @@ if (enabled) {
       assert.equal(await prisma.paymentNormalizedFactOutbox.count(), 1);
     });
 
+    it('reuses the matching conflicting observation when the same event id and hash replay after A,B', async () => {
+      const { ingestObservation } = await loadObservationService();
+      const seeded = await createAttemptWithObligation({
+        obligation: {
+          id: 'obligation_conflict_replay',
+          merchantId: 'merchant_conflict_replay',
+        },
+        attempt: {
+          id: 'attempt_conflict_replay',
+          providerOrderRef: 'order_conflict_replay',
+        },
+      });
+
+      const hashA = candidate({
+        attemptId: seeded.attempt.id,
+        obligationId: seeded.obligation.id,
+        merchantId: seeded.obligation.merchantId,
+        credentialBindingId: seeded.attempt.credentialBindingId,
+        credentialVersionId: seeded.attempt.credentialVersionId,
+        providerOrderRef: seeded.attempt.providerOrderRef!,
+        providerEventId: 'event_conflict_replay',
+        providerTransactionRef: null,
+        mappedOutcome: 'PENDING',
+        rawBodyHash: 'hash_conflict_replay_a',
+        nativeStatus: 'pending',
+      });
+      const hashB = candidate({
+        attemptId: seeded.attempt.id,
+        obligationId: seeded.obligation.id,
+        merchantId: seeded.obligation.merchantId,
+        credentialBindingId: seeded.attempt.credentialBindingId,
+        credentialVersionId: seeded.attempt.credentialVersionId,
+        providerOrderRef: seeded.attempt.providerOrderRef!,
+        providerEventId: 'event_conflict_replay',
+        providerTransactionRef: null,
+        mappedOutcome: 'PENDING',
+        rawBodyHash: 'hash_conflict_replay_b',
+        nativeStatus: 'pending',
+        receivedAt: new Date('2026-08-27T12:00:02.000Z'),
+      });
+      const hashBReplay = {
+        ...hashB,
+        id: 'observation_conflict_replay_b_second_delivery',
+        receivedAt: new Date('2026-08-27T12:00:03.000Z'),
+      };
+
+      const firstResult = await ingestObservation(prisma, hashA);
+      const secondResult = await ingestObservation(prisma, hashB);
+      const replayResult = await ingestObservation(prisma, hashBReplay);
+
+      assert.notEqual(secondResult.observationId, firstResult.observationId);
+      assert.equal(replayResult.observationId, secondResult.observationId);
+      assert.equal(replayResult.disposition, 'INTEGRITY_CONFLICT');
+      assert.equal(await prisma.providerObservation.count(), 2);
+      assert.equal(await prisma.providerObservationDelivery.count(), 3);
+
+      const observations = await prisma.providerObservation.findMany({
+        where: { obligationId: seeded.obligation.id },
+        orderBy: [{ rawBodyHash: 'asc' }, { id: 'asc' }],
+        select: { id: true, rawBodyHash: true, reductionDisposition: true },
+      });
+      assert.deepEqual(observations, [
+        {
+          id: firstResult.observationId,
+          rawBodyHash: 'hash_conflict_replay_a',
+          reductionDisposition: 'PENDING',
+        },
+        {
+          id: secondResult.observationId,
+          rawBodyHash: 'hash_conflict_replay_b',
+          reductionDisposition: 'INTEGRITY_CONFLICT',
+        },
+      ]);
+      assert.equal(await prisma.paymentAttentionSignal.count(), 1);
+      assert.equal(await prisma.paymentNormalizedFactOutbox.count(), 0);
+    });
+
     it('preserves unresolved state for an integrity conflict on an unresolved attempt', async () => {
       const { ingestObservation } = await loadObservationService();
       const seeded = await createAttemptWithObligation({

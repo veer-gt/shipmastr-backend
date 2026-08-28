@@ -124,8 +124,8 @@ async function appendOrClassifyObservation(
   tx: Tx,
   candidate: ObservationCandidate,
 ): Promise<ObservationAppendResult> {
-  const eventMatch = candidate.providerEventId
-    ? await tx.providerObservation.findFirst({
+  const eventMatches = candidate.providerEventId
+    ? await tx.providerObservation.findMany({
         where: {
           merchantId: candidate.merchantId,
           obligationId: candidate.obligationId,
@@ -134,17 +134,19 @@ async function appendOrClassifyObservation(
         orderBy: [{ createdAt: 'asc' }, { id: 'asc' }],
       })
     : null;
+  const exactHashMatch = eventMatches?.find((observation) => observation.rawBodyHash === candidate.rawBodyHash) ?? null;
+  const hasEventConflict = (eventMatches?.length ?? 0) > 0;
 
-  if (eventMatch && eventMatch.rawBodyHash === candidate.rawBodyHash) {
-    await createDelivery(tx, eventMatch, candidate);
+  if (exactHashMatch) {
+    await createDelivery(tx, exactHashMatch, candidate);
     return {
       kind: 'DUPLICATE_DELIVERY',
-      observationId: eventMatch.id,
-      observation: persistedObservationToCanonical(eventMatch),
+      observationId: exactHashMatch.id,
+      observation: persistedObservationToCanonical(exactHashMatch),
     };
   }
 
-  const reductionDisposition = eventMatch ? 'INTEGRITY_CONFLICT' : candidate.reductionDisposition;
+  const reductionDisposition = hasEventConflict ? 'INTEGRITY_CONFLICT' : candidate.reductionDisposition;
   const observationRow = await tx.providerObservation.create({
     data: {
       id: candidate.id,
@@ -181,7 +183,7 @@ async function appendOrClassifyObservation(
   await createDelivery(tx, observationRow, candidate);
 
   return {
-    kind: eventMatch ? 'HASH_CONFLICT' : 'INSERTED',
+    kind: hasEventConflict ? 'HASH_CONFLICT' : 'INSERTED',
     observationId: observationRow.id,
     observation: {
       ...candidate,

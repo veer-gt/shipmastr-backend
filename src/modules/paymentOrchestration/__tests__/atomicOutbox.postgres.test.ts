@@ -1,3 +1,4 @@
+import { createHash } from 'node:crypto';
 import assert from 'node:assert/strict';
 import { after, before, beforeEach, describe, it } from 'node:test';
 import { Prisma, PrismaClient } from '@prisma/client';
@@ -310,6 +311,134 @@ if (enabled) {
       assert.equal(await prisma.providerObservationDelivery.count(), 2);
       assert.equal(await prisma.refundDueCase.count(), 1);
       assert.equal(await prisma.paymentNormalizedFactOutbox.count(), 2);
+    });
+
+    it('attributes surplus refund persistence to the sourced attempt and keeps it exactly once across later target successes', async () => {
+      const { ingestObservation } = await loadObservationService();
+      const obligationRow = await prisma.paymentObligation.create({
+        data: obligation({
+          id: 'obligation_refund_source',
+          merchantId: 'merchant_refund_source',
+          status: 'SATISFIED',
+          satisfiedAt: new Date('2026-08-27T11:00:00.000Z'),
+        }),
+      });
+      const priorAttempt = await prisma.paymentAttempt.create({
+        data: attempt({
+          id: 'attempt_refund_source_prior',
+          merchantId: obligationRow.merchantId,
+          obligationId: obligationRow.id,
+          obligationCollectionRail: obligationRow.collectionRail,
+          providerOrderRef: 'order_refund_source_prior',
+          outcomeStatus: 'SUCCEEDED',
+          reviewStatus: 'COMPLETED',
+          resolvedAt: new Date('2026-08-27T11:00:00.000Z'),
+          createdAt: new Date('2026-08-27T10:00:00.000Z'),
+        }),
+      });
+      const targetAttempt = await prisma.paymentAttempt.create({
+        data: attempt({
+          id: 'attempt_refund_source_target',
+          merchantId: obligationRow.merchantId,
+          obligationId: obligationRow.id,
+          obligationCollectionRail: obligationRow.collectionRail,
+          providerOrderRef: 'order_refund_source_target',
+          outcomeStatus: 'SUCCEEDED',
+          reviewStatus: 'NOT_REQUIRED',
+          resolvedAt: new Date('2026-08-27T12:00:00.000Z'),
+          createdAt: new Date('2026-08-27T12:00:00.000Z'),
+        }),
+      });
+
+      const priorSuccess = candidate({
+        attemptId: priorAttempt.id,
+        obligationId: obligationRow.id,
+        merchantId: obligationRow.merchantId,
+        credentialBindingId: priorAttempt.credentialBindingId,
+        credentialVersionId: priorAttempt.credentialVersionId,
+        providerOrderRef: priorAttempt.providerOrderRef!,
+        providerEventId: 'event_refund_source_prior',
+        providerTransactionRef: 'txn_refund_source_prior',
+        rawBodyHash: 'hash_refund_source_prior',
+        receivedAt: new Date('2026-08-27T10:30:00.000Z'),
+      });
+      const targetSuccessA = candidate({
+        attemptId: targetAttempt.id,
+        obligationId: obligationRow.id,
+        merchantId: obligationRow.merchantId,
+        credentialBindingId: targetAttempt.credentialBindingId,
+        credentialVersionId: targetAttempt.credentialVersionId,
+        providerOrderRef: targetAttempt.providerOrderRef!,
+        providerEventId: 'event_refund_source_target_a',
+        providerTransactionRef: 'txn_refund_source_target',
+        rawBodyHash: 'hash_refund_source_target_a',
+        receivedAt: new Date('2026-08-27T12:30:00.000Z'),
+      });
+      const targetSuccessB = candidate({
+        attemptId: targetAttempt.id,
+        obligationId: obligationRow.id,
+        merchantId: obligationRow.merchantId,
+        credentialBindingId: targetAttempt.credentialBindingId,
+        credentialVersionId: targetAttempt.credentialVersionId,
+        providerOrderRef: targetAttempt.providerOrderRef!,
+        providerEventId: 'event_refund_source_target_b',
+        providerTransactionRef: 'txn_refund_source_target',
+        rawBodyHash: 'hash_refund_source_target_b',
+        receivedAt: new Date('2026-08-27T12:31:00.000Z'),
+      });
+
+      const priorResult = await ingestObservation(prisma, priorSuccess);
+      const targetResult = await ingestObservation(prisma, targetSuccessA);
+      await ingestObservation(prisma, targetSuccessB);
+
+      const refundCase = await prisma.refundDueCase.findUniqueOrThrow({
+        where: {
+          dedupeKey: createHash('sha256')
+            .update(
+              [
+                'pgo1:refund-due',
+                obligationRow.merchantId,
+                obligationRow.id,
+                priorAttempt.provider,
+                'txn_refund_source_prior',
+                priorAttempt.id,
+                priorResult.observationId,
+              ].join(':'),
+            )
+            .digest('hex'),
+        },
+      });
+      assert.equal(refundCase.attemptId, priorAttempt.id);
+      assert.equal(refundCase.provider, priorAttempt.provider);
+      assert.equal(refundCase.providerTransactionRef, 'txn_refund_source_prior');
+
+      const refundFacts = await prisma.paymentNormalizedFactOutbox.findMany({
+        where: {
+          obligationId: obligationRow.id,
+          factType: 'REFUND_DUE_DETECTED',
+        },
+        orderBy: { createdAt: 'asc' },
+      });
+      assert.equal(refundFacts.length, 1);
+      assert.equal(refundFacts[0]!.attemptId, priorAttempt.id);
+      assert.equal(refundFacts[0]!.triggeringObservationId, priorResult.observationId);
+      assert.equal(refundFacts[0]!.providerReferenceId, 'txn_refund_source_prior');
+
+      const paymentFacts = await prisma.paymentNormalizedFactOutbox.findMany({
+        where: {
+          obligationId: obligationRow.id,
+          factType: 'PAYMENT_SUCCEEDED',
+        },
+        orderBy: { createdAt: 'asc' },
+      });
+      assert.equal(paymentFacts.length, 3);
+      assert.ok(
+        paymentFacts.some((fact) =>
+          fact.attemptId === targetAttempt.id && fact.triggeringObservationId === targetResult.observationId,
+        ),
+      );
+      assert.equal(await prisma.refundDueCase.count(), 1);
+      assert.equal(await prisma.paymentNormalizedFactOutbox.count(), 4);
     });
   });
 }
