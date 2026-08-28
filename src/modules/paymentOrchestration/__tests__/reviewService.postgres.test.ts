@@ -196,17 +196,22 @@ if (enabled) {
       });
 
       await claimReview(prisma, {
+        merchantId: seeded.obligation.merchantId,
         attemptId: seeded.attempt.id,
         reviewerId: 'admin_1',
       });
       await attachEvidenceReference(prisma, {
+        merchantId: seeded.obligation.merchantId,
         attemptId: seeded.attempt.id,
         reviewerId: 'admin_1',
         reference: 'evidence://case/123',
       });
 
       const persisted = await loadAttempt(seeded.attempt.id);
-      const review = await viewReview(prisma, { attemptId: seeded.attempt.id });
+      const review = await viewReview(prisma, {
+        merchantId: seeded.obligation.merchantId,
+        attemptId: seeded.attempt.id,
+      });
 
       assert.equal(persisted.outcomeStatus, 'UNKNOWN');
       assert.equal(persisted.reviewStatus, 'IN_PROGRESS');
@@ -264,6 +269,7 @@ if (enabled) {
 
       await assert.rejects(
         attachEvidenceReference(prisma, {
+          merchantId: seeded.obligation.merchantId,
           attemptId: seeded.attempt.id,
           reviewerId: 'admin_1',
           reference: 'buyer-email:user@example.test',
@@ -309,6 +315,7 @@ if (enabled) {
       const before = await loadAttempt(seeded.attempt.id);
 
       const request = await requestReadOnlyQuery(prisma, {
+        merchantId: seeded.obligation.merchantId,
         attemptId: seeded.attempt.id,
         reviewerId: 'admin_1',
         note: 'await reconciler pass',
@@ -357,6 +364,73 @@ if (enabled) {
       assert.equal(history[0]?.triggeringObservationId, null);
       assert.equal(history[0]?.completedByType, null);
       assert.equal(history[0]?.correlationId, request.requestId);
+      assert.deepEqual(history[0]?.evidenceReferenceIds, {
+        references: [],
+        note: 'await reconciler pass',
+      });
+    });
+
+    it('rejects cross-merchant review access for claim, attach, request, and view', async () => {
+      const seeded = await createAttemptWithObligation({
+        obligation: {
+          id: 'obligation_cross_merchant',
+          merchantId: 'merchant_review_owner',
+        },
+        attempt: {
+          id: 'attempt_cross_merchant',
+          reviewStatus: 'REQUIRED',
+          outcomeStatus: 'UNKNOWN',
+          providerOrderRef: 'order_cross_merchant',
+        },
+      });
+
+      await assert.rejects(
+        claimReview(prisma, {
+          merchantId: 'merchant_other',
+          attemptId: seeded.attempt.id,
+          reviewerId: 'admin_1',
+        }),
+        /ATTEMPT_NOT_FOUND/,
+      );
+
+      await claimReview(prisma, {
+        merchantId: seeded.obligation.merchantId,
+        attemptId: seeded.attempt.id,
+        reviewerId: 'admin_1',
+      });
+
+      await assert.rejects(
+        attachEvidenceReference(prisma, {
+          merchantId: 'merchant_other',
+          attemptId: seeded.attempt.id,
+          reviewerId: 'admin_1',
+          reference: 'evidence://case/789',
+        }),
+        /ATTEMPT_NOT_FOUND/,
+      );
+      await assert.rejects(
+        requestReadOnlyQuery(prisma, {
+          merchantId: 'merchant_other',
+          attemptId: seeded.attempt.id,
+          reviewerId: 'admin_1',
+          note: 'safe note',
+        }),
+        /ATTEMPT_NOT_FOUND/,
+      );
+      await assert.rejects(
+        viewReview(prisma, {
+          merchantId: 'merchant_other',
+          attemptId: seeded.attempt.id,
+        }),
+        /ATTEMPT_NOT_FOUND/,
+      );
+
+      const history = await prisma.reconciliationReviewHistory.findMany({
+        where: { attemptId: seeded.attempt.id },
+        orderBy: [{ createdAt: 'asc' }, { id: 'asc' }],
+      });
+      assert.equal(history.length, 1);
+      assert.equal(history[0]?.reasonCode, 'REVIEW_CLAIMED');
     });
 
     it('lets a late webhook enter the normal ingestion path only when verification material remains available', async () => {

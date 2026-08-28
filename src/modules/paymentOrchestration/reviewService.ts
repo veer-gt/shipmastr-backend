@@ -1,5 +1,5 @@
 import { randomUUID } from 'node:crypto';
-import { PrismaClient, type PaymentAttempt, type ReconciliationReviewHistory } from '@prisma/client';
+import { Prisma, PrismaClient, type PaymentAttempt, type ReconciliationReviewHistory } from '@prisma/client';
 import { HttpError } from '../../lib/httpError.js';
 import { audit } from '../audit/audit.service.js';
 import type {
@@ -22,17 +22,20 @@ type Tx = Parameters<PrismaClient['$transaction']>[0] extends (tx: infer T) => u
 export const MANUAL_EVIDENCE_EXCEPTION_GATE = false as const;
 
 export interface ClaimReviewInput {
+  merchantId: string;
   attemptId: string;
   reviewerId: string;
 }
 
 export interface AttachEvidenceReferenceInput {
+  merchantId: string;
   attemptId: string;
   reviewerId: string;
   reference: string;
 }
 
 export interface RequestReadOnlyQueryInput {
+  merchantId: string;
   attemptId: string;
   reviewerId: string;
   note?: string;
@@ -40,6 +43,7 @@ export interface RequestReadOnlyQueryInput {
 }
 
 export interface ViewReviewInput {
+  merchantId: string;
   attemptId: string;
 }
 
@@ -52,6 +56,7 @@ export interface ReviewHistoryEntry {
   reasonCode: string;
   triggeringObservationId: string | null;
   evidenceReferenceIds: string[];
+  operationalNote: string | null;
   correlationId: string | null;
   createdAt: Date;
 }
@@ -110,11 +115,11 @@ export async function claimReview(
   const reviewerId = cleanActorId(input.reviewerId);
 
   return prisma.$transaction(async (tx) => {
-    const attempt = await lockAttempt(tx, input.attemptId);
+    const attempt = await lockAttempt(tx, input.merchantId, input.attemptId);
     assertClaimableAttempt(attempt);
 
     if (attempt.reviewStatus === 'IN_PROGRESS') {
-      return loadReviewView(tx, attempt.id);
+      return loadReviewView(tx, input.merchantId, attempt.id);
     }
 
     await tx.paymentAttempt.update({
@@ -137,7 +142,7 @@ export async function claimReview(
       },
     });
 
-    return loadReviewView(tx, attempt.id);
+    return loadReviewView(tx, input.merchantId, attempt.id);
   });
 }
 
@@ -146,7 +151,7 @@ export async function attachEvidenceReference(
   input: AttachEvidenceReferenceInput,
 ): Promise<ReviewView> {
   const reviewerId = cleanActorId(input.reviewerId);
-  const attemptForValidation = await loadAttemptForValidation(prisma, input.attemptId);
+  const attemptForValidation = await loadAttemptForValidation(prisma, input.merchantId, input.attemptId);
   const reference = await validateAuditedEvidenceInput(
     prisma,
     attemptForValidation,
@@ -156,7 +161,7 @@ export async function attachEvidenceReference(
   );
 
   return prisma.$transaction(async (tx) => {
-    const attempt = await lockAttempt(tx, input.attemptId);
+    const attempt = await lockAttempt(tx, input.merchantId, input.attemptId);
     assertInProgressAttempt(attempt);
 
     await tx.reconciliationReviewHistory.create({
@@ -170,12 +175,15 @@ export async function attachEvidenceReference(
         actorId: reviewerId,
         reasonCode: 'EVIDENCE_REFERENCE_ATTACHED',
         triggeringObservationId: null,
-        evidenceReferenceIds: [reference],
+        evidenceReferenceIds: encodeEvidencePayload({
+          references: [reference],
+          note: null,
+        }),
         correlationId: null,
       },
     });
 
-    return loadReviewView(tx, attempt.id);
+    return loadReviewView(tx, input.merchantId, attempt.id);
   });
 }
 
@@ -184,7 +192,7 @@ export async function requestReadOnlyQuery(
   input: RequestReadOnlyQueryInput,
 ): Promise<ReadOnlyQueryRequest> {
   const reviewerId = cleanActorId(input.reviewerId);
-  const attemptForValidation = await loadAttemptForValidation(prisma, input.attemptId);
+  const attemptForValidation = await loadAttemptForValidation(prisma, input.merchantId, input.attemptId);
   const note = input.note === undefined
     ? null
     : await validateAuditedEvidenceInput(
@@ -197,7 +205,7 @@ export async function requestReadOnlyQuery(
   const requestId = cleanOptional(input.requestId) ?? `review_query_${randomUUID()}`;
 
   return prisma.$transaction(async (tx) => {
-    const attempt = await lockAttempt(tx, input.attemptId);
+    const attempt = await lockAttempt(tx, input.merchantId, input.attemptId);
     assertInProgressAttempt(attempt);
 
     await tx.reconciliationReviewHistory.create({
@@ -211,7 +219,10 @@ export async function requestReadOnlyQuery(
         actorId: reviewerId,
         reasonCode: 'READ_ONLY_QUERY_REQUESTED',
         triggeringObservationId: null,
-        evidenceReferenceIds: [],
+        evidenceReferenceIds: encodeEvidencePayload({
+          references: [],
+          note,
+        }),
         correlationId: requestId,
       },
     });
@@ -236,7 +247,7 @@ export async function viewReview(
   prisma: PrismaClient,
   input: ViewReviewInput,
 ): Promise<ReviewView> {
-  return loadReviewView(prisma, input.attemptId);
+  return loadReviewView(prisma, input.merchantId, input.attemptId);
 }
 
 export const reviewService = {
@@ -268,10 +279,14 @@ export function evaluateEvidenceHorizonGovernanceTrigger(
 
 async function loadAttemptForValidation(
   prisma: PrismaClient,
+  merchantId: string,
   attemptId: string,
 ): Promise<Pick<PaymentAttempt, 'id' | 'merchantId' | 'reviewStatus' | 'resolvedAt'>> {
-  const attempt = await prisma.paymentAttempt.findUnique({
-    where: { id: attemptId },
+  const attempt = await prisma.paymentAttempt.findFirst({
+    where: {
+      id: attemptId,
+      merchantId,
+    },
     select: {
       id: true,
       merchantId: true,
@@ -397,12 +412,13 @@ function assertInProgressAttempt(
 
 async function lockAttempt(
   tx: Tx,
+  merchantId: string,
   attemptId: string,
 ): Promise<PaymentAttempt> {
   const rows = await tx.$queryRaw<Array<{ id: string }>>`
     SELECT "id"
     FROM "PaymentAttempt"
-    WHERE "id" = ${attemptId}
+    WHERE "id" = ${attemptId} AND "merchantId" = ${merchantId}
     FOR UPDATE
   `;
 
@@ -417,10 +433,14 @@ async function lockAttempt(
 
 async function loadReviewView(
   client: PrismaClient | Tx,
+  merchantId: string,
   attemptId: string,
 ): Promise<ReviewView> {
-  const attempt = await client.paymentAttempt.findUnique({
-    where: { id: attemptId },
+  const attempt = await client.paymentAttempt.findFirst({
+    where: {
+      id: attemptId,
+      merchantId,
+    },
     select: {
       id: true,
       obligationId: true,
@@ -440,7 +460,10 @@ async function loadReviewView(
   }
 
   const history = await client.reconciliationReviewHistory.findMany({
-    where: { attemptId },
+    where: {
+      attemptId,
+      merchantId,
+    },
     orderBy: [{ createdAt: 'asc' }, { id: 'asc' }],
   });
 
@@ -453,6 +476,7 @@ async function loadReviewView(
 function toReviewHistoryEntry(
   entry: ReconciliationReviewHistory,
 ): ReviewHistoryEntry {
+  const payload = decodeEvidencePayload(entry.evidenceReferenceIds);
   return {
     id: entry.id,
     priorReviewStatus: entry.priorReviewStatus as ReviewStatus,
@@ -461,16 +485,43 @@ function toReviewHistoryEntry(
     actorId: entry.actorId,
     reasonCode: entry.reasonCode,
     triggeringObservationId: entry.triggeringObservationId,
-    evidenceReferenceIds: toStringArray(entry.evidenceReferenceIds),
+    evidenceReferenceIds: payload.references,
+    operationalNote: payload.note,
     correlationId: entry.correlationId,
     createdAt: entry.createdAt,
   };
 }
 
-function toStringArray(value: unknown): string[] {
-  if (!Array.isArray(value)) {
-    return [];
+function encodeEvidencePayload(input: {
+  references: string[];
+  note: string | null;
+}): Prisma.InputJsonValue {
+  return {
+    references: input.references,
+    note: input.note,
+  };
+}
+
+function decodeEvidencePayload(value: unknown): { references: string[]; note: string | null } {
+  if (Array.isArray(value)) {
+    return {
+      references: value.filter((entry): entry is string => typeof entry === 'string'),
+      note: null,
+    };
   }
 
-  return value.filter((entry): entry is string => typeof entry === 'string');
+  if (!value || typeof value !== 'object') {
+    return {
+      references: [],
+      note: null,
+    };
+  }
+
+  const record = value as { references?: unknown; note?: unknown };
+  return {
+    references: Array.isArray(record.references)
+      ? record.references.filter((entry): entry is string => typeof entry === 'string')
+      : [],
+    note: typeof record.note === 'string' ? record.note : null,
+  };
 }

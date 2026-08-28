@@ -5,6 +5,10 @@ import type {
   RawObservationInput,
   ReconciliationResult,
 } from './adapters/providerAdapter.js';
+import {
+  decideCredentialUse,
+  type CredentialUseInput,
+} from './credentialPolicy.js';
 import type { IngestionResult, OutcomeStatus, ReviewStatus } from './types.js';
 
 export interface ReconciliationPolicy {
@@ -74,23 +78,49 @@ export type SlaEscalationResult =
     }
   | { kind: 'NO_LONGER_UNRESOLVED' };
 
+export interface PendingReadOnlyQueryRequest {
+  requestId: string;
+  attemptId: string;
+  obligationId: string;
+  merchantId: string;
+  provider: ReconciliationAttempt['provider'];
+  environment: ReconciliationAttempt['environment'];
+  credentialBindingId: string;
+  credentialVersionId: string;
+  operation: 'STATUS_QUERY';
+  note: string | null;
+}
+
+export interface ReadOnlyQueryConsumptionRecord {
+  request: PendingReadOnlyQueryRequest;
+  result: ReconciliationResult;
+}
+
+export type CredentialUseInputResolver = (
+  attempt: ReconciliationAttempt,
+  request: PendingReadOnlyQueryRequest | null,
+) => Promise<CredentialUseInput | null>;
+
 export interface ReconciliationDeps {
   clock: Clock;
   policy?: ReconciliationPolicy;
   getReconciliationState(attempt: ReconciliationAttempt): Promise<DerivedReconciliationState>;
   queryStatus(input: MockStatusQueryInput): Promise<RawObservationInput>;
   ingestRawObservation(input: RawObservationInput): Promise<IngestionResult | RawIngestionRejection>;
-  decideCredentialUse(): { allowed: true; operation: 'STATUS_QUERY' } | { allowed: false; reason: string };
+  buildCredentialUseInput: CredentialUseInputResolver;
   persistSlaEscalation(input: SlaEscalationRequest): Promise<SlaEscalationResult>;
 }
 
 export interface ReconciliationWorkerDeps extends ReconciliationDeps {
   listUnresolvedAttempts(): Promise<ReconciliationAttempt[]>;
+  listRequestedReadOnlyQueries?(): Promise<PendingReadOnlyQueryRequest[]>;
+  persistReadOnlyQueryConsumption?(input: ReadOnlyQueryConsumptionRecord): Promise<void>;
 }
 
 export async function reconcileAttempt(
   deps: ReconciliationDeps,
   attempt: ReconciliationAttempt,
+  request: PendingReadOnlyQueryRequest | null = null,
 ): Promise<ReconciliationResult> {
   if (!isValidPolicy(deps.policy)) {
     return { kind: 'POLICY_DISABLED' };
@@ -115,11 +145,16 @@ export async function reconcileAttempt(
     return { kind: 'QUERY_BLOCKED', reason: 'AUTOMATED_WINDOW_EXPIRED' };
   }
 
-  if (now.getTime() < nextDueAt(attempt, state, deps.policy).getTime()) {
+  if (request === null && now.getTime() < nextDueAt(attempt, state, deps.policy).getTime()) {
     return { kind: 'NOT_DUE' };
   }
 
-  const credentialDecision = deps.decideCredentialUse();
+  const credentialInput = await deps.buildCredentialUseInput(attempt, request);
+  if (!credentialInput) {
+    return { kind: 'QUERY_BLOCKED', reason: 'CREDENTIAL_CONTEXT_UNAVAILABLE' };
+  }
+
+  const credentialDecision = decideCredentialUse(credentialInput);
   if (!credentialDecision.allowed) {
     return { kind: 'QUERY_BLOCKED', reason: credentialDecision.reason };
   }
@@ -148,11 +183,30 @@ export function reconciliationWorker(deps: ReconciliationWorkerDeps) {
   return {
     async runOnce(): Promise<ReconciliationResult[]> {
       const attempts = await deps.listUnresolvedAttempts();
+      const pendingRequests = deps.listRequestedReadOnlyQueries
+        ? await deps.listRequestedReadOnlyQueries()
+        : [];
+      const requestByAttemptId = new Map<string, PendingReadOnlyQueryRequest>();
+      for (const request of pendingRequests) {
+        if (!requestByAttemptId.has(request.attemptId)) {
+          requestByAttemptId.set(request.attemptId, request);
+        }
+      }
       const results: ReconciliationResult[] = [];
 
       for (const attempt of attempts) {
-        const result = await reconcileAttempt(deps, attempt);
+        const pendingRequest = requestByAttemptId.get(attempt.id) ?? null;
+        const result = pendingRequest && !deps.persistReadOnlyQueryConsumption
+          ? { kind: 'QUERY_BLOCKED', reason: 'READ_ONLY_QUERY_CONSUMPTION_UNAVAILABLE' } satisfies ReconciliationResult
+          : await reconcileAttempt(deps, attempt, pendingRequest);
         results.push(result);
+
+        if (pendingRequest && deps.persistReadOnlyQueryConsumption) {
+          await deps.persistReadOnlyQueryConsumption({
+            request: pendingRequest,
+            result,
+          });
+        }
 
         if (isValidPolicy(deps.policy) && isSlaBreached(deps.clock, deps.policy, attempt)) {
           await deps.persistSlaEscalation({

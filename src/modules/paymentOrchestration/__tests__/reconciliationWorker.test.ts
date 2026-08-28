@@ -5,7 +5,10 @@ import {
   MOCK_RECONCILIATION_POLICY_V1,
   reconcileAttempt,
   reconciliationWorker,
+  type CredentialUseInputResolver,
   type DerivedReconciliationState,
+  type PendingReadOnlyQueryRequest,
+  type ReadOnlyQueryConsumptionRecord,
   type ReconciliationAttempt,
   type ReconciliationDeps,
   type SlaEscalationRequest,
@@ -109,6 +112,8 @@ function deps(
     policy?: typeof MOCK_RECONCILIATION_POLICY_V1 | undefined;
     queryStatus?: ((input: MockStatusQueryInput) => Promise<RawObservationInput>) | undefined;
     reconciliationState?: DerivedReconciliationState;
+    credentialUseInput?: Awaited<ReturnType<CredentialUseInputResolver>> | null;
+    requestedReadOnlyQueries?: PendingReadOnlyQueryRequest[];
   } = {},
 ) {
   const listedAttempt = overrides.attempt ?? persistedAttempt();
@@ -130,15 +135,36 @@ function deps(
     queryStatus: [] as Array<[MockStatusQueryInput]>,
     ingestRawObservation: [] as Array<[RawObservationInput]>,
     persistSlaEscalation: [] as Array<[SlaEscalationRequest]>,
+    buildCredentialUseInput: [] as Array<[ReconciliationAttempt]>,
+    listRequestedReadOnlyQueries: [] as Array<[]>,
+    persistReadOnlyQueryConsumption: [] as Array<[ReadOnlyQueryConsumptionRecord]>,
   };
 
   const defaultQueryStatus = overrides.queryStatus ?? timeout();
+  const credentialUseInput = overrides.credentialUseInput === undefined
+    ? {
+        originalMerchantId: listedAttempt.merchantId,
+        requestedMerchantId: listedAttempt.merchantId,
+        originalProvider: listedAttempt.provider,
+        requestedProvider: listedAttempt.provider,
+        originalEnvironment: listedAttempt.environment,
+        requestedEnvironment: listedAttempt.environment,
+        originalBindingId: listedAttempt.credentialBindingId,
+        requestedBindingId: listedAttempt.credentialBindingId,
+        continuity: 'PROVEN_SAME_ACCOUNT' as const,
+        credentialState: 'ACTIVE' as const,
+        operation: 'STATUS_QUERY' as const,
+      }
+    : overrides.credentialUseInput;
   const baseDeps = {
     clock,
-    decideCredentialUse: () => ({ allowed: true as const, operation: 'STATUS_QUERY' as const }),
     getReconciliationState: async (attempt: ReconciliationAttempt) => {
       calls.getReconciliationState.push([attempt]);
       return state;
+    },
+    buildCredentialUseInput: async (attempt: ReconciliationAttempt) => {
+      calls.buildCredentialUseInput.push([attempt]);
+      return credentialUseInput;
     },
     queryStatus: async (input: MockStatusQueryInput) => {
       calls.queryStatus.push([input]);
@@ -218,6 +244,13 @@ function deps(
         reviewStatus: storedAttempt.reviewStatus,
       };
     },
+    listRequestedReadOnlyQueries: async () => {
+      calls.listRequestedReadOnlyQueries.push([]);
+      return overrides.requestedReadOnlyQueries ?? [];
+    },
+    persistReadOnlyQueryConsumption: async (input: ReadOnlyQueryConsumptionRecord) => {
+      calls.persistReadOnlyQueryConsumption.push([input]);
+    },
     listUnresolvedAttempts: async () => {
       const snapshot = cloneAttempt(storedAttempt);
       listedSnapshots.push(snapshot);
@@ -283,6 +316,78 @@ describe('reconciliationWorker', () => {
     assert.equal(storedAttempt.resolvedAt, null);
     assert.equal(attempt.outcomeStatus, 'PENDING');
     assert.equal(calls.persistSlaEscalation.length, 0);
+  });
+
+  it('fails closed when the worker cannot resolve explicit credential policy input', async () => {
+    const attempt = persistedAttempt();
+    const { deps: rawDeps, calls } = deps({
+      attempt,
+      credentialUseInput: null,
+    });
+
+    const result = await reconcileAttempt(rawDeps, attempt);
+
+    assert.deepEqual(result, {
+      kind: 'QUERY_BLOCKED',
+      reason: 'CREDENTIAL_CONTEXT_UNAVAILABLE',
+    });
+    assert.equal(calls.buildCredentialUseInput.length, 1);
+    assert.equal(calls.queryStatus.length, 0);
+  });
+
+  it('consumes a durable read-only query request and bypasses not-due timing without mutating payment state itself', async () => {
+    const attempt = persistedAttempt({
+      reviewStatus: 'IN_PROGRESS',
+      outcomeStatus: 'PENDING',
+    });
+    const { deps: rawDeps, storedAttempt, calls } = deps({
+      attempt,
+      clock: virtualClock(0),
+      queryStatus: pending(),
+      requestedReadOnlyQueries: [{
+        requestId: 'review_query_1',
+        attemptId: attempt.id,
+        obligationId: attempt.obligationId,
+        merchantId: attempt.merchantId,
+        provider: attempt.provider,
+        environment: attempt.environment,
+        credentialBindingId: attempt.credentialBindingId,
+        credentialVersionId: attempt.credentialVersionId,
+        operation: 'STATUS_QUERY',
+        note: 'await reconciler pass',
+      }],
+    });
+
+    const [result] = await reconciliationWorker(rawDeps).runOnce();
+
+    assert.deepEqual(result, {
+      kind: 'OBSERVATION_INGESTED',
+      observationId: 'observation_1',
+    });
+    assert.equal(calls.queryStatus.length, 1);
+    assert.equal(calls.queryStatus[0]?.[0].querySequence, 1);
+    assert.equal(storedAttempt.outcomeStatus, 'PENDING');
+    assert.equal(storedAttempt.reviewStatus, 'IN_PROGRESS');
+    assert.equal(storedAttempt.resolvedAt, null);
+    assert.equal(calls.persistReadOnlyQueryConsumption.length, 1);
+    assert.deepEqual(calls.persistReadOnlyQueryConsumption[0]?.[0], {
+      request: {
+        requestId: 'review_query_1',
+        attemptId: attempt.id,
+        obligationId: attempt.obligationId,
+        merchantId: attempt.merchantId,
+        provider: attempt.provider,
+        environment: attempt.environment,
+        credentialBindingId: attempt.credentialBindingId,
+        credentialVersionId: attempt.credentialVersionId,
+        operation: 'STATUS_QUERY',
+        note: 'await reconciler pass',
+      },
+      result: {
+        kind: 'OBSERVATION_INGESTED',
+        observationId: 'observation_1',
+      },
+    });
   });
 
   it('routes SLA escalation through serialized persistence and does not mutate listed snapshots', async () => {
