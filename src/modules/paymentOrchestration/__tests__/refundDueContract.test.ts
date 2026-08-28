@@ -6,6 +6,7 @@ import {
   type RefundQueueCaseStatus,
   virtualClock,
 } from '../refundDueContract.js';
+import { PGO1_MAX_BIGINT_PAISE } from '../money.js';
 
 function refundEvent(overrides: Partial<RefundDueDetectedV1> = {}): RefundDueDetectedV1 {
   return {
@@ -168,5 +169,35 @@ describe('DeterministicRefundQueueStub', () => {
       'VERIFICATION_PENDING',
       'VERIFIED_CLOSED',
     ]);
+  });
+
+  it('rejects zero and overflowing refund amounts using the shared INR bounds', () => {
+    const stub = new DeterministicRefundQueueStub();
+
+    assert.throws(
+      () =>
+        stub.consume(
+          refundEvent({
+            amountPaise: 0n,
+            dedupeKey: 'dedupe_zero',
+            factId: 'fact_zero',
+            providerTransactionRef: 'txn_zero',
+          }),
+        ),
+      /INVALID_REFUND_DUE_AMOUNT/,
+    );
+
+    assert.throws(
+      () =>
+        stub.consume(
+          refundEvent({
+            amountPaise: PGO1_MAX_BIGINT_PAISE + 1n,
+            dedupeKey: 'dedupe_overflow',
+            factId: 'fact_overflow',
+            providerTransactionRef: 'txn_overflow',
+          }),
+        ),
+      /INVALID_REFUND_DUE_AMOUNT/,
+    );
   });
 });

@@ -1,4 +1,5 @@
 import type { PaymentProvider, RefundDueReason } from './types.js';
+import { PGO1_MAX_BIGINT_PAISE } from './money.js';
 
 export interface RefundDueDetectedV1 {
   schemaVersion: 'pgo1.refund-due.v1';
@@ -78,6 +79,7 @@ interface StatusTransition {
 }
 
 const ESCALATION_HORIZON_MS = 72 * 60 * 60 * 1000;
+const PGO1_MIN_BIGINT_PAISE = 1n;
 
 export class DeterministicRefundQueueStub {
   readonly #clock: RefundQueueClock;
@@ -276,7 +278,7 @@ function assertRefundEvent(event: RefundDueDetectedV1) {
   if (event.currency !== 'INR') {
     throw new Error('INVALID_REFUND_DUE_CURRENCY');
   }
-  if (event.amountPaise < 0n) {
+  if (event.amountPaise < PGO1_MIN_BIGINT_PAISE || event.amountPaise > PGO1_MAX_BIGINT_PAISE) {
     throw new Error('INVALID_REFUND_DUE_AMOUNT');
   }
 
