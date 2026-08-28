@@ -166,6 +166,34 @@ describe('paytmContractParser', () => {
     );
   });
 
+  it('treats string null-like form values as empty while preserving ordinary values', () => {
+    const fixture = loadPaytmFixtures().find((item) => item.name === 'valid-success');
+    assert.ok(fixture);
+    assert.equal((fixture.parsedBody as Record<string, string>).BANKTXNID, 'null');
+    assert.equal(
+      verifyPaytmChecksum({
+        representation: checksumRepresentation(fixture),
+        checksum: fixture.manifest.checksum,
+        merchantKey: testMerchantKey,
+      }),
+      true,
+    );
+    assert.equal(
+      verifyPaytmChecksum({
+        representation: {
+          kind: 'FORM_PARAMS',
+          params: {
+            ...(fixture.parsedBody as Record<string, string>),
+            BANKTXNID: 'ordinary-value',
+          },
+        },
+        checksum: fixture.manifest.checksum,
+        merchantKey: testMerchantKey,
+      }),
+      false,
+    );
+  });
+
   it('verifies JSON-body signatures over the exact body string', () => {
     const fixture = loadPaytmFixtures().find((item) => item.name === 'same-event-different-body');
     assert.ok(fixture);

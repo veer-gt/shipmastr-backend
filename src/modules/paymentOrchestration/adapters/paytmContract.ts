@@ -103,7 +103,10 @@ function constantTimeUtf8Equal(left: string, right: string): boolean {
 }
 
 function normaliseChecksumValue(value: string | null | undefined): string {
-  return value == null ? '' : String(value);
+  if (value == null) return '';
+  const stringValue = String(value);
+  const nullLikeValue = stringValue.toLowerCase();
+  return nullLikeValue === 'null' || nullLikeValue === 'undefined' ? '' : stringValue;
 }
 
 function decodePayload(rawBody: Buffer): Record<string, unknown> {
