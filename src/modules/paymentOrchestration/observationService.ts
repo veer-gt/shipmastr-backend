@@ -10,6 +10,7 @@ import type {
   ReduceEvidenceInput,
   ReductionPersistenceContext,
   ReviewStatus,
+  ShadowMutationBoundary,
 } from './types.js';
 import type {
   SlaEscalationRequest,
@@ -44,9 +45,14 @@ type AttemptSnapshot = ReduceEvidenceInput['attempts'][number] & {
 
 const PERSISTED_PROVIDER_API_VERSION = 'persisted-unavailable';
 
+interface IngestObservationOptions {
+  mutationBoundary?: ShadowMutationBoundary | undefined;
+}
+
 export async function ingestObservation(
   prisma: PrismaClient,
   candidate: ObservationCandidate,
+  options: IngestObservationOptions = {},
 ): Promise<IngestionResult> {
   return prisma.$transaction(async (tx) => {
     await lockObligation(tx, candidate.obligationId, candidate.merchantId);
@@ -66,7 +72,14 @@ export async function ingestObservation(
     }
 
     const appended = await appendOrClassifyObservation(tx, candidate);
-    const context = await loadReductionContext(tx, obligation, attempts, candidate.attemptId, appended);
+    const context = await loadReductionContext(
+      tx,
+      obligation,
+      attempts,
+      candidate.attemptId,
+      appended,
+      options,
+    );
     const plan = reduceEvidence({
       obligation: {
         id: context.obligation.id,
@@ -309,6 +322,7 @@ async function loadReductionContext(
   attempts: AttemptSnapshot[],
   targetAttemptId: string,
   appended: ObservationAppendResult,
+  options: IngestObservationOptions,
 ): Promise<ReductionPersistenceContext> {
   const observationRows = await tx.providerObservation.findMany({
     where: {
@@ -343,6 +357,7 @@ async function loadReductionContext(
     targetAttempt,
     observations,
     triggeringObservation,
+    mutationBoundary: options.mutationBoundary,
   };
 }
 

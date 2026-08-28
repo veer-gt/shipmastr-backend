@@ -1,12 +1,14 @@
 import assert from 'node:assert/strict';
-import { after, before, beforeEach, describe, it } from 'node:test';
-import { Prisma, PrismaClient, type PaymentAttempt, type PaymentObligation } from '@prisma/client';
+import { after, afterEach, before, beforeEach, describe, it } from 'node:test';
+import { Prisma, PrismaClient, type PaymentAttempt, type PaymentNormalizedFactOutbox, type PaymentObligation, type RefundDueCase } from '@prisma/client';
 import * as pgo1 from '../index.js';
 import { ingestObservation, persistSlaEscalation } from '../observationService.js';
 import type {
   CanonicalObservation,
   IngestionResult,
   ProviderActivationPolicy,
+  ShadowMutationBoundary,
+  ShadowMutationCategory,
 } from '../types.js';
 import type {
   MockStatusQueryInput,
@@ -22,10 +24,17 @@ import {
   type ReadOnlyQueryConsumptionRecord,
   type ReconciliationAttempt,
 } from '../reconciliationWorker.js';
+import {
+  DeterministicRefundQueueStub,
+  type RefundDueDetectedV1,
+  virtualClock as refundQueueVirtualClock,
+} from '../refundDueContract.js';
 import { expectedScratchDatabaseNameFromEnv } from './scratchDatabaseGuard.js';
 
 const enabled = process.env.RUN_PGO1_POSTGRES_TESTS === '1';
 const prisma = new PrismaClient();
+const ACCEPTANCE_MERCHANT_ID = 'merchant_pgo1_acceptance';
+const ACCEPTANCE_CHECKOUT_ID = 'checkout_pgo1_acceptance';
 
 it('exports Mock execution and no real-provider runtime surface', () => {
   assert.deepEqual(Object.keys(pgo1).sort(), [
@@ -56,14 +65,15 @@ interface MutableClock extends Clock {
   advanceBy(deltaMs: number): void;
 }
 
-interface MutationSpies {
-  journal: Array<unknown>;
-  wallet: Array<unknown>;
-  settlement: Array<unknown>;
-  payout: Array<unknown>;
-  refund: Array<unknown>;
-  custody: Array<unknown>;
-}
+type MutationRecorder = Record<ShadowMutationCategory, unknown[]> & {
+  authorityChecks: Array<{
+    merchantId: string;
+    obligationId: string;
+    attemptId: string;
+    categories: readonly ShadowMutationCategory[];
+  }>;
+  boundary: ShadowMutationBoundary;
+};
 
 function virtualClock(initialEpochMs: number): MutableClock {
   let nowMs = initialEpochMs;
@@ -85,17 +95,106 @@ function assertScratchUrl() {
   assert.equal(decodeURIComponent(url.pathname.slice(1)), expectedScratchDatabaseNameFromEnv());
 }
 
-async function clearPaymentTables(client: PrismaClient) {
-  await client.providerObservationInterpretation.deleteMany();
-  await client.providerObservationDelivery.deleteMany();
-  await client.paymentNormalizedFactOutbox.deleteMany();
-  await client.refundDueCase.deleteMany();
-  await client.paymentAttentionSignal.deleteMany();
-  await client.reconciliationReviewHistory.deleteMany();
-  await client.paymentOutcomeTransition.deleteMany();
-  await client.providerObservation.deleteMany();
-  await client.paymentAttempt.deleteMany();
-  await client.paymentObligation.deleteMany();
+async function acceptanceNamespaceCounts(client: PrismaClient) {
+  const obligationIds = await acceptanceNamespaceObligationIds(client);
+  const childWhere = {
+    merchantId: ACCEPTANCE_MERCHANT_ID,
+    obligationId: { in: obligationIds },
+  };
+  const [
+    interpretations,
+    deliveries,
+    facts,
+    cases,
+    attention,
+    reviews,
+    transitions,
+    observations,
+    attempts,
+    obligations,
+  ] = await Promise.all([
+    client.providerObservationInterpretation.count({ where: childWhere }),
+    client.providerObservationDelivery.count({ where: childWhere }),
+    client.paymentNormalizedFactOutbox.count({ where: childWhere }),
+    client.refundDueCase.count({ where: childWhere }),
+    client.paymentAttentionSignal.count({ where: childWhere }),
+    client.reconciliationReviewHistory.count({ where: childWhere }),
+    client.paymentOutcomeTransition.count({ where: childWhere }),
+    client.providerObservation.count({ where: childWhere }),
+    client.paymentAttempt.count({ where: childWhere }),
+    client.paymentObligation.count({
+      where: {
+        merchantId: ACCEPTANCE_MERCHANT_ID,
+        checkoutId: ACCEPTANCE_CHECKOUT_ID,
+      },
+    }),
+  ]);
+
+  return {
+    interpretations,
+    deliveries,
+    facts,
+    cases,
+    attention,
+    reviews,
+    transitions,
+    observations,
+    attempts,
+    obligations,
+  };
+}
+
+async function acceptanceNamespaceObligationIds(client: PrismaClient) {
+  const rows = await client.paymentObligation.findMany({
+    where: {
+      merchantId: ACCEPTANCE_MERCHANT_ID,
+      checkoutId: ACCEPTANCE_CHECKOUT_ID,
+    },
+    select: { id: true },
+  });
+  return rows.map((row) => row.id);
+}
+
+async function assertAcceptanceNamespaceEmpty(client: PrismaClient) {
+  assert.deepEqual(await acceptanceNamespaceCounts(client), {
+    interpretations: 0,
+    deliveries: 0,
+    facts: 0,
+    cases: 0,
+    attention: 0,
+    reviews: 0,
+    transitions: 0,
+    observations: 0,
+    attempts: 0,
+    obligations: 0,
+  });
+}
+
+async function deleteAcceptanceNamespace(client: PrismaClient) {
+  const obligationIds = await acceptanceNamespaceObligationIds(client);
+  if (obligationIds.length === 0) {
+    return;
+  }
+
+  const childWhere = {
+    merchantId: ACCEPTANCE_MERCHANT_ID,
+    obligationId: { in: obligationIds },
+  };
+  await client.providerObservationInterpretation.deleteMany({ where: childWhere });
+  await client.providerObservationDelivery.deleteMany({ where: childWhere });
+  await client.paymentNormalizedFactOutbox.deleteMany({ where: childWhere });
+  await client.refundDueCase.deleteMany({ where: childWhere });
+  await client.paymentAttentionSignal.deleteMany({ where: childWhere });
+  await client.reconciliationReviewHistory.deleteMany({ where: childWhere });
+  await client.paymentOutcomeTransition.deleteMany({ where: childWhere });
+  await client.providerObservation.deleteMany({ where: childWhere });
+  await client.paymentAttempt.deleteMany({ where: childWhere });
+  await client.paymentObligation.deleteMany({
+    where: {
+      merchantId: ACCEPTANCE_MERCHANT_ID,
+      checkoutId: ACCEPTANCE_CHECKOUT_ID,
+    },
+  });
 }
 
 function ownershipReaderFor(merchantId: string, checkoutId: string) {
@@ -160,6 +259,7 @@ async function ingestMock(input: {
   scenario: 'SUCCESS' | 'TERMINAL_FAILURE' | 'TIMEOUT' | 'PENDING' | 'UNKNOWN' | 'INTEGRITY_CONFLICT';
   observationId: string;
   raw?: RawObservationInput;
+  mutationBoundary?: ShadowMutationBoundary | undefined;
 }): Promise<IngestionResult> {
   const raw = input.raw ?? await pgo1.mockAdapter.create({
     attemptId: input.attempt.id,
@@ -174,6 +274,7 @@ async function ingestMock(input: {
       attempt: input.attempt,
       obligation: input.obligation,
       observationId: input.observationId,
+      mutationBoundary: input.mutationBoundary,
     }),
     raw,
   );
@@ -201,6 +302,7 @@ function mockIngestionDeps(input: {
   attempt: PaymentAttempt;
   obligation: PaymentObligation;
   observationId: string;
+  mutationBoundary?: ShadowMutationBoundary | undefined;
 }): RawIngestionDeps {
   return {
     parser: pgo1.mockAdapter,
@@ -216,7 +318,8 @@ function mockIngestionDeps(input: {
       bindingVerification: 'VERIFIED',
     }),
     verify: async () => 'NOT_APPLICABLE',
-    persist: (candidate: CanonicalObservation) => ingestObservation(prisma, candidate),
+    persist: (candidate: CanonicalObservation) =>
+      ingestObservation(prisma, candidate, { mutationBoundary: input.mutationBoundary }),
   };
 }
 
@@ -244,20 +347,92 @@ async function codSnapshot(obligationId: string) {
   };
 }
 
-function assertZeroMutations(spies: MutationSpies) {
-  assert.deepEqual(spies, {
+function createRecordingMutationBoundary(): MutationRecorder {
+  const recorder: Omit<MutationRecorder, 'boundary'> = {
+    authorityChecks: [],
     journal: [],
     wallet: [],
     settlement: [],
     payout: [],
     refund: [],
     custody: [],
-  });
+  };
+
+  return {
+    ...recorder,
+    boundary: {
+      assertNoMutationAuthority(input) {
+        recorder.authorityChecks.push(input);
+      },
+    },
+  };
+}
+
+function assertZeroMutations(recorder: MutationRecorder) {
+  assert.ok(recorder.authorityChecks.length > 0);
+  for (const check of recorder.authorityChecks) {
+    assert.deepEqual([...check.categories].sort(), [
+      'custody',
+      'journal',
+      'payout',
+      'refund',
+      'settlement',
+      'wallet',
+    ]);
+  }
+  assert.deepEqual(
+    {
+      journal: recorder.journal,
+      wallet: recorder.wallet,
+      settlement: recorder.settlement,
+      payout: recorder.payout,
+      refund: recorder.refund,
+      custody: recorder.custody,
+    },
+    {
+      journal: [],
+      wallet: [],
+      settlement: [],
+      payout: [],
+      refund: [],
+      custody: [],
+    },
+  );
+}
+
+function toRefundDueDetectedV1(
+  fact: PaymentNormalizedFactOutbox,
+  refundCase: RefundDueCase,
+): RefundDueDetectedV1 {
+  assert.equal(fact.factType, 'REFUND_DUE_DETECTED');
+  assert.equal(fact.merchantId, refundCase.merchantId);
+  assert.equal(fact.obligationId, refundCase.obligationId);
+  assert.equal(fact.attemptId, refundCase.attemptId);
+  assert.equal(fact.providerReferenceId, refundCase.providerTransactionRef);
+  assert.equal(fact.dedupeKey, refundCase.dedupeKey);
+
+  return {
+    schemaVersion: 'pgo1.refund-due.v1',
+    factId: fact.id,
+    merchantId: fact.merchantId,
+    obligationId: fact.obligationId,
+    attemptId: fact.attemptId,
+    provider: fact.provider,
+    providerTransactionRef: fact.providerReferenceId,
+    amountPaise: fact.amountPaise,
+    currency: 'INR',
+    reason: refundCase.reason,
+    dedupeKey: fact.dedupeKey,
+    detectedAt: refundCase.detectedAt.toISOString(),
+  };
 }
 
 async function listPendingReadOnlyQueryRequests(): Promise<PendingReadOnlyQueryRequest[]> {
   const rows = await prisma.reconciliationReviewHistory.findMany({
-    where: { reasonCode: 'READ_ONLY_QUERY_REQUESTED' },
+    where: {
+      merchantId: ACCEPTANCE_MERCHANT_ID,
+      reasonCode: 'READ_ONLY_QUERY_REQUESTED',
+    },
     orderBy: [{ createdAt: 'asc' }, { id: 'asc' }],
   });
   const pending: PendingReadOnlyQueryRequest[] = [];
@@ -280,7 +455,12 @@ async function listPendingReadOnlyQueryRequests(): Promise<PendingReadOnlyQueryR
       continue;
     }
 
-    const attempt = await prisma.paymentAttempt.findUnique({ where: { id: row.attemptId } });
+    const attempt = await prisma.paymentAttempt.findFirst({
+      where: {
+        id: row.attemptId,
+        merchantId: ACCEPTANCE_MERCHANT_ID,
+      },
+    });
     if (!attempt) {
       continue;
     }
@@ -358,8 +538,12 @@ async function claimReadOnlyQueryRequest(
 }
 
 async function persistReadOnlyQueryConsumption(input: ReadOnlyQueryConsumptionRecord) {
-  const attempt = await prisma.paymentAttempt.findUniqueOrThrow({
-    where: { id: input.request.attemptId },
+  const attempt = await prisma.paymentAttempt.findFirstOrThrow({
+    where: {
+      id: input.request.attemptId,
+      obligationId: input.request.obligationId,
+      merchantId: ACCEPTANCE_MERCHANT_ID,
+    },
   });
   await prisma.reconciliationReviewHistory.create({
     data: {
@@ -391,7 +575,11 @@ if (enabled) {
     });
 
     beforeEach(async () => {
-      await clearPaymentTables(prisma);
+      await assertAcceptanceNamespaceEmpty(prisma);
+    });
+
+    afterEach(async () => {
+      await deleteAcceptanceNamespace(prisma);
     });
 
     after(async () => {
@@ -399,17 +587,10 @@ if (enabled) {
     });
 
     it('runs the Mock-only shadow payment lifecycle without real-provider or money-moving authority', async () => {
-      const spies: MutationSpies = {
-        journal: [],
-        wallet: [],
-        settlement: [],
-        payout: [],
-        refund: [],
-        custody: [],
-      };
+      const mutationRecorder = createRecordingMutationBoundary();
       const clock = virtualClock(0);
-      const merchantId = 'merchant_pgo1_acceptance';
-      const checkoutId = 'checkout_pgo1_acceptance';
+      const merchantId = ACCEPTANCE_MERCHANT_ID;
+      const checkoutId = ACCEPTANCE_CHECKOUT_ID;
       const credentialBindingId = 'binding_pgo1_acceptance';
       const credentialVersionId = 'credential_pgo1_acceptance_v1';
       const created = await prisma.$transaction((tx) =>
@@ -497,6 +678,7 @@ if (enabled) {
         obligation: created.online,
         scenario: 'TIMEOUT',
         observationId: 'observation_acceptance_timeout',
+        mutationBoundary: mutationRecorder.boundary,
       });
       assert.equal(timeout.outcomeStatus, 'UNKNOWN');
       assert.equal(timeout.reviewStatus, 'NOT_REQUIRED');
@@ -506,18 +688,54 @@ if (enabled) {
       assert.equal(persistedAttempt.resolvedAt, null);
 
       clock.advanceBy(MOCK_RECONCILIATION_POLICY_V1.slaMs);
-      const escalation = await persistSlaEscalation(prisma, {
-        attemptId: attempt.id,
-        obligationId: created.online.id,
-        merchantId,
-        observedAt: clock.now(),
-        reason: 'SLA_EXCEEDED',
+      const escalationWorker = reconciliationWorker({
+        clock,
+        policy: MOCK_RECONCILIATION_POLICY_V1,
+        getReconciliationState: async (): Promise<DerivedReconciliationState> => ({
+          amountPaise: created.online.amountPaise,
+          currency: 'INR',
+          queryCount: 0,
+          lastReconciledAt: null,
+        }),
+        queryStatus: async (input: MockStatusQueryInput) => {
+          const raw = await pgo1.mockAdapter.queryStatus({ ...input, scenario: 'TIMEOUT' });
+          return {
+            ...patchMockRawBody(raw, { providerEventId: 'event_acceptance_sla_probe' }),
+            receivedAt: clock.now(),
+          };
+        },
+        ingestRawObservation: (raw: RawObservationInput) => pgo1.ingestRawObservation(
+          mockIngestionDeps({
+            attempt: currentAttempt,
+            obligation: created.online,
+            observationId: 'observation_acceptance_sla_probe',
+            mutationBoundary: mutationRecorder.boundary,
+          }),
+          raw,
+        ),
+        buildCredentialUseInput: async (workerAttempt: ReconciliationAttempt) => ({
+          originalMerchantId: workerAttempt.merchantId,
+          requestedMerchantId: workerAttempt.merchantId,
+          originalProvider: workerAttempt.provider,
+          requestedProvider: workerAttempt.provider,
+          originalEnvironment: workerAttempt.environment,
+          requestedEnvironment: workerAttempt.environment,
+          originalBindingId: workerAttempt.credentialBindingId,
+          requestedBindingId: workerAttempt.credentialBindingId,
+          continuity: 'PROVEN_SAME_ACCOUNT',
+          credentialState: 'ACTIVE',
+          operation: 'STATUS_QUERY',
+        }),
+        persistSlaEscalation: (input) => persistSlaEscalation(prisma, input),
+        listUnresolvedAttempts: () => prisma.paymentAttempt.findMany({
+          where: { obligationId: created.online.id, merchantId, resolvedAt: null },
+          orderBy: [{ createdAt: 'asc' }, { id: 'asc' }],
+        }),
       });
-      assert.deepEqual(escalation, {
-        kind: 'ESCALATED',
-        outcomeStatus: 'UNKNOWN',
-        reviewStatus: 'REQUIRED',
-      });
+      assert.deepEqual(await escalationWorker.runOnce(), [{
+        kind: 'OBSERVATION_INGESTED',
+        observationId: 'observation_acceptance_sla_probe',
+      }]);
       persistedAttempt = await prisma.paymentAttempt.findUniqueOrThrow({ where: { id: attempt.id } });
       assert.equal(persistedAttempt.outcomeStatus, 'UNKNOWN');
       assert.equal(persistedAttempt.reviewStatus, 'REQUIRED');
@@ -536,7 +754,12 @@ if (enabled) {
         requestId: 'review_query_acceptance_1',
       });
 
-      const worker = reconciliationWorker({
+      const [pendingReadOnlyRequest] = await listPendingReadOnlyQueryRequests();
+      assert.ok(pendingReadOnlyRequest);
+      const claimedReadOnlyRequest = await claimReadOnlyQueryRequest(pendingReadOnlyRequest);
+      assert.ok(claimedReadOnlyRequest);
+
+      const successReconciliationResult = await pgo1.reconcileAttempt({
         clock,
         policy: MOCK_RECONCILIATION_POLICY_V1,
         getReconciliationState: async (): Promise<DerivedReconciliationState> => {
@@ -564,36 +787,33 @@ if (enabled) {
             attempt: currentAttempt,
             obligation: created.online,
             observationId: 'observation_acceptance_success',
+            mutationBoundary: mutationRecorder.boundary,
           }),
           raw,
         ),
-        buildCredentialUseInput: async (workerAttempt: ReconciliationAttempt) => ({
+        buildCredentialUseInput: async (workerAttempt: ReconciliationAttempt, request) => ({
           originalMerchantId: workerAttempt.merchantId,
-          requestedMerchantId: workerAttempt.merchantId,
+          requestedMerchantId: request?.merchantId ?? workerAttempt.merchantId,
           originalProvider: workerAttempt.provider,
-          requestedProvider: workerAttempt.provider,
+          requestedProvider: request?.provider ?? workerAttempt.provider,
           originalEnvironment: workerAttempt.environment,
-          requestedEnvironment: workerAttempt.environment,
+          requestedEnvironment: request?.environment ?? workerAttempt.environment,
           originalBindingId: workerAttempt.credentialBindingId,
-          requestedBindingId: workerAttempt.credentialBindingId,
+          requestedBindingId: request?.credentialBindingId ?? workerAttempt.credentialBindingId,
           continuity: 'PROVEN_SAME_ACCOUNT',
           credentialState: 'ACTIVE',
           operation: 'STATUS_QUERY',
         }),
         persistSlaEscalation: (input) => persistSlaEscalation(prisma, input),
-        listRequestedReadOnlyQueries: listPendingReadOnlyQueryRequests,
-        claimReadOnlyQueryRequest,
-        persistReadOnlyQueryConsumption,
-        listUnresolvedAttempts: () => prisma.paymentAttempt.findMany({
-          where: { obligationId: created.online.id, merchantId, resolvedAt: null },
-          orderBy: [{ createdAt: 'asc' }, { id: 'asc' }],
-        }),
-      });
-
-      assert.deepEqual(await worker.runOnce(), [{
+      }, currentAttempt, claimedReadOnlyRequest);
+      assert.deepEqual(successReconciliationResult, {
         kind: 'OBSERVATION_INGESTED',
         observationId: 'observation_acceptance_success',
-      }]);
+      });
+      await persistReadOnlyQueryConsumption({
+        request: claimedReadOnlyRequest,
+        result: successReconciliationResult,
+      });
       persistedAttempt = await prisma.paymentAttempt.findUniqueOrThrow({ where: { id: attempt.id } });
       assert.equal(persistedAttempt.outcomeStatus, 'SUCCEEDED');
       assert.equal(persistedAttempt.reviewStatus, 'COMPLETED');
@@ -621,41 +841,40 @@ if (enabled) {
           providerEventId: 'event_acceptance_failure',
           providerOrderRef,
         }),
+        mutationBoundary: mutationRecorder.boundary,
       });
       persistedAttempt = await prisma.paymentAttempt.findUniqueOrThrow({ where: { id: attempt.id } });
       assert.equal(persistedAttempt.outcomeStatus, 'SUCCEEDED');
       assert.equal(persistedAttempt.reviewStatus, 'COMPLETED');
       assert.ok(persistedAttempt.resolvedAt);
 
-      await prisma.paymentAttempt.create({
+      const surplusAttemptResult = await createMockAttempt({
+        merchantId,
+        obligation: created.online,
+        requestIdempotencyKey: 'request_acceptance_surplus',
+        credentialBindingId,
+        credentialVersionId,
+      });
+      assert.equal(surplusAttemptResult.kind, 'CREATED');
+      await prisma.paymentAttempt.update({
+        where: { id: surplusAttemptResult.attempt.id },
         data: {
-          id: 'attempt_acceptance_surplus',
-          obligationId: created.online.id,
-          merchantId,
-          obligationCollectionRail: 'ONLINE',
-          provider: 'MOCK',
-          environment: 'TEST',
-          credentialBindingId,
-          credentialVersionId,
-          requestIdempotencyKey: 'request_acceptance_surplus',
-          providerOrderRef: `mock_order_${created.online.id}_attempt_acceptance_surplus`,
-          outcomeStatus: 'PENDING',
-          reviewStatus: 'NOT_REQUIRED',
-          resolvedAt: null,
-          lastOutcomeChangedAt: clock.now(),
-          lastObservationAt: null,
+          providerOrderRef: `mock_order_${created.online.id}_${surplusAttemptResult.attempt.id}`,
           adapterVersion: pgo1.mockAdapter.adapterVersion,
           mappingVersion: pgo1.mockAdapter.mappingVersion,
+          createdAt: clock.now(),
+          lastOutcomeChangedAt: clock.now(),
         },
       });
       const surplusAttempt = await prisma.paymentAttempt.findUniqueOrThrow({
-        where: { id: 'attempt_acceptance_surplus' },
+        where: { id: surplusAttemptResult.attempt.id },
       });
       await ingestMock({
         attempt: surplusAttempt,
         obligation: created.online,
         scenario: 'SUCCESS',
         observationId: 'observation_acceptance_surplus_success',
+        mutationBoundary: mutationRecorder.boundary,
       });
 
       const refundCases = await prisma.refundDueCase.findMany({
@@ -678,14 +897,14 @@ if (enabled) {
         assert.deepEqual(pgo1.validateShadowFact(fact), { valid: true });
       }
 
-      const queueConsumption = outbox.map((fact, index) => ({
+      const outboxFactSequence = outbox.map((fact, index) => ({
         sequence: index + 1,
         factId: fact.id,
         factType: fact.factType,
         dedupeKey: fact.dedupeKey,
       }));
       assert.deepEqual(
-        queueConsumption.map((entry) => `${entry.sequence}:${entry.factType}`),
+        outboxFactSequence.map((entry) => `${entry.sequence}:${entry.factType}`),
         [
           '1:PAYMENT_SUCCEEDED',
           '2:PAYMENT_SUCCEEDED',
@@ -693,6 +912,34 @@ if (enabled) {
           '4:REFUND_DUE_DETECTED',
         ],
       );
+      const refundDueEvent = toRefundDueDetectedV1(refundDueFacts[0]!, refundCases[0]!);
+      const refundQueue = new DeterministicRefundQueueStub({
+        clock: refundQueueVirtualClock(0),
+      });
+      refundQueue.consume(refundDueEvent);
+      refundQueue.consume(refundDueEvent);
+      assert.deepEqual(refundQueue.list().map((entry) => ({
+        owner: entry.owner,
+        status: entry.status,
+        merchantId: entry.merchantId,
+        obligationId: entry.obligationId,
+        attemptId: entry.attemptId,
+        reason: entry.reason,
+        dedupeKey: entry.dedupeKey,
+      })), [{
+        owner: 'PAYMENTS_OPERATIONS',
+        status: 'OPEN',
+        merchantId,
+        obligationId: created.online.id,
+        attemptId: surplusAttempt.id,
+        reason: 'SURPLUS_DOUBLE_SUCCESS',
+        dedupeKey: refundDueFacts[0]!.dedupeKey,
+      }]);
+      refundQueue.acknowledge({ caseId: 'case_1' });
+      assert.partialDeepStrictEqual(refundQueue.list()[0], {
+        owner: 'PAYMENTS_OPERATIONS',
+        status: 'ACKNOWLEDGED',
+      });
 
       const history = await prisma.reconciliationReviewHistory.findMany({
         where: { attemptId: attempt.id },
@@ -717,7 +964,7 @@ if (enabled) {
       });
       assert.equal(onlineObligation.status, 'SATISFIED');
       assert.deepEqual(await codSnapshot(created.cod.id), codBefore);
-      assertZeroMutations(spies);
+      assertZeroMutations(mutationRecorder);
     });
   });
 } else {

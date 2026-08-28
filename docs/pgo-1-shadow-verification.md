@@ -38,24 +38,36 @@ npm run build
 DATABASE_URL="$PGO1_TEST_DATABASE_URL" RUN_PGO1_POSTGRES_TESTS=1 node --test --test-concurrency=1 dist/modules/paymentOrchestration/__tests__/pgo1.acceptance.postgres.test.js
 ```
 
-Confirm the migration applies only to a newly created, independently guarded disposable database:
+Confirm the migration applies only to a newly created, independently guarded disposable database distinct from the acceptance test database. The migration scratch name must not equal the acceptance test database:
 
 ```bash
+test "$(stat -f %Lp /Users/mac/.config/shipmastr/pgo1-a965f431-test.env)" = "600" &&
 set -a &&
 . /Users/mac/.config/shipmastr/pgo1-a965f431-test.env &&
 set +a &&
 PGO1_TEST_DATABASE_URL="$PGO1_TEST_DATABASE_URL" PGO1_SCRATCH_DB_NAME="$PGO1_SCRATCH_DB_NAME" node -e 'const u=new URL(process.env.PGO1_TEST_DATABASE_URL??""); const d=decodeURIComponent(u.pathname.slice(1)); if(!["127.0.0.1","localhost"].includes(u.hostname.toLowerCase())||u.port!=="5433"||d!==process.env.PGO1_SCRATCH_DB_NAME||d!=="shipmastr_scratch_pgo1_a965f431"||!/^shipmastr_scratch_pgo1_[a-zA-Z0-9_]+$/.test(d)) process.exit(1)' &&
-DATABASE_URL="$PGO1_TEST_DATABASE_URL" npx prisma migrate deploy
+PGO1_MIGRATION_SCRATCH_DB_NAME=shipmastr_scratch_pgo1_a965f431_migration &&
+PGO1_TEST_DATABASE_URL="$PGO1_TEST_DATABASE_URL" PGO1_SCRATCH_DB_NAME="$PGO1_SCRATCH_DB_NAME" PGO1_MIGRATION_SCRATCH_DB_NAME="$PGO1_MIGRATION_SCRATCH_DB_NAME" node -e 'const u=new URL(process.env.PGO1_TEST_DATABASE_URL??""); const testDb=decodeURIComponent(u.pathname.slice(1)); const migrationDb=process.env.PGO1_MIGRATION_SCRATCH_DB_NAME??""; if(migrationDb===testDb||migrationDb!=="shipmastr_scratch_pgo1_a965f431_migration"||!/^shipmastr_scratch_pgo1_[a-zA-Z0-9_]+$/.test(migrationDb)) process.exit(1)' &&
+DATABASE_URL="$PGO1_TEST_DATABASE_URL" SCRATCH_DB_NAME="$PGO1_MIGRATION_SCRATCH_DB_NAME" npm run db:scratch:create &&
+PGO1_MIGRATION_DATABASE_URL="$(PGO1_TEST_DATABASE_URL="$PGO1_TEST_DATABASE_URL" PGO1_MIGRATION_SCRATCH_DB_NAME="$PGO1_MIGRATION_SCRATCH_DB_NAME" node -e 'const u=new URL(process.env.PGO1_TEST_DATABASE_URL??""); u.pathname=`/${process.env.PGO1_MIGRATION_SCRATCH_DB_NAME}`; process.stdout.write(u.toString())')" &&
+DATABASE_URL="$PGO1_MIGRATION_DATABASE_URL" PGO1_MIGRATION_SCRATCH_DB_NAME="$PGO1_MIGRATION_SCRATCH_DB_NAME" node -e 'const u=new URL(process.env.DATABASE_URL??""); const d=decodeURIComponent(u.pathname.slice(1)); if(!["127.0.0.1","localhost"].includes(u.hostname.toLowerCase())||u.port!=="5433"||d!==process.env.PGO1_MIGRATION_SCRATCH_DB_NAME||d==="shipmastr_scratch_pgo1_a965f431") process.exit(1)' &&
+DATABASE_URL="$PGO1_MIGRATION_DATABASE_URL" npx prisma migrate deploy &&
+npm run db:scratch:drop -- "$PGO1_MIGRATION_SCRATCH_DB_NAME"
 ```
 
-Rollback is not tested against a shared database. Rollback means guarded disposal of the disposable scratch database only:
+If migration application fails before the final drop command, dispose only that exact migration scratch database after re-running the same name guard:
 
 ```bash
+test "$(stat -f %Lp /Users/mac/.config/shipmastr/pgo1-a965f431-test.env)" = "600" &&
 set -a &&
 . /Users/mac/.config/shipmastr/pgo1-a965f431-test.env &&
 set +a &&
-npm run db:scratch:drop -- "$PGO1_SCRATCH_DB_NAME"
+PGO1_MIGRATION_SCRATCH_DB_NAME=shipmastr_scratch_pgo1_a965f431_migration &&
+PGO1_TEST_DATABASE_URL="$PGO1_TEST_DATABASE_URL" PGO1_SCRATCH_DB_NAME="$PGO1_SCRATCH_DB_NAME" PGO1_MIGRATION_SCRATCH_DB_NAME="$PGO1_MIGRATION_SCRATCH_DB_NAME" node -e 'const u=new URL(process.env.PGO1_TEST_DATABASE_URL??""); const testDb=decodeURIComponent(u.pathname.slice(1)); const migrationDb=process.env.PGO1_MIGRATION_SCRATCH_DB_NAME??""; if(migrationDb===testDb||migrationDb!=="shipmastr_scratch_pgo1_a965f431_migration"||!/^shipmastr_scratch_pgo1_[a-zA-Z0-9_]+$/.test(migrationDb)) process.exit(1)' &&
+npm run db:scratch:drop -- "$PGO1_MIGRATION_SCRATCH_DB_NAME"
 ```
+
+Rollback is not tested against a shared database. Rollback means guarded disposal of the separately created migration scratch database only; never run migration rollback or destructive migration commands against a production, default, shared, or acceptance-test URL.
 
 ## Mock-Only Evidence
 
@@ -91,7 +103,7 @@ The only acceptable output is deliberate raw-byte ingestion parameters or reject
 
 ## Zero-Mutation Boundary
 
-The acceptance flow asserts that journal, wallet, settlement, payout, refund, and custody spies have zero calls. It also snapshots the COD delivery-balance obligation and all related COD shadow tables before the online Mock flow, then asserts the COD delivery-balance obligation is byte-for-byte unchanged after timeout, escalation, success, contradictory failure, surplus success, refund-due detection, shadow validation, and queue-stub consumption.
+The acceptance flow injects a recording `ShadowMutationBoundary` into the production reduction persistence path. The reducer path calls the boundary's no-mutation-authority check, and the recorder asserts journal, wallet, settlement, payout, refund, and custody call counts remain zero. The flow also snapshots the COD delivery-balance obligation and all related COD shadow tables before the online Mock flow, then asserts the COD delivery-balance obligation is byte-for-byte unchanged after timeout, escalation, success, contradictory failure, surplus success, refund-due detection, shadow validation, and queue-stub consumption.
 
 The Payments Operations boundary is a deterministic local queue stub. It consumes `PaymentNormalizedFactOutbox` rows in `createdAt, id` order and records no live queue delivery. Passing this stub does not authorize live queue wiring.
 

@@ -120,6 +120,23 @@ export interface ReductionPlan {
   relatedAttemptActions: Array<{ attemptId: string; action: RelatedAttemptAction }>;
 }
 
+export type ShadowMutationCategory =
+  | 'journal'
+  | 'wallet'
+  | 'settlement'
+  | 'payout'
+  | 'refund'
+  | 'custody';
+
+export interface ShadowMutationBoundary {
+  assertNoMutationAuthority(input: {
+    merchantId: string;
+    obligationId: string;
+    attemptId: string;
+    categories: readonly ShadowMutationCategory[];
+  }): void | Promise<void>;
+}
+
 export interface MatchInput {
   observation: CanonicalObservation;
   obligation: {
@@ -180,4 +197,5 @@ export interface ReductionPersistenceContext {
   targetAttempt: ReductionPersistenceContext['attempts'][number];
   observations: CanonicalObservation[];
   triggeringObservation: CanonicalObservation;
+  mutationBoundary?: ShadowMutationBoundary | undefined;
 }

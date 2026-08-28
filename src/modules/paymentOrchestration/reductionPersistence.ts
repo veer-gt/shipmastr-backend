@@ -11,6 +11,14 @@ import type {
 
 const FACT_SCHEMA_VERSION = 'pgo1-fact-v1';
 const REDUCER_VERSION = 'pgo1-reducer-v1';
+const SHADOW_MUTATION_CATEGORIES = [
+  'journal',
+  'wallet',
+  'settlement',
+  'payout',
+  'refund',
+  'custody',
+] as const;
 const REVIEW_STATUS_REASON_CODE: Record<ReviewStatus, string> = {
   NOT_REQUIRED: 'REVIEW_NOT_REQUIRED',
   REQUIRED: 'REVIEW_REQUIRED_FROM_OBSERVATION',
@@ -31,6 +39,13 @@ export async function persistReduction(
   context: ReductionPersistenceContext,
   plan: ReductionPlan,
 ): Promise<void> {
+  await context.mutationBoundary?.assertNoMutationAuthority({
+    merchantId: context.obligation.merchantId,
+    obligationId: context.obligation.id,
+    attemptId: context.targetAttempt.id,
+    categories: SHADOW_MUTATION_CATEGORIES,
+  });
+
   const effectiveAt = effectiveObservationTime(context.triggeringObservation);
   const preserveResolvedAttempt =
     context.targetAttempt.resolvedAt !== null &&
