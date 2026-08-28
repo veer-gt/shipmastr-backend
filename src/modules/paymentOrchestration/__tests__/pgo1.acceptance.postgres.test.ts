@@ -754,12 +754,8 @@ if (enabled) {
         requestId: 'review_query_acceptance_1',
       });
 
-      const [pendingReadOnlyRequest] = await listPendingReadOnlyQueryRequests();
-      assert.ok(pendingReadOnlyRequest);
-      const claimedReadOnlyRequest = await claimReadOnlyQueryRequest(pendingReadOnlyRequest);
-      assert.ok(claimedReadOnlyRequest);
-
-      const successReconciliationResult = await pgo1.reconcileAttempt({
+      assert.equal((await listPendingReadOnlyQueryRequests()).length, 1);
+      const readOnlyWorker = reconciliationWorker({
         clock,
         policy: MOCK_RECONCILIATION_POLICY_V1,
         getReconciliationState: async (): Promise<DerivedReconciliationState> => {
@@ -805,14 +801,34 @@ if (enabled) {
           operation: 'STATUS_QUERY',
         }),
         persistSlaEscalation: (input) => persistSlaEscalation(prisma, input),
-      }, currentAttempt, claimedReadOnlyRequest);
-      assert.deepEqual(successReconciliationResult, {
+        listRequestedReadOnlyQueries: listPendingReadOnlyQueryRequests,
+        claimReadOnlyQueryRequest,
+        persistReadOnlyQueryConsumption,
+        listUnresolvedAttempts: () => prisma.paymentAttempt.findMany({
+          where: { obligationId: created.online.id, merchantId, resolvedAt: null },
+          orderBy: [{ createdAt: 'asc' }, { id: 'asc' }],
+        }),
+      });
+      const readOnlyWorkerResults = await readOnlyWorker.runOnce();
+      assert.deepEqual(readOnlyWorkerResults, [{
         kind: 'OBSERVATION_INGESTED',
         observationId: 'observation_acceptance_success',
+      }]);
+      assert.equal((await listPendingReadOnlyQueryRequests()).length, 0);
+      const consumedReadOnlyRequest = await prisma.reconciliationReviewHistory.findFirstOrThrow({
+        where: {
+          attemptId: attempt.id,
+          obligationId: created.online.id,
+          merchantId,
+          reasonCode: 'READ_ONLY_QUERY_CONSUMED',
+          correlationId: 'review_query_acceptance_1',
+        },
+        select: { evidenceReferenceIds: true },
       });
-      await persistReadOnlyQueryConsumption({
-        request: claimedReadOnlyRequest,
-        result: successReconciliationResult,
+      assert.deepEqual(consumedReadOnlyRequest.evidenceReferenceIds, {
+        references: [],
+        note: 'acceptance deterministic queue request',
+        result: 'OBSERVATION_INGESTED',
       });
       persistedAttempt = await prisma.paymentAttempt.findUniqueOrThrow({ where: { id: attempt.id } });
       assert.equal(persistedAttempt.outcomeStatus, 'SUCCEEDED');
