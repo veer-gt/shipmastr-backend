@@ -6926,12 +6926,15 @@ model PaymentObligation {
   @@index([merchantId])
   @@index([checkoutId])
   @@index([status])
+  @@unique([id, merchantId])
+  @@unique([id, merchantId, collectionRail])
 }
 
 model PaymentAttempt {
   id                   String              @id @default(cuid())
   obligationId         String
   merchantId           String
+  obligationCollectionRail CollectionRail
   provider             PaymentProvider
   environment          ProviderEnvironment
   credentialBindingId  String
@@ -6948,7 +6951,7 @@ model PaymentAttempt {
   createdAt            DateTime            @default(now())
   updatedAt            DateTime            @updatedAt
 
-  obligation         PaymentObligation             @relation(fields: [obligationId], references: [id], onDelete: Restrict)
+  obligation         PaymentObligation             @relation(fields: [obligationId, merchantId, obligationCollectionRail], references: [id, merchantId, collectionRail], onDelete: Restrict)
   observations       ProviderObservation[]
   outcomeTransitions PaymentOutcomeTransition[]
   reviewHistory      ReconciliationReviewHistory[]
@@ -6957,8 +6960,10 @@ model PaymentAttempt {
   refundDueCases     RefundDueCase[]
 
   @@unique([merchantId, requestIdempotencyKey], map: "payment_attempt_request_idempotency")
+  @@unique([id, obligationId, merchantId])
   @@index([obligationId])
   @@index([merchantId])
+  @@index([obligationId, merchantId, obligationCollectionRail])
   @@index([provider, environment])
   @@index([reviewStatus])
   @@index([outcomeStatus])
@@ -6995,8 +7000,8 @@ model ProviderObservation {
   observationDedupeKey  String
   createdAt             DateTime                   @default(now())
 
-  attempt                         PaymentAttempt                    @relation(fields: [attemptId], references: [id], onDelete: Restrict)
-  obligation                      PaymentObligation                 @relation(fields: [obligationId], references: [id], onDelete: Restrict)
+  attempt                         PaymentAttempt                    @relation(fields: [attemptId, obligationId, merchantId], references: [id, obligationId, merchantId], onDelete: Restrict)
+  obligation                      PaymentObligation                 @relation(fields: [obligationId, merchantId], references: [id, merchantId], onDelete: Restrict)
   deliveries                      ProviderObservationDelivery[]
   originalObservationInterpretations ProviderObservationInterpretation[] @relation("OriginalProviderObservationInterpretations")
   derivedObservationInterpretations  ProviderObservationInterpretation[] @relation("DerivedProviderObservationInterpretations")
@@ -7007,6 +7012,7 @@ model ProviderObservation {
   verifiedRefundDueCases          RefundDueCase[]
 
   @@unique([observationDedupeKey], map: "provider_observation_dedupe")
+  @@unique([id, attemptId, obligationId, merchantId])
   @@index([attemptId])
   @@index([obligationId])
   @@index([merchantId])
@@ -7028,7 +7034,7 @@ model ProviderObservationDelivery {
   deliveryMetadata Json?
   createdAt      DateTime            @default(now())
 
-  observation ProviderObservation @relation(fields: [observationId], references: [id], onDelete: Restrict)
+  observation ProviderObservation @relation(fields: [observationId, attemptId, obligationId, merchantId], references: [id, attemptId, obligationId, merchantId], onDelete: Restrict)
 
   @@index([observationId])
   @@index([merchantId])
@@ -7047,8 +7053,8 @@ model ProviderObservationInterpretation {
   derivedMappingVersion String
   createdAt             DateTime            @default(now())
 
-  originalObservation ProviderObservation @relation("OriginalProviderObservationInterpretations", fields: [originalObservationId], references: [id], onDelete: Restrict)
-  derivedObservation  ProviderObservation @relation("DerivedProviderObservationInterpretations", fields: [derivedObservationId], references: [id], onDelete: Restrict)
+  originalObservation ProviderObservation @relation("OriginalProviderObservationInterpretations", fields: [originalObservationId, attemptId, obligationId, merchantId], references: [id, attemptId, obligationId, merchantId], onDelete: Restrict)
+  derivedObservation  ProviderObservation @relation("DerivedProviderObservationInterpretations", fields: [derivedObservationId, attemptId, obligationId, merchantId], references: [id, attemptId, obligationId, merchantId], onDelete: Restrict)
 
   @@unique([originalObservationId, derivedAdapterVersion, derivedMappingVersion], map: "provider_observation_interpretation_dedupe")
   @@index([derivedObservationId])
@@ -7068,9 +7074,9 @@ model PaymentOutcomeTransition {
   triggeringObservationId String?
   createdAt             DateTime       @default(now())
 
-  attempt               PaymentAttempt      @relation(fields: [attemptId], references: [id], onDelete: Restrict)
-  obligation            PaymentObligation   @relation(fields: [obligationId], references: [id], onDelete: Restrict)
-  triggeringObservation ProviderObservation? @relation(fields: [triggeringObservationId], references: [id], onDelete: SetNull)
+  attempt               PaymentAttempt      @relation(fields: [attemptId, obligationId, merchantId], references: [id, obligationId, merchantId], onDelete: Restrict)
+  obligation            PaymentObligation   @relation(fields: [obligationId, merchantId], references: [id, merchantId], onDelete: Restrict)
+  triggeringObservation ProviderObservation? @relation(fields: [triggeringObservationId, attemptId, obligationId, merchantId], references: [id, attemptId, obligationId, merchantId], onDelete: Restrict)
 
   @@index([attemptId, createdAt])
   @@index([obligationId, createdAt])
@@ -7092,9 +7098,9 @@ model ReconciliationReviewHistory {
   correlationId         String?
   createdAt             DateTime              @default(now())
 
-  attempt               PaymentAttempt       @relation(fields: [attemptId], references: [id], onDelete: Restrict)
-  obligation            PaymentObligation    @relation(fields: [obligationId], references: [id], onDelete: Restrict)
-  triggeringObservation ProviderObservation? @relation(fields: [triggeringObservationId], references: [id], onDelete: SetNull)
+  attempt               PaymentAttempt       @relation(fields: [attemptId, obligationId, merchantId], references: [id, obligationId, merchantId], onDelete: Restrict)
+  obligation            PaymentObligation    @relation(fields: [obligationId, merchantId], references: [id, merchantId], onDelete: Restrict)
+  triggeringObservation ProviderObservation? @relation(fields: [triggeringObservationId, attemptId, obligationId, merchantId], references: [id, attemptId, obligationId, merchantId], onDelete: Restrict)
 
   @@index([attemptId, createdAt])
   @@index([obligationId, createdAt])
@@ -7111,9 +7117,9 @@ model PaymentAttentionSignal {
   detail         Json?
   createdAt      DateTime              @default(now())
 
-  attempt     PaymentAttempt       @relation(fields: [attemptId], references: [id], onDelete: Restrict)
-  obligation  PaymentObligation    @relation(fields: [obligationId], references: [id], onDelete: Restrict)
-  observation ProviderObservation? @relation(fields: [observationId], references: [id], onDelete: SetNull)
+  attempt     PaymentAttempt       @relation(fields: [attemptId, obligationId, merchantId], references: [id, obligationId, merchantId], onDelete: Restrict)
+  obligation  PaymentObligation    @relation(fields: [obligationId, merchantId], references: [id, merchantId], onDelete: Restrict)
+  observation ProviderObservation? @relation(fields: [observationId, attemptId, obligationId, merchantId], references: [id, attemptId, obligationId, merchantId], onDelete: Restrict)
 
   @@index([attemptId, createdAt])
   @@index([obligationId, createdAt])
@@ -7138,9 +7144,9 @@ model PaymentNormalizedFactOutbox {
   mappingVersion        String
   createdAt             DateTime        @default(now())
 
-  obligation            PaymentObligation   @relation(fields: [obligationId], references: [id], onDelete: Restrict)
-  attempt               PaymentAttempt      @relation(fields: [attemptId], references: [id], onDelete: Restrict)
-  triggeringObservation ProviderObservation @relation(fields: [triggeringObservationId], references: [id], onDelete: Restrict)
+  obligation            PaymentObligation   @relation(fields: [obligationId, merchantId], references: [id, merchantId], onDelete: Restrict)
+  attempt               PaymentAttempt      @relation(fields: [attemptId, obligationId, merchantId], references: [id, obligationId, merchantId], onDelete: Restrict)
+  triggeringObservation ProviderObservation @relation(fields: [triggeringObservationId, attemptId, obligationId, merchantId], references: [id, attemptId, obligationId, merchantId], onDelete: Restrict)
 
   @@unique([dedupeKey], map: "payment_fact_dedupe")
   @@index([merchantId, createdAt])
@@ -7167,9 +7173,9 @@ model RefundDueCase {
   verificationObservationId String?
   createdAt             DateTime           @default(now())
 
-  obligation            PaymentObligation    @relation(fields: [obligationId], references: [id], onDelete: Restrict)
-  attempt               PaymentAttempt       @relation(fields: [attemptId], references: [id], onDelete: Restrict)
-  verificationObservation ProviderObservation? @relation(fields: [verificationObservationId], references: [id], onDelete: SetNull)
+  obligation            PaymentObligation    @relation(fields: [obligationId, merchantId], references: [id, merchantId], onDelete: Restrict)
+  attempt               PaymentAttempt       @relation(fields: [attemptId, obligationId, merchantId], references: [id, obligationId, merchantId], onDelete: Restrict)
+  verificationObservation ProviderObservation? @relation(fields: [verificationObservationId, attemptId, obligationId, merchantId], references: [id, attemptId, obligationId, merchantId], onDelete: Restrict)
 
   @@unique([dedupeKey], map: "refund_due_case_dedupe")
   @@index([merchantId, detectedAt])

@@ -28,6 +28,10 @@ function isPrismaCode(error: unknown, code: string): error is Prisma.PrismaClien
   return error instanceof Prisma.PrismaClientKnownRequestError && error.code === code;
 }
 
+function isBindingViolation(error: unknown) {
+  return isPrismaCode(error, "P2003") || isPrismaCode(error, "P2004");
+}
+
 function obligation(overrides: Partial<Prisma.PaymentObligationUncheckedCreateInput> = {}): Prisma.PaymentObligationUncheckedCreateInput {
   const merchantId = overrides.merchantId ?? nextId("merchant");
 
@@ -58,6 +62,7 @@ function attempt(overrides: Partial<Prisma.PaymentAttemptUncheckedCreateInput> =
     id: overrides.id ?? nextId("attempt"),
     obligationId,
     merchantId,
+    obligationCollectionRail: overrides.obligationCollectionRail ?? "ONLINE",
     provider: overrides.provider ?? "MOCK",
     environment: overrides.environment ?? "TEST",
     credentialBindingId: overrides.credentialBindingId ?? nextId("binding"),
@@ -378,6 +383,59 @@ if (enabled) {
       }));
     });
 
+    it("rejects attempts on COD delivery-balance obligations", async () => {
+      const codObligation = await createObligation({
+        collectionRail: "COD",
+        purpose: "COD_DELIVERY_BALANCE"
+      });
+
+      await assert.rejects(
+        prisma.paymentAttempt.create({
+          data: attempt({
+            merchantId: codObligation.merchantId,
+            obligationId: codObligation.id as string
+          })
+        }),
+        isBindingViolation
+      );
+    });
+
+    it("rejects cross-merchant attempt and obligation mismatches", async () => {
+      const baseObligation = await createObligation({ merchantId: "merchant_alpha" });
+
+      await assert.rejects(
+        prisma.paymentAttempt.create({
+          data: attempt({
+            merchantId: "merchant_beta",
+            obligationId: baseObligation.id as string
+          })
+        }),
+        isBindingViolation
+      );
+    });
+
+    it("rejects provider observations whose attempt and obligation bindings do not match", async () => {
+      const leftObligation = await createObligation({ merchantId: "merchant_obs" });
+      const rightObligation = await createObligation({ merchantId: "merchant_obs" });
+      const createdAttempt = await prisma.paymentAttempt.create({
+        data: attempt({
+          merchantId: "merchant_obs",
+          obligationId: leftObligation.id as string
+        })
+      });
+
+      await assert.rejects(
+        prisma.providerObservation.create({
+          data: observation({
+            merchantId: "merchant_obs",
+            attemptId: createdAttempt.id,
+            obligationId: rightObligation.id as string
+          })
+        }),
+        isBindingViolation
+      );
+    });
+
     it("rejects non-INR normalized facts", async () => {
       await assert.rejects(createFactWithAttempt({ currency: "USD" }));
     });
@@ -433,6 +491,47 @@ if (enabled) {
       await assert.rejects(
         createFactWithAttempt({ dedupeKey: "same_fact" }),
         (error: unknown) => isPrismaCode(error, "P2002")
+      );
+    });
+
+    it("rejects normalized facts whose attempt and observation bindings do not match the obligation", async () => {
+      const obligationA = await createObligation({ merchantId: "merchant_fact" });
+      const obligationB = await createObligation({ merchantId: "merchant_fact" });
+      const createdAttempt = await prisma.paymentAttempt.create({
+        data: attempt({
+          merchantId: "merchant_fact",
+          obligationId: obligationA.id as string
+        })
+      });
+      const createdObservation = await prisma.providerObservation.create({
+        data: observation({
+          merchantId: "merchant_fact",
+          obligationId: obligationA.id as string,
+          attemptId: createdAttempt.id
+        })
+      });
+
+      await assert.rejects(
+        prisma.paymentNormalizedFactOutbox.create({
+          data: {
+            id: nextId("fact"),
+            schemaVersion: "pgo1-fact-v1",
+            merchantId: "merchant_fact",
+            obligationId: obligationB.id as string,
+            attemptId: createdAttempt.id,
+            triggeringObservationId: createdObservation.id,
+            factType: "REFUND_DUE_DETECTED",
+            amountPaise: 10_000n,
+            currency: "INR",
+            provider: "MOCK",
+            providerReferenceId: nextId("provider_ref"),
+            dedupeKey: nextId("fact_dedupe"),
+            reducerVersion: "reducer-v1",
+            adapterVersion: "mock-adapter-v1",
+            mappingVersion: "mock-mapping-v1"
+          }
+        }),
+        isBindingViolation
       );
     });
 

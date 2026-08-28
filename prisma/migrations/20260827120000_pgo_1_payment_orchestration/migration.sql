@@ -59,6 +59,7 @@ CREATE TABLE "PaymentAttempt" (
     "id" TEXT NOT NULL,
     "obligationId" TEXT NOT NULL,
     "merchantId" TEXT NOT NULL,
+    "obligationCollectionRail" "CollectionRail" NOT NULL,
     "provider" "PaymentProvider" NOT NULL,
     "environment" "ProviderEnvironment" NOT NULL,
     "credentialBindingId" TEXT NOT NULL,
@@ -248,13 +249,25 @@ CREATE INDEX "PaymentObligation_checkoutId_idx" ON "PaymentObligation"("checkout
 CREATE INDEX "PaymentObligation_status_idx" ON "PaymentObligation"("status");
 
 -- CreateIndex
+CREATE UNIQUE INDEX "PaymentObligation_id_merchantId_key" ON "PaymentObligation"("id", "merchantId");
+
+-- CreateIndex
+CREATE UNIQUE INDEX "PaymentObligation_id_merchantId_collectionRail_key" ON "PaymentObligation"("id", "merchantId", "collectionRail");
+
+-- CreateIndex
 CREATE UNIQUE INDEX "payment_attempt_request_idempotency" ON "PaymentAttempt"("merchantId", "requestIdempotencyKey");
+
+-- CreateIndex
+CREATE UNIQUE INDEX "PaymentAttempt_id_obligationId_merchantId_key" ON "PaymentAttempt"("id", "obligationId", "merchantId");
 
 -- CreateIndex
 CREATE INDEX "PaymentAttempt_obligationId_idx" ON "PaymentAttempt"("obligationId");
 
 -- CreateIndex
 CREATE INDEX "PaymentAttempt_merchantId_idx" ON "PaymentAttempt"("merchantId");
+
+-- CreateIndex
+CREATE INDEX "PaymentAttempt_obligationId_merchantId_obligationCollectionRail_idx" ON "PaymentAttempt"("obligationId", "merchantId", "obligationCollectionRail");
 
 -- CreateIndex
 CREATE INDEX "PaymentAttempt_provider_environment_idx" ON "PaymentAttempt"("provider", "environment");
@@ -267,6 +280,9 @@ CREATE INDEX "PaymentAttempt_outcomeStatus_idx" ON "PaymentAttempt"("outcomeStat
 
 -- CreateIndex
 CREATE UNIQUE INDEX "provider_observation_dedupe" ON "ProviderObservation"("observationDedupeKey");
+
+-- CreateIndex
+CREATE UNIQUE INDEX "ProviderObservation_id_attemptId_obligationId_merchantId_key" ON "ProviderObservation"("id", "attemptId", "obligationId", "merchantId");
 
 -- CreateIndex
 CREATE INDEX "ProviderObservation_attemptId_idx" ON "ProviderObservation"("attemptId");
@@ -370,70 +386,73 @@ ON "PaymentAttempt" ("obligationId")
 WHERE "resolvedAt" IS NULL;
 
 -- AddForeignKey
-ALTER TABLE "PaymentAttempt" ADD CONSTRAINT "PaymentAttempt_obligationId_fkey" FOREIGN KEY ("obligationId") REFERENCES "PaymentObligation"("id") ON DELETE RESTRICT ON UPDATE CASCADE;
+ALTER TABLE "PaymentAttempt" ADD CONSTRAINT "PaymentAttempt_obligationId_merchantId_obligationCollectionRa_fkey" FOREIGN KEY ("obligationId", "merchantId", "obligationCollectionRail") REFERENCES "PaymentObligation"("id", "merchantId", "collectionRail") ON DELETE RESTRICT ON UPDATE CASCADE;
 
 -- AddForeignKey
-ALTER TABLE "ProviderObservation" ADD CONSTRAINT "ProviderObservation_attemptId_fkey" FOREIGN KEY ("attemptId") REFERENCES "PaymentAttempt"("id") ON DELETE RESTRICT ON UPDATE CASCADE;
+ALTER TABLE "ProviderObservation" ADD CONSTRAINT "ProviderObservation_attemptId_obligationId_merchantId_fkey" FOREIGN KEY ("attemptId", "obligationId", "merchantId") REFERENCES "PaymentAttempt"("id", "obligationId", "merchantId") ON DELETE RESTRICT ON UPDATE CASCADE;
 
 -- AddForeignKey
-ALTER TABLE "ProviderObservation" ADD CONSTRAINT "ProviderObservation_obligationId_fkey" FOREIGN KEY ("obligationId") REFERENCES "PaymentObligation"("id") ON DELETE RESTRICT ON UPDATE CASCADE;
+ALTER TABLE "ProviderObservation" ADD CONSTRAINT "ProviderObservation_obligationId_merchantId_fkey" FOREIGN KEY ("obligationId", "merchantId") REFERENCES "PaymentObligation"("id", "merchantId") ON DELETE RESTRICT ON UPDATE CASCADE;
 
 -- AddForeignKey
-ALTER TABLE "ProviderObservationDelivery" ADD CONSTRAINT "ProviderObservationDelivery_observationId_fkey" FOREIGN KEY ("observationId") REFERENCES "ProviderObservation"("id") ON DELETE RESTRICT ON UPDATE CASCADE;
+ALTER TABLE "ProviderObservationDelivery" ADD CONSTRAINT "ProviderObservationDelivery_observationId_attemptId_oblig_fkey" FOREIGN KEY ("observationId", "attemptId", "obligationId", "merchantId") REFERENCES "ProviderObservation"("id", "attemptId", "obligationId", "merchantId") ON DELETE RESTRICT ON UPDATE CASCADE;
 
 -- AddForeignKey
-ALTER TABLE "ProviderObservationInterpretation" ADD CONSTRAINT "ProviderObservationInterpretation_originalObservationId_fkey" FOREIGN KEY ("originalObservationId") REFERENCES "ProviderObservation"("id") ON DELETE RESTRICT ON UPDATE CASCADE;
+ALTER TABLE "ProviderObservationInterpretation" ADD CONSTRAINT "ProviderObservationInterpretation_originalObservationI_fkey" FOREIGN KEY ("originalObservationId", "attemptId", "obligationId", "merchantId") REFERENCES "ProviderObservation"("id", "attemptId", "obligationId", "merchantId") ON DELETE RESTRICT ON UPDATE CASCADE;
 
 -- AddForeignKey
-ALTER TABLE "ProviderObservationInterpretation" ADD CONSTRAINT "ProviderObservationInterpretation_derivedObservationId_fkey" FOREIGN KEY ("derivedObservationId") REFERENCES "ProviderObservation"("id") ON DELETE RESTRICT ON UPDATE CASCADE;
+ALTER TABLE "ProviderObservationInterpretation" ADD CONSTRAINT "ProviderObservationInterpretation_derivedObservationId_fkey" FOREIGN KEY ("derivedObservationId", "attemptId", "obligationId", "merchantId") REFERENCES "ProviderObservation"("id", "attemptId", "obligationId", "merchantId") ON DELETE RESTRICT ON UPDATE CASCADE;
 
 -- AddForeignKey
-ALTER TABLE "PaymentOutcomeTransition" ADD CONSTRAINT "PaymentOutcomeTransition_attemptId_fkey" FOREIGN KEY ("attemptId") REFERENCES "PaymentAttempt"("id") ON DELETE RESTRICT ON UPDATE CASCADE;
+ALTER TABLE "PaymentOutcomeTransition" ADD CONSTRAINT "PaymentOutcomeTransition_attemptId_obligationId_merchan_fkey" FOREIGN KEY ("attemptId", "obligationId", "merchantId") REFERENCES "PaymentAttempt"("id", "obligationId", "merchantId") ON DELETE RESTRICT ON UPDATE CASCADE;
 
 -- AddForeignKey
-ALTER TABLE "PaymentOutcomeTransition" ADD CONSTRAINT "PaymentOutcomeTransition_obligationId_fkey" FOREIGN KEY ("obligationId") REFERENCES "PaymentObligation"("id") ON DELETE RESTRICT ON UPDATE CASCADE;
+ALTER TABLE "PaymentOutcomeTransition" ADD CONSTRAINT "PaymentOutcomeTransition_obligationId_merchantId_fkey" FOREIGN KEY ("obligationId", "merchantId") REFERENCES "PaymentObligation"("id", "merchantId") ON DELETE RESTRICT ON UPDATE CASCADE;
 
 -- AddForeignKey
-ALTER TABLE "PaymentOutcomeTransition" ADD CONSTRAINT "PaymentOutcomeTransition_triggeringObservationId_fkey" FOREIGN KEY ("triggeringObservationId") REFERENCES "ProviderObservation"("id") ON DELETE SET NULL ON UPDATE CASCADE;
+ALTER TABLE "PaymentOutcomeTransition" ADD CONSTRAINT "PaymentOutcomeTransition_triggeringObservationId_attemptI_fkey" FOREIGN KEY ("triggeringObservationId", "attemptId", "obligationId", "merchantId") REFERENCES "ProviderObservation"("id", "attemptId", "obligationId", "merchantId") ON DELETE RESTRICT ON UPDATE CASCADE;
 
 -- AddForeignKey
-ALTER TABLE "ReconciliationReviewHistory" ADD CONSTRAINT "ReconciliationReviewHistory_attemptId_fkey" FOREIGN KEY ("attemptId") REFERENCES "PaymentAttempt"("id") ON DELETE RESTRICT ON UPDATE CASCADE;
+ALTER TABLE "ReconciliationReviewHistory" ADD CONSTRAINT "ReconciliationReviewHistory_attemptId_obligationId_merc_fkey" FOREIGN KEY ("attemptId", "obligationId", "merchantId") REFERENCES "PaymentAttempt"("id", "obligationId", "merchantId") ON DELETE RESTRICT ON UPDATE CASCADE;
 
 -- AddForeignKey
-ALTER TABLE "ReconciliationReviewHistory" ADD CONSTRAINT "ReconciliationReviewHistory_obligationId_fkey" FOREIGN KEY ("obligationId") REFERENCES "PaymentObligation"("id") ON DELETE RESTRICT ON UPDATE CASCADE;
+ALTER TABLE "ReconciliationReviewHistory" ADD CONSTRAINT "ReconciliationReviewHistory_obligationId_merchantId_fkey" FOREIGN KEY ("obligationId", "merchantId") REFERENCES "PaymentObligation"("id", "merchantId") ON DELETE RESTRICT ON UPDATE CASCADE;
 
 -- AddForeignKey
-ALTER TABLE "ReconciliationReviewHistory" ADD CONSTRAINT "ReconciliationReviewHistory_triggeringObservationId_fkey" FOREIGN KEY ("triggeringObservationId") REFERENCES "ProviderObservation"("id") ON DELETE SET NULL ON UPDATE CASCADE;
+ALTER TABLE "ReconciliationReviewHistory" ADD CONSTRAINT "ReconciliationReviewHistory_triggeringObservationId_a_fkey" FOREIGN KEY ("triggeringObservationId", "attemptId", "obligationId", "merchantId") REFERENCES "ProviderObservation"("id", "attemptId", "obligationId", "merchantId") ON DELETE RESTRICT ON UPDATE CASCADE;
 
 -- AddForeignKey
-ALTER TABLE "PaymentAttentionSignal" ADD CONSTRAINT "PaymentAttentionSignal_attemptId_fkey" FOREIGN KEY ("attemptId") REFERENCES "PaymentAttempt"("id") ON DELETE RESTRICT ON UPDATE CASCADE;
+ALTER TABLE "PaymentAttentionSignal" ADD CONSTRAINT "PaymentAttentionSignal_attemptId_obligationId_merchantId_fkey" FOREIGN KEY ("attemptId", "obligationId", "merchantId") REFERENCES "PaymentAttempt"("id", "obligationId", "merchantId") ON DELETE RESTRICT ON UPDATE CASCADE;
 
 -- AddForeignKey
-ALTER TABLE "PaymentAttentionSignal" ADD CONSTRAINT "PaymentAttentionSignal_obligationId_fkey" FOREIGN KEY ("obligationId") REFERENCES "PaymentObligation"("id") ON DELETE RESTRICT ON UPDATE CASCADE;
+ALTER TABLE "PaymentAttentionSignal" ADD CONSTRAINT "PaymentAttentionSignal_obligationId_merchantId_fkey" FOREIGN KEY ("obligationId", "merchantId") REFERENCES "PaymentObligation"("id", "merchantId") ON DELETE RESTRICT ON UPDATE CASCADE;
 
 -- AddForeignKey
-ALTER TABLE "PaymentAttentionSignal" ADD CONSTRAINT "PaymentAttentionSignal_observationId_fkey" FOREIGN KEY ("observationId") REFERENCES "ProviderObservation"("id") ON DELETE SET NULL ON UPDATE CASCADE;
+ALTER TABLE "PaymentAttentionSignal" ADD CONSTRAINT "PaymentAttentionSignal_observationId_attemptId_obligat_fkey" FOREIGN KEY ("observationId", "attemptId", "obligationId", "merchantId") REFERENCES "ProviderObservation"("id", "attemptId", "obligationId", "merchantId") ON DELETE RESTRICT ON UPDATE CASCADE;
 
 -- AddForeignKey
-ALTER TABLE "PaymentNormalizedFactOutbox" ADD CONSTRAINT "PaymentNormalizedFactOutbox_obligationId_fkey" FOREIGN KEY ("obligationId") REFERENCES "PaymentObligation"("id") ON DELETE RESTRICT ON UPDATE CASCADE;
+ALTER TABLE "PaymentNormalizedFactOutbox" ADD CONSTRAINT "PaymentNormalizedFactOutbox_obligationId_merchantId_fkey" FOREIGN KEY ("obligationId", "merchantId") REFERENCES "PaymentObligation"("id", "merchantId") ON DELETE RESTRICT ON UPDATE CASCADE;
 
 -- AddForeignKey
-ALTER TABLE "PaymentNormalizedFactOutbox" ADD CONSTRAINT "PaymentNormalizedFactOutbox_attemptId_fkey" FOREIGN KEY ("attemptId") REFERENCES "PaymentAttempt"("id") ON DELETE RESTRICT ON UPDATE CASCADE;
+ALTER TABLE "PaymentNormalizedFactOutbox" ADD CONSTRAINT "PaymentNormalizedFactOutbox_attemptId_obligationId_mer_fkey" FOREIGN KEY ("attemptId", "obligationId", "merchantId") REFERENCES "PaymentAttempt"("id", "obligationId", "merchantId") ON DELETE RESTRICT ON UPDATE CASCADE;
 
 -- AddForeignKey
-ALTER TABLE "PaymentNormalizedFactOutbox" ADD CONSTRAINT "PaymentNormalizedFactOutbox_triggeringObservationId_fkey" FOREIGN KEY ("triggeringObservationId") REFERENCES "ProviderObservation"("id") ON DELETE RESTRICT ON UPDATE CASCADE;
+ALTER TABLE "PaymentNormalizedFactOutbox" ADD CONSTRAINT "PaymentNormalizedFactOutbox_triggeringObservationId__fkey" FOREIGN KEY ("triggeringObservationId", "attemptId", "obligationId", "merchantId") REFERENCES "ProviderObservation"("id", "attemptId", "obligationId", "merchantId") ON DELETE RESTRICT ON UPDATE CASCADE;
 
 -- AddForeignKey
-ALTER TABLE "RefundDueCase" ADD CONSTRAINT "RefundDueCase_obligationId_fkey" FOREIGN KEY ("obligationId") REFERENCES "PaymentObligation"("id") ON DELETE RESTRICT ON UPDATE CASCADE;
+ALTER TABLE "RefundDueCase" ADD CONSTRAINT "RefundDueCase_obligationId_merchantId_fkey" FOREIGN KEY ("obligationId", "merchantId") REFERENCES "PaymentObligation"("id", "merchantId") ON DELETE RESTRICT ON UPDATE CASCADE;
 
 -- AddForeignKey
-ALTER TABLE "RefundDueCase" ADD CONSTRAINT "RefundDueCase_attemptId_fkey" FOREIGN KEY ("attemptId") REFERENCES "PaymentAttempt"("id") ON DELETE RESTRICT ON UPDATE CASCADE;
+ALTER TABLE "RefundDueCase" ADD CONSTRAINT "RefundDueCase_attemptId_obligationId_merchantId_fkey" FOREIGN KEY ("attemptId", "obligationId", "merchantId") REFERENCES "PaymentAttempt"("id", "obligationId", "merchantId") ON DELETE RESTRICT ON UPDATE CASCADE;
 
 -- AddForeignKey
-ALTER TABLE "RefundDueCase" ADD CONSTRAINT "RefundDueCase_verificationObservationId_fkey" FOREIGN KEY ("verificationObservationId") REFERENCES "ProviderObservation"("id") ON DELETE SET NULL ON UPDATE CASCADE;
+ALTER TABLE "RefundDueCase" ADD CONSTRAINT "RefundDueCase_verificationObservationId_attemptId_obli_fkey" FOREIGN KEY ("verificationObservationId", "attemptId", "obligationId", "merchantId") REFERENCES "ProviderObservation"("id", "attemptId", "obligationId", "merchantId") ON DELETE RESTRICT ON UPDATE CASCADE;
 
 ALTER TABLE "PaymentAttempt" ADD CONSTRAINT "payment_attempt_outcome_resolution_ck"
 CHECK (("outcomeStatus" IN ('SUCCEEDED','FAILED_TERMINAL','NOT_FOUND_TERMINAL')) = ("resolvedAt" IS NOT NULL));
+
+ALTER TABLE "PaymentAttempt" ADD CONSTRAINT "payment_attempt_online_rail_ck"
+CHECK ("obligationCollectionRail" = 'ONLINE');
 
 ALTER TABLE "PaymentAttempt" ADD CONSTRAINT "payment_attempt_review_completed_ck"
 CHECK ("reviewStatus" <> 'COMPLETED' OR "resolvedAt" IS NOT NULL);
