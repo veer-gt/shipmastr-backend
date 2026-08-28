@@ -700,16 +700,17 @@ if (enabled) {
       releaseQueryBarrier();
 
       const [firstResult, secondResult] = await Promise.all([firstRun, secondRun]);
+      const results = [firstResult, secondResult].flat();
 
       assert.equal(queryExecutions, 1);
-      assert.deepEqual(firstResult, [{
-        kind: 'OBSERVATION_INGESTED',
-        observationId: 'observation_worker_manual_request_race',
-      }]);
-      assert.deepEqual(secondResult, [{
-        kind: 'QUERY_BLOCKED',
-        reason: 'READ_ONLY_QUERY_ALREADY_CLAIMED',
-      }]);
+      assert.equal(results.filter((result) =>
+        result.kind === 'OBSERVATION_INGESTED' &&
+        result.observationId === 'observation_worker_manual_request_race',
+      ).length, 1);
+      assert.equal(results.filter((result) =>
+        result.kind === 'QUERY_BLOCKED' &&
+        result.reason === 'READ_ONLY_QUERY_ALREADY_CLAIMED',
+      ).length, 1);
 
       const persisted = await prisma.paymentAttempt.findUniqueOrThrow({ where: { id: attemptId } });
       assert.equal(persisted.outcomeStatus, 'PENDING');

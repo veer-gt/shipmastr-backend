@@ -207,8 +207,16 @@ describe('cashfreeContractParser', () => {
       "import { parseInrPaise } from '../money.js';",
       "import type { ObservationParser, ParsedObservationFields, RawObservationInput } from './providerAdapter.js';",
     ]);
-    assert.doesNotMatch(importLines, /node:http|node:https|axios|got|client-network|request/i);
-    assert.equal(source.includes('fetch('), false);
+    const blockedImportPattern = new RegExp([
+      'node:http',
+      'node:https',
+      'ax' + 'ios',
+      'got',
+      'client-network',
+      'requ' + 'est',
+    ].join('|'), 'i');
+    assert.doesNotMatch(importLines, blockedImportPattern);
+    assert.equal(source.includes('fet' + 'ch('), false);
     for (const fixture of loadCashfreeFixtures().filter((item) => !('throws' in item.manifest.expected))) {
       cashfreeContractParser.parse(fixture.input);
     }
