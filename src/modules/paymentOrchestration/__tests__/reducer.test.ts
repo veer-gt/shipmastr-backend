@@ -476,4 +476,42 @@ describe('reduceEvidence', () => {
 
     assertRelatedActions(plan, [{ attemptId: other.id, action: 'KEEP_UNRESOLVED_LOCKED' }]);
   });
+
+  it('keeps target review unresolved when another attempt succeeded but the target attempt did not resolve', () => {
+    const succeeded = buildAttempt({
+      id: 'attempt_a1',
+      providerOrderRef: 'order_a1',
+      outcomeStatus: 'SUCCEEDED',
+      resolvedAt: new Date('2026-08-27T11:00:00.000Z'),
+    });
+    const target = buildAttempt({
+      id: 'attempt_a2',
+      providerOrderRef: 'order_a2',
+      reviewStatus: 'IN_PROGRESS',
+      outcomeStatus: 'PENDING',
+      resolvedAt: null,
+    });
+
+    const plan = reduceEvidence(
+      buildInput({
+        attempts: [succeeded, target],
+        targetAttemptId: target.id,
+        observations: [
+          buildObservation({
+            id: 'success_a1',
+            attemptId: succeeded.id,
+            providerOrderRef: succeeded.providerOrderRef!,
+            providerEventId: 'event_success_a1',
+            providerTransactionRef: 'txn_success_a1',
+          }),
+        ],
+      }),
+    );
+
+    assert.equal(plan.outcomeStatus, 'PENDING');
+    assert.equal(plan.resolved, false);
+    assert.equal(plan.reviewStatus, 'IN_PROGRESS');
+    assert.equal(plan.completedByType, null);
+    assertRelatedActions(plan, [{ attemptId: succeeded.id, action: 'PRESERVE_TERMINAL' }]);
+  });
 });

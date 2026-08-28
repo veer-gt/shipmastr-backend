@@ -260,13 +260,16 @@ function reduceSuccesses(
     facts.push('REFUND_DUE_DETECTED');
   }
 
-  const review = resolvedReviewStatus(targetAttempt.reviewStatus);
+  const targetResolves = targetHasSuccess || targetAttempt.resolvedAt !== null;
+  const review = targetResolves
+    ? resolvedReviewStatus(targetAttempt.reviewStatus)
+    : preserveUnresolvedReviewStatus(targetAttempt.reviewStatus);
   const disposition = deriveSuccessDisposition(refundDue, attention);
 
   return finalizePlan({
     attemptId: targetAttempt.id,
     outcomeStatus: targetHasSuccess ? 'SUCCEEDED' : targetAttempt.outcomeStatus,
-    resolved: targetHasSuccess || targetAttempt.resolvedAt !== null,
+    resolved: targetResolves,
     satisfyObligation: targetHasSuccess && input.obligation.status === 'OPEN',
     reviewStatus: review.reviewStatus,
     completedByType: review.completedByType,
@@ -422,6 +425,16 @@ function unresolvedReviewStatus(reviewStatus: AttemptSnapshot['reviewStatus']): 
 
   return {
     reviewStatus: 'REQUIRED',
+    completedByType: null,
+  };
+}
+
+function preserveUnresolvedReviewStatus(reviewStatus: AttemptSnapshot['reviewStatus']): {
+  reviewStatus: AttemptSnapshot['reviewStatus'];
+  completedByType: 'SYSTEM' | null;
+} {
+  return {
+    reviewStatus,
     completedByType: null,
   };
 }

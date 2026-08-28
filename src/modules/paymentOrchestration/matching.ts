@@ -89,8 +89,15 @@ function classifyAuthenticationFailure(
       break;
     case 'STATUS_QUERY':
     case 'PROVIDER_RECORD':
-    case 'MOCK':
       if (observation.signatureVerification !== 'NOT_APPLICABLE') {
+        return 'UNAUTHENTICATED';
+      }
+      break;
+    case 'MOCK':
+      if (
+        observation.signatureVerification !== 'NOT_APPLICABLE' ||
+        observation.provider !== 'MOCK'
+      ) {
         return 'UNAUTHENTICATED';
       }
       break;

@@ -187,6 +187,23 @@ describe('matchObservation', () => {
     );
   });
 
+  it('rejects MOCK source when the provider is not MOCK', () => {
+    assert.deepEqual(
+      matchObservation(
+        buildInput({
+          attempt: { provider: 'CASHFREE' },
+          observation: {
+            source: 'MOCK',
+            provider: 'CASHFREE',
+            signatureVerification: 'NOT_APPLICABLE',
+            evidenceAuthority: 'ELIGIBLE',
+          },
+        }),
+      ),
+      { matched: false, reason: 'UNAUTHENTICATED' },
+    );
+  });
+
   const providersBySource: Record<CanonicalObservationSource, PaymentProvider> = {
     WEBHOOK: 'CASHFREE',
     STATUS_QUERY: 'CASHFREE',
