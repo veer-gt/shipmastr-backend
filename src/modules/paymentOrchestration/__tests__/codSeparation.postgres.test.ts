@@ -15,7 +15,10 @@ import {
   listOwnedAttemptsForObligationOrThrow,
 } from '../repository.js';
 import { expectedScratchDatabaseNameFromEnv } from './scratchDatabaseGuard.js';
-import type { ProviderActivationPolicy } from '../types.js';
+import type {
+  CanonicalObservation,
+  ProviderActivationPolicy,
+} from '../types.js';
 
 const enabled = process.env.RUN_PGO1_POSTGRES_TESTS === '1';
 const prisma = new PrismaClient();
@@ -127,6 +130,162 @@ function ownershipReaderFor(merchantId: string, checkoutId: string): CheckoutOwn
         throw new Error('CHECKOUT_NOT_FOUND');
       }
     },
+  };
+}
+
+type IngestObservation = (
+  client: PrismaClient,
+  candidate: ObservationCandidate,
+) => Promise<IngestionResult>;
+
+type ObservationCandidate = CanonicalObservation;
+
+interface IngestionResult {
+  observationId: string;
+  disposition: string;
+  outcomeStatus: 'PENDING' | 'UNKNOWN' | 'SUCCEEDED' | 'FAILED_TERMINAL' | 'NOT_FOUND_TERMINAL';
+  reviewStatus: 'NOT_REQUIRED' | 'REQUIRED' | 'IN_PROGRESS' | 'COMPLETED';
+  resolvedAt: Date | null;
+}
+
+async function loadObservationService(): Promise<{ ingestObservation: IngestObservation }> {
+  const modulePath = '../observationService.js';
+  return import(modulePath) as Promise<{ ingestObservation: IngestObservation }>;
+}
+
+function directAttempt(
+  overrides: Partial<Prisma.PaymentAttemptUncheckedCreateInput> = {},
+): Prisma.PaymentAttemptUncheckedCreateInput {
+  const merchantId = overrides.merchantId ?? nextId('merchant');
+  const obligationId = overrides.obligationId ?? nextId('obligation_ref');
+
+  return {
+    id: overrides.id ?? nextId('attempt'),
+    obligationId,
+    merchantId,
+    obligationCollectionRail: overrides.obligationCollectionRail ?? 'ONLINE',
+    provider: overrides.provider ?? 'MOCK',
+    environment: overrides.environment ?? 'TEST',
+    credentialBindingId: overrides.credentialBindingId ?? nextId('binding'),
+    credentialVersionId: overrides.credentialVersionId ?? nextId('credential_version'),
+    requestIdempotencyKey: overrides.requestIdempotencyKey ?? nextId('request'),
+    providerOrderRef: overrides.providerOrderRef ?? nextId('provider_order'),
+    outcomeStatus: overrides.outcomeStatus ?? 'PENDING',
+    reviewStatus: overrides.reviewStatus ?? 'NOT_REQUIRED',
+    resolvedAt: overrides.resolvedAt ?? null,
+    lastOutcomeChangedAt: overrides.lastOutcomeChangedAt ?? new Date('2026-08-27T12:00:00.000Z'),
+    lastObservationAt: overrides.lastObservationAt ?? null,
+    adapterVersion: overrides.adapterVersion ?? 'test-adapter-v1',
+    mappingVersion: overrides.mappingVersion ?? 'test-mapping-v1',
+  };
+}
+
+function observationCandidate(
+  input: {
+    attemptId: string;
+    obligationId: string;
+    merchantId: string;
+    credentialBindingId: string;
+    credentialVersionId: string;
+    providerOrderRef: string;
+    providerEventId?: string | null;
+    providerTransactionRef?: string | null;
+    mappedOutcome?: CanonicalObservation['mappedOutcome'];
+    nativeStatus?: string;
+  },
+  overrides: Partial<CanonicalObservation> = {},
+): CanonicalObservation {
+  return {
+    id: overrides.id ?? nextId('observation'),
+    attemptId: input.attemptId,
+    obligationId: input.obligationId,
+    merchantId: input.merchantId,
+    provider: 'MOCK',
+    environment: 'TEST',
+    credentialBindingId: input.credentialBindingId,
+    credentialVersionId: input.credentialVersionId,
+    source: 'MOCK',
+    providerEventId: input.providerEventId ?? nextId('event'),
+    providerOrderRef: input.providerOrderRef,
+    providerTransactionRef: input.providerTransactionRef ?? nextId('txn'),
+    nativeStatus: input.nativeStatus ?? 'captured',
+    nativeReasonCode: null,
+    amountPaise: 10_000n,
+    nativeAmountText: '100.00',
+    nativeCurrency: 'INR',
+    rawBodyHash: overrides.rawBodyHash ?? nextId('hash'),
+    hashAlgorithm: 'SHA-256',
+    signatureVerification: 'NOT_APPLICABLE',
+    bindingVerification: 'VERIFIED',
+    evidenceAuthority: 'ELIGIBLE',
+    mappedOutcome: input.mappedOutcome ?? 'SUCCEEDED',
+    adapterVersion: 'test-adapter-v1',
+    mappingVersion: 'test-mapping-v1',
+    providerApiVersion: 'mock-2026-08-27',
+    providerOccurredAt: new Date('2026-08-27T12:00:00.000Z'),
+    receivedAt: new Date('2026-08-27T12:00:01.000Z'),
+    reductionDisposition: 'ACCEPTED',
+    ...overrides,
+  };
+}
+
+async function seedPartialCodCheckout() {
+  const merchantId = nextId('merchant_cod_pair');
+  const checkoutId = nextId('checkout_cod_pair');
+  const online = await prisma.paymentObligation.create({
+    data: obligation({
+      id: nextId('obligation_online'),
+      merchantId,
+      checkoutId,
+      collectionRail: 'ONLINE',
+      purpose: 'COD_ADVANCE',
+      amountPaise: 10_000n,
+    }),
+  });
+  const cod = await prisma.paymentObligation.create({
+    data: obligation({
+      id: nextId('obligation_cod'),
+      merchantId,
+      checkoutId,
+      collectionRail: 'COD',
+      purpose: 'COD_DELIVERY_BALANCE',
+      amountPaise: 40_000n,
+    }),
+  });
+  const onlineAttempt = await prisma.paymentAttempt.create({
+    data: directAttempt({
+      id: nextId('attempt_online'),
+      merchantId,
+      obligationId: online.id,
+      obligationCollectionRail: online.collectionRail,
+      providerOrderRef: nextId('order_online'),
+    }),
+  });
+
+  return { online, cod, onlineAttempt };
+}
+
+async function codSnapshot(obligationId: string) {
+  const [obligationRow, transitions, reviews, attention, facts, cases, observations, deliveries] = await Promise.all([
+    prisma.paymentObligation.findUniqueOrThrow({ where: { id: obligationId } }),
+    prisma.paymentOutcomeTransition.findMany({ where: { obligationId }, orderBy: { id: 'asc' } }),
+    prisma.reconciliationReviewHistory.findMany({ where: { obligationId }, orderBy: { id: 'asc' } }),
+    prisma.paymentAttentionSignal.findMany({ where: { obligationId }, orderBy: { id: 'asc' } }),
+    prisma.paymentNormalizedFactOutbox.findMany({ where: { obligationId }, orderBy: { id: 'asc' } }),
+    prisma.refundDueCase.findMany({ where: { obligationId }, orderBy: { id: 'asc' } }),
+    prisma.providerObservation.findMany({ where: { obligationId }, orderBy: { id: 'asc' } }),
+    prisma.providerObservationDelivery.findMany({ where: { obligationId }, orderBy: { id: 'asc' } }),
+  ]);
+
+  return {
+    obligation: obligationRow,
+    transitions,
+    reviews,
+    attention,
+    facts,
+    cases,
+    observations,
+    deliveries,
   };
 }
 
@@ -284,6 +443,176 @@ if (enabled) {
       assert.equal(
         await prisma.paymentAttempt.count({ where: { merchantId: owningMerchantId } }),
         1,
+      );
+    });
+
+    for (const testCase of [
+      {
+        name: 'online unknown leaves COD snapshot unchanged',
+        build: (state: Awaited<ReturnType<typeof seedPartialCodCheckout>>) =>
+          observationCandidate({
+            attemptId: state.onlineAttempt.id,
+            obligationId: state.online.id,
+            merchantId: state.online.merchantId,
+            credentialBindingId: state.onlineAttempt.credentialBindingId,
+            credentialVersionId: state.onlineAttempt.credentialVersionId,
+            providerOrderRef: state.onlineAttempt.providerOrderRef!,
+            providerEventId: 'event_cod_unknown',
+            providerTransactionRef: null,
+            mappedOutcome: 'UNKNOWN',
+            nativeStatus: 'review',
+          }),
+      },
+      {
+        name: 'terminal failure leaves COD snapshot unchanged',
+        build: (state: Awaited<ReturnType<typeof seedPartialCodCheckout>>) =>
+          observationCandidate({
+            attemptId: state.onlineAttempt.id,
+            obligationId: state.online.id,
+            merchantId: state.online.merchantId,
+            credentialBindingId: state.onlineAttempt.credentialBindingId,
+            credentialVersionId: state.onlineAttempt.credentialVersionId,
+            providerOrderRef: state.onlineAttempt.providerOrderRef!,
+            providerEventId: 'event_cod_failure',
+            providerTransactionRef: null,
+            mappedOutcome: 'FAILED_TERMINAL',
+            nativeStatus: 'failed',
+          }),
+      },
+      {
+        name: 'late success refund-due leaves COD snapshot unchanged',
+        setup: async (state: Awaited<ReturnType<typeof seedPartialCodCheckout>>) => {
+          await prisma.paymentObligation.update({
+            where: { id: state.online.id },
+            data: { status: 'EXPIRED' },
+          });
+        },
+        build: (state: Awaited<ReturnType<typeof seedPartialCodCheckout>>) =>
+          observationCandidate({
+            attemptId: state.onlineAttempt.id,
+            obligationId: state.online.id,
+            merchantId: state.online.merchantId,
+            credentialBindingId: state.onlineAttempt.credentialBindingId,
+            credentialVersionId: state.onlineAttempt.credentialVersionId,
+            providerOrderRef: state.onlineAttempt.providerOrderRef!,
+            providerEventId: 'event_cod_late_success',
+            providerTransactionRef: 'txn_cod_late_success',
+            mappedOutcome: 'SUCCEEDED',
+          }),
+      },
+      {
+        name: 'distinct double success leaves COD snapshot unchanged',
+        setup: async (state: Awaited<ReturnType<typeof seedPartialCodCheckout>>) => {
+          const priorAttempt = await prisma.paymentAttempt.create({
+            data: directAttempt({
+              id: nextId('attempt_prior_success'),
+              merchantId: state.online.merchantId,
+              obligationId: state.online.id,
+              obligationCollectionRail: state.online.collectionRail,
+              providerOrderRef: nextId('order_prior_success'),
+              outcomeStatus: 'SUCCEEDED',
+              reviewStatus: 'COMPLETED',
+              resolvedAt: new Date('2026-08-27T11:00:00.000Z'),
+            }),
+          });
+          await prisma.paymentObligation.update({
+            where: { id: state.online.id },
+            data: { status: 'SATISFIED', satisfiedAt: new Date('2026-08-27T11:00:01.000Z') },
+          });
+          await prisma.providerObservation.create({
+            data: {
+              id: nextId('prior_observation'),
+              attemptId: priorAttempt.id,
+              obligationId: state.online.id,
+              merchantId: state.online.merchantId,
+              provider: 'MOCK',
+              environment: 'TEST',
+              credentialBindingId: priorAttempt.credentialBindingId,
+              credentialVersionId: priorAttempt.credentialVersionId,
+              source: 'MOCK',
+              providerEventId: 'event_prior_success',
+              providerOrderRef: priorAttempt.providerOrderRef,
+              providerTransactionRef: 'txn_prior_success',
+              nativeStatus: 'captured',
+              nativeReasonCode: null,
+              nativeAmountText: '100.00',
+              nativeCurrency: 'INR',
+              amountPaise: 10_000n,
+              rawBodyHash: nextId('hash'),
+              hashAlgorithm: 'SHA-256',
+              signatureVerification: 'NOT_APPLICABLE',
+              bindingVerification: 'VERIFIED',
+              evidenceAuthority: 'ELIGIBLE',
+              adapterVersion: 'test-adapter-v1',
+              mappingVersion: 'test-mapping-v1',
+              receivedAt: new Date('2026-08-27T11:00:02.000Z'),
+              reductionDisposition: 'SUCCEEDED',
+              observationDedupeKey: nextId('dedupe'),
+            },
+          });
+        },
+        build: (state: Awaited<ReturnType<typeof seedPartialCodCheckout>>) =>
+          observationCandidate({
+            attemptId: state.onlineAttempt.id,
+            obligationId: state.online.id,
+            merchantId: state.online.merchantId,
+            credentialBindingId: state.onlineAttempt.credentialBindingId,
+            credentialVersionId: state.onlineAttempt.credentialVersionId,
+            providerOrderRef: state.onlineAttempt.providerOrderRef!,
+            providerEventId: 'event_cod_double_success',
+            providerTransactionRef: 'txn_cod_double_success',
+            mappedOutcome: 'SUCCEEDED',
+          }),
+      },
+    ] as const) {
+      it(testCase.name, async () => {
+        const { ingestObservation } = await loadObservationService();
+        const state = await seedPartialCodCheckout();
+        if (testCase.setup) {
+          await testCase.setup(state);
+        }
+
+        const beforeSnapshot = await codSnapshot(state.cod.id);
+        await ingestObservation(prisma, testCase.build(state));
+        const afterSnapshot = await codSnapshot(state.cod.id);
+
+        assert.deepEqual(afterSnapshot, beforeSnapshot);
+      });
+    }
+
+    it('rejects a COD obligation paired with an online attempt as an internal reference mismatch', async () => {
+      const { ingestObservation } = await loadObservationService();
+      const state = await seedPartialCodCheckout();
+      const onlineBefore = await prisma.paymentObligation.findUniqueOrThrow({ where: { id: state.online.id } });
+      const codBefore = await prisma.paymentObligation.findUniqueOrThrow({ where: { id: state.cod.id } });
+
+      await assert.rejects(
+        ingestObservation(
+          prisma,
+          observationCandidate({
+            attemptId: state.onlineAttempt.id,
+            obligationId: state.cod.id,
+            merchantId: state.cod.merchantId,
+            credentialBindingId: state.onlineAttempt.credentialBindingId,
+            credentialVersionId: state.onlineAttempt.credentialVersionId,
+            providerOrderRef: state.onlineAttempt.providerOrderRef!,
+            providerEventId: 'event_cod_reference_mismatch',
+            providerTransactionRef: null,
+            mappedOutcome: 'FAILED_TERMINAL',
+            nativeStatus: 'failed',
+          }),
+        ),
+        /INTERNAL_REFERENCE_MISMATCH/,
+      );
+
+      assert.equal(await prisma.paymentOutcomeTransition.count(), 0);
+      assert.deepEqual(
+        await prisma.paymentObligation.findUniqueOrThrow({ where: { id: state.online.id } }),
+        onlineBefore,
+      );
+      assert.deepEqual(
+        await prisma.paymentObligation.findUniqueOrThrow({ where: { id: state.cod.id } }),
+        codBefore,
       );
     });
   });

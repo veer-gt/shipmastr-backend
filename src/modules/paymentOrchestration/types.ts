@@ -88,6 +88,16 @@ export interface CanonicalObservation {
   reductionDisposition: string;
 }
 
+export type ObservationCandidate = CanonicalObservation;
+
+export interface IngestionResult {
+  observationId: string;
+  disposition: string;
+  outcomeStatus: OutcomeStatus;
+  reviewStatus: ReviewStatus;
+  resolvedAt: Date | null;
+}
+
 export interface ReductionPlan {
   attemptId: string;
   outcomeStatus: OutcomeStatus;
@@ -144,4 +154,22 @@ export interface ReduceEvidenceInput {
     }
   >;
   observations: CanonicalObservation[];
+}
+
+export interface ReductionPersistenceContext {
+  obligation: ReduceEvidenceInput['obligation'] & {
+    collectionRail: CollectionRail;
+    satisfiedAt: Date | null;
+  };
+  attempts: Array<
+    ReduceEvidenceInput['attempts'][number] & {
+      credentialVersionId: string;
+      lastObservationAt: Date | null;
+      lastOutcomeChangedAt: Date;
+      createdAt: Date;
+    }
+  >;
+  targetAttempt: ReductionPersistenceContext['attempts'][number];
+  observations: CanonicalObservation[];
+  triggeringObservation: CanonicalObservation;
 }
