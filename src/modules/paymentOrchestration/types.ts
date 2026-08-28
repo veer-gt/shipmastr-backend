@@ -6,6 +6,32 @@ export type ObligationStatus = 'OPEN' | 'SATISFIED' | 'EXPIRED' | 'CANCELLED';
 export type ObligationPurpose = 'FULL_ONLINE' | 'COD_ADVANCE' | 'COD_DELIVERY_BALANCE';
 export type CollectionRail = 'ONLINE' | 'COD';
 export type RefundDueReason = 'LATE_SUCCESS_AFTER_CLOSURE' | 'SURPLUS_DOUBLE_SUCCESS';
+export type CanonicalObservationSource = 'WEBHOOK' | 'STATUS_QUERY' | 'PROVIDER_RECORD' | 'MOCK';
+export type SignatureVerification = 'VERIFIED' | 'FAILED' | 'NOT_APPLICABLE' | 'UNAVAILABLE';
+export type BindingVerification = 'VERIFIED' | 'FAILED';
+export type EvidenceAuthority = 'ELIGIBLE' | 'ACTIVATION_GATED' | 'INELIGIBLE';
+export type MatchFailureReason =
+  | 'MERCHANT_MISMATCH'
+  | 'PROVIDER_MISMATCH'
+  | 'ENVIRONMENT_MISMATCH'
+  | 'CREDENTIAL_BINDING_MISMATCH'
+  | 'UNAUTHENTICATED'
+  | 'EVIDENCE_NOT_AUTHORIZED'
+  | 'ORDER_REFERENCE_MISMATCH'
+  | 'MISSING_TRANSACTION_REFERENCE'
+  | 'AMOUNT_MISMATCH'
+  | 'CURRENCY_MISMATCH'
+  | 'UNMAPPED_STATUS'
+  | 'MAPPING_VERSION_MISMATCH'
+  | 'INTERNAL_REFERENCE_MISMATCH'
+  | 'IDEMPOTENCY_KEY_MISMATCH';
+export type ReductionFactType = 'PAYMENT_SUCCEEDED' | 'PAYMENT_FAILED' | 'REFUND_DUE_DETECTED';
+export type ReductionAttentionType =
+  | 'INTEGRITY_CONFLICT'
+  | 'CONTRADICTORY_EVIDENCE'
+  | 'DOUBLE_SUCCESS_DETECTED'
+  | 'MAPPING_GAP';
+export type RelatedAttemptAction = 'KEEP_UNRESOLVED_LOCKED' | 'PRESERVE_TERMINAL';
 
 export interface ProviderActivationPolicy {
   version: string;
@@ -29,3 +55,93 @@ export interface ActivationPolicyInput {
 export type ActivationDecision =
   | { enabled: true; policyVersion: string }
   | { enabled: false; reason: 'POLICY_DISABLED' };
+
+export interface CanonicalObservation {
+  id: string;
+  attemptId: string;
+  obligationId: string;
+  merchantId: string;
+  provider: PaymentProvider;
+  environment: ProviderEnvironment;
+  credentialBindingId: string;
+  credentialVersionId: string;
+  source: CanonicalObservationSource;
+  providerEventId: string | null;
+  providerOrderRef: string;
+  providerTransactionRef: string | null;
+  nativeStatus: string;
+  nativeReasonCode: string | null;
+  amountPaise: bigint | null;
+  nativeAmountText: string | null;
+  nativeCurrency: string | null;
+  rawBodyHash: string;
+  hashAlgorithm: 'SHA-256';
+  signatureVerification: SignatureVerification;
+  bindingVerification: BindingVerification;
+  evidenceAuthority: EvidenceAuthority;
+  mappedOutcome: OutcomeStatus | 'UNMAPPED';
+  adapterVersion: string;
+  mappingVersion: string;
+  providerApiVersion: string;
+  providerOccurredAt: Date | null;
+  receivedAt: Date;
+  reductionDisposition: string;
+}
+
+export interface ReductionPlan {
+  attemptId: string;
+  outcomeStatus: OutcomeStatus;
+  resolved: boolean;
+  satisfyObligation: boolean;
+  reviewStatus: ReviewStatus;
+  completedByType: 'SYSTEM' | null;
+  disposition: string;
+  factTypes: ReductionFactType[];
+  refundDue: Array<{ providerTransactionRef: string; reason: RefundDueReason }>;
+  attention: Array<{ type: ReductionAttentionType }>;
+  relatedAttemptActions: Array<{ attemptId: string; action: RelatedAttemptAction }>;
+}
+
+export interface MatchInput {
+  observation: CanonicalObservation;
+  obligation: {
+    id: string;
+    merchantId: string;
+    amountPaise: bigint;
+    currency: 'INR';
+    status: ObligationStatus;
+  };
+  attempt: {
+    id: string;
+    obligationId: string;
+    merchantId: string;
+    provider: PaymentProvider;
+    environment: ProviderEnvironment;
+    credentialBindingId: string;
+    providerOrderRef: string | null;
+    requestIdempotencyKey: string;
+    adapterVersion: string;
+    mappingVersion: string;
+  };
+  returnedIdempotencyKey?: string | null;
+}
+
+export type MatchResult =
+  | { matched: true }
+  | {
+      matched: false;
+      reason: MatchFailureReason;
+    };
+
+export interface ReduceEvidenceInput {
+  obligation: MatchInput['obligation'];
+  targetAttemptId: string;
+  attempts: Array<
+    MatchInput['attempt'] & {
+      outcomeStatus: OutcomeStatus;
+      reviewStatus: ReviewStatus;
+      resolvedAt: Date | null;
+    }
+  >;
+  observations: CanonicalObservation[];
+}
