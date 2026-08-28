@@ -6,6 +6,7 @@ import {
   type AttemptCreationResult,
   type CreateAttemptInput,
 } from '../attemptCoordinator.js';
+import { expectedScratchDatabaseNameFromEnv } from './scratchDatabaseGuard.js';
 import type { ProviderActivationPolicy } from '../types.js';
 
 const enabled = process.env.RUN_PGO1_POSTGRES_TESTS === '1';
@@ -28,19 +29,7 @@ function assertScratchUrl() {
 }
 
 function expectedScratchDatabaseName() {
-  const fromName = process.env.PGO1_SCRATCH_DB_NAME ?? null;
-  const fromUrl = process.env.PGO1_TEST_DATABASE_URL
-    ? decodeURIComponent(new URL(process.env.PGO1_TEST_DATABASE_URL).pathname.slice(1))
-    : null;
-  const expected = fromName ?? fromUrl;
-
-  assert.ok(expected, 'PGO1 scratch database name must be present in local test config');
-  assert.match(expected, /^shipmastr_scratch_/);
-  if (fromName && fromUrl) {
-    assert.equal(fromName, fromUrl);
-  }
-
-  return expected;
+  return expectedScratchDatabaseNameFromEnv();
 }
 
 function isPrismaCode(error: unknown, code: string): error is Prisma.PrismaClientKnownRequestError {
