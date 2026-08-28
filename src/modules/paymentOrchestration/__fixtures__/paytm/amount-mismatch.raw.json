@@ -1,0 +1,1 @@
+{"MID":"SYNTH_PAYTM_MID","ORDERID":"paytm_order_amount_mismatch","TXNID":"paytm_txn_amount_mismatch","TXNAMOUNT":"100.01","CURRENCY":"INR","STATUS":"TXN_SUCCESS","RESPCODE":"01","RESPMSG":"Synthetic amount mismatch","TXNDATE":"2026-08-28T04:35:00.000Z","CUSTEMAIL":"paytm.amount@example.invalid","CUSTPHONE":"+919900000006","CARD_LAST4":"1116"}
