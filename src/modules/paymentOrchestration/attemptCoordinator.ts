@@ -64,7 +64,10 @@ export async function createAttempt(
         return { kind: 'EXISTING_UNRESOLVED', attempt: unresolved };
       }
 
-      const decision = evaluateActivationPolicy(input);
+      const decision = evaluateActivationPolicy({
+        ...input,
+        amountPaise: obligation.amountPaise,
+      });
       if (!decision.enabled) {
         throw new Error('PROVIDER_POLICY_DISABLED');
       }

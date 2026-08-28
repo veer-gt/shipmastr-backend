@@ -31,8 +31,24 @@ function assertScratchUrl() {
   const url = new URL(raw);
   assert.ok(['127.0.0.1', 'localhost'].includes(url.hostname.toLowerCase()));
   assert.equal(url.port, '5433');
-  assert.equal(decodeURIComponent(url.pathname.slice(1)), 'shipmastr_scratch_pgo1_a965f431');
+  assert.equal(decodeURIComponent(url.pathname.slice(1)), expectedScratchDatabaseName());
   return url;
+}
+
+function expectedScratchDatabaseName() {
+  const fromName = process.env.PGO1_SCRATCH_DB_NAME ?? null;
+  const fromUrl = process.env.PGO1_TEST_DATABASE_URL
+    ? decodeURIComponent(new URL(process.env.PGO1_TEST_DATABASE_URL).pathname.slice(1))
+    : null;
+  const expected = fromName ?? fromUrl;
+
+  assert.ok(expected, 'PGO1 scratch database name must be present in local test config');
+  assert.match(expected, /^shipmastr_scratch_/);
+  if (fromName && fromUrl) {
+    assert.equal(fromName, fromUrl);
+  }
+
+  return expected;
 }
 
 async function clearPaymentTables(client: PrismaClient) {
