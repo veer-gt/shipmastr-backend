@@ -81,16 +81,18 @@ async function listPendingReadOnlyQueryRequests(): Promise<PendingReadOnlyQueryR
       continue;
     }
 
-    const consumed = await prisma.reconciliationReviewHistory.findFirst({
+    const claimedOrConsumed = await prisma.reconciliationReviewHistory.findFirst({
       where: {
         attemptId: row.attemptId,
         merchantId: row.merchantId,
-        reasonCode: 'READ_ONLY_QUERY_CONSUMED',
+        reasonCode: {
+          in: ['READ_ONLY_QUERY_CLAIMED', 'READ_ONLY_QUERY_CONSUMED'],
+        },
         correlationId: row.correlationId,
       },
       select: { id: true },
     });
-    if (consumed) {
+    if (claimedOrConsumed) {
       continue;
     }
 
@@ -117,6 +119,84 @@ async function listPendingReadOnlyQueryRequests(): Promise<PendingReadOnlyQueryR
   }
 
   return pending;
+}
+
+async function claimReadOnlyQueryRequest(
+  request: PendingReadOnlyQueryRequest,
+): Promise<PendingReadOnlyQueryRequest | null> {
+  return prisma.$transaction(async (tx) => {
+    const lockedRequestRows = await tx.$queryRaw<Array<{
+      id: string;
+      evidenceReferenceIds: unknown;
+    }>>`
+      SELECT "id", "evidenceReferenceIds"
+      FROM "ReconciliationReviewHistory"
+      WHERE "attemptId" = ${request.attemptId}
+        AND "obligationId" = ${request.obligationId}
+        AND "merchantId" = ${request.merchantId}
+        AND "reasonCode" = 'READ_ONLY_QUERY_REQUESTED'
+        AND "correlationId" = ${request.requestId}
+      ORDER BY "createdAt" ASC, "id" ASC
+      LIMIT 1
+      FOR UPDATE
+    `;
+
+    if (lockedRequestRows.length !== 1) {
+      return null;
+    }
+
+    const priorClaim = await tx.reconciliationReviewHistory.findFirst({
+      where: {
+        attemptId: request.attemptId,
+        obligationId: request.obligationId,
+        merchantId: request.merchantId,
+        reasonCode: {
+          in: ['READ_ONLY_QUERY_CLAIMED', 'READ_ONLY_QUERY_CONSUMED'],
+        },
+        correlationId: request.requestId,
+      },
+      select: { id: true },
+    });
+    if (priorClaim) {
+      return null;
+    }
+
+    const attempt = await tx.paymentAttempt.findFirst({
+      where: {
+        id: request.attemptId,
+        obligationId: request.obligationId,
+        merchantId: request.merchantId,
+      },
+    });
+    if (!attempt) {
+      return null;
+    }
+
+    const payload = decodeReviewPayload(lockedRequestRows[0]?.evidenceReferenceIds);
+    await tx.reconciliationReviewHistory.create({
+      data: {
+        attemptId: attempt.id,
+        obligationId: attempt.obligationId,
+        merchantId: attempt.merchantId,
+        priorReviewStatus: attempt.reviewStatus,
+        nextReviewStatus: attempt.reviewStatus,
+        completedByType: null,
+        actorId: null,
+        reasonCode: 'READ_ONLY_QUERY_CLAIMED',
+        triggeringObservationId: null,
+        evidenceReferenceIds: {
+          references: payload.references,
+          note: payload.note,
+        },
+        correlationId: request.requestId,
+      },
+    });
+
+    return {
+      ...request,
+      note: payload.note,
+    };
+  });
 }
 
 async function persistReadOnlyQueryConsumption(
@@ -408,6 +488,7 @@ if (enabled) {
         }, input),
         persistSlaEscalation: (input) => persistSlaEscalation(prisma, input),
         listRequestedReadOnlyQueries: listPendingReadOnlyQueryRequests,
+        claimReadOnlyQueryRequest,
         persistReadOnlyQueryConsumption,
         listUnresolvedAttempts: () => prisma.paymentAttempt.findMany({
           where: { obligationId, merchantId, resolvedAt: null },
@@ -451,6 +532,7 @@ if (enabled) {
       assert.deepEqual(history.map((entry) => entry.reasonCode), [
         'REVIEW_CLAIMED',
         'READ_ONLY_QUERY_REQUESTED',
+        'READ_ONLY_QUERY_CLAIMED',
         'READ_ONLY_QUERY_CONSUMED',
       ]);
       assert.equal(history[1]?.correlationId, request.requestId);
@@ -462,9 +544,197 @@ if (enabled) {
       assert.deepEqual(history[2]?.evidenceReferenceIds, {
         references: [],
         note: 'await reconciler pass',
+      });
+      assert.equal(history[3]?.correlationId, request.requestId);
+      assert.deepEqual(history[3]?.evidenceReferenceIds, {
+        references: [],
+        note: 'await reconciler pass',
         result: 'OBSERVATION_INGESTED',
       });
 
+      assert.equal((await listPendingReadOnlyQueryRequests()).length, 0);
+    });
+
+    it('atomically claims durable read-only query requests so concurrent workers execute exactly one query', async () => {
+      const clock = virtualClock(0);
+      const merchantId = 'merchant_worker_manual_request_race';
+      const obligationId = 'obligation_worker_manual_request_race';
+      const attemptId = 'attempt_worker_manual_request_race';
+      const obligation = await prisma.paymentObligation.create({
+        data: {
+          id: obligationId,
+          merchantId,
+          checkoutId: 'checkout_worker_manual_request_race',
+          collectionRail: 'ONLINE',
+          purpose: 'FULL_ONLINE',
+          amountPaise: 10_000n,
+          currency: 'INR',
+          status: 'OPEN',
+          satisfiedAt: null,
+        },
+      });
+      await prisma.paymentAttempt.create({
+        data: {
+          id: attemptId,
+          obligationId: obligation.id,
+          merchantId,
+          obligationCollectionRail: obligation.collectionRail,
+          provider: 'MOCK',
+          environment: 'TEST',
+          credentialBindingId: 'binding_worker_manual_request_race',
+          credentialVersionId: 'credential_worker_manual_request_race',
+          requestIdempotencyKey: 'request_worker_manual_request_race',
+          providerOrderRef: 'mock_order_obligation_worker_manual_request_race_attempt_worker_manual_request_race',
+          outcomeStatus: 'PENDING',
+          reviewStatus: 'REQUIRED',
+          resolvedAt: null,
+          lastOutcomeChangedAt: new Date(0),
+          lastObservationAt: null,
+          adapterVersion: 'mock-adapter-v1',
+          mappingVersion: 'mock-mapping-v1',
+          createdAt: new Date(0),
+        },
+      });
+
+      await claimReview(prisma, {
+        merchantId,
+        attemptId,
+        reviewerId: 'admin_1',
+      });
+      const request = await requestReadOnlyQuery(prisma, {
+        merchantId,
+        attemptId,
+        reviewerId: 'admin_1',
+        note: 'await single worker claim',
+        requestId: 'review_query_manual_request_race',
+      });
+
+      let coordinatedListCalls = 0;
+      let releaseListBarrier!: () => void;
+      const listBarrier = new Promise<void>((resolve) => {
+        releaseListBarrier = resolve;
+      });
+      let queryExecutions = 0;
+      let releaseQueryBarrier!: () => void;
+      const queryBarrier = new Promise<void>((resolve) => {
+        releaseQueryBarrier = resolve;
+      });
+      let queryStartedResolve!: () => void;
+      const queryStarted = new Promise<void>((resolve) => {
+        queryStartedResolve = resolve;
+      });
+
+      const worker = reconciliationWorker({
+        clock,
+        policy: MOCK_RECONCILIATION_POLICY_V1,
+        getReconciliationState: async (): Promise<DerivedReconciliationState> => {
+          const observations = await prisma.providerObservation.findMany({
+            where: { attemptId },
+            orderBy: [{ receivedAt: 'desc' }, { id: 'desc' }],
+            select: { receivedAt: true },
+          });
+          return {
+            amountPaise: obligation.amountPaise,
+            currency: obligation.currency as 'INR',
+            queryCount: observations.length,
+            lastReconciledAt: observations[0]?.receivedAt ?? null,
+          };
+        },
+        buildCredentialUseInput: async (attempt) => ({
+          originalMerchantId: attempt.merchantId,
+          requestedMerchantId: attempt.merchantId,
+          originalProvider: attempt.provider,
+          requestedProvider: attempt.provider,
+          originalEnvironment: attempt.environment,
+          requestedEnvironment: attempt.environment,
+          originalBindingId: attempt.credentialBindingId,
+          requestedBindingId: attempt.credentialBindingId,
+          continuity: 'PROVEN_SAME_ACCOUNT',
+          credentialState: 'ACTIVE',
+          operation: 'STATUS_QUERY',
+        }),
+        queryStatus: async (input: MockStatusQueryInput) => {
+          queryExecutions += 1;
+          queryStartedResolve();
+          await queryBarrier;
+          const raw = await mockAdapter.queryStatus({ ...input, scenario: 'PENDING' });
+          return { ...raw, receivedAt: clock.now() };
+        },
+        ingestRawObservation: (input) => ingestRawObservation({
+          parser: mockAdapter,
+          ingestionMode: 'MOCK_EXECUTABLE',
+          retentionDecision: 'MOCK_SYNTHETIC',
+          nextObservationId: () => 'observation_worker_manual_request_race',
+          resolveBinding: async () => ({
+            attemptId,
+            obligationId,
+            merchantId,
+            credentialBindingId: 'binding_worker_manual_request_race',
+            credentialVersionId: 'credential_worker_manual_request_race',
+            bindingVerification: 'VERIFIED' as const,
+          }),
+          verify: async () => 'NOT_APPLICABLE' as const,
+          persist: (candidate) => ingestObservation(prisma, candidate),
+        }, input),
+        persistSlaEscalation: (input) => persistSlaEscalation(prisma, input),
+        listRequestedReadOnlyQueries: async () => {
+          coordinatedListCalls += 1;
+          if (coordinatedListCalls === 1) {
+            await listBarrier;
+          } else {
+            releaseListBarrier();
+          }
+          return listPendingReadOnlyQueryRequests();
+        },
+        claimReadOnlyQueryRequest,
+        persistReadOnlyQueryConsumption,
+        listUnresolvedAttempts: () => prisma.paymentAttempt.findMany({
+          where: { obligationId, merchantId, resolvedAt: null },
+          orderBy: [{ createdAt: 'asc' }, { id: 'asc' }],
+        }),
+      });
+
+      const firstRun = worker.runOnce();
+      const secondRun = worker.runOnce();
+      await queryStarted;
+      releaseQueryBarrier();
+
+      const [firstResult, secondResult] = await Promise.all([firstRun, secondRun]);
+
+      assert.equal(queryExecutions, 1);
+      assert.deepEqual(firstResult, [{
+        kind: 'OBSERVATION_INGESTED',
+        observationId: 'observation_worker_manual_request_race',
+      }]);
+      assert.deepEqual(secondResult, [{
+        kind: 'QUERY_BLOCKED',
+        reason: 'READ_ONLY_QUERY_ALREADY_CLAIMED',
+      }]);
+
+      const persisted = await prisma.paymentAttempt.findUniqueOrThrow({ where: { id: attemptId } });
+      assert.equal(persisted.outcomeStatus, 'PENDING');
+      assert.equal(persisted.reviewStatus, 'IN_PROGRESS');
+      assert.equal(persisted.resolvedAt, null);
+
+      const history = await prisma.reconciliationReviewHistory.findMany({
+        where: { attemptId },
+        orderBy: [{ createdAt: 'asc' }, { id: 'asc' }],
+        select: {
+          reasonCode: true,
+          correlationId: true,
+        },
+      });
+      assert.deepEqual(history.map((entry) => entry.reasonCode), [
+        'REVIEW_CLAIMED',
+        'READ_ONLY_QUERY_REQUESTED',
+        'READ_ONLY_QUERY_CLAIMED',
+        'READ_ONLY_QUERY_CONSUMED',
+      ]);
+      assert.equal(history.filter((entry) => entry.reasonCode === 'READ_ONLY_QUERY_CLAIMED').length, 1);
+      assert.equal(history.filter((entry) => entry.reasonCode === 'READ_ONLY_QUERY_CONSUMED').length, 1);
+      assert.equal(history[1]?.correlationId, request.requestId);
+      assert.equal(history[2]?.correlationId, request.requestId);
+      assert.equal(history[3]?.correlationId, request.requestId);
       assert.equal((await listPendingReadOnlyQueryRequests()).length, 0);
     });
   });

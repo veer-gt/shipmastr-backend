@@ -96,6 +96,8 @@ export interface ReadOnlyQueryConsumptionRecord {
   result: ReconciliationResult;
 }
 
+export type ClaimReadOnlyQueryRequest = PendingReadOnlyQueryRequest;
+
 export type CredentialUseInputResolver = (
   attempt: ReconciliationAttempt,
   request: PendingReadOnlyQueryRequest | null,
@@ -114,6 +116,7 @@ export interface ReconciliationDeps {
 export interface ReconciliationWorkerDeps extends ReconciliationDeps {
   listUnresolvedAttempts(): Promise<ReconciliationAttempt[]>;
   listRequestedReadOnlyQueries?(): Promise<PendingReadOnlyQueryRequest[]>;
+  claimReadOnlyQueryRequest?(request: ClaimReadOnlyQueryRequest): Promise<PendingReadOnlyQueryRequest | null>;
   persistReadOnlyQueryConsumption?(input: ReadOnlyQueryConsumptionRecord): Promise<void>;
 }
 
@@ -196,14 +199,28 @@ export function reconciliationWorker(deps: ReconciliationWorkerDeps) {
 
       for (const attempt of attempts) {
         const pendingRequest = requestByAttemptId.get(attempt.id) ?? null;
-        const result = pendingRequest && !deps.persistReadOnlyQueryConsumption
-          ? { kind: 'QUERY_BLOCKED', reason: 'READ_ONLY_QUERY_CONSUMPTION_UNAVAILABLE' } satisfies ReconciliationResult
-          : await reconcileAttempt(deps, attempt, pendingRequest);
+        const claimReadOnlyQueryRequest = deps.claimReadOnlyQueryRequest;
+        const persistReadOnlyQueryConsumption = deps.persistReadOnlyQueryConsumption;
+        let claimedRequest: PendingReadOnlyQueryRequest | null = null;
+        let result: ReconciliationResult;
+
+        if (pendingRequest && !claimReadOnlyQueryRequest) {
+          result = { kind: 'QUERY_BLOCKED', reason: 'READ_ONLY_QUERY_CLAIM_UNAVAILABLE' };
+        } else if (pendingRequest && !persistReadOnlyQueryConsumption) {
+          result = { kind: 'QUERY_BLOCKED', reason: 'READ_ONLY_QUERY_CONSUMPTION_UNAVAILABLE' };
+        } else if (pendingRequest) {
+          claimedRequest = await claimReadOnlyQueryRequest!(pendingRequest);
+          result = claimedRequest
+            ? await reconcileAttempt(deps, attempt, claimedRequest)
+            : { kind: 'QUERY_BLOCKED', reason: 'READ_ONLY_QUERY_ALREADY_CLAIMED' };
+        } else {
+          result = await reconcileAttempt(deps, attempt, null);
+        }
         results.push(result);
 
-        if (pendingRequest && deps.persistReadOnlyQueryConsumption) {
-          await deps.persistReadOnlyQueryConsumption({
-            request: pendingRequest,
+        if (claimedRequest && persistReadOnlyQueryConsumption) {
+          await persistReadOnlyQueryConsumption({
+            request: claimedRequest,
             result,
           });
         }

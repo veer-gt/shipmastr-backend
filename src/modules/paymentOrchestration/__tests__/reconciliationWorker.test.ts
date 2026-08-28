@@ -5,6 +5,7 @@ import {
   MOCK_RECONCILIATION_POLICY_V1,
   reconcileAttempt,
   reconciliationWorker,
+  type ClaimReadOnlyQueryRequest,
   type CredentialUseInputResolver,
   type DerivedReconciliationState,
   type PendingReadOnlyQueryRequest,
@@ -137,6 +138,7 @@ function deps(
     persistSlaEscalation: [] as Array<[SlaEscalationRequest]>,
     buildCredentialUseInput: [] as Array<[ReconciliationAttempt]>,
     listRequestedReadOnlyQueries: [] as Array<[]>,
+    claimReadOnlyQueryRequest: [] as Array<[PendingReadOnlyQueryRequest]>,
     persistReadOnlyQueryConsumption: [] as Array<[ReadOnlyQueryConsumptionRecord]>,
   };
 
@@ -247,6 +249,10 @@ function deps(
     listRequestedReadOnlyQueries: async () => {
       calls.listRequestedReadOnlyQueries.push([]);
       return overrides.requestedReadOnlyQueries ?? [];
+    },
+    claimReadOnlyQueryRequest: async (request: PendingReadOnlyQueryRequest) => {
+      calls.claimReadOnlyQueryRequest.push([request]);
+      return request;
     },
     persistReadOnlyQueryConsumption: async (input: ReadOnlyQueryConsumptionRecord) => {
       calls.persistReadOnlyQueryConsumption.push([input]);
@@ -365,6 +371,7 @@ describe('reconciliationWorker', () => {
       observationId: 'observation_1',
     });
     assert.equal(calls.queryStatus.length, 1);
+    assert.equal(calls.claimReadOnlyQueryRequest.length, 1);
     assert.equal(calls.queryStatus[0]?.[0].querySequence, 1);
     assert.equal(storedAttempt.outcomeStatus, 'PENDING');
     assert.equal(storedAttempt.reviewStatus, 'IN_PROGRESS');
@@ -388,6 +395,72 @@ describe('reconciliationWorker', () => {
         observationId: 'observation_1',
       },
     });
+  });
+
+  it('claims a durable read-only query request before execution so concurrent workers only query once', async () => {
+    const attempt = persistedAttempt({
+      reviewStatus: 'IN_PROGRESS',
+      outcomeStatus: 'PENDING',
+    });
+    const request: PendingReadOnlyQueryRequest = {
+      requestId: 'review_query_race',
+      attemptId: attempt.id,
+      obligationId: attempt.obligationId,
+      merchantId: attempt.merchantId,
+      provider: attempt.provider,
+      environment: attempt.environment,
+      credentialBindingId: attempt.credentialBindingId,
+      credentialVersionId: attempt.credentialVersionId,
+      operation: 'STATUS_QUERY',
+      note: 'await single worker claim',
+    };
+    let claimReleased = false;
+    let releaseClaimBarrier!: () => void;
+    const claimBarrier = new Promise<void>((resolve) => {
+      releaseClaimBarrier = resolve;
+    });
+    let alreadyClaimed = false;
+
+    const { deps: rawDeps, calls } = deps({
+      attempt,
+      clock: virtualClock(0),
+      queryStatus: pending(),
+      requestedReadOnlyQueries: [request],
+    });
+    const worker = reconciliationWorker({
+      ...rawDeps,
+      claimReadOnlyQueryRequest: async (candidate: ClaimReadOnlyQueryRequest) => {
+        calls.claimReadOnlyQueryRequest.push([candidate]);
+        if (alreadyClaimed) {
+          return null;
+        }
+        alreadyClaimed = true;
+        if (!claimReleased) {
+          claimReleased = true;
+          await claimBarrier;
+        }
+        return candidate;
+      },
+    });
+
+    const firstRun = worker.runOnce();
+    await Promise.resolve();
+    const secondRun = worker.runOnce();
+    releaseClaimBarrier();
+
+    const [firstResult, secondResult] = await Promise.all([firstRun, secondRun]);
+
+    assert.equal(calls.queryStatus.length, 1);
+    assert.equal(calls.persistReadOnlyQueryConsumption.length, 1);
+    assert.equal(calls.claimReadOnlyQueryRequest.length, 2);
+    assert.deepEqual(firstResult, [{
+      kind: 'OBSERVATION_INGESTED',
+      observationId: 'observation_1',
+    }]);
+    assert.deepEqual(secondResult, [{
+      kind: 'QUERY_BLOCKED',
+      reason: 'READ_ONLY_QUERY_ALREADY_CLAIMED',
+    }]);
   });
 
   it('routes SLA escalation through serialized persistence and does not mutate listed snapshots', async () => {
