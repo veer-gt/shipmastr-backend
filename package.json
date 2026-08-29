@@ -5,6 +5,10 @@
   "main": "dist/server.js",
   "scripts": {
     "test": "npm run build && node --test \"dist/**/*.test.js\"",
+    "test:pgo1:pure": "npm run build && node --test dist/modules/paymentOrchestration/__tests__/money.test.js dist/modules/paymentOrchestration/__tests__/activationPolicy.test.js dist/modules/paymentOrchestration/__tests__/obligationService.test.js dist/modules/paymentOrchestration/__tests__/matching.test.js dist/modules/paymentOrchestration/__tests__/reducer.test.js dist/modules/paymentOrchestration/__tests__/reducerPermutations.test.js dist/modules/paymentOrchestration/__tests__/reconciliationWorker.test.js dist/modules/paymentOrchestration/__tests__/credentialPolicy.test.js dist/modules/paymentOrchestration/__tests__/presenters.test.js dist/modules/paymentOrchestration/__tests__/telemetry.test.js",
+    "test:pgo1:contracts": "npm run build && node --test dist/modules/paymentOrchestration/__tests__/observationIngestor.test.js dist/modules/paymentOrchestration/__tests__/mockAdapter.test.js dist/modules/paymentOrchestration/__tests__/cashfreeContract.test.js dist/modules/paymentOrchestration/__tests__/paytmContract.test.js dist/modules/paymentOrchestration/__tests__/interpretation.test.js dist/modules/paymentOrchestration/__tests__/refundDueContract.test.js dist/modules/paymentOrchestration/__tests__/shadowFactValidator.test.js",
+    "test:pgo1:postgres": "npm run build && RUN_PGO1_POSTGRES_TESTS=1 node --test --test-concurrency=1 \"dist/modules/paymentOrchestration/__tests__/*.postgres.test.js\"",
+    "test:pgo1": "npm run test:pgo1:pure && npm run test:pgo1:contracts && npm run test:pgo1:postgres",
     "dev": "tsx watch src/server.ts",
     "clean": "node -e \"require('node:fs').rmSync('dist', { recursive: true, force: true })\"",
     "prebuild": "npm run clean && npm run prisma:generate",

@@ -1,0 +1,1 @@
+{"MID":"SYNTH_PAYTM_MID","ORDERID":"paytm_order_invalid_signature","TXNID":"paytm_txn_invalid_signature","TXNAMOUNT":"100.00","CURRENCY":"INR","STATUS":"TXN_SUCCESS","RESPCODE":"01","RESPMSG":"Synthetic invalid signature","TXNDATE":"2026-08-28T04:31:00.000Z","CUSTEMAIL":"paytm.invalid@example.invalid","CUSTPHONE":"+919900000002","CARD_LAST4":"1112"}

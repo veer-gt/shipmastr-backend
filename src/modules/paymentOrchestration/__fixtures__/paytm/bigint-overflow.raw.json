@@ -1,0 +1,1 @@
+{"MID":"SYNTH_PAYTM_MID","ORDERID":"paytm_order_bigint_overflow","TXNID":"paytm_txn_bigint_overflow","TXNAMOUNT":"92233720368547758.08","CURRENCY":"INR","STATUS":"TXN_SUCCESS","RESPCODE":"01","RESPMSG":"Synthetic bigint overflow","TXNDATE":"2026-08-28T04:36:00.000Z","CUSTEMAIL":"paytm.overflow@example.invalid","CUSTPHONE":"+919900000007","CARD_LAST4":"1117"}

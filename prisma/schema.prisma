@@ -16,6 +16,107 @@ enum CourierAuditExtractionMode {
   AI_ASSISTED
 }
 
+enum PaymentProvider {
+  MOCK
+  CASHFREE
+  PAYTM
+}
+
+enum ProviderEnvironment {
+  TEST
+  LIVE
+}
+
+enum OutcomeStatus {
+  PENDING
+  UNKNOWN
+  SUCCEEDED
+  FAILED_TERMINAL
+  NOT_FOUND_TERMINAL
+}
+
+enum ReviewStatus {
+  NOT_REQUIRED
+  REQUIRED
+  IN_PROGRESS
+  COMPLETED
+}
+
+enum ObligationStatus {
+  OPEN
+  SATISFIED
+  EXPIRED
+  CANCELLED
+}
+
+enum ObligationPurpose {
+  FULL_ONLINE
+  COD_ADVANCE
+  COD_DELIVERY_BALANCE
+}
+
+enum CollectionRail {
+  ONLINE
+  COD
+}
+
+enum ProviderObservationSource {
+  WEBHOOK
+  STATUS_QUERY
+  PROVIDER_RECORD
+  MOCK
+}
+
+enum SignatureVerification {
+  VERIFIED
+  FAILED
+  NOT_APPLICABLE
+  UNAVAILABLE
+}
+
+enum EvidenceAuthority {
+  ELIGIBLE
+  ACTIVATION_GATED
+  INELIGIBLE
+}
+
+enum ObservationMappedOutcome {
+  PENDING
+  UNKNOWN
+  SUCCEEDED
+  FAILED_TERMINAL
+  NOT_FOUND_TERMINAL
+  UNMAPPED
+}
+
+enum ObservationHashAlgorithm {
+  SHA_256 @map("SHA-256")
+}
+
+enum BindingVerification {
+  VERIFIED
+  FAILED
+}
+
+enum ReviewCompletedByType {
+  SYSTEM
+  REVIEWER
+}
+
+enum RefundDueReason {
+  LATE_SUCCESS_AFTER_CLOSURE
+  SURPLUS_DOUBLE_SUCCESS
+}
+
+enum RefundDueCaseStatus {
+  OPEN
+  ACKNOWLEDGED
+  MERCHANT_ACTION_PENDING
+  VERIFICATION_PENDING
+  VERIFIED_CLOSED
+  ESCALATED_UNRESOLVED
+}
+
 enum PaymentMode {
   PREPAID
   COD
@@ -6817,4 +6918,345 @@ model CourierAuditExtractionRevision {
 
   @@unique([intakeId, revision])
   @@index([intakeId, createdAt])
+}
+
+model PaymentObligation {
+  id            String             @id @default(cuid())
+  merchantId    String
+  checkoutId    String
+  collectionRail CollectionRail
+  purpose       ObligationPurpose
+  amountPaise   BigInt
+  currency      String
+  status        ObligationStatus
+  satisfiedAt   DateTime?
+  createdAt     DateTime           @default(now())
+  updatedAt     DateTime           @updatedAt
+
+  attempts          PaymentAttempt[]
+  observations      ProviderObservation[]
+  outcomeTransitions PaymentOutcomeTransition[]
+  reviewHistory     ReconciliationReviewHistory[]
+  attentionSignals  PaymentAttentionSignal[]
+  normalizedFacts   PaymentNormalizedFactOutbox[]
+  refundDueCases    RefundDueCase[]
+
+  @@index([merchantId])
+  @@index([checkoutId])
+  @@index([status])
+  @@unique([id, merchantId])
+  @@unique([id, merchantId, collectionRail])
+}
+
+model PaymentAttempt {
+  id                   String              @id @default(cuid())
+  obligationId         String
+  merchantId           String
+  obligationCollectionRail CollectionRail
+  provider             PaymentProvider
+  environment          ProviderEnvironment
+  credentialBindingId  String
+  credentialVersionId  String
+  requestIdempotencyKey String
+  providerOrderRef     String?
+  outcomeStatus        OutcomeStatus
+  reviewStatus         ReviewStatus
+  resolvedAt           DateTime?
+  lastOutcomeChangedAt DateTime
+  lastObservationAt    DateTime?
+  adapterVersion       String
+  mappingVersion       String
+  createdAt            DateTime            @default(now())
+  updatedAt            DateTime            @updatedAt
+
+  obligation         PaymentObligation             @relation(fields: [obligationId, merchantId, obligationCollectionRail], references: [id, merchantId, collectionRail], onDelete: Restrict)
+  observations       ProviderObservation[]
+  outcomeTransitions PaymentOutcomeTransition[]
+  reviewHistory      ReconciliationReviewHistory[]
+  attentionSignals   PaymentAttentionSignal[]
+  normalizedFacts    PaymentNormalizedFactOutbox[]
+  refundDueCases     RefundDueCase[]
+
+  @@unique([merchantId, requestIdempotencyKey], map: "payment_attempt_request_idempotency")
+  @@unique([id, obligationId, merchantId])
+  @@index([obligationId])
+  @@index([merchantId])
+  @@index([obligationId, merchantId, obligationCollectionRail])
+  @@index([provider, environment])
+  @@index([reviewStatus])
+  @@index([outcomeStatus])
+}
+
+model ProviderObservation {
+  id                    String                     @id @default(cuid())
+  attemptId             String
+  obligationId          String
+  merchantId            String
+  provider              PaymentProvider
+  environment           ProviderEnvironment
+  credentialBindingId   String
+  credentialVersionId   String
+  source                ProviderObservationSource
+  providerEventId       String?
+  providerOrderRef      String
+  providerTransactionRef String?
+  nativeStatus          String
+  nativeReasonCode      String?
+  nativeAmountText      String?
+  nativeCurrency        String?
+  amountPaise           BigInt?
+  rawBodyHash           String
+  hashAlgorithm         ObservationHashAlgorithm
+  signatureVerification SignatureVerification
+  bindingVerification   BindingVerification
+  evidenceAuthority     EvidenceAuthority
+  mappedOutcome         ObservationMappedOutcome
+  adapterVersion        String
+  mappingVersion        String
+  providerApiVersion    String
+  providerOccurredAt    DateTime?
+  receivedAt            DateTime
+  reductionDisposition  String
+  observationDedupeKey  String
+  createdAt             DateTime                   @default(now())
+
+  attempt                         PaymentAttempt                    @relation(fields: [attemptId, obligationId, merchantId], references: [id, obligationId, merchantId], onDelete: Restrict)
+  obligation                      PaymentObligation                 @relation(fields: [obligationId, merchantId], references: [id, merchantId], onDelete: Restrict)
+  deliveries                      ProviderObservationDelivery[]
+  originalObservationInterpretations ProviderObservationInterpretation[] @relation("OriginalProviderObservationInterpretations")
+  triggeredOutcomeTransitions     PaymentOutcomeTransition[]
+  triggeredReviewHistory          ReconciliationReviewHistory[]
+  attentionSignals                PaymentAttentionSignal[]
+  normalizedFacts                 PaymentNormalizedFactOutbox[]
+  verifiedRefundDueCases          RefundDueCase[]
+
+  @@unique([observationDedupeKey], map: "provider_observation_dedupe")
+  @@unique([merchantId, obligationId, attemptId, provider, environment, providerEventId, rawBodyHash], map: "provider_observation_scoped_event_body")
+  @@unique([id, attemptId, obligationId, merchantId])
+  @@index([attemptId])
+  @@index([obligationId])
+  @@index([merchantId])
+  @@index([provider, environment])
+  @@index([providerTransactionRef])
+  @@index([providerEventId])
+}
+
+model ProviderObservationDelivery {
+  id             String              @id @default(cuid())
+  observationId  String
+  merchantId     String
+  attemptId      String
+  obligationId   String
+  source         ProviderObservationSource
+  providerEventId String?
+  rawBodyHash    String
+  receivedAt     DateTime
+  deliveryMetadata Json?
+  createdAt      DateTime            @default(now())
+
+  observation ProviderObservation @relation(fields: [observationId, attemptId, obligationId, merchantId], references: [id, attemptId, obligationId, merchantId], onDelete: Restrict)
+
+  @@index([observationId])
+  @@index([merchantId])
+  @@index([attemptId])
+  @@index([obligationId])
+}
+
+model ProviderObservationRejection {
+  id                    String                     @id
+  provider              PaymentProvider
+  environment           ProviderEnvironment
+  source                ProviderObservationSource
+  reason                String
+  merchantId            String?
+  obligationId          String?
+  attemptId             String?
+  credentialBindingId   String?
+  rawBodyHash           String
+  hashAlgorithm         ObservationHashAlgorithm
+  signatureVerification SignatureVerification
+  bindingVerification   BindingVerification?
+  adapterVersion        String
+  mappingVersion        String
+  providerApiVersion    String
+  detectedAt            DateTime
+  securityAlertCode     String
+  securityAlertStatus   String
+  alertDedupeKey        String                     @unique(map: "provider_security_alert_dedupe")
+  createdAt             DateTime                   @default(now())
+
+  @@index([merchantId, detectedAt])
+  @@index([attemptId, detectedAt])
+  @@index([securityAlertStatus, detectedAt])
+}
+
+model ProviderPolicyDecisionAudit {
+  id                    String              @id
+  merchantId            String
+  obligationId          String?
+  attemptId             String?
+  provider              PaymentProvider
+  environment           ProviderEnvironment
+  operation             String
+  policyVersion         String?
+  policyApproved        Boolean
+  policyMerchantId      String?
+  policyProvider        PaymentProvider?
+  policyEnvironment     ProviderEnvironment?
+  policyOperation       String?
+  maxAmountPaise        BigInt?
+  approvedAt            DateTime?
+  effectiveFrom         DateTime?
+  effectiveUntil        DateTime?
+  evaluatedAt           DateTime
+  decision              String
+  reason                String
+  timing                Json?
+  createdAt             DateTime            @default(now())
+
+  @@index([merchantId, evaluatedAt])
+  @@index([attemptId, evaluatedAt])
+  @@index([provider, environment, operation, evaluatedAt])
+  @@index([decision, evaluatedAt])
+}
+
+model ProviderObservationInterpretation {
+  id                    String              @id @default(cuid())
+  originalObservationId String
+  merchantId            String
+  obligationId          String
+  attemptId             String
+  originalMappingVersion String
+  derivedAdapterVersion String
+  derivedMappingVersion String
+  derivedOutcome        ObservationMappedOutcome
+  derivedAt             DateTime
+  createdAt             DateTime            @default(now())
+
+  originalObservation ProviderObservation @relation("OriginalProviderObservationInterpretations", fields: [originalObservationId, attemptId, obligationId, merchantId], references: [id, attemptId, obligationId, merchantId], onDelete: Restrict)
+
+  @@unique([originalObservationId, derivedAdapterVersion, derivedMappingVersion], map: "provider_observation_interpretation_dedupe")
+  @@index([merchantId])
+  @@index([attemptId])
+  @@index([obligationId])
+}
+
+model PaymentOutcomeTransition {
+  id                    String         @id @default(cuid())
+  attemptId             String
+  obligationId          String
+  merchantId            String
+  priorOutcomeStatus    OutcomeStatus?
+  nextOutcomeStatus     OutcomeStatus
+  reasonCode            String
+  triggeringObservationId String?
+  createdAt             DateTime       @default(now())
+
+  attempt               PaymentAttempt      @relation(fields: [attemptId, obligationId, merchantId], references: [id, obligationId, merchantId], onDelete: Restrict)
+  obligation            PaymentObligation   @relation(fields: [obligationId, merchantId], references: [id, merchantId], onDelete: Restrict)
+  triggeringObservation ProviderObservation? @relation(fields: [triggeringObservationId, attemptId, obligationId, merchantId], references: [id, attemptId, obligationId, merchantId], onDelete: Restrict)
+
+  @@index([attemptId, createdAt])
+  @@index([obligationId, createdAt])
+  @@index([merchantId, createdAt])
+}
+
+model ReconciliationReviewHistory {
+  id                    String                @id @default(cuid())
+  attemptId             String
+  obligationId          String
+  merchantId            String
+  priorReviewStatus     ReviewStatus
+  nextReviewStatus      ReviewStatus
+  completedByType       ReviewCompletedByType?
+  actorId               String?
+  reasonCode            String
+  triggeringObservationId String?
+  evidenceReferenceIds  Json?
+  correlationId         String?
+  createdAt             DateTime              @default(now())
+
+  attempt               PaymentAttempt       @relation(fields: [attemptId, obligationId, merchantId], references: [id, obligationId, merchantId], onDelete: Restrict)
+  obligation            PaymentObligation    @relation(fields: [obligationId, merchantId], references: [id, merchantId], onDelete: Restrict)
+  triggeringObservation ProviderObservation? @relation(fields: [triggeringObservationId, attemptId, obligationId, merchantId], references: [id, attemptId, obligationId, merchantId], onDelete: Restrict)
+
+  @@index([attemptId, createdAt])
+  @@index([obligationId, createdAt])
+  @@index([merchantId, createdAt])
+}
+
+model PaymentAttentionSignal {
+  id             String                @id @default(cuid())
+  attemptId      String
+  obligationId   String
+  merchantId     String
+  signalCode     String
+  observationId  String?
+  detail         Json?
+  createdAt      DateTime              @default(now())
+
+  attempt     PaymentAttempt       @relation(fields: [attemptId, obligationId, merchantId], references: [id, obligationId, merchantId], onDelete: Restrict)
+  obligation  PaymentObligation    @relation(fields: [obligationId, merchantId], references: [id, merchantId], onDelete: Restrict)
+  observation ProviderObservation? @relation(fields: [observationId, attemptId, obligationId, merchantId], references: [id, attemptId, obligationId, merchantId], onDelete: Restrict)
+
+  @@index([attemptId, createdAt])
+  @@index([obligationId, createdAt])
+  @@index([merchantId, createdAt])
+}
+
+model PaymentNormalizedFactOutbox {
+  id                    String          @id @default(cuid())
+  schemaVersion         String
+  merchantId            String
+  obligationId          String
+  attemptId             String
+  triggeringObservationId String
+  factType              String
+  amountPaise           BigInt
+  currency              String
+  provider              PaymentProvider
+  providerReferenceId   String
+  dedupeKey             String
+  reducerVersion        String
+  adapterVersion        String
+  mappingVersion        String
+  createdAt             DateTime        @default(now())
+
+  obligation            PaymentObligation   @relation(fields: [obligationId, merchantId], references: [id, merchantId], onDelete: Restrict)
+  attempt               PaymentAttempt      @relation(fields: [attemptId, obligationId, merchantId], references: [id, obligationId, merchantId], onDelete: Restrict)
+  triggeringObservation ProviderObservation @relation(fields: [triggeringObservationId, attemptId, obligationId, merchantId], references: [id, attemptId, obligationId, merchantId], onDelete: Restrict)
+
+  @@unique([dedupeKey], map: "payment_fact_dedupe")
+  @@index([merchantId, createdAt])
+  @@index([obligationId, createdAt])
+  @@index([attemptId, createdAt])
+}
+
+model RefundDueCase {
+  id                    String             @id @default(cuid())
+  merchantId            String
+  obligationId          String
+  attemptId             String
+  provider              PaymentProvider
+  providerTransactionRef String
+  amountPaise           BigInt
+  currency              String
+  reason                RefundDueReason
+  status                RefundDueCaseStatus
+  dedupeKey             String
+  detectedAt            DateTime
+  acknowledgedAt        DateTime?
+  escalatedAt           DateTime?
+  verifiedClosedAt      DateTime?
+  verificationObservationId String?
+  createdAt             DateTime           @default(now())
+
+  obligation            PaymentObligation    @relation(fields: [obligationId, merchantId], references: [id, merchantId], onDelete: Restrict)
+  attempt               PaymentAttempt       @relation(fields: [attemptId, obligationId, merchantId], references: [id, obligationId, merchantId], onDelete: Restrict)
+  verificationObservation ProviderObservation? @relation(fields: [verificationObservationId, attemptId, obligationId, merchantId], references: [id, attemptId, obligationId, merchantId], onDelete: Restrict)
+
+  @@unique([dedupeKey], map: "refund_due_case_dedupe")
+  @@index([merchantId, detectedAt])
+  @@index([obligationId, detectedAt])
+  @@index([attemptId, detectedAt])
 }

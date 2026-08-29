@@ -1,0 +1,1 @@
+{"MID":"SYNTH_PAYTM_MID","ORDERID":"paytm_order_raw_byte","TXNID":"paytm_txn_raw_byte","TXNAMOUNT":"100.00","CURRENCY":"INR","STATUS":"TXN_SUCCESS","RESPCODE":"01","RESPMSG":"Synthetic raw byte","TXNDATE":"2026-08-28T04:32:00.000Z","CUSTEMAIL":"paytm.raw@example.invalid","CUSTPHONE":"+919900000003","CARD_LAST4":"1113"}

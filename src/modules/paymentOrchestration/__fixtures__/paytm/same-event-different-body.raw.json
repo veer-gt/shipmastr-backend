@@ -1,0 +1,1 @@
+{"body":{"mid":"SYNTH_PAYTM_MID","orderId":"paytm_order_success","txnId":"paytm_txn_success","txnAmount":"100.00","currency":"INR","resultInfo":{"resultStatus":"TXN_SUCCESS","resultCode":"01","resultMsg":"Synthetic success changed body"},"txnDate":"2026-08-28T04:42:00.000Z","custEmail":"paytm.sameevent@example.invalid","custPhone":"+919900000013","cardLast4":"1123"}}
