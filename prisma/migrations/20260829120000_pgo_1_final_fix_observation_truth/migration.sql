@@ -24,10 +24,13 @@ ALTER TABLE "ProviderObservation"
     USING ("hashAlgorithm"::"ObservationHashAlgorithm"),
   ALTER COLUMN "bindingVerification" TYPE "BindingVerification"
     USING ("bindingVerification"::"BindingVerification"),
+  ALTER COLUMN "providerOrderRef" SET NOT NULL,
   ADD COLUMN "mappedOutcome" "ObservationMappedOutcome" NOT NULL,
   ADD COLUMN "providerApiVersion" TEXT NOT NULL;
 
 ALTER TABLE "ProviderObservation"
+  ADD CONSTRAINT "ProviderObservation_providerOrderRef_nonempty"
+  CHECK (length(btrim("providerOrderRef")) > 0),
   ADD CONSTRAINT "ProviderObservation_providerApiVersion_nonempty"
   CHECK (length(btrim("providerApiVersion")) > 0);
 

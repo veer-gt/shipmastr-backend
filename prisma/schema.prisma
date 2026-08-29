@@ -6998,7 +6998,7 @@ model ProviderObservation {
   credentialVersionId   String
   source                ProviderObservationSource
   providerEventId       String?
-  providerOrderRef      String?
+  providerOrderRef      String
   providerTransactionRef String?
   nativeStatus          String
   nativeReasonCode      String?

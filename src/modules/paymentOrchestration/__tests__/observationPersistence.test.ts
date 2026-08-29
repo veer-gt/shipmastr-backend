@@ -35,6 +35,8 @@ describe('persisted provider observation loading', () => {
     ['bindingVerification', 'UNVERIFIED', 'INVALID_PERSISTED_BINDING_VERIFICATION'],
     ['evidenceAuthority', 'AUTHORIZED_BY_DEFAULT', 'INVALID_PERSISTED_EVIDENCE_AUTHORITY'],
     ['mappedOutcome', 'CAPTUREDISH', 'INVALID_PERSISTED_MAPPED_OUTCOME'],
+    ['providerOrderRef', null, 'INVALID_PERSISTED_PROVIDER_ORDER_REF'],
+    ['providerOrderRef', '   ', 'INVALID_PERSISTED_PROVIDER_ORDER_REF'],
     ['providerApiVersion', '   ', 'INVALID_PERSISTED_PROVIDER_API_VERSION'],
   ] as const) {
     it(`fails closed for unknown persisted ${field}`, () => {

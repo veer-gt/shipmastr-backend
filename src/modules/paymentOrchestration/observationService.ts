@@ -565,6 +565,9 @@ export function providerObservationRowToCanonical(value: unknown): CanonicalObse
   if (!isMappedOutcome(observation.mappedOutcome)) {
     throw new Error('INVALID_PERSISTED_MAPPED_OUTCOME');
   }
+  if (typeof observation.providerOrderRef !== 'string' || observation.providerOrderRef.trim() === '') {
+    throw new Error('INVALID_PERSISTED_PROVIDER_ORDER_REF');
+  }
   if (typeof observation.providerApiVersion !== 'string' || observation.providerApiVersion.trim() === '') {
     throw new Error('INVALID_PERSISTED_PROVIDER_API_VERSION');
   }
@@ -580,7 +583,7 @@ export function providerObservationRowToCanonical(value: unknown): CanonicalObse
     credentialVersionId: observation.credentialVersionId,
     source: observation.source,
     providerEventId: observation.providerEventId,
-    providerOrderRef: observation.providerOrderRef ?? '',
+    providerOrderRef: observation.providerOrderRef,
     providerTransactionRef: observation.providerTransactionRef,
     nativeStatus: observation.nativeStatus,
     nativeReasonCode: observation.nativeReasonCode,
