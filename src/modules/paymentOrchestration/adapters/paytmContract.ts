@@ -21,6 +21,7 @@ export const paytmContractParser: ObservationParser = {
   provider: 'PAYTM',
   adapterVersion: PAYTM_ADAPTER_VERSION,
   mappingVersion: PAYTM_MAPPING_VERSION,
+  providerApiVersion: PAYTM_PROVIDER_API_VERSION,
   parse(input) {
     return parsePaytmObservation(input);
   },

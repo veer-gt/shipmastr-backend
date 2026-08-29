@@ -175,7 +175,9 @@ describe('cashfreeContractParser', () => {
       const candidate = cashfreeContractParser.parse(fixture.input);
       assert.deepEqual(project(candidate), expectedProject(fixture.manifest));
       assert.equal(dispositionFor(candidate.mappedOutcome), fixture.manifest.expectedDisposition);
-      const serialized = JSON.stringify(project(candidate));
+      const serialized = JSON.stringify(candidate, (_key, value) =>
+        typeof value === 'bigint' ? value.toString() : value,
+      );
       assertNoLeakage(serialized, fixture);
     });
   }

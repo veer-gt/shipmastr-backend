@@ -68,13 +68,6 @@ export async function persistReduction(
     context.triggeringObservation.receivedAt,
   );
 
-  await tx.providerObservation.update({
-    where: { id: context.triggeringObservation.id },
-    data: {
-      reductionDisposition: observationDisposition(context, plan),
-    },
-  });
-
   await tx.paymentAttempt.update({
     where: { id: context.targetAttempt.id },
     data: {
@@ -161,14 +154,7 @@ export async function persistReduction(
     requireRefundSourceObservation(context, refund);
     await tx.refundDueCase.upsert({
       where: {
-        dedupeKey: refundDedupeKey(
-          context.obligation.merchantId,
-          context.obligation.id,
-          refund.provider,
-          refund.providerTransactionRef,
-          refund.sourceAttemptId,
-          refund.sourceObservationId,
-        ),
+        dedupeKey: refund.captureKey,
       },
       update: {},
       create: {
@@ -181,14 +167,7 @@ export async function persistReduction(
         currency: context.obligation.currency,
         reason: refund.reason,
         status: 'OPEN',
-        dedupeKey: refundDedupeKey(
-          context.obligation.merchantId,
-          context.obligation.id,
-          refund.provider,
-          refund.providerTransactionRef,
-          refund.sourceAttemptId,
-          refund.sourceObservationId,
-        ),
+        dedupeKey: refund.captureKey,
         detectedAt: effectiveAt,
         acknowledgedAt: null,
         escalatedAt: null,
@@ -212,67 +191,32 @@ export async function persistReduction(
   }
 }
 
-function buildFactInserts(
+export function buildFactInserts(
   context: ReductionPersistenceContext,
   plan: ReductionPlan,
 ) {
-  const base = {
-    schemaVersion: FACT_SCHEMA_VERSION,
-    merchantId: context.obligation.merchantId,
-    obligationId: context.obligation.id,
-    attemptId: context.targetAttempt.id,
-    triggeringObservationId: context.triggeringObservation.id,
-    amountPaise: context.obligation.amountPaise,
-    currency: context.obligation.currency,
-    provider: context.targetAttempt.provider,
-    reducerVersion: REDUCER_VERSION,
-    adapterVersion: context.triggeringObservation.adapterVersion,
-    mappingVersion: context.triggeringObservation.mappingVersion,
-  } satisfies Omit<
-    Prisma.PaymentNormalizedFactOutboxUncheckedCreateInput,
-    'factType' | 'providerReferenceId' | 'dedupeKey'
-  >;
-
   const rows: Prisma.PaymentNormalizedFactOutboxUncheckedCreateInput[] = [];
-
-  for (const factType of plan.factTypes) {
-    if (factType === 'REFUND_DUE_DETECTED') {
-      for (const refund of plan.refundDue) {
-        const sourceObservation = requireRefundSourceObservation(context, refund);
-        rows.push({
-          schemaVersion: FACT_SCHEMA_VERSION,
-          merchantId: context.obligation.merchantId,
-          obligationId: context.obligation.id,
-          attemptId: refund.sourceAttemptId,
-          triggeringObservationId: refund.sourceObservationId,
-          factType,
-          amountPaise: context.obligation.amountPaise,
-          currency: context.obligation.currency,
-          provider: refund.provider,
-          providerReferenceId: refund.providerTransactionRef,
-          reducerVersion: REDUCER_VERSION,
-          adapterVersion: sourceObservation.adapterVersion,
-          mappingVersion: sourceObservation.mappingVersion,
-          dedupeKey: factDedupeKey(
-            factType,
-            refund.sourceAttemptId,
-            refund.sourceObservationId,
-            refund.providerTransactionRef,
-          ),
-        });
-      }
-      continue;
-    }
-
+  for (const emission of plan.factEmissions) {
+    const sourceObservation = requireFactSourceObservation(context, emission);
     rows.push({
-      ...base,
-      factType,
-      providerReferenceId: providerReferenceIdForFact(context.triggeringObservation, factType),
+      schemaVersion: FACT_SCHEMA_VERSION,
+      merchantId: context.obligation.merchantId,
+      obligationId: context.obligation.id,
+      attemptId: emission.sourceAttemptId,
+      triggeringObservationId: emission.sourceObservationId,
+      factType: emission.factType,
+      amountPaise: context.obligation.amountPaise,
+      currency: context.obligation.currency,
+      provider: emission.provider,
+      providerReferenceId: emission.providerReferenceId,
+      reducerVersion: REDUCER_VERSION,
+      adapterVersion: sourceObservation.adapterVersion,
+      mappingVersion: sourceObservation.mappingVersion,
       dedupeKey: factDedupeKey(
-        factType,
-        context.targetAttempt.id,
-        context.triggeringObservation.id,
-        context.triggeringObservation.providerTransactionRef,
+        emission.factType,
+        emission.sourceAttemptId,
+        emission.sourceObservationId,
+        emission.providerReferenceId,
       ),
     });
   }
@@ -284,6 +228,16 @@ function requireRefundSourceObservation(
   context: ReductionPersistenceContext,
   refund: RefundDueEntry,
 ) {
+  const expectedCaptureKey = normalizedCaptureKey(
+    context.obligation.merchantId,
+    context.obligation.id,
+    refund.provider,
+    refund.providerTransactionRef,
+  );
+  if (refund.captureKey !== expectedCaptureKey) {
+    throw new Error('REFUND_CAPTURE_IDENTITY_MISMATCH');
+  }
+
   const observation = context.observations.find((entry) =>
     entry.id === refund.sourceObservationId &&
     entry.attemptId === refund.sourceAttemptId &&
@@ -298,26 +252,19 @@ function requireRefundSourceObservation(
   return observation;
 }
 
-function providerReferenceIdForFact(
-  observation: CanonicalObservation,
-  factType: Exclude<ReductionFactType, 'REFUND_DUE_DETECTED'>,
-) {
-  if (factType === 'PAYMENT_SUCCEEDED') {
-    return observation.providerTransactionRef ?? observation.providerEventId ?? observation.id;
-  }
-
-  return observation.providerEventId ?? observation.id;
-}
-
-function observationDisposition(
+function requireFactSourceObservation(
   context: ReductionPersistenceContext,
-  plan: ReductionPlan,
+  emission: ReductionPlan['factEmissions'][number],
 ) {
-  if (plan.disposition.startsWith('INTEGRITY_CONFLICT')) {
-    return 'INTEGRITY_CONFLICT';
+  const observation = context.observations.find((entry) =>
+    entry.id === emission.sourceObservationId &&
+    entry.attemptId === emission.sourceAttemptId &&
+    entry.provider === emission.provider,
+  );
+  if (!observation) {
+    throw new Error('FACT_SOURCE_OBSERVATION_NOT_FOUND');
   }
-
-  return plan.disposition;
+  return observation;
 }
 
 function outcomeReasonCode(plan: ReductionPlan) {
@@ -353,22 +300,18 @@ function factDedupeKey(
   factType: ReductionFactType,
   attemptId: string,
   observationId: string,
-  transactionRef: string | null,
+  providerReferenceId: string,
 ) {
-  return sha256(`pgo1:fact:${factType}:${attemptId}:${observationId}:${transactionRef ?? '-'}`);
+  return sha256(`pgo1:fact:${factType}:${attemptId}:${observationId}:${providerReferenceId}`);
 }
 
-function refundDedupeKey(
+export function normalizedCaptureKey(
   merchantId: string,
   obligationId: string,
   provider: PaymentProvider,
   transactionRef: string,
-  sourceAttemptId: string,
-  sourceObservationId: string,
 ) {
-  return sha256(
-    `pgo1:refund-due:${merchantId}:${obligationId}:${provider}:${transactionRef}:${sourceAttemptId}:${sourceObservationId}`,
-  );
+  return `${merchantId}:${obligationId}:${provider}:${transactionRef}`;
 }
 
 function sha256(value: string) {

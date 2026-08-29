@@ -8,6 +8,7 @@ export interface ObservationParser {
   readonly provider: PaymentProvider;
   readonly adapterVersion: string;
   readonly mappingVersion: string;
+  readonly providerApiVersion: string;
   parse(input: RawObservationInput): ParsedObservationFields;
 }
 
@@ -62,6 +63,14 @@ export type ProviderIngestionMode = 'MOCK_EXECUTABLE' | 'CONTRACT_FIXTURE_ONLY';
 
 export interface RawIngestionDeps {
   parser: ObservationParser;
+  environment: ObservationCandidate['environment'];
+  source: ObservationCandidate['source'];
+  securityContext?: {
+    merchantId: string;
+    obligationId: string;
+    attemptId: string;
+    credentialBindingId: string;
+  };
   ingestionMode: ProviderIngestionMode;
   retentionDecision: RawRetentionDecision;
   nextObservationId(): string;
@@ -75,6 +84,27 @@ export interface RawIngestionDeps {
   }>;
   verify(input: RawObservationInput): Promise<'VERIFIED' | 'FAILED' | 'NOT_APPLICABLE' | 'UNAVAILABLE'>;
   persist(candidate: ObservationCandidate): Promise<IngestionResult>;
+  persistSecurityRejection(evidence: ProviderSecurityRejectionEvidence): Promise<void>;
+}
+
+export interface ProviderSecurityRejectionEvidence {
+  provider: PaymentProvider;
+  environment: ObservationCandidate['environment'];
+  source: ObservationCandidate['source'];
+  reason: 'UNAUTHENTICATED' | 'BINDING_MISMATCH';
+  rawBodyHash: string;
+  hashAlgorithm: 'SHA-256';
+  signatureVerification: 'FAILED' | 'UNAVAILABLE' | 'VERIFIED' | 'NOT_APPLICABLE';
+  bindingVerification: 'FAILED' | null;
+  merchantId: string | null;
+  obligationId: string | null;
+  attemptId: string | null;
+  credentialBindingId: string | null;
+  adapterVersion: string;
+  mappingVersion: string;
+  providerApiVersion: string;
+  detectedAt: Date;
+  securityAlertCode: 'INVALID_PROVIDER_SIGNATURE' | 'PROVIDER_BINDING_MISMATCH';
 }
 
 export type RawIngestionRejection = {

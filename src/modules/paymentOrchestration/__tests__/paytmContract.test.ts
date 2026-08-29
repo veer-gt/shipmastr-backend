@@ -19,6 +19,7 @@ interface PaytmFixtureManifest {
   fixtureProvenance: 'SYNTHETIC_FROM_OFFICIAL_CONTRACT';
   officialChecksumImplementationUrl: string;
   officialNodeChecksumSourceUrl: string;
+  officialNodeChecksumSourceFilePath: 'PaytmChecksum.js';
   officialNodeChecksumSourceCommit: string;
   officialNodeChecksumSourceSha256: string;
   signatureRepresentation: 'FORM_PARAMS' | 'JSON_BODY';
@@ -224,6 +225,7 @@ describe('paytmContractParser', () => {
       assert.equal(fixture.manifest.containsRealPii, false);
       assert.equal(fixture.manifest.officialNodeChecksumSourceCommit, 'c8d5803d8b3c01fe73ee5a7b7c89b892180aea22');
       assert.equal(fixture.manifest.officialNodeChecksumSourceSha256, 'd59f38ef72ccc6cded9b00c8835be96ccefee246c4c2e8465e82cf3087eed60e');
+      assert.equal(fixture.manifest.officialNodeChecksumSourceFilePath, 'PaytmChecksum.js');
       assert.equal(
         verifyPaytmChecksum({
           representation: checksumRepresentation(fixture),
@@ -250,7 +252,9 @@ describe('paytmContractParser', () => {
       const candidate = paytmContractParser.parse(fixture.input);
       assert.deepEqual(project(candidate), expectedProject(fixture.manifest));
       assert.equal(dispositionFor(candidate.mappedOutcome), fixture.manifest.expectedDisposition);
-      const serialized = JSON.stringify(project(candidate));
+      const serialized = JSON.stringify(candidate, (_key, value) =>
+        typeof value === 'bigint' ? value.toString() : value,
+      );
       assertNoLeakage(serialized, fixture);
     });
   }

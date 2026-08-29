@@ -200,4 +200,19 @@ describe('DeterministicRefundQueueStub', () => {
       /INVALID_REFUND_DUE_AMOUNT/,
     );
   });
+
+  for (const [field, value, error] of [
+    ['provider', 'STRIPE', 'INVALID_REFUND_DUE_PROVIDER'],
+    ['reason', 'JUST_BECAUSE', 'INVALID_REFUND_DUE_REASON'],
+    ['detectedAt', 'not-a-date', 'INVALID_REFUND_DUE_DETECTED_AT'],
+    ['detectedAt', '2026-08-28', 'INVALID_REFUND_DUE_DETECTED_AT'],
+  ] as const) {
+    it(`rejects invalid runtime ${field}`, () => {
+      const stub = new DeterministicRefundQueueStub();
+      assert.throws(
+        () => stub.consume(refundEvent({ [field]: value } as never)),
+        new RegExp(error),
+      );
+    });
+  }
 });

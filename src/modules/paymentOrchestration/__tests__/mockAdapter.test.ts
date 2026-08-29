@@ -1,7 +1,7 @@
 import assert from 'node:assert/strict';
 import { createHash } from 'node:crypto';
 import { describe, it } from 'node:test';
-import { mockAdapter } from '../adapters/mockAdapter.js';
+import { mockAdapter, mockProviderOrderRef } from '../adapters/mockAdapter.js';
 import type { MockCreateInput, ParsedObservationFields } from '../adapters/providerAdapter.js';
 
 function mockInput(
@@ -85,6 +85,12 @@ function expectedCandidate(scenario: MockCreateInput['scenario']): ParsedObserva
 }
 
 describe('mockAdapter', () => {
+  it('derives the production-seam provider binding from persisted obligation and attempt ids', () => {
+    assert.equal(
+      mockProviderOrderRef('obligation_1', 'attempt_1'),
+      'mock_order_obligation_1_attempt_1',
+    );
+  });
   for (const scenario of [
     'SUCCESS',
     'TERMINAL_FAILURE',

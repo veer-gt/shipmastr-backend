@@ -95,3 +95,56 @@ Result: exit code `1` with no matches, confirming no provider-native or database
 - No PostgreSQL command was needed for Task 4, so `/Users/mac/.config/shipmastr/pgo1-a965f431-test.env` was not sourced.
 - No provider SDK, network call, production DB mutation, migration, deploy, push, or merge was performed.
 - Existing dirty generated drift in `dist/` and `node_modules/` was preserved and will not be staged into the Task 4 commit.
+
+## Fix Round 1
+
+Addressed the two blocking review findings in the `f3ae70ba..a19b2e3` range:
+
+- tightened `matchObservation` so `source = 'MOCK'` is accepted only when `provider = 'MOCK'`, with a fail-closed `UNAUTHENTICATED` regression for `source = 'MOCK'` plus `provider = 'CASHFREE'`;
+- corrected the reducer success path so a success on another attempt no longer force-completes the target attempt’s review when the target itself remains unresolved; active target review now stays internally consistent with `resolved = false`.
+
+### Fix-round TDD evidence
+
+1. RED: added two regressions before changing the implementation:
+   - `rejects MOCK source when the provider is not MOCK`
+   - `keeps target review unresolved when another attempt succeeded but the target attempt did not resolve`
+2. RED verification command:
+
+```text
+npm run build && node --test dist/modules/paymentOrchestration/__tests__/matching.test.js dist/modules/paymentOrchestration/__tests__/reducer.test.js
+```
+
+RED result:
+
+```text
+✖ rejects MOCK source when the provider is not MOCK
+  actual: { matched: true }
+  expected: { matched: false, reason: 'UNAUTHENTICATED' }
+
+✖ keeps target review unresolved when another attempt succeeded but the target attempt did not resolve
+  actual reviewStatus: 'COMPLETED'
+  expected reviewStatus: 'IN_PROGRESS'
+```
+
+3. GREEN: changed only the source-authentication branch in `matching.ts` and the target-review resolution branch in `reducer.ts`.
+4. GREEN verification command:
+
+```text
+npm run build && node --test dist/modules/paymentOrchestration/__tests__/matching.test.js dist/modules/paymentOrchestration/__tests__/reducer.test.js dist/modules/paymentOrchestration/__tests__/reducerPermutations.test.js
+```
+
+GREEN result:
+
+```text
+✔ matchObservation
+✔ reduceEvidence
+✔ reduceEvidence permutation stability
+ℹ tests 86
+ℹ suites 3
+ℹ pass 86
+ℹ fail 0
+```
+
+### Fix-round ruling
+
+- When another attempt already holds the successful evidence and the current `targetAttemptId` remains unresolved, the reduction plan must not emit `reviewStatus = 'COMPLETED'` or `completedByType = 'SYSTEM'` for the target. The target review state is preserved until the target itself resolves, which keeps the plan consistent with the reviewed invariant that completed review requires a resolved target attempt.

@@ -38,6 +38,10 @@ const MOCK_ADAPTER_VERSION = 'mock-adapter-v1';
 const MOCK_MAPPING_VERSION = 'mock-mapping-v1';
 const MOCK_PROVIDER_API_VERSION = 'mock-api-2026-08-28';
 
+export function mockProviderOrderRef(obligationId: string, attemptId: string) {
+  return `mock_order_${obligationId}_${attemptId}`;
+}
+
 const SCENARIOS: Record<MockCreateInput['scenario'], ScenarioDefinition> = {
   SUCCESS: {
     mappedOutcome: 'SUCCEEDED',
@@ -93,6 +97,7 @@ export const mockAdapter: MockExecutableAdapter = {
   provider: 'MOCK',
   adapterVersion: MOCK_ADAPTER_VERSION,
   mappingVersion: MOCK_MAPPING_VERSION,
+  providerApiVersion: MOCK_PROVIDER_API_VERSION,
   async create(input) {
     return encodeMockObservation(input);
   },

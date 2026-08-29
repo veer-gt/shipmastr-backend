@@ -20,7 +20,6 @@ export interface DerivedInterpretationInput {
 
 export interface AppendDerivedInterpretationInput extends DerivedInterpretationInput {
   original: Pick<CanonicalObservation, 'id' | 'mappingVersion' | 'nativeStatus' | 'merchantId' | 'obligationId' | 'attemptId'>;
-  derivedObservationId: string;
 }
 
 export function deriveObservationInterpretation(input: DerivedInterpretationInput): DerivedInterpretation {
@@ -50,13 +49,15 @@ export async function appendDerivedInterpretation(
     },
     create: {
       originalObservationId: derived.originalObservationId,
-      derivedObservationId: input.derivedObservationId,
+      originalMappingVersion: derived.originalMappingVersion,
       merchantId: input.original.merchantId,
       obligationId: input.original.obligationId,
       attemptId: input.original.attemptId,
       derivedAdapterVersion: derived.derivedAdapterVersion,
       derivedMappingVersion: derived.derivedMappingVersion,
-    },
+      derivedOutcome: derived.derivedOutcome,
+      derivedAt: derived.derivedAt,
+    } as Prisma.ProviderObservationInterpretationUncheckedCreateInput,
     update: {},
   });
 }

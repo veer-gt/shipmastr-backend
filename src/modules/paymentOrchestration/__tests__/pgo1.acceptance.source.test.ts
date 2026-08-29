@@ -22,14 +22,16 @@ const localQueueArray = new RegExp('const queue' + 'Consumption = outbox\\.map')
 const inertSpyInterface = new RegExp('interface Mutation' + 'Spies');
 const directSlaPersistence = new RegExp('const escalation = await persist' + 'SlaEscalation');
 const directAttemptInsert = new RegExp('prisma\\.paymentAttempt\\.cre' + 'ate\\(');
+const directAttemptUpdate = new RegExp('prisma\\.paymentAttempt\\.up' + 'date\\(');
 const directReadOnlyConsumptionPersistence = new RegExp('await persistRead' + 'OnlyQueryConsumption\\(');
 const directReadOnlyRequestClaim = new RegExp('const claimedRead' + 'OnlyRequest = await claimRead' + 'OnlyQueryRequest');
 const directReconcileAttemptCall = new RegExp('await pgo1\\.reconcile' + 'Attempt');
 
 describe('PGO-1 acceptance source contract', () => {
   it('fails dirty acceptance namespaces instead of globally deleting PGO-1 rows', () => {
-    assert.match(acceptanceSource, /async function assertAcceptanceNamespaceEmpty/);
-    assert.match(acceptanceSource, /await assertAcceptanceNamespaceEmpty\(prisma\)/);
+    assert.match(acceptanceSource, /createPaymentPostgresNamespace\('acceptance'\)/);
+    assert.match(acceptanceSource, /await namespace\.assertEmpty\(prisma\)/);
+    assert.match(acceptanceSource, /await namespace\.cleanup\(prisma\)/);
     assert.doesNotMatch(acceptanceSource, new RegExp(`function ${globalTableCleanupName}`));
     assert.doesNotMatch(acceptanceSource, deleteWithoutFilter('paymentObligation'));
     assert.doesNotMatch(acceptanceSource, deleteWithoutFilter('paymentAttempt'));
@@ -58,9 +60,11 @@ describe('PGO-1 acceptance source contract', () => {
     assert.match(acceptanceSource, /const readOnlyWorkerResults = await readOnlyWorker\.runOnce\(\)/);
     assert.match(acceptanceSource, /const consumedReadOnlyRequest = await prisma\.reconciliationReviewHistory\.findFirstOrThrow/);
     assert.match(acceptanceSource, /result:\s*'OBSERVATION_INGESTED'/);
-    assert.match(acceptanceSource, /request_acceptance_surplus/);
+    assert.match(acceptanceSource, /request_acceptance_winner/);
+    assert.match(acceptanceSource, /request_acceptance_after_satisfied/);
     assert.doesNotMatch(acceptanceSource, directSlaPersistence);
     assert.doesNotMatch(acceptanceSource, directAttemptInsert);
+    assert.doesNotMatch(acceptanceSource, directAttemptUpdate);
     assert.doesNotMatch(acceptanceSource, directReadOnlyConsumptionPersistence);
     assert.doesNotMatch(acceptanceSource, directReadOnlyRequestClaim);
     assert.doesNotMatch(acceptanceSource, directReconcileAttemptCall);

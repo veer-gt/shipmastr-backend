@@ -100,6 +100,18 @@ describe('Pgo1Telemetry', () => {
       }),
       /PII_FORBIDDEN_IN_TELEMETRY/,
     );
+
+    assert.throws(
+      () => telemetry.emit({
+        type: 'MAPPING_GAP',
+        merchantId: 'm_1',
+        attemptId: 'a_1',
+        provider: 'CASHFREE',
+        mappingVersion: 'v1',
+        nativeStatus: '+91 98765 43210',
+      }),
+      /PII_FORBIDDEN_IN_TELEMETRY/,
+    );
     assert.equal(sink.events.length, 0);
   });
 });

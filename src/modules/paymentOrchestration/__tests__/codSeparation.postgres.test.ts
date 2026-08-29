@@ -1,5 +1,5 @@
 import assert from 'node:assert/strict';
-import { after, before, beforeEach, describe, it } from 'node:test';
+import { after, afterEach, before, beforeEach, describe, it } from 'node:test';
 import { Prisma, PrismaClient } from '@prisma/client';
 import {
   createAttempt,
@@ -15,6 +15,7 @@ import {
   listOwnedAttemptsForObligationOrThrow,
 } from '../repository.js';
 import { expectedScratchDatabaseNameFromEnv } from './scratchDatabaseGuard.js';
+import { createPaymentPostgresNamespace } from './postgresTestNamespace.js';
 import type {
   CanonicalObservation,
   ProviderActivationPolicy,
@@ -22,12 +23,13 @@ import type {
 
 const enabled = process.env.RUN_PGO1_POSTGRES_TESTS === '1';
 const prisma = new PrismaClient();
+const namespace = createPaymentPostgresNamespace('cod_separation');
 
 let sequence = 0;
 
 function nextId(prefix: string) {
   sequence += 1;
-  return `${prefix}_${sequence}`;
+  return namespace.id(`${prefix}_${sequence}`);
 }
 
 function assertScratchUrl() {
@@ -41,19 +43,6 @@ function assertScratchUrl() {
 
 function expectedScratchDatabaseName() {
   return expectedScratchDatabaseNameFromEnv();
-}
-
-async function clearPaymentTables(client: PrismaClient) {
-  await client.providerObservationInterpretation.deleteMany();
-  await client.providerObservationDelivery.deleteMany();
-  await client.paymentNormalizedFactOutbox.deleteMany();
-  await client.refundDueCase.deleteMany();
-  await client.paymentAttentionSignal.deleteMany();
-  await client.reconciliationReviewHistory.deleteMany();
-  await client.paymentOutcomeTransition.deleteMany();
-  await client.providerObservation.deleteMany();
-  await client.paymentAttempt.deleteMany();
-  await client.paymentObligation.deleteMany();
 }
 
 function obligation(
@@ -90,6 +79,9 @@ function activationPolicy(merchantId: string, amountPaise: bigint): ProviderActi
     environment: 'TEST',
     operation: 'CREATE_ATTEMPT',
     maxAmountPaise: amountPaise,
+    approvedAt: new Date('2026-08-27T00:00:00.000Z'),
+    effectiveFrom: new Date('2026-08-27T00:00:00.000Z'),
+    effectiveUntil: new Date('2030-01-01T00:00:00.000Z'),
   };
 }
 
@@ -105,6 +97,7 @@ function requestFactory(base: { merchantId: string; obligationId: string; amount
       environment: 'TEST',
       operation: 'CREATE_ATTEMPT',
       amountPaise: base.amountPaise,
+      evaluatedAt: new Date('2026-08-28T00:00:00.000Z'),
       requestIdempotencyKey: overrides.requestIdempotencyKey ?? nextId('request'),
       credentialBindingId: overrides.credentialBindingId ?? nextId('binding'),
       credentialVersionId: overrides.credentialVersionId ?? nextId('credential_version'),
@@ -298,7 +291,11 @@ if (enabled) {
     });
 
     beforeEach(async () => {
-      await clearPaymentTables(prisma);
+      await namespace.assertEmpty(prisma);
+    });
+
+    afterEach(async () => {
+      await namespace.cleanup(prisma);
     });
 
     after(async () => {
@@ -306,8 +303,8 @@ if (enabled) {
     });
 
     it('persists partial COD obligations as separate authoritative rows', async () => {
-      const merchantId = 'merchant_cod';
-      const checkoutId = 'checkout_cod';
+      const merchantId = namespace.id('merchant_cod');
+      const checkoutId = namespace.id('checkout_cod');
       const result = await prisma.$transaction((tx) =>
         createCheckoutObligations(
           tx,
@@ -355,7 +352,7 @@ if (enabled) {
     });
 
     it('rejects a COD-rail obligation before policy evaluation', async () => {
-      const merchantId = 'merchant_cod';
+      const merchantId = namespace.id('merchant_cod');
       const codObligation = await createObligation({
         id: 'obligation_cod_only',
         merchantId,
@@ -382,7 +379,7 @@ if (enabled) {
       await assert.rejects(
         prisma.paymentObligation.create({
           data: obligation({
-            merchantId: 'merchant_invalid',
+            merchantId: namespace.id('merchant_invalid'),
             id: 'obligation_invalid',
             collectionRail: 'COD',
             purpose: 'FULL_ONLINE',
@@ -392,8 +389,8 @@ if (enabled) {
     });
 
     it('returns obligation not found for cross-merchant coordinator and repository reads', async () => {
-      const owningMerchantId = 'merchant_owner';
-      const otherMerchantId = 'merchant_other';
+      const owningMerchantId = namespace.id('merchant_owner');
+      const otherMerchantId = namespace.id('merchant_other');
       const obligationRow = await createObligation({
         id: 'obligation_owned',
         merchantId: owningMerchantId,
@@ -539,12 +536,14 @@ if (enabled) {
               nativeCurrency: 'INR',
               amountPaise: 10_000n,
               rawBodyHash: nextId('hash'),
-              hashAlgorithm: 'SHA-256',
+              hashAlgorithm: 'SHA_256',
               signatureVerification: 'NOT_APPLICABLE',
               bindingVerification: 'VERIFIED',
               evidenceAuthority: 'ELIGIBLE',
+              mappedOutcome: 'SUCCEEDED',
               adapterVersion: 'test-adapter-v1',
               mappingVersion: 'test-mapping-v1',
+              providerApiVersion: 'mock-2026-08-27',
               receivedAt: new Date('2026-08-27T11:00:02.000Z'),
               reductionDisposition: 'SUCCEEDED',
               observationDedupeKey: nextId('dedupe'),
@@ -605,7 +604,9 @@ if (enabled) {
         /INTERNAL_REFERENCE_MISMATCH/,
       );
 
-      assert.equal(await prisma.paymentOutcomeTransition.count(), 0);
+      assert.equal(await prisma.paymentOutcomeTransition.count({
+        where: { merchantId: { startsWith: namespace.prefix } },
+      }), 0);
       assert.deepEqual(
         await prisma.paymentObligation.findUniqueOrThrow({ where: { id: state.online.id } }),
         onlineBefore,

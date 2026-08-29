@@ -1,7 +1,8 @@
 import assert from 'node:assert/strict';
-import { after, before, beforeEach, describe, it } from 'node:test';
+import { after, afterEach, before, beforeEach, describe, it } from 'node:test';
 import { Prisma, PrismaClient } from '@prisma/client';
 import { expectedScratchDatabaseNameFromEnv } from './scratchDatabaseGuard.js';
+import { createPaymentPostgresNamespace } from './postgresTestNamespace.js';
 import type {
   CanonicalObservation,
   OutcomeStatus,
@@ -14,6 +15,8 @@ import type {
 
 const enabled = process.env.RUN_PGO1_POSTGRES_TESTS === '1';
 const prisma = new PrismaClient();
+const namespace = createPaymentPostgresNamespace('observation_service');
+const namespaceRows = { merchantId: { startsWith: namespace.prefix } };
 
 let sequence = 0;
 
@@ -34,7 +37,7 @@ interface IngestionResult {
 
 function nextId(prefix: string) {
   sequence += 1;
-  return `${prefix}_${sequence}`;
+  return namespace.id(`${prefix}_${sequence}`);
 }
 
 function assertScratchUrl() {
@@ -44,19 +47,6 @@ function assertScratchUrl() {
   assert.equal(url.port, '5433');
   assert.equal(decodeURIComponent(url.pathname.slice(1)), expectedScratchDatabaseNameFromEnv());
   return url;
-}
-
-async function clearPaymentTables(client: PrismaClient) {
-  await client.providerObservationInterpretation.deleteMany();
-  await client.providerObservationDelivery.deleteMany();
-  await client.paymentNormalizedFactOutbox.deleteMany();
-  await client.refundDueCase.deleteMany();
-  await client.paymentAttentionSignal.deleteMany();
-  await client.reconciliationReviewHistory.deleteMany();
-  await client.paymentOutcomeTransition.deleteMany();
-  await client.providerObservation.deleteMany();
-  await client.paymentAttempt.deleteMany();
-  await client.paymentObligation.deleteMany();
 }
 
 function obligation(
@@ -202,13 +192,13 @@ async function createAttemptWithObligation(
 
 async function counts() {
   return {
-    observations: await prisma.providerObservation.count(),
-    deliveries: await prisma.providerObservationDelivery.count(),
-    transitions: await prisma.paymentOutcomeTransition.count(),
-    reviews: await prisma.reconciliationReviewHistory.count(),
-    attention: await prisma.paymentAttentionSignal.count(),
-    facts: await prisma.paymentNormalizedFactOutbox.count(),
-    cases: await prisma.refundDueCase.count(),
+    observations: await prisma.providerObservation.count({ where: namespaceRows }),
+    deliveries: await prisma.providerObservationDelivery.count({ where: namespaceRows }),
+    transitions: await prisma.paymentOutcomeTransition.count({ where: namespaceRows }),
+    reviews: await prisma.reconciliationReviewHistory.count({ where: namespaceRows }),
+    attention: await prisma.paymentAttentionSignal.count({ where: namespaceRows }),
+    facts: await prisma.paymentNormalizedFactOutbox.count({ where: namespaceRows }),
+    cases: await prisma.refundDueCase.count({ where: namespaceRows }),
   };
 }
 
@@ -230,7 +220,11 @@ if (enabled) {
     });
 
     beforeEach(async () => {
-      await clearPaymentTables(prisma);
+      await namespace.assertEmpty(prisma);
+    });
+
+    afterEach(async () => {
+      await namespace.cleanup(prisma);
     });
 
     after(async () => {
@@ -242,7 +236,7 @@ if (enabled) {
       const seeded = await createAttemptWithObligation({
         obligation: {
           id: 'obligation_serialized',
-          merchantId: 'merchant_serialized',
+          merchantId: namespace.id('merchant_serialized'),
           amountPaise: 12_500n,
         },
         attempt: {
@@ -283,8 +277,8 @@ if (enabled) {
       ]);
 
       assert.equal(await currentOutcome(seeded.attempt.id), 'SUCCEEDED');
-      assert.equal(await prisma.providerObservation.count(), 2);
-      assert.equal(await prisma.providerObservationDelivery.count(), 2);
+      assert.equal(await prisma.providerObservation.count({ where: namespaceRows }), 2);
+      assert.equal(await prisma.providerObservationDelivery.count({ where: namespaceRows }), 2);
     });
 
     it('locks a newer unresolved attempt when late success resolves an older failure', async () => {
@@ -292,7 +286,7 @@ if (enabled) {
       const obligationRow = await prisma.paymentObligation.create({
         data: obligation({
           id: 'obligation_late_success',
-          merchantId: 'merchant_late_success',
+          merchantId: namespace.id('merchant_late_success'),
           amountPaise: 20_000n,
         }),
       });
@@ -358,7 +352,7 @@ if (enabled) {
       const seeded = await createAttemptWithObligation({
         obligation: {
           id: 'obligation_duplicate',
-          merchantId: 'merchant_duplicate',
+          merchantId: namespace.id('merchant_duplicate'),
         },
         attempt: {
           id: 'attempt_duplicate',
@@ -397,9 +391,9 @@ if (enabled) {
       const secondResult = await ingestObservation(prisma, second);
 
       assert.equal(secondResult.observationId, firstResult.observationId);
-      assert.equal(await prisma.providerObservation.count(), 1);
-      assert.equal(await prisma.providerObservationDelivery.count(), 2);
-      assert.equal(await prisma.paymentNormalizedFactOutbox.count(), 1);
+      assert.equal(await prisma.providerObservation.count({ where: namespaceRows }), 1);
+      assert.equal(await prisma.providerObservationDelivery.count({ where: namespaceRows }), 2);
+      assert.equal(await prisma.paymentNormalizedFactOutbox.count({ where: namespaceRows }), 1);
     });
 
     it('reuses the matching conflicting observation when the same event id and hash replay after A,B', async () => {
@@ -407,7 +401,7 @@ if (enabled) {
       const seeded = await createAttemptWithObligation({
         obligation: {
           id: 'obligation_conflict_replay',
-          merchantId: 'merchant_conflict_replay',
+          merchantId: namespace.id('merchant_conflict_replay'),
         },
         attempt: {
           id: 'attempt_conflict_replay',
@@ -455,8 +449,8 @@ if (enabled) {
       assert.notEqual(secondResult.observationId, firstResult.observationId);
       assert.equal(replayResult.observationId, secondResult.observationId);
       assert.equal(replayResult.disposition, 'INTEGRITY_CONFLICT');
-      assert.equal(await prisma.providerObservation.count(), 2);
-      assert.equal(await prisma.providerObservationDelivery.count(), 3);
+      assert.equal(await prisma.providerObservation.count({ where: namespaceRows }), 2);
+      assert.equal(await prisma.providerObservationDelivery.count({ where: namespaceRows }), 3);
 
       const observations = await prisma.providerObservation.findMany({
         where: { obligationId: seeded.obligation.id },
@@ -475,8 +469,8 @@ if (enabled) {
           reductionDisposition: 'INTEGRITY_CONFLICT',
         },
       ]);
-      assert.equal(await prisma.paymentAttentionSignal.count(), 1);
-      assert.equal(await prisma.paymentNormalizedFactOutbox.count(), 0);
+      assert.equal(await prisma.paymentAttentionSignal.count({ where: namespaceRows }), 1);
+      assert.equal(await prisma.paymentNormalizedFactOutbox.count({ where: namespaceRows }), 0);
     });
 
     it('preserves unresolved state for an integrity conflict on an unresolved attempt', async () => {
@@ -484,7 +478,7 @@ if (enabled) {
       const seeded = await createAttemptWithObligation({
         obligation: {
           id: 'obligation_unresolved_conflict',
-          merchantId: 'merchant_unresolved_conflict',
+          merchantId: namespace.id('merchant_unresolved_conflict'),
         },
         attempt: {
           id: 'attempt_unresolved_conflict',
@@ -530,9 +524,9 @@ if (enabled) {
       assert.equal(result.outcomeStatus, 'PENDING');
       assert.equal(result.reviewStatus, 'REQUIRED');
       assert.equal((await loadAttempt(seeded.attempt.id)).resolvedAt, null);
-      assert.equal(await prisma.providerObservation.count(), 2);
-      assert.equal(await prisma.paymentNormalizedFactOutbox.count(), 0);
-      assert.equal(await prisma.paymentAttentionSignal.count(), 1);
+      assert.equal(await prisma.providerObservation.count({ where: namespaceRows }), 2);
+      assert.equal(await prisma.paymentNormalizedFactOutbox.count({ where: namespaceRows }), 0);
+      assert.equal(await prisma.paymentAttentionSignal.count({ where: namespaceRows }), 1);
     });
 
     it('preserves the resolved outcome and adds attention when an integrity conflict arrives after success', async () => {
@@ -540,7 +534,7 @@ if (enabled) {
       const seeded = await createAttemptWithObligation({
         obligation: {
           id: 'obligation_resolved_conflict',
-          merchantId: 'merchant_resolved_conflict',
+          merchantId: namespace.id('merchant_resolved_conflict'),
         },
         attempt: {
           id: 'attempt_resolved_conflict',
@@ -585,9 +579,10 @@ if (enabled) {
       assert.equal(result.reviewStatus, 'COMPLETED');
       assert.equal(resolvedAttempt.outcomeStatus, 'SUCCEEDED');
       assert.notEqual(resolvedAttempt.resolvedAt, null);
-      assert.equal(await prisma.paymentOutcomeTransition.count(), 1);
-      assert.equal(await prisma.paymentNormalizedFactOutbox.count(), 1);
-      assert.equal(await prisma.paymentAttentionSignal.count(), 1);
+      assert.deepEqual(result.resolvedAt, resolvedAttempt.resolvedAt);
+      assert.equal(await prisma.paymentOutcomeTransition.count({ where: namespaceRows }), 1);
+      assert.equal(await prisma.paymentNormalizedFactOutbox.count({ where: namespaceRows }), 1);
+      assert.equal(await prisma.paymentAttentionSignal.count({ where: namespaceRows }), 1);
     });
 
     it('persists SLA escalation through the serialized Task 5 boundary with history', async () => {
@@ -595,7 +590,7 @@ if (enabled) {
       const seeded = await createAttemptWithObligation({
         obligation: {
           id: 'obligation_sla_escalation',
-          merchantId: 'merchant_sla_escalation',
+          merchantId: namespace.id('merchant_sla_escalation'),
         },
         attempt: {
           id: 'attempt_sla_escalation',

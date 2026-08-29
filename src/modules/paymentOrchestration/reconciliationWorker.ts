@@ -9,10 +9,23 @@ import {
   decideCredentialUse,
   type CredentialUseInput,
 } from './credentialPolicy.js';
-import type { IngestionResult, OutcomeStatus, ReviewStatus } from './types.js';
+import type {
+  IngestionResult,
+  OutcomeStatus,
+  ProviderPolicyDecisionRecord,
+  ReviewStatus,
+} from './types.js';
 
 export interface ReconciliationPolicy {
   version: string;
+  approved: boolean;
+  merchantId: string;
+  provider: 'MOCK';
+  environment: 'TEST';
+  operation: 'STATUS_QUERY';
+  approvedAt: Date;
+  effectiveFrom: Date;
+  effectiveUntil: Date;
   initialDelayMs: number;
   cadenceMs: number;
   backoffMultiplier: number;
@@ -23,17 +36,33 @@ export interface ReconciliationPolicy {
   evidenceHorizonMs: number;
 }
 
-export const MOCK_RECONCILIATION_POLICY_V1: Readonly<ReconciliationPolicy> = Object.freeze({
-  version: 'mock-reconciliation-v1',
-  initialDelayMs: 1_000,
-  cadenceMs: 5_000,
-  backoffMultiplier: 2,
-  maxDelayMs: 30_000,
-  jitterBasisPoints: 0,
-  slaMs: 60_000,
-  maxAutomatedQueryMs: 300_000,
-  evidenceHorizonMs: 86_400_000,
-});
+export function createMockReconciliationPolicy(
+  merchantId: string,
+  overrides: Partial<ReconciliationPolicy> = {},
+): Readonly<ReconciliationPolicy> {
+  return Object.freeze({
+    version: 'mock-reconciliation-v1',
+    approved: true,
+    merchantId,
+    provider: 'MOCK',
+    environment: 'TEST',
+    operation: 'STATUS_QUERY',
+    approvedAt: new Date(-1),
+    effectiveFrom: new Date(0),
+    effectiveUntil: new Date('2100-01-01T00:00:00.000Z'),
+    initialDelayMs: 1_000,
+    cadenceMs: 5_000,
+    backoffMultiplier: 2,
+    maxDelayMs: 30_000,
+    jitterBasisPoints: 0,
+    slaMs: 60_000,
+    maxAutomatedQueryMs: 300_000,
+    evidenceHorizonMs: 86_400_000,
+    ...overrides,
+  });
+}
+
+export const MOCK_RECONCILIATION_POLICY_V1 = createMockReconciliationPolicy('merchant_1');
 
 export interface Clock {
   now(): Date;
@@ -103,6 +132,23 @@ export type CredentialUseInputResolver = (
   request: PendingReadOnlyQueryRequest | null,
 ) => Promise<CredentialUseInput | null>;
 
+export interface CredentialDenialPersistenceRequest {
+  attemptId: string;
+  obligationId: string;
+  merchantId: string;
+  observedAt: Date;
+  reason:
+    | 'CREDENTIAL_CONTEXT_UNAVAILABLE'
+    | 'BINDING_MISMATCH'
+    | 'CONTINUITY_NOT_PROVEN'
+    | 'CREDENTIAL_NOT_ACTIVE'
+    | 'OPERATION_NOT_ALLOWED';
+  forceUnknownIfUnresolved: true;
+  requireReview: true;
+  preserveProviderLock: true;
+  securityAlert: true;
+}
+
 export interface ReconciliationDeps {
   clock: Clock;
   policy?: ReconciliationPolicy;
@@ -110,6 +156,8 @@ export interface ReconciliationDeps {
   queryStatus(input: MockStatusQueryInput): Promise<RawObservationInput>;
   ingestRawObservation(input: RawObservationInput): Promise<IngestionResult | RawIngestionRejection>;
   buildCredentialUseInput: CredentialUseInputResolver;
+  persistCredentialDenial(input: CredentialDenialPersistenceRequest): Promise<void>;
+  persistPolicyDecision(input: ProviderPolicyDecisionRecord): Promise<void>;
   persistSlaEscalation(input: SlaEscalationRequest): Promise<SlaEscalationResult>;
 }
 
@@ -125,42 +173,54 @@ export async function reconcileAttempt(
   attempt: ReconciliationAttempt,
   request: PendingReadOnlyQueryRequest | null = null,
 ): Promise<ReconciliationResult> {
-  if (!isValidPolicy(deps.policy)) {
+  const now = deps.clock.now();
+  if (!isValidPolicy(deps.policy, attempt, now)) {
+    await auditPolicyDecision(deps, attempt, now, 'DISABLED', 'POLICY_DISABLED');
     return { kind: 'POLICY_DISABLED' };
   }
 
-  if (attempt.provider !== 'MOCK') {
-    return { kind: 'QUERY_BLOCKED', reason: 'PROVIDER_NOT_EXECUTABLE' };
-  }
-
   if (attempt.resolvedAt !== null) {
+    await auditPolicyDecision(deps, attempt, now, 'NO_EXECUTION', 'ATTEMPT_RESOLVED');
     return { kind: 'QUERY_BLOCKED', reason: 'ATTEMPT_RESOLVED' };
   }
 
-  const now = deps.clock.now();
   const state = await deps.getReconciliationState(attempt);
   if (!isValidReconciliationState(state)) {
+    await auditPolicyDecision(deps, attempt, now, 'NO_EXECUTION', 'RECONCILIATION_STATE_INVALID');
     return { kind: 'QUERY_BLOCKED', reason: 'RECONCILIATION_STATE_INVALID' };
   }
 
   const ageMs = now.getTime() - attempt.createdAt.getTime();
   if (ageMs > deps.policy.maxAutomatedQueryMs) {
+    await auditPolicyDecision(deps, attempt, now, 'NO_EXECUTION', 'AUTOMATED_WINDOW_EXPIRED');
     return { kind: 'QUERY_BLOCKED', reason: 'AUTOMATED_WINDOW_EXPIRED' };
   }
 
   if (request === null && now.getTime() < nextDueAt(attempt, state, deps.policy).getTime()) {
+    await auditPolicyDecision(deps, attempt, now, 'NO_EXECUTION', 'NOT_DUE');
     return { kind: 'NOT_DUE' };
   }
 
-  const credentialInput = await deps.buildCredentialUseInput(attempt, request);
+  let credentialInput: CredentialUseInput | null;
+  try {
+    credentialInput = await deps.buildCredentialUseInput(attempt, request);
+  } catch {
+    credentialInput = null;
+  }
   if (!credentialInput) {
+    await persistCredentialDenial(deps, attempt, now, 'CREDENTIAL_CONTEXT_UNAVAILABLE');
+    await auditPolicyDecision(deps, attempt, now, 'NO_EXECUTION', 'CREDENTIAL_CONTEXT_UNAVAILABLE');
     return { kind: 'QUERY_BLOCKED', reason: 'CREDENTIAL_CONTEXT_UNAVAILABLE' };
   }
 
   const credentialDecision = decideCredentialUse(credentialInput);
   if (!credentialDecision.allowed) {
+    await persistCredentialDenial(deps, attempt, now, credentialDecision.reason);
+    await auditPolicyDecision(deps, attempt, now, 'NO_EXECUTION', credentialDecision.reason);
     return { kind: 'QUERY_BLOCKED', reason: credentialDecision.reason };
   }
+
+  await auditPolicyDecision(deps, attempt, now, 'ENABLED', 'STATUS_QUERY_AUTHORIZED');
 
   const raw = await deps.queryStatus({
     attemptId: attempt.id,
@@ -180,6 +240,72 @@ export async function reconcileAttempt(
     kind: 'OBSERVATION_INGESTED',
     observationId: result.observationId,
   };
+}
+
+async function auditPolicyDecision(
+  deps: ReconciliationDeps,
+  attempt: ReconciliationAttempt,
+  evaluatedAt: Date,
+  decision: ProviderPolicyDecisionRecord['decision'],
+  reason: string,
+) {
+  if (!deps.persistPolicyDecision) {
+    throw new Error('POLICY_DECISION_AUDIT_UNAVAILABLE');
+  }
+  const policy = deps.policy;
+  await deps.persistPolicyDecision({
+    merchantId: attempt.merchantId,
+    obligationId: attempt.obligationId,
+    attemptId: attempt.id,
+    provider: attempt.provider,
+    environment: attempt.environment,
+    operation: 'STATUS_QUERY',
+    policyVersion: typeof policy?.version === 'string' ? policy.version : null,
+    policyApproved: policy?.approved === true,
+    policyMerchantId: typeof policy?.merchantId === 'string' ? policy.merchantId : null,
+    policyProvider: isPaymentProvider(policy?.provider) ? policy.provider : null,
+    policyEnvironment: isProviderEnvironment(policy?.environment) ? policy.environment : null,
+    policyOperation: isProviderOperation(policy?.operation) ? policy.operation : null,
+    maxAmountPaise: null,
+    approvedAt: auditDate(policy?.approvedAt),
+    effectiveFrom: auditDate(policy?.effectiveFrom),
+    effectiveUntil: auditDate(policy?.effectiveUntil),
+    evaluatedAt: auditDate(evaluatedAt) ?? new Date(),
+    decision,
+    reason,
+    timing: policy ? {
+      initialDelayMs: policy.initialDelayMs,
+      cadenceMs: policy.cadenceMs,
+      backoffMultiplier: policy.backoffMultiplier,
+      maxDelayMs: policy.maxDelayMs,
+      jitterBasisPoints: policy.jitterBasisPoints,
+      slaMs: policy.slaMs,
+      maxAutomatedQueryMs: policy.maxAutomatedQueryMs,
+      evidenceHorizonMs: policy.evidenceHorizonMs,
+    } : null,
+  });
+}
+
+async function persistCredentialDenial(
+  deps: ReconciliationDeps,
+  attempt: ReconciliationAttempt,
+  observedAt: Date,
+  reason: CredentialDenialPersistenceRequest['reason'],
+) {
+  if (!deps.persistCredentialDenial) {
+    throw new Error('CREDENTIAL_DENIAL_PERSISTENCE_UNAVAILABLE');
+  }
+  await deps.persistCredentialDenial({
+    attemptId: attempt.id,
+    obligationId: attempt.obligationId,
+    merchantId: attempt.merchantId,
+    observedAt,
+    reason,
+    forceUnknownIfUnresolved: true,
+    requireReview: true,
+    preserveProviderLock: true,
+    securityAlert: true,
+  });
 }
 
 export function reconciliationWorker(deps: ReconciliationWorkerDeps) {
@@ -205,14 +331,37 @@ export function reconciliationWorker(deps: ReconciliationWorkerDeps) {
         let result: ReconciliationResult;
 
         if (pendingRequest && !claimReadOnlyQueryRequest) {
+          await auditPolicyDecision(
+            deps,
+            attempt,
+            deps.clock.now(),
+            'NO_EXECUTION',
+            'READ_ONLY_QUERY_CLAIM_UNAVAILABLE',
+          );
           result = { kind: 'QUERY_BLOCKED', reason: 'READ_ONLY_QUERY_CLAIM_UNAVAILABLE' };
         } else if (pendingRequest && !persistReadOnlyQueryConsumption) {
+          await auditPolicyDecision(
+            deps,
+            attempt,
+            deps.clock.now(),
+            'NO_EXECUTION',
+            'READ_ONLY_QUERY_CONSUMPTION_UNAVAILABLE',
+          );
           result = { kind: 'QUERY_BLOCKED', reason: 'READ_ONLY_QUERY_CONSUMPTION_UNAVAILABLE' };
         } else if (pendingRequest) {
           claimedRequest = await claimReadOnlyQueryRequest!(pendingRequest);
-          result = claimedRequest
-            ? await reconcileAttempt(deps, attempt, claimedRequest)
-            : { kind: 'QUERY_BLOCKED', reason: 'READ_ONLY_QUERY_ALREADY_CLAIMED' };
+          if (claimedRequest) {
+            result = await reconcileAttempt(deps, attempt, claimedRequest);
+          } else {
+            await auditPolicyDecision(
+              deps,
+              attempt,
+              deps.clock.now(),
+              'NO_EXECUTION',
+              'READ_ONLY_QUERY_ALREADY_CLAIMED',
+            );
+            result = { kind: 'QUERY_BLOCKED', reason: 'READ_ONLY_QUERY_ALREADY_CLAIMED' };
+          }
         } else {
           result = await reconcileAttempt(deps, attempt, null);
         }
@@ -225,7 +374,10 @@ export function reconciliationWorker(deps: ReconciliationWorkerDeps) {
           });
         }
 
-        if (isValidPolicy(deps.policy) && isSlaBreached(deps.clock, deps.policy, attempt)) {
+        if (
+          isValidPolicy(deps.policy, attempt, deps.clock.now()) &&
+          isSlaBreached(deps.clock, deps.policy, attempt)
+        ) {
           await deps.persistSlaEscalation({
             attemptId: attempt.id,
             obligationId: attempt.obligationId,
@@ -262,8 +414,33 @@ function isSlaBreached(clock: Clock, policy: ReconciliationPolicy, attempt: Reco
   return clock.now().getTime() - attempt.createdAt.getTime() >= policy.slaMs;
 }
 
-function isValidPolicy(policy: ReconciliationPolicy | undefined): policy is ReconciliationPolicy {
+function isValidPolicy(
+  policy: ReconciliationPolicy | undefined,
+  attempt: ReconciliationAttempt,
+  evaluatedAt: Date,
+): policy is ReconciliationPolicy {
   if (!policy) {
+    return false;
+  }
+
+  if (
+    policy.approved !== true ||
+    typeof policy.version !== 'string' ||
+    policy.version.trim() === '' ||
+    attempt.provider !== 'MOCK' ||
+    attempt.environment !== 'TEST' ||
+    policy.merchantId !== attempt.merchantId ||
+    policy.provider !== attempt.provider ||
+    policy.environment !== attempt.environment ||
+    policy.operation !== 'STATUS_QUERY' ||
+    !validDate(policy.approvedAt) ||
+    !validDate(policy.effectiveFrom) ||
+    !validDate(policy.effectiveUntil) ||
+    !validDate(evaluatedAt) ||
+    policy.approvedAt.getTime() > policy.effectiveFrom.getTime() ||
+    evaluatedAt.getTime() < policy.effectiveFrom.getTime() ||
+    evaluatedAt.getTime() >= policy.effectiveUntil.getTime()
+  ) {
     return false;
   }
 
@@ -307,6 +484,26 @@ function isValidPolicy(policy: ReconciliationPolicy | undefined): policy is Reco
   }
 
   return true;
+}
+
+function validDate(value: unknown): value is Date {
+  return value instanceof Date && Number.isFinite(value.getTime());
+}
+
+function auditDate(value: unknown): Date | null {
+  return validDate(value) ? value : null;
+}
+
+function isPaymentProvider(value: unknown): value is 'MOCK' | 'CASHFREE' | 'PAYTM' {
+  return value === 'MOCK' || value === 'CASHFREE' || value === 'PAYTM';
+}
+
+function isProviderEnvironment(value: unknown): value is 'TEST' | 'LIVE' {
+  return value === 'TEST' || value === 'LIVE';
+}
+
+function isProviderOperation(value: unknown): value is NonNullable<ProviderPolicyDecisionRecord['policyOperation']> {
+  return value === 'CREATE_ATTEMPT' || value === 'STATUS_QUERY';
 }
 
 function isValidReconciliationState(

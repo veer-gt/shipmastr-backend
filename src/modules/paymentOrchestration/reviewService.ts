@@ -202,7 +202,7 @@ export async function requestReadOnlyQuery(
         'note',
         input.note,
       );
-  const requestId = cleanOptional(input.requestId) ?? `review_query_${randomUUID()}`;
+  const requestId = sanitizeReadOnlyRequestId(input.requestId) ?? `review_query_${randomUUID()}`;
 
   return prisma.$transaction(async (tx) => {
     const attempt = await lockAttempt(tx, input.merchantId, input.attemptId);
@@ -384,6 +384,20 @@ function cleanOptional(value: string | undefined): string | null {
   }
   const next = value.trim();
   return next ? next : null;
+}
+
+export function sanitizeReadOnlyRequestId(value: string | undefined): string | null {
+  const requestId = cleanOptional(value);
+  if (requestId === null) return null;
+  if (
+    requestId.length > 120 ||
+    !/^[A-Za-z0-9][A-Za-z0-9._:-]*$/.test(requestId) ||
+    emailPattern.test(requestId) ||
+    longDigitPattern.test(requestId)
+  ) {
+    throw new HttpError(400, 'INVALID_READ_ONLY_REQUEST_ID');
+  }
+  return requestId;
 }
 
 function assertClaimableAttempt(

@@ -1,22 +1,25 @@
 import assert from 'node:assert/strict';
-import { after, before, beforeEach, describe, it } from 'node:test';
+import { after, afterEach, before, beforeEach, describe, it } from 'node:test';
 import { Prisma, PrismaClient } from '@prisma/client';
 import {
   createAttempt,
   type AttemptCreationResult,
   type CreateAttemptInput,
 } from '../attemptCoordinator.js';
+import { mockAdapter, mockProviderOrderRef } from '../adapters/mockAdapter.js';
 import { expectedScratchDatabaseNameFromEnv } from './scratchDatabaseGuard.js';
+import { createPaymentPostgresNamespace } from './postgresTestNamespace.js';
 import type { ProviderActivationPolicy } from '../types.js';
 
 const enabled = process.env.RUN_PGO1_POSTGRES_TESTS === '1';
 const prisma = new PrismaClient();
+const namespace = createPaymentPostgresNamespace('attempt_coordinator');
 
 let sequence = 0;
 
 function nextId(prefix: string) {
   sequence += 1;
-  return `${prefix}_${sequence}`;
+  return namespace.id(`${prefix}_${sequence}`);
 }
 
 function assertScratchUrl() {
@@ -34,19 +37,6 @@ function expectedScratchDatabaseName() {
 
 function isPrismaCode(error: unknown, code: string): error is Prisma.PrismaClientKnownRequestError {
   return error instanceof Prisma.PrismaClientKnownRequestError && error.code === code;
-}
-
-async function clearPaymentTables(client: PrismaClient) {
-  await client.providerObservationInterpretation.deleteMany();
-  await client.providerObservationDelivery.deleteMany();
-  await client.paymentNormalizedFactOutbox.deleteMany();
-  await client.refundDueCase.deleteMany();
-  await client.paymentAttentionSignal.deleteMany();
-  await client.reconciliationReviewHistory.deleteMany();
-  await client.paymentOutcomeTransition.deleteMany();
-  await client.providerObservation.deleteMany();
-  await client.paymentAttempt.deleteMany();
-  await client.paymentObligation.deleteMany();
 }
 
 function obligation(
@@ -110,6 +100,9 @@ function activationPolicy(merchantId: string, amountPaise: bigint): ProviderActi
     environment: 'TEST',
     operation: 'CREATE_ATTEMPT',
     maxAmountPaise: amountPaise,
+    approvedAt: new Date('2026-08-27T00:00:00.000Z'),
+    effectiveFrom: new Date('2026-08-27T00:00:00.000Z'),
+    effectiveUntil: new Date('2030-01-01T00:00:00.000Z'),
   };
 }
 
@@ -130,6 +123,7 @@ function requestFactory(base: { merchantId: string; obligationId: string; amount
       environment: 'TEST',
       operation: 'CREATE_ATTEMPT',
       amountPaise: base.amountPaise,
+      evaluatedAt: new Date('2026-08-28T00:00:00.000Z'),
       requestIdempotencyKey: overrides.requestIdempotencyKey ?? nextId('request'),
       credentialBindingId: overrides.credentialBindingId ?? nextId('binding'),
       credentialVersionId: overrides.credentialVersionId ?? nextId('credential_version'),
@@ -165,7 +159,11 @@ if (enabled) {
     });
 
     beforeEach(async () => {
-      await clearPaymentTables(prisma);
+      await namespace.assertEmpty(prisma);
+    });
+
+    afterEach(async () => {
+      await namespace.cleanup(prisma);
     });
 
     after(async () => {
@@ -173,7 +171,7 @@ if (enabled) {
     });
 
     it('serializes two different requests and creates one unresolved attempt', async () => {
-      const merchantId = 'm_1';
+      const merchantId = namespace.id('m_1');
       const obligationRow = await createObligation({
         id: 'obligation_serialized',
         merchantId,
@@ -205,10 +203,32 @@ if (enabled) {
         [value(left), value(right)].filter((result) => result.kind === 'EXISTING_UNRESOLVED').length,
         1,
       );
+      const createdResult = [value(left), value(right)].find((result) => result.kind === 'CREATED');
+      assert.ok(createdResult);
+      assert.equal(
+        createdResult.attempt.providerOrderRef,
+        mockProviderOrderRef(obligationRow.id, createdResult.attempt.id),
+      );
+      assert.equal(createdResult.attempt.adapterVersion, mockAdapter.adapterVersion);
+      assert.equal(createdResult.attempt.mappingVersion, mockAdapter.mappingVersion);
+      const audits = await prisma.providerPolicyDecisionAudit.findMany({
+        where: { merchantId, obligationId: obligationRow.id },
+        orderBy: { evaluatedAt: 'asc' },
+      });
+      assert.deepEqual(audits.map((row) => row.decision).sort(), ['ENABLED', 'NO_EXECUTION']);
+      assert.ok(audits.every((row) =>
+        row.provider === 'MOCK' &&
+        row.environment === 'TEST' &&
+        row.operation === 'CREATE_ATTEMPT' &&
+        row.policyVersion === 'policy_v1' &&
+        row.approvedAt !== null &&
+        row.effectiveFrom !== null &&
+        row.effectiveUntil !== null,
+      ));
     });
 
     it('returns one logical result for the same request key', async () => {
-      const merchantId = 'm_1';
+      const merchantId = namespace.id('m_1');
       const obligationRow = await createObligation({
         id: 'obligation_same_key',
         merchantId,
@@ -236,7 +256,7 @@ if (enabled) {
     });
 
     it('rejects reuse of a merchant idempotency key for another obligation', async () => {
-      const merchantId = 'm_1';
+      const merchantId = namespace.id('m_1');
       const obligationA = await createObligation({
         id: 'obligation_conflict_a',
         merchantId,
@@ -272,7 +292,7 @@ if (enabled) {
     });
 
     it('maps a concurrent same-key and different-obligation race to the same conflict', async () => {
-      const merchantId = 'm_1';
+      const merchantId = namespace.id('m_1');
       const obligationA = await createObligation({
         id: 'obligation_race_a',
         merchantId,
@@ -318,7 +338,7 @@ if (enabled) {
     });
 
     it('returns the existing unresolved attempt before evaluating a now-disabled policy', async () => {
-      const merchantId = 'm_1';
+      const merchantId = namespace.id('m_1');
       const obligationRow = await createObligation({
         id: 'obligation_existing',
         merchantId,
@@ -343,7 +363,7 @@ if (enabled) {
     });
 
     it('fails disabled before touching the provider', async () => {
-      const merchantId = 'm_1';
+      const merchantId = namespace.id('m_1');
       const obligationRow = await createObligation({
         id: 'obligation_disabled',
         merchantId,
@@ -361,10 +381,60 @@ if (enabled) {
       );
       assert.equal(createAttempt.length, 2);
       assert.equal(await prisma.paymentAttempt.count({ where: { obligationId: obligationRow.id } }), 0);
+      assert.partialDeepStrictEqual(
+        await prisma.providerPolicyDecisionAudit.findFirstOrThrow({
+          where: { merchantId, obligationId: obligationRow.id },
+        }),
+        {
+          provider: 'MOCK',
+          environment: 'TEST',
+          operation: 'CREATE_ATTEMPT',
+          policyVersion: null,
+          policyApproved: false,
+          decision: 'DISABLED',
+          reason: 'POLICY_DISABLED',
+        },
+      );
+    });
+
+    it('does not create an attempt after the locked obligation is satisfied', async () => {
+      const merchantId = namespace.id('merchant_satisfied');
+      const satisfiedAt = new Date('2026-08-28T00:00:00.000Z');
+      const obligationRow = await createObligation({
+        id: namespace.id('obligation_satisfied'),
+        merchantId,
+        status: 'SATISFIED',
+        satisfiedAt,
+      });
+      const request = requestFactory({
+        merchantId,
+        obligationId: obligationRow.id,
+        amountPaise: obligationRow.amountPaise,
+      });
+
+      await assert.rejects(
+        createAttempt(prisma, request({ requestIdempotencyKey: namespace.id('after_satisfied') })),
+        /OBLIGATION_NOT_ATTEMPT_ELIGIBLE/,
+      );
+      assert.equal(await prisma.paymentAttempt.count({
+        where: { merchantId, obligationId: obligationRow.id },
+      }), 0);
+      assert.partialDeepStrictEqual(
+        await prisma.providerPolicyDecisionAudit.findFirstOrThrow({
+          where: { merchantId, obligationId: obligationRow.id },
+        }),
+        {
+          decision: 'NO_EXECUTION',
+          reason: 'OBLIGATION_NOT_ATTEMPT_ELIGIBLE',
+          provider: 'MOCK',
+          environment: 'TEST',
+          operation: 'CREATE_ATTEMPT',
+        },
+      );
     });
 
     it('evaluates policy against the authoritative obligation amount', async () => {
-      const merchantId = 'm_1';
+      const merchantId = namespace.id('m_1');
       const obligationRow = await createObligation({
         id: 'obligation_authoritative_amount',
         merchantId,
@@ -394,7 +464,7 @@ if (enabled) {
     });
 
     it('proves the unique index independently of the service lock', async () => {
-      const merchantId = 'm_1';
+      const merchantId = namespace.id('m_1');
       const obligationRow = await createObligation({
         id: 'obligation_direct_index',
         merchantId,

@@ -43,6 +43,7 @@ export const cashfreeContractParser: ObservationParser = {
   provider: 'CASHFREE',
   adapterVersion: CASHFREE_ADAPTER_VERSION,
   mappingVersion: CASHFREE_MAPPING_VERSION,
+  providerApiVersion: CASHFREE_PROVIDER_API_VERSION,
   parse(input) {
     return parseCashfreeObservation(input);
   },

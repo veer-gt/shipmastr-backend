@@ -1,11 +1,13 @@
 import assert from 'node:assert/strict';
 import { describe, it } from 'node:test';
 import type { PaymentAttempt } from '@prisma/client';
+import type { ProviderPolicyDecisionRecord } from '../types.js';
 import {
   MOCK_RECONCILIATION_POLICY_V1,
   reconcileAttempt,
   reconciliationWorker,
   type ClaimReadOnlyQueryRequest,
+  type CredentialDenialPersistenceRequest,
   type CredentialUseInputResolver,
   type DerivedReconciliationState,
   type PendingReadOnlyQueryRequest,
@@ -140,6 +142,8 @@ function deps(
     listRequestedReadOnlyQueries: [] as Array<[]>,
     claimReadOnlyQueryRequest: [] as Array<[PendingReadOnlyQueryRequest]>,
     persistReadOnlyQueryConsumption: [] as Array<[ReadOnlyQueryConsumptionRecord]>,
+    persistCredentialDenial: [] as Array<[CredentialDenialPersistenceRequest]>,
+    persistPolicyDecision: [] as Array<[ProviderPolicyDecisionRecord]>,
   };
 
   const defaultQueryStatus = overrides.queryStatus ?? timeout();
@@ -246,6 +250,16 @@ function deps(
         reviewStatus: storedAttempt.reviewStatus,
       };
     },
+    persistCredentialDenial: async (input: CredentialDenialPersistenceRequest) => {
+      calls.persistCredentialDenial.push([input]);
+      if (storedAttempt.resolvedAt === null) {
+        storedAttempt.outcomeStatus = 'UNKNOWN';
+        storedAttempt.reviewStatus = 'REQUIRED';
+      }
+    },
+    persistPolicyDecision: async (input: ProviderPolicyDecisionRecord) => {
+      calls.persistPolicyDecision.push([input]);
+    },
     listRequestedReadOnlyQueries: async () => {
       calls.listRequestedReadOnlyQueries.push([]);
       return overrides.requestedReadOnlyQueries ?? [];
@@ -288,7 +302,7 @@ describe('reconciliationWorker', () => {
     const attempt = persistedAttempt({
       lastObservationAt: new Date(10_000),
     });
-    const { deps: rawDeps, calls } = deps({
+    const { deps: rawDeps, calls, storedAttempt } = deps({
       attempt,
       clock: virtualClock(15_000),
       reconciliationState: {
@@ -306,6 +320,16 @@ describe('reconciliationWorker', () => {
     assert.equal(calls.queryStatus[0]?.[0].querySequence, 2);
     assert.equal(calls.queryStatus[0]?.[0].amountPaise, 10_000n);
     assert.equal(attempt.lastObservationAt?.getTime(), 10_000);
+    assert.partialDeepStrictEqual(calls.persistPolicyDecision[0]?.[0], {
+      merchantId: attempt.merchantId,
+      attemptId: attempt.id,
+      provider: 'MOCK',
+      environment: 'TEST',
+      operation: 'STATUS_QUERY',
+      policyVersion: 'mock-reconciliation-v1',
+      decision: 'ENABLED',
+      reason: 'STATUS_QUERY_AUTHORIZED',
+    });
   });
 
   it('turns timeout into UNKNOWN through persisted observation state and preserves the lock', async () => {
@@ -326,7 +350,7 @@ describe('reconciliationWorker', () => {
 
   it('fails closed when the worker cannot resolve explicit credential policy input', async () => {
     const attempt = persistedAttempt();
-    const { deps: rawDeps, calls } = deps({
+    const { deps: rawDeps, calls, storedAttempt } = deps({
       attempt,
       credentialUseInput: null,
     });
@@ -339,6 +363,60 @@ describe('reconciliationWorker', () => {
     });
     assert.equal(calls.buildCredentialUseInput.length, 1);
     assert.equal(calls.queryStatus.length, 0);
+    assert.equal(storedAttempt.outcomeStatus, 'UNKNOWN');
+    assert.equal(storedAttempt.reviewStatus, 'REQUIRED');
+    assert.partialDeepStrictEqual(calls.persistCredentialDenial[0]?.[0], {
+      attemptId: attempt.id,
+      reason: 'CREDENTIAL_CONTEXT_UNAVAILABLE',
+      forceUnknownIfUnresolved: true,
+      requireReview: true,
+      preserveProviderLock: true,
+      securityAlert: true,
+    });
+  });
+
+  it('durably denies a query when credential context resolution throws', async () => {
+    const attempt = persistedAttempt();
+    const { deps: rawDeps, calls, storedAttempt } = deps({ attempt });
+
+    const result = await reconcileAttempt({
+      ...rawDeps,
+      buildCredentialUseInput: async () => {
+        throw new Error('credential store unavailable');
+      },
+    }, attempt);
+
+    assert.deepEqual(result, {
+      kind: 'QUERY_BLOCKED',
+      reason: 'CREDENTIAL_CONTEXT_UNAVAILABLE',
+    });
+    assert.equal(calls.queryStatus.length, 0);
+    assert.equal(storedAttempt.outcomeStatus, 'UNKNOWN');
+    assert.equal(storedAttempt.reviewStatus, 'REQUIRED');
+    assert.equal(calls.persistCredentialDenial.length, 1);
+    assert.equal(calls.persistPolicyDecision.at(-1)?.[0].reason, 'CREDENTIAL_CONTEXT_UNAVAILABLE');
+  });
+
+  it('durably enforces revoked credential denial before any provider query', async () => {
+    const attempt = persistedAttempt();
+    const { deps: rawDeps, calls, storedAttempt } = deps({
+      attempt,
+      credentialUseInput: {
+        originalMerchantId: attempt.merchantId, requestedMerchantId: attempt.merchantId,
+        originalProvider: attempt.provider, requestedProvider: attempt.provider,
+        originalEnvironment: attempt.environment, requestedEnvironment: attempt.environment,
+        originalBindingId: attempt.credentialBindingId, requestedBindingId: attempt.credentialBindingId,
+        continuity: 'PROVEN_SAME_ACCOUNT', credentialState: 'REVOKED', operation: 'STATUS_QUERY',
+      },
+    });
+
+    assert.deepEqual(await reconcileAttempt(rawDeps, attempt), {
+      kind: 'QUERY_BLOCKED', reason: 'CREDENTIAL_NOT_ACTIVE',
+    });
+    assert.equal(calls.queryStatus.length, 0);
+    assert.equal(storedAttempt.outcomeStatus, 'UNKNOWN');
+    assert.equal(storedAttempt.reviewStatus, 'REQUIRED');
+    assert.equal(calls.persistCredentialDenial[0]?.[0].securityAlert, true);
   });
 
   it('consumes a durable read-only query request and bypasses not-due timing without mutating payment state itself', async () => {
@@ -529,6 +607,36 @@ describe('reconciliationWorker', () => {
 
     assert.deepEqual(await reconcileAttempt(rawDeps, attempt), { kind: 'POLICY_DISABLED' });
     assert.equal(calls.queryStatus.length, 0);
+    assert.equal(calls.persistPolicyDecision.length, 1);
+    assert.equal(calls.persistPolicyDecision[0]?.[0].decision, 'DISABLED');
+  });
+
+  it('cannot execute a real provider even when a policy object claims approval', async () => {
+    const attempt = persistedAttempt({ provider: 'CASHFREE' });
+    const { deps: rawDeps, calls } = deps({
+      attempt,
+      policy: { ...MOCK_RECONCILIATION_POLICY_V1, provider: 'CASHFREE' } as never,
+    });
+
+    assert.deepEqual(await reconcileAttempt(rawDeps, attempt), { kind: 'POLICY_DISABLED' });
+    assert.equal(calls.queryStatus.length, 0);
+    assert.equal(calls.persistPolicyDecision[0]?.[0].reason, 'POLICY_DISABLED');
+  });
+
+  it('fails disabled and audits malformed persisted governance values without querying', async () => {
+    const attempt = persistedAttempt();
+    const { deps: rawDeps, calls } = deps({
+      attempt,
+      policy: { ...MOCK_RECONCILIATION_POLICY_V1, version: 7 } as never,
+    });
+
+    assert.deepEqual(await reconcileAttempt(rawDeps, attempt), { kind: 'POLICY_DISABLED' });
+    assert.equal(calls.queryStatus.length, 0);
+    assert.partialDeepStrictEqual(calls.persistPolicyDecision[0]?.[0], {
+      policyVersion: null,
+      decision: 'DISABLED',
+      reason: 'POLICY_DISABLED',
+    });
   });
 
   for (const [name, policy] of [

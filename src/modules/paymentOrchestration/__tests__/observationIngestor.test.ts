@@ -51,6 +51,7 @@ function mockParserStub(
     provider: 'MOCK',
     adapterVersion: 'mock-adapter-v1',
     mappingVersion: 'mock-mapping-v1',
+    providerApiVersion: 'mock-2026-08-28',
     parse() {
       return parsedObservation(overrides);
     },
@@ -62,6 +63,7 @@ function cashfreeParserStub(): ObservationParser {
     provider: 'CASHFREE',
     adapterVersion: 'cashfree-adapter-fixture-v1',
     mappingVersion: 'cashfree-mapping-fixture-v1',
+    providerApiVersion: 'cashfree-webhook-contract-2026-08-28',
     parse() {
       return parsedObservation({
         provider: 'CASHFREE',
@@ -102,12 +104,14 @@ function deps(
     verify: Array<[RawObservationInput]>;
     resolveBinding: Array<[ParsedObservationFields]>;
     persist: Array<[ObservationCandidate]>;
+    securityRejections: Array<[Parameters<NonNullable<RawIngestionDeps['persistSecurityRejection']>>[0]]>;
   };
 } {
   const calls = {
     verify: [] as Array<[RawObservationInput]>,
     resolveBinding: [] as Array<[ParsedObservationFields]>,
     persist: [] as Array<[ObservationCandidate]>,
+    securityRejections: [] as Array<[Parameters<NonNullable<RawIngestionDeps['persistSecurityRejection']>>[0]]>,
   };
   const result: IngestionResult = {
     observationId: 'observation_1',
@@ -120,6 +124,14 @@ function deps(
     parser: mockParserStub(),
     ingestionMode: 'MOCK_EXECUTABLE',
     retentionDecision: 'MOCK_SYNTHETIC',
+    environment: 'TEST',
+    source: 'MOCK',
+    securityContext: {
+      merchantId: 'merchant_1',
+      obligationId: 'obligation_1',
+      attemptId: 'attempt_1',
+      credentialBindingId: 'binding_1',
+    },
     nextObservationId: () => 'observation_1',
     resolveBinding: async (parsed: ParsedObservationFields) => {
       calls.resolveBinding.push([parsed]);
@@ -139,6 +151,9 @@ function deps(
     persist: async (candidate: ObservationCandidate) => {
       calls.persist.push([candidate]);
       return result;
+    },
+    persistSecurityRejection: async (record) => {
+      calls.securityRejections.push([record]);
     },
   };
 
@@ -200,6 +215,14 @@ describe('ingestRawObservation', () => {
     });
     assert.equal(calls.persist.length, 0);
     assert.equal(calls.resolveBinding.length, 0);
+    assert.equal(calls.securityRejections.length, 1);
+    assert.partialDeepStrictEqual(calls.securityRejections[0]?.[0], {
+      provider: 'MOCK', environment: 'TEST', source: 'MOCK', reason: 'UNAUTHENTICATED',
+      signatureVerification: 'FAILED', bindingVerification: null,
+      securityAlertCode: 'INVALID_PROVIDER_SIGNATURE',
+    });
+    assert.equal(JSON.stringify(calls.securityRejections[0]?.[0]).includes('"rawBody"'), false);
+    assert.equal(JSON.stringify(calls.securityRejections[0]?.[0]).includes('"headers"'), false);
   });
 
   it('rejects unavailable verification before persistence', async () => {
@@ -216,6 +239,24 @@ describe('ingestRawObservation', () => {
     });
     assert.equal(calls.persist.length, 0);
     assert.equal(calls.resolveBinding.length, 0);
+    assert.equal(calls.securityRejections.length, 1);
+  });
+
+  it('fails closed and records sanitized rejection for unexpected verifier metadata', async () => {
+    const { deps: rawDeps, calls } = deps({
+      verify: async () => 'TRUST_ME' as never,
+    });
+
+    assert.deepEqual(await ingestRawObservation(rawDeps, rawInput()), {
+      kind: 'REJECTED',
+      reason: 'UNAUTHENTICATED',
+    });
+    assert.equal(calls.persist.length, 0);
+    assert.equal(calls.resolveBinding.length, 0);
+    assert.partialDeepStrictEqual(calls.securityRejections[0]?.[0], {
+      signatureVerification: 'UNAVAILABLE',
+      securityAlertCode: 'INVALID_PROVIDER_SIGNATURE',
+    });
   });
 
   it('disables non-Mock ingestion without an approved retention decision', async () => {
@@ -231,6 +272,18 @@ describe('ingestRawObservation', () => {
     });
     assert.equal(calls.verify.length, 0);
     assert.equal(calls.persist.length, 0);
+    assert.equal(calls.securityRejections.length, 0);
+  });
+
+  it('never copies direct phone PII or raw payload material into durable rejection evidence', async () => {
+    const { deps: rawDeps, calls } = deps({ verify: async () => 'FAILED' });
+    await ingestRawObservation(rawDeps, rawInput({
+      rawBody: Buffer.from('{"phone":"+919876543210","token":"secret"}', 'utf8'),
+      headers: { authorization: 'Bearer secret' },
+    }));
+
+    const serialized = JSON.stringify(calls.securityRejections);
+    assert.doesNotMatch(serialized, /9876543210|Bearer|token|"rawBody"|"headers"|secret/i);
   });
 
   it('rejects binding mismatches before persistence', async () => {
@@ -253,6 +306,40 @@ describe('ingestRawObservation', () => {
       reason: 'BINDING_MISMATCH',
     });
     assert.equal(calls.persist.length, 0);
+    assert.equal(calls.securityRejections.length, 1);
+    assert.partialDeepStrictEqual(calls.securityRejections[0]?.[0], {
+      attemptId: 'attempt_1', obligationId: 'obligation_1', merchantId: 'merchant_1',
+      reason: 'BINDING_MISMATCH', bindingVerification: 'FAILED',
+      securityAlertCode: 'PROVIDER_BINDING_MISMATCH',
+    });
+  });
+
+  it('never copies untrusted binding identifiers into durable rejection evidence', async () => {
+    const { deps: rawDeps, calls } = deps({
+      resolveBinding: async () => ({
+        attemptId: 'buyer@example.invalid',
+        obligationId: '+919876543210',
+        merchantId: 'payload-merchant',
+        credentialBindingId: 'raw-secret-binding',
+        credentialVersionId: 'raw-secret-version',
+        bindingVerification: 'FAILED',
+      }),
+    });
+
+    assert.deepEqual(await ingestRawObservation(rawDeps, rawInput()), {
+      kind: 'REJECTED',
+      reason: 'BINDING_MISMATCH',
+    });
+    assert.partialDeepStrictEqual(calls.securityRejections[0]?.[0], {
+      merchantId: null,
+      obligationId: null,
+      attemptId: null,
+      credentialBindingId: null,
+    });
+    assert.doesNotMatch(
+      JSON.stringify(calls.securityRejections),
+      /buyer@example|9876543210|payload-merchant|raw-secret/i,
+    );
   });
 
   it('rejects malformed payloads without persisting', async () => {
@@ -261,6 +348,7 @@ describe('ingestRawObservation', () => {
         provider: 'MOCK',
         adapterVersion: 'mock-adapter-v1',
         mappingVersion: 'mock-mapping-v1',
+        providerApiVersion: 'mock-2026-08-28',
         parse() {
           throw new Error('malformed');
         },

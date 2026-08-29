@@ -1,8 +1,13 @@
 import assert from 'node:assert/strict';
-import { after, before, beforeEach, describe, it } from 'node:test';
+import { createHash } from 'node:crypto';
+import { after, afterEach, before, beforeEach, describe, it } from 'node:test';
 import { Prisma, PrismaClient, type PaymentProvider, type ProviderEnvironment } from '@prisma/client';
 import { expectedScratchDatabaseNameFromEnv } from './scratchDatabaseGuard.js';
-import { ingestObservation } from '../observationService.js';
+import { createPaymentPostgresNamespace } from './postgresTestNamespace.js';
+import {
+  ingestObservation,
+  persistProviderSecurityRejection,
+} from '../observationService.js';
 import { ingestRawObservation } from '../observationIngestor.js';
 import {
   MANUAL_EVIDENCE_EXCEPTION_GATE,
@@ -21,12 +26,13 @@ import type {
 
 const enabled = process.env.RUN_PGO1_POSTGRES_TESTS === '1';
 const prisma = new PrismaClient();
+const namespace = createPaymentPostgresNamespace('review_service');
 
 let sequence = 0;
 
 function nextId(prefix: string) {
   sequence += 1;
-  return `${prefix}_${sequence}`;
+  return namespace.id(`${prefix}_${sequence}`);
 }
 
 function assertScratchUrl() {
@@ -35,20 +41,6 @@ function assertScratchUrl() {
   assert.ok(['127.0.0.1', 'localhost'].includes(url.hostname.toLowerCase()));
   assert.equal(url.port, '5433');
   assert.equal(decodeURIComponent(url.pathname.slice(1)), expectedScratchDatabaseNameFromEnv());
-}
-
-async function clearPaymentTables(client: PrismaClient) {
-  await client.providerObservationInterpretation.deleteMany();
-  await client.providerObservationDelivery.deleteMany();
-  await client.paymentNormalizedFactOutbox.deleteMany();
-  await client.refundDueCase.deleteMany();
-  await client.paymentAttentionSignal.deleteMany();
-  await client.reconciliationReviewHistory.deleteMany();
-  await client.paymentOutcomeTransition.deleteMany();
-  await client.providerObservation.deleteMany();
-  await client.paymentAttempt.deleteMany();
-  await client.paymentObligation.deleteMany();
-  await client.auditLog.deleteMany();
 }
 
 function obligation(
@@ -130,6 +122,7 @@ function lateWebhookParser(input: {
     provider: input.provider ?? 'MOCK',
     adapterVersion: 'late-webhook-adapter-v1',
     mappingVersion: 'late-webhook-mapping-v1',
+    providerApiVersion: 'late-webhook-api-v1',
     parse(raw: RawObservationInput): ParsedObservationFields {
       return {
         provider: input.provider ?? 'MOCK',
@@ -174,7 +167,11 @@ if (enabled) {
     });
 
     beforeEach(async () => {
-      await clearPaymentTables(prisma);
+      await namespace.assertEmpty(prisma);
+    });
+
+    afterEach(async () => {
+      await namespace.cleanup(prisma);
     });
 
     after(async () => {
@@ -185,7 +182,7 @@ if (enabled) {
       const seeded = await createAttemptWithObligation({
         obligation: {
           id: 'obligation_review_claim',
-          merchantId: 'merchant_review_claim',
+          merchantId: namespace.id('merchant_review_claim'),
         },
         attempt: {
           id: 'attempt_review_claim',
@@ -257,7 +254,7 @@ if (enabled) {
       const seeded = await createAttemptWithObligation({
         obligation: {
           id: 'obligation_review_reject',
-          merchantId: 'merchant_review_reject',
+          merchantId: namespace.id('merchant_review_reject'),
         },
         attempt: {
           id: 'attempt_review_reject',
@@ -303,7 +300,7 @@ if (enabled) {
       const seeded = await createAttemptWithObligation({
         obligation: {
           id: 'obligation_review_query',
-          merchantId: 'merchant_review_query',
+          merchantId: namespace.id('merchant_review_query'),
         },
         attempt: {
           id: 'attempt_review_query',
@@ -374,7 +371,7 @@ if (enabled) {
       const seeded = await createAttemptWithObligation({
         obligation: {
           id: 'obligation_cross_merchant',
-          merchantId: 'merchant_review_owner',
+          merchantId: namespace.id('merchant_review_owner'),
         },
         attempt: {
           id: 'attempt_cross_merchant',
@@ -386,7 +383,7 @@ if (enabled) {
 
       await assert.rejects(
         claimReview(prisma, {
-          merchantId: 'merchant_other',
+          merchantId: namespace.id('merchant_other'),
           attemptId: seeded.attempt.id,
           reviewerId: 'admin_1',
         }),
@@ -401,7 +398,7 @@ if (enabled) {
 
       await assert.rejects(
         attachEvidenceReference(prisma, {
-          merchantId: 'merchant_other',
+          merchantId: namespace.id('merchant_other'),
           attemptId: seeded.attempt.id,
           reviewerId: 'admin_1',
           reference: 'evidence://case/789',
@@ -410,7 +407,7 @@ if (enabled) {
       );
       await assert.rejects(
         requestReadOnlyQuery(prisma, {
-          merchantId: 'merchant_other',
+          merchantId: namespace.id('merchant_other'),
           attemptId: seeded.attempt.id,
           reviewerId: 'admin_1',
           note: 'safe note',
@@ -419,7 +416,7 @@ if (enabled) {
       );
       await assert.rejects(
         viewReview(prisma, {
-          merchantId: 'merchant_other',
+          merchantId: namespace.id('merchant_other'),
           attemptId: seeded.attempt.id,
         }),
         /ATTEMPT_NOT_FOUND/,
@@ -437,7 +434,7 @@ if (enabled) {
       const seeded = await createAttemptWithObligation({
         obligation: {
           id: 'obligation_late_webhook_verified',
-          merchantId: 'merchant_late_webhook_verified',
+          merchantId: namespace.id('merchant_late_webhook_verified'),
         },
         attempt: {
           id: 'attempt_late_webhook_verified',
@@ -454,6 +451,14 @@ if (enabled) {
         }),
         ingestionMode: 'MOCK_EXECUTABLE',
         retentionDecision: 'MOCK_SYNTHETIC',
+        environment: 'TEST',
+        source: 'WEBHOOK',
+        securityContext: {
+          merchantId: seeded.obligation.merchantId,
+          obligationId: seeded.obligation.id,
+          attemptId: seeded.attempt.id,
+          credentialBindingId: seeded.attempt.credentialBindingId,
+        },
         nextObservationId: () => nextId('observation'),
         resolveBinding: async () => ({
           attemptId: seeded.attempt.id,
@@ -464,6 +469,7 @@ if (enabled) {
           bindingVerification: 'VERIFIED',
         }),
         verify: async () => 'VERIFIED',
+        persistSecurityRejection: (evidence) => persistProviderSecurityRejection(prisma, evidence),
         persist: (candidate) => ingestObservation(prisma, candidate),
       }, rawWebhookInput('verified'));
 
@@ -484,7 +490,7 @@ if (enabled) {
       const seeded = await createAttemptWithObligation({
         obligation: {
           id: 'obligation_late_webhook_unavailable',
-          merchantId: 'merchant_late_webhook_unavailable',
+          merchantId: namespace.id('merchant_late_webhook_unavailable'),
         },
         attempt: {
           id: 'attempt_late_webhook_unavailable',
@@ -502,6 +508,14 @@ if (enabled) {
         }),
         ingestionMode: 'MOCK_EXECUTABLE',
         retentionDecision: 'MOCK_SYNTHETIC',
+        environment: 'TEST',
+        source: 'WEBHOOK',
+        securityContext: {
+          merchantId: seeded.obligation.merchantId,
+          obligationId: seeded.obligation.id,
+          attemptId: seeded.attempt.id,
+          credentialBindingId: seeded.attempt.credentialBindingId,
+        },
         nextObservationId: () => nextId('observation'),
         resolveBinding: async () => ({
           attemptId: seeded.attempt.id,
@@ -515,6 +529,7 @@ if (enabled) {
           verification = 'UNAVAILABLE';
           return verification;
         },
+        persistSecurityRejection: (evidence) => persistProviderSecurityRejection(prisma, evidence),
         persist: (candidate) => ingestObservation(prisma, candidate),
       }, rawWebhookInput('unavailable'));
 
@@ -533,6 +548,17 @@ if (enabled) {
           where: { attemptId: seeded.attempt.id },
         }),
         0,
+      );
+      assert.partialDeepStrictEqual(
+        await prisma.providerObservationRejection.findFirstOrThrow({
+          where: { merchantId: seeded.obligation.merchantId, attemptId: seeded.attempt.id },
+        }),
+        {
+          reason: 'UNAUTHENTICATED',
+          securityAlertCode: 'INVALID_PROVIDER_SIGNATURE',
+          securityAlertStatus: 'PENDING',
+          rawBodyHash: createHash('sha256').update(rawWebhookInput('unavailable').rawBody).digest('hex'),
+        },
       );
       assert.deepEqual(Object.keys(reviewService).sort(), [
         'attachEvidenceReference',

@@ -72,9 +72,12 @@ function buildInput(
     attempts?: ReduceEvidenceInput['attempts'];
     observations?: CanonicalObservation[];
     targetAttemptId?: string;
+    triggeringObservationId?: string | null;
+    triggeringObservationIsNew?: boolean;
   } = {},
 ): ReduceEvidenceInput {
   const attempts = overrides.attempts ?? [buildAttempt()];
+  const observations = overrides.observations ?? [];
   return {
     obligation: {
       id: 'obligation_1',
@@ -86,7 +89,12 @@ function buildInput(
     },
     targetAttemptId: overrides.targetAttemptId ?? attempts[0]!.id,
     attempts,
-    observations: overrides.observations ?? [],
+    observations,
+    triggeringObservationId:
+      overrides.triggeringObservationId === undefined
+        ? observations.at(-1)?.id ?? null
+        : overrides.triggeringObservationId,
+    triggeringObservationIsNew: overrides.triggeringObservationIsNew ?? true,
   };
 }
 
@@ -280,10 +288,13 @@ describe('reduceEvidence', () => {
             receivedAt: new Date('2026-08-27T12:00:05.000Z'),
           }),
         ],
+        triggeringObservationId: 'dup_1',
+        triggeringObservationIsNew: false,
       }),
     );
 
-    assert.deepEqual(plan.factTypes, ['PAYMENT_SUCCEEDED']);
+    assert.deepEqual(plan.factTypes, []);
+    assert.deepEqual(plan.factEmissions, []);
     assert.deepEqual(plan.attention, []);
     assertRefund(plan, []);
   });
@@ -366,6 +377,7 @@ describe('reduceEvidence', () => {
     assert.deepEqual(plan.factTypes, ['PAYMENT_SUCCEEDED', 'REFUND_DUE_DETECTED']);
     assertRefund(plan, [
       {
+        captureKey: 'merchant_1:obligation_1:MOCK:txn_late_1',
         providerTransactionRef: 'txn_late_1',
         reason: 'LATE_SUCCESS_AFTER_CLOSURE',
         sourceAttemptId: 'attempt_1',
@@ -417,6 +429,7 @@ describe('reduceEvidence', () => {
     assert.deepEqual(plan.factTypes, ['PAYMENT_SUCCEEDED', 'REFUND_DUE_DETECTED']);
     assertRefund(plan, [
       {
+        captureKey: 'merchant_1:obligation_1:MOCK:txn_b',
         providerTransactionRef: 'txn_b',
         reason: 'SURPLUS_DOUBLE_SUCCESS',
         sourceAttemptId: 'attempt_b',
@@ -427,7 +440,7 @@ describe('reduceEvidence', () => {
     assertRelatedActions(plan, [{ attemptId: 'attempt_a', action: 'PRESERVE_TERMINAL' }]);
   });
 
-  it('attributes a surplus refund entry to the non-target success when the target success is already legitimate', () => {
+  it('attributes a newly observed surplus to the triggering target capture', () => {
     const attemptA = buildAttempt({
       id: 'attempt_legit_a',
       providerOrderRef: 'order_legit_a',
@@ -469,13 +482,266 @@ describe('reduceEvidence', () => {
     assert.equal(plan.disposition, 'DOUBLE_SUCCESS_DETECTED');
     assertRefund(plan, [
       {
-        providerTransactionRef: 'txn_legit_a',
+        captureKey: 'merchant_1:obligation_1:MOCK:txn_legit_b',
+        providerTransactionRef: 'txn_legit_b',
         reason: 'SURPLUS_DOUBLE_SUCCESS',
-        sourceAttemptId: 'attempt_legit_a',
-        sourceObservationId: 'success_legit_a',
+        sourceAttemptId: 'attempt_legit_b',
+        sourceObservationId: 'success_legit_b',
         provider: 'MOCK',
       },
     ]);
+  });
+
+  it('does not let a terminal failure from one attempt resolve a later target attempt', () => {
+    const prior = buildAttempt({
+      id: 'attempt_prior_failure',
+      providerOrderRef: 'order_prior_failure',
+      outcomeStatus: 'FAILED_TERMINAL',
+      resolvedAt: new Date('2026-08-27T10:00:00.000Z'),
+    });
+    const target = buildAttempt({
+      id: 'attempt_later_pending',
+      providerOrderRef: 'order_later_pending',
+    });
+    const plan = reduceEvidence(buildInput({
+      attempts: [prior, target],
+      targetAttemptId: target.id,
+      observations: [
+        buildObservation({
+          id: 'prior_failure_evidence',
+          attemptId: prior.id,
+          providerOrderRef: prior.providerOrderRef!,
+          providerEventId: 'event_prior_failure',
+          providerTransactionRef: null,
+          mappedOutcome: 'FAILED_TERMINAL',
+        }),
+        buildObservation({
+          id: 'later_pending_evidence',
+          attemptId: target.id,
+          providerOrderRef: target.providerOrderRef!,
+          providerEventId: 'event_later_pending',
+          providerTransactionRef: null,
+          mappedOutcome: 'PENDING',
+        }),
+      ],
+    }));
+
+    assert.equal(plan.attemptId, target.id);
+    assert.equal(plan.outcomeStatus, 'PENDING');
+    assert.equal(plan.resolved, false);
+    assert.deepEqual(plan.factTypes, []);
+  });
+
+  it('does not let a mapping gap from one attempt block terminal failure on its source attempt', () => {
+    const prior = buildAttempt({
+      id: 'attempt_prior_gap',
+      providerOrderRef: 'order_prior_gap',
+      outcomeStatus: 'UNKNOWN',
+    });
+    const target = buildAttempt({
+      id: 'attempt_target_failure',
+      providerOrderRef: 'order_target_failure',
+    });
+    const plan = reduceEvidence(buildInput({
+      attempts: [prior, target],
+      targetAttemptId: target.id,
+      observations: [
+        buildObservation({
+          id: 'prior_gap_evidence',
+          attemptId: prior.id,
+          providerOrderRef: prior.providerOrderRef!,
+          providerEventId: 'event_prior_gap',
+          providerTransactionRef: null,
+          mappedOutcome: 'UNMAPPED',
+        }),
+        buildObservation({
+          id: 'target_failure_evidence',
+          attemptId: target.id,
+          providerOrderRef: target.providerOrderRef!,
+          providerEventId: 'event_target_failure',
+          providerTransactionRef: null,
+          mappedOutcome: 'FAILED_TERMINAL',
+        }),
+      ],
+    }));
+
+    assert.equal(plan.outcomeStatus, 'FAILED_TERMINAL');
+    assert.equal(plan.resolved, true);
+    assert.deepEqual(plan.factEmissions, [{
+      factType: 'PAYMENT_FAILED',
+      sourceAttemptId: target.id,
+      sourceObservationId: 'target_failure_evidence',
+      provider: 'MOCK',
+      providerReferenceId: 'event_target_failure',
+    }]);
+  });
+
+  it('scopes provider event identity by provider environment and attempt', () => {
+    const prior = buildAttempt({
+      id: 'attempt_event_prior',
+      providerOrderRef: 'order_event_prior',
+    });
+    const target = buildAttempt({
+      id: 'attempt_event_target',
+      providerOrderRef: 'order_event_target',
+    });
+    const plan = reduceEvidence(buildInput({
+      attempts: [prior, target],
+      targetAttemptId: target.id,
+      observations: [
+        buildObservation({
+          id: 'same_event_prior',
+          attemptId: prior.id,
+          providerOrderRef: prior.providerOrderRef!,
+          providerEventId: 'provider_reused_event_id',
+          providerTransactionRef: null,
+          mappedOutcome: 'PENDING',
+          rawBodyHash: 'hash_prior',
+        }),
+        buildObservation({
+          id: 'same_event_target',
+          attemptId: target.id,
+          providerOrderRef: target.providerOrderRef!,
+          providerEventId: 'provider_reused_event_id',
+          providerTransactionRef: 'txn_target',
+          mappedOutcome: 'SUCCEEDED',
+          rawBodyHash: 'hash_target',
+        }),
+      ],
+    }));
+
+    assert.equal(plan.outcomeStatus, 'SUCCEEDED');
+    assert.equal(plan.disposition, 'SUCCEEDED');
+    assert.equal(plan.attention.some((entry) => entry.type === 'INTEGRITY_CONFLICT'), false);
+  });
+
+  it('binds a terminal fact to the new source evidence and does not re-emit historical success', () => {
+    const plan = reduceEvidence(buildInput({
+      observations: [
+        buildObservation({
+          id: 'historical_success',
+          providerEventId: 'event_historical_success',
+          providerTransactionRef: 'txn_historical_success',
+          mappedOutcome: 'SUCCEEDED',
+        }),
+        buildObservation({
+          id: 'later_failure',
+          providerEventId: 'event_later_failure',
+          providerTransactionRef: null,
+          nativeStatus: 'failed',
+          mappedOutcome: 'FAILED_TERMINAL',
+        }),
+      ],
+      triggeringObservationId: 'later_failure',
+    }));
+
+    assert.equal(plan.outcomeStatus, 'SUCCEEDED');
+    assert.deepEqual(plan.factTypes, ['PAYMENT_FAILED']);
+    assert.deepEqual(plan.factEmissions, [{
+      factType: 'PAYMENT_FAILED',
+      sourceAttemptId: 'attempt_1',
+      sourceObservationId: 'later_failure',
+      provider: 'MOCK',
+      providerReferenceId: 'event_later_failure',
+    }]);
+  });
+
+  it('emits success evidence but does not reopen a refund for an already-seen capture identity', () => {
+    const primary = buildAttempt({
+      id: 'attempt_primary_capture',
+      providerOrderRef: 'order_primary_capture',
+      outcomeStatus: 'SUCCEEDED',
+      resolvedAt: new Date('2026-08-27T10:00:00.000Z'),
+    });
+    const surplus = buildAttempt({
+      id: 'attempt_surplus_capture',
+      providerOrderRef: 'order_surplus_capture',
+      outcomeStatus: 'SUCCEEDED',
+      resolvedAt: new Date('2026-08-27T11:00:00.000Z'),
+    });
+    const plan = reduceEvidence(buildInput({
+      obligation: { status: 'SATISFIED' },
+      attempts: [primary, surplus],
+      targetAttemptId: surplus.id,
+      observations: [
+        buildObservation({
+          id: 'primary_capture_evidence', attemptId: primary.id,
+          providerOrderRef: primary.providerOrderRef!, providerEventId: 'event_primary_capture',
+          providerTransactionRef: 'txn_primary_capture',
+        }),
+        buildObservation({
+          id: 'surplus_capture_first', attemptId: surplus.id,
+          providerOrderRef: surplus.providerOrderRef!, providerEventId: 'event_surplus_capture_first',
+          providerTransactionRef: 'txn_surplus_capture',
+        }),
+        buildObservation({
+          id: 'surplus_capture_later_evidence', attemptId: surplus.id,
+          providerOrderRef: surplus.providerOrderRef!, providerEventId: 'event_surplus_capture_later',
+          providerTransactionRef: 'txn_surplus_capture',
+        }),
+      ],
+      triggeringObservationId: 'surplus_capture_later_evidence',
+    }));
+
+    assert.deepEqual(plan.factEmissions, [{
+      factType: 'PAYMENT_SUCCEEDED',
+      sourceAttemptId: surplus.id,
+      sourceObservationId: 'surplus_capture_later_evidence',
+      provider: 'MOCK',
+      providerReferenceId: 'txn_surplus_capture',
+    }]);
+    assertRefund(plan, []);
+  });
+
+  it('opens only the newly observed surplus capture when multiple captures arrive sequentially', () => {
+    const primary = buildAttempt({
+      id: 'attempt_primary',
+      providerOrderRef: 'order_primary',
+      outcomeStatus: 'SUCCEEDED',
+      resolvedAt: new Date('2026-08-27T10:00:00.000Z'),
+    });
+    const priorSurplus = buildAttempt({
+      id: 'attempt_prior_surplus',
+      providerOrderRef: 'order_prior_surplus',
+      outcomeStatus: 'SUCCEEDED',
+      resolvedAt: new Date('2026-08-27T11:00:00.000Z'),
+    });
+    const target = buildAttempt({
+      id: 'attempt_new_surplus',
+      providerOrderRef: 'order_new_surplus',
+    });
+    const plan = reduceEvidence(buildInput({
+      obligation: { status: 'SATISFIED' },
+      attempts: [primary, priorSurplus, target],
+      targetAttemptId: target.id,
+      observations: [
+        buildObservation({
+          id: 'primary_success', attemptId: primary.id,
+          providerOrderRef: primary.providerOrderRef!, providerEventId: 'event_primary',
+          providerTransactionRef: 'txn_primary',
+        }),
+        buildObservation({
+          id: 'prior_surplus_success', attemptId: priorSurplus.id,
+          providerOrderRef: priorSurplus.providerOrderRef!, providerEventId: 'event_prior_surplus',
+          providerTransactionRef: 'txn_prior_surplus',
+        }),
+        buildObservation({
+          id: 'new_surplus_success', attemptId: target.id,
+          providerOrderRef: target.providerOrderRef!, providerEventId: 'event_new_surplus',
+          providerTransactionRef: 'txn_new_surplus',
+        }),
+      ],
+      triggeringObservationId: 'new_surplus_success',
+    }));
+
+    assertRefund(plan, [{
+      captureKey: 'merchant_1:obligation_1:MOCK:txn_new_surplus',
+      providerTransactionRef: 'txn_new_surplus',
+      reason: 'SURPLUS_DOUBLE_SUCCESS',
+      sourceAttemptId: target.id,
+      sourceObservationId: 'new_surplus_success',
+      provider: 'MOCK',
+    }]);
   });
 
   it('satisfies an open obligation on verified success after prior failure without refund case', () => {

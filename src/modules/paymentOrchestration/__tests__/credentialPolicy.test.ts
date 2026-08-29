@@ -51,7 +51,7 @@ describe('decideCredentialUse', () => {
           forceUnknownIfUnresolved: true,
           requireReview: true,
           preserveProviderLock: true,
-          securityAlert: false,
+          securityAlert: true,
         },
       );
     }
@@ -66,7 +66,7 @@ describe('decideCredentialUse', () => {
         forceUnknownIfUnresolved: true,
         requireReview: true,
         preserveProviderLock: true,
-        securityAlert: false,
+        securityAlert: true,
       },
     );
 
@@ -78,7 +78,7 @@ describe('decideCredentialUse', () => {
         forceUnknownIfUnresolved: true,
         requireReview: true,
         preserveProviderLock: true,
-        securityAlert: false,
+        securityAlert: true,
       },
     );
 
@@ -90,7 +90,7 @@ describe('decideCredentialUse', () => {
         forceUnknownIfUnresolved: true,
         requireReview: true,
         preserveProviderLock: true,
-        securityAlert: false,
+        securityAlert: true,
       },
     );
   });

@@ -1,5 +1,12 @@
 import { createHash } from 'node:crypto';
-import { PrismaClient, type CollectionRail, type PaymentAttempt, type PaymentObligation, type ProviderObservation } from '@prisma/client';
+import {
+  Prisma,
+  PrismaClient,
+  type CollectionRail,
+  type PaymentAttempt,
+  type PaymentObligation,
+  type ProviderObservation,
+} from '@prisma/client';
 import { reduceEvidence } from './reducer.js';
 import { persistReduction } from './reductionPersistence.js';
 import type {
@@ -15,7 +22,9 @@ import type {
 import type {
   SlaEscalationRequest,
   SlaEscalationResult,
+  CredentialDenialPersistenceRequest,
 } from './reconciliationWorker.js';
+import type { ProviderSecurityRejectionEvidence } from './adapters/providerAdapter.js';
 
 type Tx = Parameters<PrismaClient['$transaction']>[0] extends (tx: infer T) => unknown ? T : never;
 
@@ -43,7 +52,15 @@ type AttemptSnapshot = ReduceEvidenceInput['attempts'][number] & {
   createdAt: Date;
 };
 
-const PERSISTED_PROVIDER_API_VERSION = 'persisted-unavailable';
+type PersistedObservationRow = Omit<
+  ProviderObservation,
+  'hashAlgorithm' | 'bindingVerification'
+> & {
+  hashAlgorithm: string;
+  bindingVerification: string;
+  mappedOutcome: string;
+  providerApiVersion: string;
+};
 
 interface IngestObservationOptions {
   mutationBoundary?: ShadowMutationBoundary | undefined;
@@ -91,18 +108,29 @@ export async function ingestObservation(
       targetAttemptId: candidate.attemptId,
       attempts: context.attempts.map(toReducerAttempt),
       observations: context.observations,
+      triggeringObservationId: appended.observationId,
+      triggeringObservationIsNew: appended.kind !== 'DUPLICATE_DELIVERY',
     });
 
     await persistReduction(tx, context, plan);
 
+    const persistedAttempt = await tx.paymentAttempt.findFirst({
+      where: {
+        id: context.targetAttempt.id,
+        obligationId: context.obligation.id,
+        merchantId: context.obligation.merchantId,
+      },
+    });
+    if (!persistedAttempt) {
+      throw new Error('ATTEMPT_NOT_FOUND_AFTER_REDUCTION');
+    }
+
     return {
       observationId: appended.observationId,
       disposition: plan.disposition,
-      outcomeStatus: plan.outcomeStatus,
-      reviewStatus: plan.reviewStatus,
-      resolvedAt: plan.resolved
-        ? context.targetAttempt.resolvedAt ?? effectiveObservationTime(context.triggeringObservation)
-        : null,
+      outcomeStatus: persistedAttempt.outcomeStatus,
+      reviewStatus: persistedAttempt.reviewStatus,
+      resolvedAt: persistedAttempt.resolvedAt,
     };
   });
 }
@@ -194,6 +222,136 @@ export async function persistSlaEscalation(
   });
 }
 
+/**
+ * Atomically records rejected provider evidence and queues its security alert.
+ * The row contains only canonical identifiers and the body digest—never raw
+ * bytes, headers, contact fields, or credential material.
+ */
+export async function persistProviderSecurityRejection(
+  prisma: PrismaClient,
+  evidence: ProviderSecurityRejectionEvidence,
+): Promise<void> {
+  const alertDedupeKey = sha256([
+    'pgo1:provider-security-rejection',
+    evidence.provider,
+    evidence.environment,
+    evidence.source,
+    evidence.reason,
+    evidence.rawBodyHash,
+    evidence.attemptId ?? '-',
+  ].join(':'));
+  const id = `pgo1_rejection_${alertDedupeKey}`;
+
+  await prisma.$executeRaw`
+    INSERT INTO "ProviderObservationRejection" (
+      "id", "provider", "environment", "source", "reason",
+      "merchantId", "obligationId", "attemptId", "credentialBindingId",
+      "rawBodyHash", "hashAlgorithm", "signatureVerification", "bindingVerification",
+      "adapterVersion", "mappingVersion", "providerApiVersion", "detectedAt",
+      "securityAlertCode", "securityAlertStatus", "alertDedupeKey", "createdAt"
+    ) VALUES (
+      ${id}, ${evidence.provider}::"PaymentProvider",
+      ${evidence.environment}::"ProviderEnvironment",
+      ${evidence.source}::"ProviderObservationSource", ${evidence.reason},
+      ${evidence.merchantId}, ${evidence.obligationId}, ${evidence.attemptId},
+      ${evidence.credentialBindingId}, ${evidence.rawBodyHash},
+      ${evidence.hashAlgorithm}::"ObservationHashAlgorithm",
+      ${evidence.signatureVerification}::"SignatureVerification",
+      ${evidence.bindingVerification}::"BindingVerification",
+      ${evidence.adapterVersion}, ${evidence.mappingVersion}, ${evidence.providerApiVersion},
+      ${evidence.detectedAt}, ${evidence.securityAlertCode}, 'PENDING',
+      ${alertDedupeKey}, CURRENT_TIMESTAMP
+    )
+    ON CONFLICT ("alertDedupeKey") DO NOTHING
+  `;
+}
+
+export async function persistCredentialUseDenial(
+  prisma: PrismaClient,
+  input: CredentialDenialPersistenceRequest,
+): Promise<void> {
+  await prisma.$transaction(async (tx) => {
+    await lockObligation(tx, input.obligationId, input.merchantId);
+    await lockAttemptsForObligation(tx, input.obligationId, input.merchantId);
+    const attempt = await tx.paymentAttempt.findFirst({
+      where: {
+        id: input.attemptId,
+        obligationId: input.obligationId,
+        merchantId: input.merchantId,
+        resolvedAt: null,
+      },
+    });
+    if (!attempt) return;
+
+    const nextOutcomeStatus = 'UNKNOWN' as const;
+    const nextReviewStatus = attempt.reviewStatus === 'IN_PROGRESS' ? 'IN_PROGRESS' as const : 'REQUIRED' as const;
+    const outcomeChanged = attempt.outcomeStatus !== nextOutcomeStatus;
+    const reviewChanged = attempt.reviewStatus !== nextReviewStatus;
+    await tx.paymentAttempt.update({
+      where: { id: attempt.id },
+      data: {
+        outcomeStatus: nextOutcomeStatus,
+        reviewStatus: nextReviewStatus,
+        resolvedAt: null,
+        lastOutcomeChangedAt: outcomeChanged ? input.observedAt : attempt.lastOutcomeChangedAt,
+      },
+    });
+
+    if (outcomeChanged) {
+      await tx.paymentOutcomeTransition.create({
+        data: {
+          attemptId: attempt.id,
+          obligationId: attempt.obligationId,
+          merchantId: attempt.merchantId,
+          priorOutcomeStatus: attempt.outcomeStatus,
+          nextOutcomeStatus,
+          reasonCode: input.reason,
+          triggeringObservationId: null,
+        },
+      });
+    }
+    if (reviewChanged) {
+      await tx.reconciliationReviewHistory.create({
+        data: {
+          attemptId: attempt.id,
+          obligationId: attempt.obligationId,
+          merchantId: attempt.merchantId,
+          priorReviewStatus: attempt.reviewStatus,
+          nextReviewStatus,
+          completedByType: null,
+          actorId: null,
+          reasonCode: input.reason,
+          triggeringObservationId: null,
+          evidenceReferenceIds: [],
+          correlationId: null,
+        },
+      });
+    }
+
+    const priorAlert = await tx.paymentAttentionSignal.findFirst({
+      where: {
+        attemptId: attempt.id,
+        obligationId: attempt.obligationId,
+        merchantId: attempt.merchantId,
+        signalCode: 'CREDENTIAL_SECURITY_ALERT',
+        observationId: null,
+      },
+    });
+    if (!priorAlert) {
+      await tx.paymentAttentionSignal.create({
+        data: {
+          attemptId: attempt.id,
+          obligationId: attempt.obligationId,
+          merchantId: attempt.merchantId,
+          signalCode: 'CREDENTIAL_SECURITY_ALERT',
+          observationId: null,
+          detail: { reason: input.reason, providerLockPreserved: true },
+        },
+      });
+    }
+  });
+}
+
 async function lockObligation(tx: Tx, obligationId: string, merchantId: string) {
   const rows = await tx.$queryRaw<Array<{ id: string }>>`
     SELECT "id"
@@ -229,14 +387,17 @@ async function appendOrClassifyObservation(
   candidate: ObservationCandidate,
 ): Promise<ObservationAppendResult> {
   const eventMatches = candidate.providerEventId
-    ? await tx.providerObservation.findMany({
-        where: {
-          merchantId: candidate.merchantId,
-          obligationId: candidate.obligationId,
-          providerEventId: candidate.providerEventId,
-        },
-        orderBy: [{ createdAt: 'asc' }, { id: 'asc' }],
-      })
+    ? await tx.$queryRaw<PersistedObservationRow[]>`
+        SELECT *
+        FROM "ProviderObservation"
+        WHERE "merchantId" = ${candidate.merchantId}
+          AND "obligationId" = ${candidate.obligationId}
+          AND "attemptId" = ${candidate.attemptId}
+          AND "provider"::text = ${candidate.provider}
+          AND "environment"::text = ${candidate.environment}
+          AND "providerEventId" = ${candidate.providerEventId}
+        ORDER BY "createdAt" ASC, "id" ASC
+      `
     : null;
   const exactHashMatch = eventMatches?.find((observation) => observation.rawBodyHash === candidate.rawBodyHash) ?? null;
   const hasEventConflict = (eventMatches?.length ?? 0) > 0;
@@ -246,7 +407,7 @@ async function appendOrClassifyObservation(
     return {
       kind: 'DUPLICATE_DELIVERY',
       observationId: exactHashMatch.id,
-      observation: persistedObservationToCanonical(exactHashMatch),
+      observation: providerObservationRowToCanonical(exactHashMatch),
     };
   }
 
@@ -271,18 +432,23 @@ async function appendOrClassifyObservation(
       nativeCurrency: candidate.nativeCurrency,
       amountPaise: candidate.amountPaise,
       rawBodyHash: candidate.rawBodyHash,
-      hashAlgorithm: candidate.hashAlgorithm,
+      // Prisma exposes the enum member name; PostgreSQL stores its mapped
+      // canonical label (`SHA-256`). Raw reloads therefore still validate
+      // against the frozen canonical value below.
+      hashAlgorithm: 'SHA_256',
       signatureVerification: candidate.signatureVerification,
       bindingVerification: candidate.bindingVerification,
       evidenceAuthority: candidate.evidenceAuthority,
+      mappedOutcome: candidate.mappedOutcome,
       adapterVersion: candidate.adapterVersion,
       mappingVersion: candidate.mappingVersion,
+      providerApiVersion: candidate.providerApiVersion,
       providerOccurredAt: candidate.providerOccurredAt,
       receivedAt: candidate.receivedAt,
       reductionDisposition,
       observationDedupeKey: observationDedupeKey(candidate),
-    },
-  });
+    } as Prisma.ProviderObservationUncheckedCreateInput,
+  }) as PersistedObservationRow;
 
   await createDelivery(tx, observationRow, candidate);
 
@@ -299,7 +465,10 @@ async function appendOrClassifyObservation(
 
 async function createDelivery(
   tx: Tx,
-  observation: ProviderObservation,
+  observation: Pick<
+    ProviderObservation,
+    'id' | 'merchantId' | 'attemptId' | 'obligationId'
+  >,
   candidate: ObservationCandidate,
 ) {
   await tx.providerObservationDelivery.create({
@@ -324,15 +493,15 @@ async function loadReductionContext(
   appended: ObservationAppendResult,
   options: IngestObservationOptions,
 ): Promise<ReductionPersistenceContext> {
-  const observationRows = await tx.providerObservation.findMany({
-    where: {
-      merchantId: obligation.merchantId,
-      obligationId: obligation.id,
-    },
-    orderBy: [{ createdAt: 'asc' }, { id: 'asc' }],
-  });
+  const observationRows = await tx.$queryRaw<PersistedObservationRow[]>`
+    SELECT *
+    FROM "ProviderObservation"
+    WHERE "merchantId" = ${obligation.merchantId}
+      AND "obligationId" = ${obligation.id}
+    ORDER BY "createdAt" ASC, "id" ASC
+  `;
   const observations = observationRows.map((row) =>
-    row.id === appended.observationId ? appended.observation : persistedObservationToCanonical(row),
+    row.id === appended.observationId ? appended.observation : providerObservationRowToCanonical(row),
   );
   const targetAttempt = attempts.find((attempt) => attempt.id === targetAttemptId);
   if (!targetAttempt) {
@@ -379,7 +548,27 @@ function toReducerAttempt(attempt: AttemptSnapshot): ReduceEvidenceInput['attemp
   };
 }
 
-function persistedObservationToCanonical(observation: ProviderObservation): CanonicalObservation {
+export function providerObservationRowToCanonical(value: unknown): CanonicalObservation {
+  const observation = value as PersistedObservationRow;
+  if (observation.hashAlgorithm !== 'SHA-256') {
+    throw new Error('INVALID_PERSISTED_HASH_ALGORITHM');
+  }
+  if (!isSignatureVerification(observation.signatureVerification)) {
+    throw new Error('INVALID_PERSISTED_SIGNATURE_VERIFICATION');
+  }
+  if (observation.bindingVerification !== 'VERIFIED' && observation.bindingVerification !== 'FAILED') {
+    throw new Error('INVALID_PERSISTED_BINDING_VERIFICATION');
+  }
+  if (!isEvidenceAuthority(observation.evidenceAuthority)) {
+    throw new Error('INVALID_PERSISTED_EVIDENCE_AUTHORITY');
+  }
+  if (!isMappedOutcome(observation.mappedOutcome)) {
+    throw new Error('INVALID_PERSISTED_MAPPED_OUTCOME');
+  }
+  if (typeof observation.providerApiVersion !== 'string' || observation.providerApiVersion.trim() === '') {
+    throw new Error('INVALID_PERSISTED_PROVIDER_API_VERSION');
+  }
+
   return {
     id: observation.id,
     attemptId: observation.attemptId,
@@ -399,61 +588,66 @@ function persistedObservationToCanonical(observation: ProviderObservation): Cano
     nativeAmountText: observation.nativeAmountText,
     nativeCurrency: observation.nativeCurrency,
     rawBodyHash: observation.rawBodyHash,
-    hashAlgorithm: normalizeHashAlgorithm(observation.hashAlgorithm),
+    hashAlgorithm: observation.hashAlgorithm,
     signatureVerification: observation.signatureVerification,
-    bindingVerification: normalizeBindingVerification(observation.bindingVerification),
+    bindingVerification: observation.bindingVerification,
     evidenceAuthority: observation.evidenceAuthority,
-    mappedOutcome: mappedOutcomeFromDisposition(observation.reductionDisposition),
+    mappedOutcome: observation.mappedOutcome,
     adapterVersion: observation.adapterVersion,
     mappingVersion: observation.mappingVersion,
-    providerApiVersion: PERSISTED_PROVIDER_API_VERSION,
+    providerApiVersion: observation.providerApiVersion,
     providerOccurredAt: observation.providerOccurredAt,
     receivedAt: observation.receivedAt,
     reductionDisposition: observation.reductionDisposition,
   };
 }
 
-function mappedOutcomeFromDisposition(disposition: string): CanonicalObservation['mappedOutcome'] {
-  switch (disposition) {
-    case 'SUCCEEDED':
-    case 'CONTRADICTORY_EVIDENCE':
-    case 'DOUBLE_SUCCESS_DETECTED':
-    case 'LATE_SUCCESS_AFTER_CLOSURE':
-      return 'SUCCEEDED';
-    case 'TERMINAL_FAILURE':
-      return 'FAILED_TERMINAL';
-    case 'NOT_FOUND_TERMINAL':
-      return 'NOT_FOUND_TERMINAL';
-    case 'UNKNOWN':
-      return 'UNKNOWN';
-    case 'MAPPING_GAP':
-      return 'UNMAPPED';
-    case 'PENDING':
-    case 'INTEGRITY_CONFLICT':
-    case 'INTEGRITY_CONFLICT_POST_RESOLUTION':
-    default:
-      return 'PENDING';
-  }
+function isMappedOutcome(value: string): value is CanonicalObservation['mappedOutcome'] {
+  return (
+    value === 'PENDING' ||
+    value === 'UNKNOWN' ||
+    value === 'SUCCEEDED' ||
+    value === 'FAILED_TERMINAL' ||
+    value === 'NOT_FOUND_TERMINAL' ||
+    value === 'UNMAPPED'
+  );
 }
 
-function normalizeHashAlgorithm(hashAlgorithm: string): CanonicalObservation['hashAlgorithm'] {
-  return hashAlgorithm === 'SHA-256' ? 'SHA-256' : 'SHA-256';
+function isSignatureVerification(value: unknown): value is CanonicalObservation['signatureVerification'] {
+  return (
+    value === 'VERIFIED' ||
+    value === 'FAILED' ||
+    value === 'NOT_APPLICABLE' ||
+    value === 'UNAVAILABLE'
+  );
 }
 
-function normalizeBindingVerification(value: string): CanonicalObservation['bindingVerification'] {
-  return value === 'FAILED' ? 'FAILED' : 'VERIFIED';
+function isEvidenceAuthority(value: unknown): value is CanonicalObservation['evidenceAuthority'] {
+  return value === 'ELIGIBLE' || value === 'ACTIVATION_GATED' || value === 'INELIGIBLE';
 }
 
 function observationDedupeKey(candidate: ObservationCandidate) {
   return sha256(
-    `pgo1:observation:${candidate.merchantId}:${candidate.obligationId}:${candidate.attemptId}:${candidate.provider}:${candidate.environment}:${candidate.providerEventId ?? candidate.id}:${candidate.rawBodyHash}`,
+    `pgo1:observation:${providerEventIdentity(candidate)}:${candidate.rawBodyHash}`,
   );
+}
+
+export function providerEventIdentity(
+  candidate: Pick<
+    ObservationCandidate,
+    'merchantId' | 'obligationId' | 'attemptId' | 'provider' | 'environment' | 'providerEventId' | 'id'
+  >,
+) {
+  return [
+    candidate.merchantId,
+    candidate.obligationId,
+    candidate.provider,
+    candidate.environment,
+    candidate.attemptId,
+    candidate.providerEventId ?? candidate.id,
+  ].join(':');
 }
 
 function sha256(value: string) {
   return createHash('sha256').update(value).digest('hex');
-}
-
-function effectiveObservationTime(observation: CanonicalObservation) {
-  return observation.providerOccurredAt ?? observation.receivedAt;
 }

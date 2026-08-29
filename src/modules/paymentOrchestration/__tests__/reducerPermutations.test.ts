@@ -74,6 +74,8 @@ function buildInput(observations: CanonicalObservation[], attempts?: ReduceEvide
     targetAttemptId: resolvedAttempts[0]!.id,
     attempts: resolvedAttempts,
     observations,
+    triggeringObservationId: observations.at(-1)?.id ?? null,
+    triggeringObservationIsNew: true,
   };
 }
 
@@ -96,6 +98,11 @@ function semantic(plan: ReductionPlan) {
   return {
     ...plan,
     factTypes: [...plan.factTypes].sort(),
+    factEmissions: [...plan.factEmissions].sort((left, right) =>
+      `${left.factType}:${left.sourceAttemptId}:${left.sourceObservationId}`.localeCompare(
+        `${right.factType}:${right.sourceAttemptId}:${right.sourceObservationId}`,
+      ),
+    ),
     refundDue: [...plan.refundDue].sort((left, right) =>
       `${left.providerTransactionRef}:${left.reason}:${left.sourceAttemptId}:${left.sourceObservationId}`.localeCompare(
         `${right.providerTransactionRef}:${right.reason}:${right.sourceAttemptId}:${right.sourceObservationId}`,

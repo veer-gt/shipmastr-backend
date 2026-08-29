@@ -1,10 +1,15 @@
 import assert from 'node:assert/strict';
-import { after, before, beforeEach, describe, it } from 'node:test';
+import { after, afterEach, before, beforeEach, describe, it } from 'node:test';
 import { PrismaClient } from '@prisma/client';
-import { ingestObservation, persistSlaEscalation } from '../observationService.js';
+import {
+  ingestObservation,
+  persistCredentialUseDenial,
+  persistProviderSecurityRejection,
+  persistSlaEscalation,
+} from '../observationService.js';
 import { ingestRawObservation } from '../observationIngestor.js';
 import {
-  MOCK_RECONCILIATION_POLICY_V1,
+  createMockReconciliationPolicy,
   reconciliationWorker,
   type CredentialUseInputResolver,
   type Clock,
@@ -12,13 +17,16 @@ import {
   type PendingReadOnlyQueryRequest,
   type ReadOnlyQueryConsumptionRecord,
 } from '../reconciliationWorker.js';
-import { mockAdapter } from '../adapters/mockAdapter.js';
+import { mockAdapter, mockProviderOrderRef } from '../adapters/mockAdapter.js';
 import type { MockStatusQueryInput } from '../adapters/providerAdapter.js';
+import { persistProviderPolicyDecision } from '../policyAudit.js';
 import { claimReview, requestReadOnlyQuery } from '../reviewService.js';
 import { expectedScratchDatabaseNameFromEnv } from './scratchDatabaseGuard.js';
+import { createPaymentPostgresNamespace } from './postgresTestNamespace.js';
 
 const enabled = process.env.RUN_PGO1_POSTGRES_TESTS === '1';
 const prisma = new PrismaClient();
+const namespace = createPaymentPostgresNamespace('reconciliation_worker');
 
 interface MutableClock extends Clock {
   advanceBy(deltaMs: number): void;
@@ -34,19 +42,6 @@ function virtualClock(initialEpochMs: number): MutableClock {
       nowMs += deltaMs;
     },
   };
-}
-
-async function clearPaymentTables() {
-  await prisma.providerObservationInterpretation.deleteMany();
-  await prisma.providerObservationDelivery.deleteMany();
-  await prisma.paymentNormalizedFactOutbox.deleteMany();
-  await prisma.refundDueCase.deleteMany();
-  await prisma.paymentAttentionSignal.deleteMany();
-  await prisma.reconciliationReviewHistory.deleteMany();
-  await prisma.paymentOutcomeTransition.deleteMany();
-  await prisma.providerObservation.deleteMany();
-  await prisma.paymentAttempt.deleteMany();
-  await prisma.paymentObligation.deleteMany();
 }
 
 function decodeReviewPayload(value: unknown): { references: string[]; note: string | null } {
@@ -71,7 +66,10 @@ function decodeReviewPayload(value: unknown): { references: string[]; note: stri
 
 async function listPendingReadOnlyQueryRequests(): Promise<PendingReadOnlyQueryRequest[]> {
   const rows = await prisma.reconciliationReviewHistory.findMany({
-    where: { reasonCode: 'READ_ONLY_QUERY_REQUESTED' },
+    where: {
+      merchantId: { startsWith: namespace.prefix },
+      reasonCode: 'READ_ONLY_QUERY_REQUESTED',
+    },
     orderBy: [{ createdAt: 'asc' }, { id: 'asc' }],
   });
 
@@ -253,7 +251,11 @@ if (enabled) {
     });
 
     beforeEach(async () => {
-      await clearPaymentTables();
+      await namespace.assertEmpty(prisma);
+    });
+
+    afterEach(async () => {
+      await namespace.cleanup(prisma);
     });
 
     after(async () => {
@@ -262,14 +264,15 @@ if (enabled) {
 
     it('uses the persisted attempt shape and routes worker SLA escalation through Task 5 persistence', async () => {
       const clock = virtualClock(0);
-      const merchantId = 'merchant_worker_integration';
-      const obligationId = 'obligation_worker_integration';
-      const attemptId = 'attempt_worker_integration';
+      const merchantId = namespace.id('merchant_worker_integration');
+      const policy = createMockReconciliationPolicy(merchantId);
+      const obligationId = namespace.id('obligation_worker_integration');
+      const attemptId = namespace.id('attempt_worker_integration');
       const obligation = await prisma.paymentObligation.create({
         data: {
           id: obligationId,
           merchantId,
-          checkoutId: 'checkout_worker_integration',
+          checkoutId: namespace.id('checkout_worker_integration'),
           collectionRail: 'ONLINE',
           purpose: 'FULL_ONLINE',
           amountPaise: 10_000n,
@@ -286,10 +289,10 @@ if (enabled) {
           obligationCollectionRail: obligation.collectionRail,
           provider: 'MOCK',
           environment: 'TEST',
-          credentialBindingId: 'binding_worker_integration',
-          credentialVersionId: 'credential_worker_integration',
-          requestIdempotencyKey: 'request_worker_integration',
-          providerOrderRef: 'mock_order_obligation_worker_integration_attempt_worker_integration',
+          credentialBindingId: namespace.id('binding_worker_integration'),
+          credentialVersionId: namespace.id('credential_worker_integration'),
+          requestIdempotencyKey: namespace.id('request_worker_integration'),
+          providerOrderRef: mockProviderOrderRef(obligationId, attemptId),
           outcomeStatus: 'PENDING',
           reviewStatus: 'NOT_REQUIRED',
           resolvedAt: null,
@@ -303,7 +306,7 @@ if (enabled) {
 
       const worker = reconciliationWorker({
         clock,
-        policy: MOCK_RECONCILIATION_POLICY_V1,
+        policy,
         getReconciliationState: async (): Promise<DerivedReconciliationState> => {
           const observations = await prisma.providerObservation.findMany({
             where: { attemptId },
@@ -325,16 +328,20 @@ if (enabled) {
           parser: mockAdapter,
           ingestionMode: 'MOCK_EXECUTABLE',
           retentionDecision: 'MOCK_SYNTHETIC',
-          nextObservationId: () => 'observation_worker_integration',
+          environment: 'TEST',
+          source: 'MOCK',
+          securityContext: { merchantId, obligationId, attemptId, credentialBindingId: namespace.id('binding_worker_integration') },
+          nextObservationId: () => namespace.id('observation_worker_integration'),
           resolveBinding: async () => ({
             attemptId,
             obligationId,
             merchantId,
-            credentialBindingId: 'binding_worker_integration',
-            credentialVersionId: 'credential_worker_integration',
+            credentialBindingId: namespace.id('binding_worker_integration'),
+            credentialVersionId: namespace.id('credential_worker_integration'),
             bindingVerification: 'VERIFIED' as const,
           }),
           verify: async () => 'NOT_APPLICABLE' as const,
+          persistSecurityRejection: (evidence) => persistProviderSecurityRejection(prisma, evidence),
           persist: (candidate) => ingestObservation(prisma, candidate),
         }, input),
         buildCredentialUseInput: async (attempt) => ({
@@ -350,6 +357,8 @@ if (enabled) {
           credentialState: 'ACTIVE',
           operation: 'STATUS_QUERY',
         }),
+        persistCredentialDenial: (input) => persistCredentialUseDenial(prisma, input),
+        persistPolicyDecision: (input) => persistProviderPolicyDecision(prisma, input),
         persistSlaEscalation: (input) => persistSlaEscalation(prisma, input),
         listUnresolvedAttempts: () => prisma.paymentAttempt.findMany({
           where: { obligationId, merchantId, resolvedAt: null },
@@ -358,17 +367,17 @@ if (enabled) {
       });
 
       assert.deepEqual(await worker.runOnce(), [{ kind: 'NOT_DUE' }]);
-      clock.advanceBy(MOCK_RECONCILIATION_POLICY_V1.slaMs);
+      clock.advanceBy(policy.slaMs);
       assert.deepEqual(await worker.runOnce(), [{
         kind: 'OBSERVATION_INGESTED',
-        observationId: 'observation_worker_integration',
+        observationId: namespace.id('observation_worker_integration'),
       }]);
 
       const persisted = await prisma.paymentAttempt.findUniqueOrThrow({ where: { id: attemptId } });
       assert.equal(persisted.outcomeStatus, 'UNKNOWN');
       assert.equal(persisted.reviewStatus, 'REQUIRED');
       assert.equal(persisted.resolvedAt, null);
-      assert.equal(persisted.lastObservationAt?.getTime(), MOCK_RECONCILIATION_POLICY_V1.slaMs);
+      assert.equal(persisted.lastObservationAt?.getTime(), policy.slaMs);
       assert.deepEqual(
         await prisma.paymentOutcomeTransition.count({ where: { attemptId } }),
         1,
@@ -377,18 +386,105 @@ if (enabled) {
         await prisma.reconciliationReviewHistory.count({ where: { attemptId } }),
         1,
       );
+      const policyAudits = await prisma.providerPolicyDecisionAudit.findMany({
+        where: { merchantId, attemptId },
+        orderBy: [{ evaluatedAt: 'asc' }, { id: 'asc' }],
+      });
+      assert.deepEqual(policyAudits.map((row) => row.decision), ['NO_EXECUTION', 'ENABLED']);
+      assert.ok(policyAudits.every((row) =>
+        row.provider === 'MOCK' &&
+        row.environment === 'TEST' &&
+        row.operation === 'STATUS_QUERY' &&
+        row.policyVersion === policy.version &&
+        row.approvedAt !== null &&
+        row.effectiveFrom !== null &&
+        row.effectiveUntil !== null &&
+        row.timing !== null,
+      ));
     });
 
-    it('consumes a durable read-only query request from review history and uses explicit credential policy input without changing payment state', async () => {
-      const clock = virtualClock(0);
-      const merchantId = 'merchant_worker_manual_request';
-      const obligationId = 'obligation_worker_manual_request';
-      const attemptId = 'attempt_worker_manual_request';
+    it('durably fails closed on credential denial while preserving the provider lock', async () => {
+      const merchantId = namespace.id('merchant_credential_denial');
+      const obligationId = namespace.id('obligation_credential_denial');
+      const attemptId = namespace.id('attempt_credential_denial');
+      const credentialBindingId = namespace.id('binding_credential_denial');
       const obligation = await prisma.paymentObligation.create({
         data: {
           id: obligationId,
           merchantId,
-          checkoutId: 'checkout_worker_manual_request',
+          checkoutId: namespace.id('checkout_credential_denial'),
+          collectionRail: 'ONLINE',
+          purpose: 'FULL_ONLINE',
+          amountPaise: 10_000n,
+          currency: 'INR',
+          status: 'OPEN',
+          satisfiedAt: null,
+        },
+      });
+      await prisma.paymentAttempt.create({
+        data: {
+          id: attemptId,
+          obligationId,
+          merchantId,
+          obligationCollectionRail: obligation.collectionRail,
+          provider: 'MOCK',
+          environment: 'TEST',
+          credentialBindingId,
+          credentialVersionId: namespace.id('credential_version_denied'),
+          requestIdempotencyKey: namespace.id('request_credential_denied'),
+          providerOrderRef: mockProviderOrderRef(obligationId, attemptId),
+          outcomeStatus: 'PENDING',
+          reviewStatus: 'NOT_REQUIRED',
+          resolvedAt: null,
+          lastOutcomeChangedAt: new Date(0),
+          lastObservationAt: null,
+          adapterVersion: mockAdapter.adapterVersion,
+          mappingVersion: mockAdapter.mappingVersion,
+        },
+      });
+
+      await persistCredentialUseDenial(prisma, {
+        merchantId,
+        obligationId,
+        attemptId,
+        observedAt: new Date(1_000),
+        reason: 'CREDENTIAL_NOT_ACTIVE',
+        forceUnknownIfUnresolved: true,
+        requireReview: true,
+        preserveProviderLock: true,
+        securityAlert: true,
+      });
+
+      assert.partialDeepStrictEqual(
+        await prisma.paymentAttempt.findUniqueOrThrow({ where: { id: attemptId } }),
+        {
+          provider: 'MOCK',
+          environment: 'TEST',
+          credentialBindingId,
+          outcomeStatus: 'UNKNOWN',
+          reviewStatus: 'REQUIRED',
+          resolvedAt: null,
+        },
+      );
+      assert.partialDeepStrictEqual(
+        await prisma.paymentAttentionSignal.findFirstOrThrow({
+          where: { merchantId, obligationId, attemptId, signalCode: 'CREDENTIAL_SECURITY_ALERT' },
+        }),
+        { observationId: null },
+      );
+    });
+
+    it('consumes a durable read-only query request from review history and uses explicit credential policy input without changing payment state', async () => {
+      const clock = virtualClock(0);
+      const merchantId = namespace.id('merchant_worker_manual_request');
+      const policy = createMockReconciliationPolicy(merchantId);
+      const obligationId = namespace.id('obligation_worker_manual_request');
+      const attemptId = namespace.id('attempt_worker_manual_request');
+      const obligation = await prisma.paymentObligation.create({
+        data: {
+          id: obligationId,
+          merchantId,
+          checkoutId: namespace.id('checkout_worker_manual_request'),
           collectionRail: 'ONLINE',
           purpose: 'FULL_ONLINE',
           amountPaise: 10_000n,
@@ -405,10 +501,10 @@ if (enabled) {
           obligationCollectionRail: obligation.collectionRail,
           provider: 'MOCK',
           environment: 'TEST',
-          credentialBindingId: 'binding_worker_manual_request',
-          credentialVersionId: 'credential_worker_manual_request',
-          requestIdempotencyKey: 'request_worker_manual_request',
-          providerOrderRef: 'mock_order_obligation_worker_manual_request_attempt_worker_manual_request',
+          credentialBindingId: namespace.id('binding_worker_manual_request'),
+          credentialVersionId: namespace.id('credential_worker_manual_request'),
+          requestIdempotencyKey: namespace.id('request_worker_manual_request'),
+          providerOrderRef: mockProviderOrderRef(obligationId, attemptId),
           outcomeStatus: 'PENDING',
           reviewStatus: 'REQUIRED',
           resolvedAt: null,
@@ -436,7 +532,7 @@ if (enabled) {
 
       const worker = reconciliationWorker({
         clock,
-        policy: MOCK_RECONCILIATION_POLICY_V1,
+        policy,
         getReconciliationState: async (): Promise<DerivedReconciliationState> => {
           const observations = await prisma.providerObservation.findMany({
             where: { attemptId },
@@ -474,18 +570,24 @@ if (enabled) {
           parser: mockAdapter,
           ingestionMode: 'MOCK_EXECUTABLE',
           retentionDecision: 'MOCK_SYNTHETIC',
-          nextObservationId: () => 'observation_worker_manual_request',
+          environment: 'TEST',
+          source: 'MOCK',
+          securityContext: { merchantId, obligationId, attemptId, credentialBindingId: namespace.id('binding_worker_manual_request') },
+          nextObservationId: () => namespace.id('observation_worker_manual_request'),
           resolveBinding: async () => ({
             attemptId,
             obligationId,
             merchantId,
-            credentialBindingId: 'binding_worker_manual_request',
-            credentialVersionId: 'credential_worker_manual_request',
+            credentialBindingId: namespace.id('binding_worker_manual_request'),
+            credentialVersionId: namespace.id('credential_worker_manual_request'),
             bindingVerification: 'VERIFIED' as const,
           }),
           verify: async () => 'NOT_APPLICABLE' as const,
+          persistSecurityRejection: (evidence) => persistProviderSecurityRejection(prisma, evidence),
           persist: (candidate) => ingestObservation(prisma, candidate),
         }, input),
+        persistCredentialDenial: (input) => persistCredentialUseDenial(prisma, input),
+        persistPolicyDecision: (input) => persistProviderPolicyDecision(prisma, input),
         persistSlaEscalation: (input) => persistSlaEscalation(prisma, input),
         listRequestedReadOnlyQueries: listPendingReadOnlyQueryRequests,
         claimReadOnlyQueryRequest,
@@ -498,7 +600,7 @@ if (enabled) {
 
       assert.deepEqual(await worker.runOnce(), [{
         kind: 'OBSERVATION_INGESTED',
-        observationId: 'observation_worker_manual_request',
+        observationId: namespace.id('observation_worker_manual_request'),
       }]);
 
       assert.deepEqual(seenCredentialInput, {
@@ -508,8 +610,8 @@ if (enabled) {
         requestedProvider: 'MOCK',
         originalEnvironment: 'TEST',
         requestedEnvironment: 'TEST',
-        originalBindingId: 'binding_worker_manual_request',
-        requestedBindingId: 'binding_worker_manual_request',
+        originalBindingId: namespace.id('binding_worker_manual_request'),
+        requestedBindingId: namespace.id('binding_worker_manual_request'),
         continuity: 'PROVEN_SAME_ACCOUNT',
         credentialState: 'ACTIVE',
         operation: 'STATUS_QUERY',
@@ -557,14 +659,15 @@ if (enabled) {
 
     it('atomically claims durable read-only query requests so concurrent workers execute exactly one query', async () => {
       const clock = virtualClock(0);
-      const merchantId = 'merchant_worker_manual_request_race';
-      const obligationId = 'obligation_worker_manual_request_race';
-      const attemptId = 'attempt_worker_manual_request_race';
+      const merchantId = namespace.id('merchant_worker_manual_request_race');
+      const policy = createMockReconciliationPolicy(merchantId);
+      const obligationId = namespace.id('obligation_worker_manual_request_race');
+      const attemptId = namespace.id('attempt_worker_manual_request_race');
       const obligation = await prisma.paymentObligation.create({
         data: {
           id: obligationId,
           merchantId,
-          checkoutId: 'checkout_worker_manual_request_race',
+          checkoutId: namespace.id('checkout_worker_manual_request_race'),
           collectionRail: 'ONLINE',
           purpose: 'FULL_ONLINE',
           amountPaise: 10_000n,
@@ -581,10 +684,10 @@ if (enabled) {
           obligationCollectionRail: obligation.collectionRail,
           provider: 'MOCK',
           environment: 'TEST',
-          credentialBindingId: 'binding_worker_manual_request_race',
-          credentialVersionId: 'credential_worker_manual_request_race',
-          requestIdempotencyKey: 'request_worker_manual_request_race',
-          providerOrderRef: 'mock_order_obligation_worker_manual_request_race_attempt_worker_manual_request_race',
+          credentialBindingId: namespace.id('binding_worker_manual_request_race'),
+          credentialVersionId: namespace.id('credential_worker_manual_request_race'),
+          requestIdempotencyKey: namespace.id('request_worker_manual_request_race'),
+          providerOrderRef: mockProviderOrderRef(obligationId, attemptId),
           outcomeStatus: 'PENDING',
           reviewStatus: 'REQUIRED',
           resolvedAt: null,
@@ -626,7 +729,7 @@ if (enabled) {
 
       const worker = reconciliationWorker({
         clock,
-        policy: MOCK_RECONCILIATION_POLICY_V1,
+        policy,
         getReconciliationState: async (): Promise<DerivedReconciliationState> => {
           const observations = await prisma.providerObservation.findMany({
             where: { attemptId },
@@ -664,18 +767,24 @@ if (enabled) {
           parser: mockAdapter,
           ingestionMode: 'MOCK_EXECUTABLE',
           retentionDecision: 'MOCK_SYNTHETIC',
-          nextObservationId: () => 'observation_worker_manual_request_race',
+          environment: 'TEST',
+          source: 'MOCK',
+          securityContext: { merchantId, obligationId, attemptId, credentialBindingId: namespace.id('binding_worker_manual_request_race') },
+          nextObservationId: () => namespace.id('observation_worker_manual_request_race'),
           resolveBinding: async () => ({
             attemptId,
             obligationId,
             merchantId,
-            credentialBindingId: 'binding_worker_manual_request_race',
-            credentialVersionId: 'credential_worker_manual_request_race',
+            credentialBindingId: namespace.id('binding_worker_manual_request_race'),
+            credentialVersionId: namespace.id('credential_worker_manual_request_race'),
             bindingVerification: 'VERIFIED' as const,
           }),
           verify: async () => 'NOT_APPLICABLE' as const,
+          persistSecurityRejection: (evidence) => persistProviderSecurityRejection(prisma, evidence),
           persist: (candidate) => ingestObservation(prisma, candidate),
         }, input),
+        persistCredentialDenial: (input) => persistCredentialUseDenial(prisma, input),
+        persistPolicyDecision: (input) => persistProviderPolicyDecision(prisma, input),
         persistSlaEscalation: (input) => persistSlaEscalation(prisma, input),
         listRequestedReadOnlyQueries: async () => {
           coordinatedListCalls += 1;
@@ -705,7 +814,7 @@ if (enabled) {
       assert.equal(queryExecutions, 1);
       assert.equal(results.filter((result) =>
         result.kind === 'OBSERVATION_INGESTED' &&
-        result.observationId === 'observation_worker_manual_request_race',
+        result.observationId === namespace.id('observation_worker_manual_request_race'),
       ).length, 1);
       assert.equal(results.filter((result) =>
         result.kind === 'QUERY_BLOCKED' &&

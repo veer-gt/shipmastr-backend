@@ -28,7 +28,7 @@ export type CredentialUseDecision =
   | { allowed: true; operation: 'STATUS_QUERY' }
   | {
       allowed: false;
-      reason: string;
+      reason: 'BINDING_MISMATCH' | 'CONTINUITY_NOT_PROVEN' | 'CREDENTIAL_NOT_ACTIVE' | 'OPERATION_NOT_ALLOWED';
       forceUnknownIfUnresolved: true;
       requireReview: true;
       preserveProviderLock: true;
@@ -44,19 +44,19 @@ export function decideCredentialUse(
     || input.originalEnvironment !== input.requestedEnvironment
     || input.originalBindingId !== input.requestedBindingId
   ) {
-    return blocked('BINDING_MISMATCH', true);
+    return blocked('BINDING_MISMATCH');
   }
 
   if (input.continuity !== 'PROVEN_SAME_ACCOUNT') {
-    return blocked('CONTINUITY_NOT_PROVEN', false);
+    return blocked('CONTINUITY_NOT_PROVEN');
   }
 
   if (input.credentialState !== 'ACTIVE') {
-    return blocked('CREDENTIAL_NOT_ACTIVE', false);
+    return blocked('CREDENTIAL_NOT_ACTIVE');
   }
 
   if (input.operation !== 'STATUS_QUERY') {
-    return blocked('OPERATION_NOT_ALLOWED', false);
+    return blocked('OPERATION_NOT_ALLOWED');
   }
 
   return {
@@ -66,8 +66,7 @@ export function decideCredentialUse(
 }
 
 function blocked(
-  reason: string,
-  securityAlert: boolean,
+  reason: Extract<CredentialUseDecision, { allowed: false }>['reason'],
 ): Extract<CredentialUseDecision, { allowed: false }> {
   return {
     allowed: false,
@@ -75,6 +74,6 @@ function blocked(
     forceUnknownIfUnresolved: true,
     requireReview: true,
     preserveProviderLock: true,
-    securityAlert,
+    securityAlert: true,
   };
 }

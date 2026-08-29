@@ -34,11 +34,20 @@ export type ReductionAttentionType =
 export type RelatedAttemptAction = 'KEEP_UNRESOLVED_LOCKED' | 'PRESERVE_TERMINAL';
 
 export interface RefundDueEntry {
+  captureKey: string;
   providerTransactionRef: string;
   reason: RefundDueReason;
   sourceAttemptId: string;
   sourceObservationId: string;
   provider: PaymentProvider;
+}
+
+export interface ReductionFactEmission {
+  factType: ReductionFactType;
+  sourceAttemptId: string;
+  sourceObservationId: string;
+  provider: PaymentProvider;
+  providerReferenceId: string;
 }
 
 export interface ProviderActivationPolicy {
@@ -49,6 +58,9 @@ export interface ProviderActivationPolicy {
   environment: ProviderEnvironment;
   operation: 'CREATE_ATTEMPT' | 'STATUS_QUERY';
   maxAmountPaise: bigint;
+  approvedAt: Date;
+  effectiveFrom: Date;
+  effectiveUntil: Date;
 }
 
 export interface ActivationPolicyInput {
@@ -57,12 +69,36 @@ export interface ActivationPolicyInput {
   environment: ProviderEnvironment;
   operation: ProviderActivationPolicy['operation'];
   amountPaise: bigint;
+  evaluatedAt: Date;
   policy?: ProviderActivationPolicy;
 }
 
 export type ActivationDecision =
   | { enabled: true; policyVersion: string }
   | { enabled: false; reason: 'POLICY_DISABLED' };
+
+export interface ProviderPolicyDecisionRecord {
+  merchantId: string;
+  obligationId: string | null;
+  attemptId: string | null;
+  provider: PaymentProvider;
+  environment: ProviderEnvironment;
+  operation: 'CREATE_ATTEMPT' | 'STATUS_QUERY';
+  policyVersion: string | null;
+  policyApproved: boolean;
+  policyMerchantId: string | null;
+  policyProvider: PaymentProvider | null;
+  policyEnvironment: ProviderEnvironment | null;
+  policyOperation: 'CREATE_ATTEMPT' | 'STATUS_QUERY' | null;
+  maxAmountPaise: bigint | null;
+  approvedAt: Date | null;
+  effectiveFrom: Date | null;
+  effectiveUntil: Date | null;
+  evaluatedAt: Date;
+  decision: 'ENABLED' | 'DISABLED' | 'NO_EXECUTION';
+  reason: string;
+  timing: Record<string, number> | null;
+}
 
 export interface CanonicalObservation {
   id: string;
@@ -115,6 +151,7 @@ export interface ReductionPlan {
   completedByType: 'SYSTEM' | null;
   disposition: string;
   factTypes: ReductionFactType[];
+  factEmissions: ReductionFactEmission[];
   refundDue: RefundDueEntry[];
   attention: Array<{ type: ReductionAttentionType }>;
   relatedAttemptActions: Array<{ attemptId: string; action: RelatedAttemptAction }>;
@@ -179,6 +216,8 @@ export interface ReduceEvidenceInput {
     }
   >;
   observations: CanonicalObservation[];
+  triggeringObservationId: string | null;
+  triggeringObservationIsNew: boolean;
 }
 
 export interface ReductionPersistenceContext {

@@ -281,6 +281,16 @@ function assertRefundEvent(event: RefundDueDetectedV1) {
   if (event.amountPaise < PGO1_MIN_BIGINT_PAISE || event.amountPaise > PGO1_MAX_BIGINT_PAISE) {
     throw new Error('INVALID_REFUND_DUE_AMOUNT');
   }
+  if (event.provider !== 'MOCK' && event.provider !== 'CASHFREE' && event.provider !== 'PAYTM') {
+    throw new Error('INVALID_REFUND_DUE_PROVIDER');
+  }
+  if (event.reason !== 'LATE_SUCCESS_AFTER_CLOSURE' && event.reason !== 'SURPLUS_DOUBLE_SUCCESS') {
+    throw new Error('INVALID_REFUND_DUE_REASON');
+  }
+  const detectedAt = new Date(event.detectedAt);
+  if (!Number.isFinite(detectedAt.getTime()) || detectedAt.toISOString() !== event.detectedAt) {
+    throw new Error('INVALID_REFUND_DUE_DETECTED_AT');
+  }
 
   for (const value of [
     event.factId,

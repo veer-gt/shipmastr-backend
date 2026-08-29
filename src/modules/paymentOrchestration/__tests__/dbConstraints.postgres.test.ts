@@ -1,10 +1,13 @@
 import assert from "node:assert/strict";
-import { after, before, beforeEach, describe, it } from "node:test";
+import { after, afterEach, before, beforeEach, describe, it } from "node:test";
 import { Prisma, PrismaClient } from "@prisma/client";
 import { parseInrPaise } from "../money.js";
+import { expectedScratchDatabaseNameFromEnv } from "./scratchDatabaseGuard.js";
+import { createPaymentPostgresNamespace } from "./postgresTestNamespace.js";
 
 const enabled = process.env.RUN_PGO1_POSTGRES_TESTS === "1";
 const prisma = new PrismaClient();
+const namespace = createPaymentPostgresNamespace("db_constraints");
 const MAX_PAISE = 9_223_372_036_854_775_807n;
 type AttemptOutcome = Prisma.PaymentAttemptUncheckedCreateInput["outcomeStatus"];
 
@@ -12,7 +15,7 @@ let sequence = 0;
 
 function nextId(prefix: string) {
   sequence += 1;
-  return `${prefix}_${sequence}`;
+  return namespace.id(`${prefix}_${sequence}`);
 }
 
 function assertScratchUrl() {
@@ -20,7 +23,7 @@ function assertScratchUrl() {
   const url = new URL(raw);
   assert.ok(["127.0.0.1", "localhost"].includes(url.hostname.toLowerCase()));
   assert.equal(url.port, "5433");
-  assert.equal(decodeURIComponent(url.pathname.slice(1)), "shipmastr_scratch_pgo1_a965f431");
+  assert.equal(decodeURIComponent(url.pathname.slice(1)), expectedScratchDatabaseNameFromEnv());
   return url;
 }
 
@@ -138,12 +141,14 @@ function observation(overrides: Partial<Prisma.ProviderObservationUncheckedCreat
     nativeCurrency: overrides.nativeCurrency ?? "INR",
     amountPaise: overrides.amountPaise ?? 10_000n,
     rawBodyHash: overrides.rawBodyHash ?? nextId("hash"),
-    hashAlgorithm: overrides.hashAlgorithm ?? "SHA256",
+    hashAlgorithm: overrides.hashAlgorithm ?? "SHA_256",
     signatureVerification: overrides.signatureVerification ?? "VERIFIED",
-    bindingVerification: overrides.bindingVerification ?? "MATCHED",
+    bindingVerification: overrides.bindingVerification ?? "VERIFIED",
     evidenceAuthority: overrides.evidenceAuthority ?? "ELIGIBLE",
+    mappedOutcome: overrides.mappedOutcome ?? "SUCCEEDED",
     adapterVersion: overrides.adapterVersion ?? "mock-adapter-v1",
     mappingVersion: overrides.mappingVersion ?? "mock-mapping-v1",
+    providerApiVersion: overrides.providerApiVersion ?? "mock-api-v1",
     providerOccurredAt: overrides.providerOccurredAt ?? new Date("2026-08-27T12:00:00.000Z"),
     receivedAt: overrides.receivedAt ?? new Date("2026-08-27T12:00:01.000Z"),
     reductionDisposition: overrides.reductionDisposition ?? "ACCEPTED",
@@ -271,16 +276,11 @@ if (enabled) {
     });
 
     beforeEach(async () => {
-      await prisma.providerObservationInterpretation.deleteMany();
-      await prisma.providerObservationDelivery.deleteMany();
-      await prisma.paymentNormalizedFactOutbox.deleteMany();
-      await prisma.refundDueCase.deleteMany();
-      await prisma.paymentAttentionSignal.deleteMany();
-      await prisma.reconciliationReviewHistory.deleteMany();
-      await prisma.paymentOutcomeTransition.deleteMany();
-      await prisma.providerObservation.deleteMany();
-      await prisma.paymentAttempt.deleteMany();
-      await prisma.paymentObligation.deleteMany();
+      await namespace.assertEmpty(prisma);
+    });
+
+    afterEach(async () => {
+      await namespace.cleanup(prisma);
     });
 
     after(async () => {
@@ -401,12 +401,12 @@ if (enabled) {
     });
 
     it("rejects cross-merchant attempt and obligation mismatches", async () => {
-      const baseObligation = await createObligation({ merchantId: "merchant_alpha" });
+      const baseObligation = await createObligation({ merchantId: namespace.id("merchant_alpha") });
 
       await assert.rejects(
         prisma.paymentAttempt.create({
           data: attempt({
-            merchantId: "merchant_beta",
+            merchantId: namespace.id("merchant_beta"),
             obligationId: baseObligation.id as string
           })
         }),
@@ -415,11 +415,11 @@ if (enabled) {
     });
 
     it("rejects provider observations whose attempt and obligation bindings do not match", async () => {
-      const leftObligation = await createObligation({ merchantId: "merchant_obs" });
-      const rightObligation = await createObligation({ merchantId: "merchant_obs" });
+      const leftObligation = await createObligation({ merchantId: namespace.id("merchant_obs") });
+      const rightObligation = await createObligation({ merchantId: namespace.id("merchant_obs") });
       const createdAttempt = await prisma.paymentAttempt.create({
         data: attempt({
-          merchantId: "merchant_obs",
+          merchantId: namespace.id("merchant_obs"),
           obligationId: leftObligation.id as string
         })
       });
@@ -427,7 +427,7 @@ if (enabled) {
       await assert.rejects(
         prisma.providerObservation.create({
           data: observation({
-            merchantId: "merchant_obs",
+            merchantId: namespace.id("merchant_obs"),
             attemptId: createdAttempt.id,
             obligationId: rightObligation.id as string
           })
@@ -486,6 +486,57 @@ if (enabled) {
       );
     });
 
+    it("dedupes event bodies only within provider, environment, and attempt scope", async () => {
+      const merchantId = namespace.id("merchant_event_scope");
+      const obligationData = await createObligation({
+        id: namespace.id("obligation_event_scope"),
+        merchantId,
+      });
+      const firstAttempt = await prisma.paymentAttempt.create({
+        data: attempt({
+          id: namespace.id("attempt_event_scope_first"),
+          merchantId,
+          obligationId: obligationData.id as string,
+          outcomeStatus: "FAILED_TERMINAL",
+          reviewStatus: "COMPLETED",
+          resolvedAt: new Date("2026-08-28T00:00:00.000Z"),
+        }),
+      });
+      const secondAttempt = await prisma.paymentAttempt.create({
+        data: attempt({
+          id: namespace.id("attempt_event_scope_second"),
+          merchantId,
+          obligationId: obligationData.id as string,
+          outcomeStatus: "FAILED_TERMINAL",
+          reviewStatus: "COMPLETED",
+          resolvedAt: new Date("2026-08-28T00:01:00.000Z"),
+        }),
+      });
+      const shared = {
+        merchantId,
+        obligationId: obligationData.id as string,
+        providerEventId: namespace.id("shared_provider_event"),
+        rawBodyHash: namespace.id("shared_raw_hash"),
+      };
+
+      await prisma.providerObservation.create({
+        data: observation({ ...shared, attemptId: firstAttempt.id }),
+      });
+      await assert.rejects(
+        prisma.providerObservation.create({
+          data: observation({ ...shared, attemptId: firstAttempt.id }),
+        }),
+        (error: unknown) => isPrismaCode(error, "P2002"),
+      );
+      await prisma.providerObservation.create({
+        data: observation({ ...shared, attemptId: secondAttempt.id }),
+      });
+
+      assert.equal(await prisma.providerObservation.count({
+        where: { merchantId, providerEventId: shared.providerEventId },
+      }), 2);
+    });
+
     it("dedupes normalized facts by deterministic dedupe key", async () => {
       await createFactWithAttempt({ dedupeKey: "same_fact" });
       await assert.rejects(
@@ -495,17 +546,17 @@ if (enabled) {
     });
 
     it("rejects normalized facts whose attempt and observation bindings do not match the obligation", async () => {
-      const obligationA = await createObligation({ merchantId: "merchant_fact" });
-      const obligationB = await createObligation({ merchantId: "merchant_fact" });
+      const obligationA = await createObligation({ merchantId: namespace.id("merchant_fact") });
+      const obligationB = await createObligation({ merchantId: namespace.id("merchant_fact") });
       const createdAttempt = await prisma.paymentAttempt.create({
         data: attempt({
-          merchantId: "merchant_fact",
+          merchantId: namespace.id("merchant_fact"),
           obligationId: obligationA.id as string
         })
       });
       const createdObservation = await prisma.providerObservation.create({
         data: observation({
-          merchantId: "merchant_fact",
+          merchantId: namespace.id("merchant_fact"),
           obligationId: obligationA.id as string,
           attemptId: createdAttempt.id
         })
@@ -516,7 +567,7 @@ if (enabled) {
           data: {
             id: nextId("fact"),
             schemaVersion: "pgo1-fact-v1",
-            merchantId: "merchant_fact",
+            merchantId: namespace.id("merchant_fact"),
             obligationId: obligationB.id as string,
             attemptId: createdAttempt.id,
             triggeringObservationId: createdObservation.id,
@@ -563,26 +614,19 @@ if (enabled) {
       const merchantId = originalObservation.merchantId;
       const obligationId = originalObservation.obligationId as string;
       const attemptId = originalObservation.attemptId;
-      const derivedObservation = await prisma.providerObservation.create({
-        data: observation({
-          merchantId,
-          obligationId,
-          attemptId,
-          evidenceAuthority: "ACTIVATION_GATED",
-          reductionDisposition: "UNRESOLVED"
-        })
-      });
 
       await prisma.providerObservationInterpretation.create({
         data: {
           id: nextId("interpretation"),
           originalObservationId: originalObservation.id,
-          derivedObservationId: derivedObservation.id,
           merchantId,
           obligationId,
           attemptId,
+          originalMappingVersion: originalObservation.mappingVersion,
           derivedAdapterVersion: "cashfree-fixture-v1",
-          derivedMappingVersion: "cashfree-map-v1"
+          derivedMappingVersion: "cashfree-map-v1",
+          derivedOutcome: "SUCCEEDED",
+          derivedAt: new Date("2026-08-28T06:00:00.000Z")
         }
       });
 
@@ -591,12 +635,14 @@ if (enabled) {
           data: {
             id: nextId("interpretation"),
             originalObservationId: originalObservation.id,
-            derivedObservationId: derivedObservation.id,
             merchantId,
             obligationId,
             attemptId,
+            originalMappingVersion: originalObservation.mappingVersion,
             derivedAdapterVersion: "cashfree-fixture-v1",
-            derivedMappingVersion: "cashfree-map-v1"
+            derivedMappingVersion: "cashfree-map-v1",
+            derivedOutcome: "SUCCEEDED",
+            derivedAt: new Date("2026-08-28T06:00:00.000Z")
           }
         }),
         (error: unknown) => isPrismaCode(error, "P2002")
