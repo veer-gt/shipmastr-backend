@@ -40,48 +40,41 @@ The values above remain the reviewed starting state only.
 
 The only accepted pending set, in order, is:
 
-1. `20260712180000_h2a_platform_webhook_credentials`
-2. `20260714100000_h2a_synthetic_tenant_lifecycle`
+1. `20260827120000_pgo_1_payment_orchestration`
+2. `20260829120000_pgo_1_final_fix_observation_truth`
 
-The first SQL file creates `PlatformCredentialPurpose`, the new
-`platform_webhook_credentials` table, its primary key, one unique and three
-non-unique indexes, and one foreign key to `platform_connections`. The second
-creates `SecurityFixtureKind`, `SecurityFixtureStatus`, the new
-`security_fixture_tenants` table, its primary key, three unique and two
-non-unique indexes, and three foreign keys to existing `Merchant` and `User`
-tables.
+The first SQL file creates the PGO-1 payment orchestration enums and tables,
+their exact indexes, foreign keys, and check constraints. The second adds the
+observation-truth enums and rejection/audit tables, tightens the existing
+`ProviderObservation` and `ProviderObservationInterpretation` schema, and
+adds the final observation-deduplication index. It refuses to run when
+`ProviderObservation` already contains rows, so no canonical mapping or API
+version is invented for pre-existing observations.
 
 Direct review of both SQL files gives this compatibility matrix:
 
 | Operation | Present? | Assessment |
 | --- | --- | --- |
-| `DROP` | No | No existing schema object is removed. |
+| `DROP` | Yes | The obsolete derived-observation foreign key, index, and column are removed from `ProviderObservationInterpretation`; the migration's empty-observation guard prevents unverified observation truth from being discarded. |
 | `DELETE` | No | No application row is deleted. |
 | `UPDATE` | No | `ON UPDATE CASCADE` is referential behavior, not an SQL data update in the migration. |
 | Table or column rename | No | Existing identifiers are unchanged. |
-| Existing-column type change | No | No existing column is altered. |
-| New `NOT NULL` on an existing table | No | Required columns occur only on the two newly created, initially empty tables. |
+| Existing-column type change | Yes | `ProviderObservation.hashAlgorithm` and `bindingVerification` are converted to the PGO-1 enums. |
+| New `NOT NULL` on an existing table | Yes | `ProviderObservation.providerOrderRef` becomes required and `mappedOutcome`/`providerApiVersion` are added as required columns; the empty-observation guard avoids a data backfill. |
 | Data backfill | No | The files contain no data-copy or data-mutation statement. |
-| Existing-table rewrite | No | No existing table is rewritten. |
-| Lock-heavy operation | No sustained rewrite/backfill lock | Enum/table/index creation is additive. Foreign-key creation can take brief catalog and referenced-table locks, so the operation still needs a quiet, monitored window. The new referencing tables are empty, avoiding a large existing-row validation scan. |
+| Existing-table rewrite | No explicit rewrite/backfill | The existing observation table is only altered by catalog DDL, and the guard requires it to be empty before those changes. |
+| Lock-heavy operation | DDL locks require a quiet, monitored window | Enum/table/index creation and the existing-table alterations can take catalog/table locks. The empty-observation guard bounds validation and avoids a large existing-row scan. |
 
 ## Compatibility with the live production application
 
-The existing production revision remains live throughout the migration. The
-two migrations do not remove or alter any column, constraint, enum, index, or
-table used by that revision. The webhook-credential table is a new H2A storage
-surface; the pre-H2A production behavior does not depend on it. The synthetic
-tenant lifecycle is additionally gated in source to `APP_ENV=staging` and its
-explicit feature flag, so the production router does not register that
-lifecycle surface.
-
-The result is forward-compatible with `shipmastr-api-00210-xov`: existing
-queries retain their prior schema, while the new objects remain unused by the
-old revision. The residual runtime risk is the brief DDL locking described
-above, not an application/schema contract break. This assessment does not
-permit a service deployment; service revision and traffic are snapshotted
-before and after the migration and must be byte-for-byte equivalent in the
-governed comparison.
+The existing production revision remains live throughout the migration. This
+pair is not purely additive: it changes observation-truth types and required
+columns and removes the obsolete derived-observation link. The exact
+application image, source, database state, and empty-observation precondition
+therefore remain mandatory; a populated observation table fails closed before
+any migration execution. This assessment does not permit a service
+deployment; service revision and traffic are snapshotted before and after the
+migration and must be byte-for-byte equivalent in the governed comparison.
 
 ## Fixed production target and approvals
 

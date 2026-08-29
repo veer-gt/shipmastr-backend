@@ -2875,30 +2875,124 @@ if [[ "${1:-}" == "logging" && "${2:-}" == "read" ]]; then
   [[ "$filter" != *'execution-3'* ]] || phase='postcheck'
   PHASE="$phase" MODE="${SHIPMASTR_TEST_MIGRATION_MODE:-success}" node <<'NODE'
 const expected = [
-  "20260712180000_h2a_platform_webhook_credentials",
-  "20260714100000_h2a_synthetic_tenant_lifecycle",
+  "20260827120000_pgo_1_payment_orchestration",
+  "20260829120000_pgo_1_final_fix_observation_truth",
 ];
 const schema = [
-  "enum:PlatformCredentialPurpose",
-  "enum:SecurityFixtureKind",
-  "enum:SecurityFixtureStatus",
-  "foreign_key:platform_webhook_credentials_connection_id_fkey",
-  "foreign_key:security_fixture_tenants_creator_internal_user_id_fkey",
-  "foreign_key:security_fixture_tenants_merchant_id_fkey",
-  "foreign_key:security_fixture_tenants_owner_user_id_fkey",
-  "index:platform_webhook_credentials_connection_id_idx",
-  "index:platform_webhook_credentials_connection_id_purpose_key",
-  "index:platform_webhook_credentials_merchant_id_idx",
-  "index:platform_webhook_credentials_merchant_id_platform_idx",
-  "index:platform_webhook_credentials_pkey",
-  "index:security_fixture_tenants_active_slot_key",
-  "index:security_fixture_tenants_expires_at_idx",
-  "index:security_fixture_tenants_fixture_kind_status_idx",
-  "index:security_fixture_tenants_merchant_id_key",
-  "index:security_fixture_tenants_owner_user_id_key",
-  "index:security_fixture_tenants_pkey",
-  "table:platform_webhook_credentials",
-  "table:security_fixture_tenants",
+  "enum:BindingVerification",
+  "enum:CollectionRail",
+  "enum:EvidenceAuthority",
+  "enum:ObligationPurpose",
+  "enum:ObligationStatus",
+  "enum:ObservationHashAlgorithm",
+  "enum:ObservationMappedOutcome",
+  "enum:OutcomeStatus",
+  "enum:PaymentProvider",
+  "enum:ProviderEnvironment",
+  "enum:ProviderObservationSource",
+  "enum:RefundDueCaseStatus",
+  "enum:RefundDueReason",
+  "enum:ReviewCompletedByType",
+  "enum:ReviewStatus",
+  "enum:SignatureVerification",
+  "foreign_key:PaymentAttentionSignal_attemptId_obligationId_merchantId_fkey",
+  "foreign_key:PaymentAttentionSignal_obligationId_merchantId_fkey",
+  "foreign_key:PaymentAttentionSignal_observationId_attemptId_obligat_fkey",
+  "foreign_key:PaymentAttempt_obligationId_merchantId_obligationCollectionRa_fkey",
+  "foreign_key:PaymentNormalizedFactOutbox_attemptId_obligationId_mer_fkey",
+  "foreign_key:PaymentNormalizedFactOutbox_obligationId_merchantId_fkey",
+  "foreign_key:PaymentNormalizedFactOutbox_triggeringObservationId__fkey",
+  "foreign_key:PaymentOutcomeTransition_attemptId_obligationId_merchan_fkey",
+  "foreign_key:PaymentOutcomeTransition_obligationId_merchantId_fkey",
+  "foreign_key:PaymentOutcomeTransition_triggeringObservationId_attemptI_fkey",
+  "foreign_key:ProviderObservationDelivery_observationId_attemptId_oblig_fkey",
+  "foreign_key:ProviderObservationInterpretation_originalObservationI_fkey",
+  "foreign_key:ProviderObservation_attemptId_obligationId_merchantId_fkey",
+  "foreign_key:ProviderObservation_obligationId_merchantId_fkey",
+  "foreign_key:ReconciliationReviewHistory_attemptId_obligationId_merc_fkey",
+  "foreign_key:ReconciliationReviewHistory_obligationId_merchantId_fkey",
+  "foreign_key:ReconciliationReviewHistory_triggeringObservationId_a_fkey",
+  "foreign_key:RefundDueCase_attemptId_obligationId_merchantId_fkey",
+  "foreign_key:RefundDueCase_obligationId_merchantId_fkey",
+  "foreign_key:RefundDueCase_verificationObservationId_attemptId_obli_fkey",
+  "index:PaymentAttempt_id_obligationId_merchantId_key",
+  "index:PaymentAttempt_merchantId_idx",
+  "index:PaymentAttempt_obligationId_idx",
+  "index:PaymentAttempt_obligationId_merchantId_obligationCollectionRail_idx",
+  "index:PaymentAttempt_outcomeStatus_idx",
+  "index:PaymentAttempt_pkey",
+  "index:PaymentAttempt_provider_environment_idx",
+  "index:PaymentAttempt_reviewStatus_idx",
+  "index:PaymentAttentionSignal_attemptId_createdAt_idx",
+  "index:PaymentAttentionSignal_merchantId_createdAt_idx",
+  "index:PaymentAttentionSignal_obligationId_createdAt_idx",
+  "index:PaymentAttentionSignal_pkey",
+  "index:PaymentNormalizedFactOutbox_attemptId_createdAt_idx",
+  "index:PaymentNormalizedFactOutbox_merchantId_createdAt_idx",
+  "index:PaymentNormalizedFactOutbox_obligationId_createdAt_idx",
+  "index:PaymentNormalizedFactOutbox_pkey",
+  "index:PaymentObligation_checkoutId_idx",
+  "index:PaymentObligation_id_merchantId_collectionRail_key",
+  "index:PaymentObligation_id_merchantId_key",
+  "index:PaymentObligation_merchantId_idx",
+  "index:PaymentObligation_pkey",
+  "index:PaymentObligation_status_idx",
+  "index:PaymentOutcomeTransition_attemptId_createdAt_idx",
+  "index:PaymentOutcomeTransition_merchantId_createdAt_idx",
+  "index:PaymentOutcomeTransition_obligationId_createdAt_idx",
+  "index:PaymentOutcomeTransition_pkey",
+  "index:ProviderObservationDelivery_attemptId_idx",
+  "index:ProviderObservationDelivery_merchantId_idx",
+  "index:ProviderObservationDelivery_obligationId_idx",
+  "index:ProviderObservationDelivery_observationId_idx",
+  "index:ProviderObservationInterpretation_attemptId_idx",
+  "index:ProviderObservationInterpretation_merchantId_idx",
+  "index:ProviderObservationInterpretation_obligationId_idx",
+  "index:ProviderObservationInterpretation_pkey",
+  "index:ProviderObservationRejection_attemptId_detectedAt_idx",
+  "index:ProviderObservationRejection_merchantId_detectedAt_idx",
+  "index:ProviderObservationRejection_securityAlertStatus_detectedAt_idx",
+  "index:ProviderObservation_attemptId_idx",
+  "index:ProviderObservation_id_attemptId_obligationId_merchantId_key",
+  "index:ProviderObservation_merchantId_idx",
+  "index:ProviderObservation_obligationId_idx",
+  "index:ProviderObservation_pkey",
+  "index:ProviderObservation_providerEventId_idx",
+  "index:ProviderObservation_providerTransactionRef_idx",
+  "index:ProviderObservation_provider_environment_idx",
+  "index:ProviderPolicyDecisionAudit_attemptId_evaluatedAt_idx",
+  "index:ProviderPolicyDecisionAudit_decision_evaluatedAt_idx",
+  "index:ProviderPolicyDecisionAudit_merchantId_evaluatedAt_idx",
+  "index:ProviderPolicyDecisionAudit_pkey",
+  "index:ProviderPolicyDecisionAudit_provider_environment_operation_evaluatedAt_idx",
+  "index:ReconciliationReviewHistory_attemptId_createdAt_idx",
+  "index:ReconciliationReviewHistory_merchantId_createdAt_idx",
+  "index:ReconciliationReviewHistory_obligationId_createdAt_idx",
+  "index:ReconciliationReviewHistory_pkey",
+  "index:RefundDueCase_attemptId_detectedAt_idx",
+  "index:RefundDueCase_merchantId_detectedAt_idx",
+  "index:RefundDueCase_obligationId_detectedAt_idx",
+  "index:RefundDueCase_pkey",
+  "index:payment_attempt_one_unresolved_per_obligation",
+  "index:payment_attempt_request_idempotency",
+  "index:payment_fact_dedupe",
+  "index:provider_observation_dedupe",
+  "index:provider_observation_interpretation_dedupe",
+  "index:provider_observation_scoped_event_body",
+  "index:provider_security_alert_dedupe",
+  "index:refund_due_case_dedupe",
+  "table:PaymentAttempt",
+  "table:PaymentAttentionSignal",
+  "table:PaymentNormalizedFactOutbox",
+  "table:PaymentObligation",
+  "table:PaymentOutcomeTransition",
+  "table:ProviderObservation",
+  "table:ProviderObservationDelivery",
+  "table:ProviderObservationInterpretation",
+  "table:ProviderObservationRejection",
+  "table:ProviderPolicyDecisionAudit",
+  "table:ReconciliationReviewHistory",
+  "table:RefundDueCase",
 ].sort();
 const phase = process.env.PHASE;
 const mode = process.env.MODE;
@@ -2923,6 +3017,10 @@ let unexpectedAppliedMigrationNames = [
 if (phase === "precheck") {
   if (mode === "missing-migration") pending = prismaPending = [expected[0]];
   if (mode === "extra-migration") pending = prismaPending = [...expected, "20260715120000_unexpected_third"];
+  if (mode === "stale-h2a-pending") pending = prismaPending = [
+    "20260712180000_h2a_platform_webhook_credentials",
+    "20260714100000_h2a_synthetic_tenant_lifecycle",
+  ];
   if (mode === "zero-pending") pending = prismaPending = [];
   if (mode === "failed-migration") failed = [expected[0]];
   if (mode === "database-not-allowlisted") databaseName = "temporary_prod_copy";
@@ -3041,8 +3139,8 @@ production_migration_exact_two_path_succeeds() {
   [[ "$(shipmastr_governance_file_mode "$MIGRATION_FIXTURE_EVIDENCE")" == "600" ]]
   grep -Fxq 'migration_execution=PASS' "$MIGRATION_FIXTURE_EVIDENCE"
   grep -Fxq 'migration_status_after=PASS' "$MIGRATION_FIXTURE_EVIDENCE"
-  grep -Fxq 'verified_migration_1=20260712180000_h2a_platform_webhook_credentials' "$MIGRATION_FIXTURE_EVIDENCE"
-  grep -Fxq 'verified_migration_2=20260714100000_h2a_synthetic_tenant_lifecycle' "$MIGRATION_FIXTURE_EVIDENCE"
+  grep -Fxq 'verified_migration_1=20260827120000_pgo_1_payment_orchestration' "$MIGRATION_FIXTURE_EVIDENCE"
+  grep -Fxq 'verified_migration_2=20260829120000_pgo_1_final_fix_observation_truth' "$MIGRATION_FIXTURE_EVIDENCE"
   grep -Fxq 'production_service_revision_before=shipmastr-api-00210-xov' "$MIGRATION_FIXTURE_EVIDENCE"
   grep -Fxq 'production_service_revision_after=shipmastr-api-00210-xov' "$MIGRATION_FIXTURE_EVIDENCE"
   grep -Fxq 'production_traffic_mutation=none' "$MIGRATION_FIXTURE_EVIDENCE"
@@ -3065,6 +3163,10 @@ production_migration_missing_expected_blocks() {
 
 production_migration_extra_pending_blocks() {
   production_migration_fixture_failure extra-migration
+}
+
+production_migration_stale_h2a_pending_blocks() {
+  production_migration_fixture_failure stale-h2a-pending
 }
 
 production_migration_zero_pending_blocks() {
@@ -3782,6 +3884,8 @@ expect_pass production_migration_missing_expected_blocks \
   production_migration_missing_expected_blocks
 expect_pass production_migration_extra_pending_blocks \
   production_migration_extra_pending_blocks
+expect_pass production_migration_stale_h2a_pending_blocks \
+  production_migration_stale_h2a_pending_blocks
 expect_pass production_migration_zero_pending_blocks \
   production_migration_zero_pending_blocks
 expect_pass production_migration_malformed_status_blocks \
