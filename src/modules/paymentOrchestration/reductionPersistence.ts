@@ -68,13 +68,6 @@ export async function persistReduction(
     context.triggeringObservation.receivedAt,
   );
 
-  await tx.providerObservation.update({
-    where: { id: context.triggeringObservation.id },
-    data: {
-      reductionDisposition: plan.disposition,
-    },
-  });
-
   await tx.paymentAttempt.update({
     where: { id: context.targetAttempt.id },
     data: {
