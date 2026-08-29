@@ -80,6 +80,24 @@ enum EvidenceAuthority {
   INELIGIBLE
 }
 
+enum ObservationMappedOutcome {
+  PENDING
+  UNKNOWN
+  SUCCEEDED
+  FAILED_TERMINAL
+  NOT_FOUND_TERMINAL
+  UNMAPPED
+}
+
+enum ObservationHashAlgorithm {
+  SHA_256 @map("SHA-256")
+}
+
+enum BindingVerification {
+  VERIFIED
+  FAILED
+}
+
 enum ReviewCompletedByType {
   SYSTEM
   REVIEWER
@@ -6988,12 +7006,14 @@ model ProviderObservation {
   nativeCurrency        String?
   amountPaise           BigInt?
   rawBodyHash           String
-  hashAlgorithm         String
+  hashAlgorithm         ObservationHashAlgorithm
   signatureVerification SignatureVerification
-  bindingVerification   String
+  bindingVerification   BindingVerification
   evidenceAuthority     EvidenceAuthority
+  mappedOutcome         ObservationMappedOutcome
   adapterVersion        String
   mappingVersion        String
+  providerApiVersion    String
   providerOccurredAt    DateTime?
   receivedAt            DateTime
   reductionDisposition  String
@@ -7004,7 +7024,6 @@ model ProviderObservation {
   obligation                      PaymentObligation                 @relation(fields: [obligationId, merchantId], references: [id, merchantId], onDelete: Restrict)
   deliveries                      ProviderObservationDelivery[]
   originalObservationInterpretations ProviderObservationInterpretation[] @relation("OriginalProviderObservationInterpretations")
-  derivedObservationInterpretations  ProviderObservationInterpretation[] @relation("DerivedProviderObservationInterpretations")
   triggeredOutcomeTransitions     PaymentOutcomeTransition[]
   triggeredReviewHistory          ReconciliationReviewHistory[]
   attentionSignals                PaymentAttentionSignal[]
@@ -7012,6 +7031,7 @@ model ProviderObservation {
   verifiedRefundDueCases          RefundDueCase[]
 
   @@unique([observationDedupeKey], map: "provider_observation_dedupe")
+  @@unique([merchantId, obligationId, attemptId, provider, environment, providerEventId, rawBodyHash], map: "provider_observation_scoped_event_body")
   @@unique([id, attemptId, obligationId, merchantId])
   @@index([attemptId])
   @@index([obligationId])
@@ -7042,22 +7062,80 @@ model ProviderObservationDelivery {
   @@index([obligationId])
 }
 
+model ProviderObservationRejection {
+  id                    String                     @id
+  provider              PaymentProvider
+  environment           ProviderEnvironment
+  source                ProviderObservationSource
+  reason                String
+  merchantId            String?
+  obligationId          String?
+  attemptId             String?
+  credentialBindingId   String?
+  rawBodyHash           String
+  hashAlgorithm         ObservationHashAlgorithm
+  signatureVerification SignatureVerification
+  bindingVerification   BindingVerification?
+  adapterVersion        String
+  mappingVersion        String
+  providerApiVersion    String
+  detectedAt            DateTime
+  securityAlertCode     String
+  securityAlertStatus   String
+  alertDedupeKey        String                     @unique(map: "provider_security_alert_dedupe")
+  createdAt             DateTime                   @default(now())
+
+  @@index([merchantId, detectedAt])
+  @@index([attemptId, detectedAt])
+  @@index([securityAlertStatus, detectedAt])
+}
+
+model ProviderPolicyDecisionAudit {
+  id                    String              @id
+  merchantId            String
+  obligationId          String?
+  attemptId             String?
+  provider              PaymentProvider
+  environment           ProviderEnvironment
+  operation             String
+  policyVersion         String?
+  policyApproved        Boolean
+  policyMerchantId      String?
+  policyProvider        PaymentProvider?
+  policyEnvironment     ProviderEnvironment?
+  policyOperation       String?
+  maxAmountPaise        BigInt?
+  approvedAt            DateTime?
+  effectiveFrom         DateTime?
+  effectiveUntil        DateTime?
+  evaluatedAt           DateTime
+  decision              String
+  reason                String
+  timing                Json?
+  createdAt             DateTime            @default(now())
+
+  @@index([merchantId, evaluatedAt])
+  @@index([attemptId, evaluatedAt])
+  @@index([provider, environment, operation, evaluatedAt])
+  @@index([decision, evaluatedAt])
+}
+
 model ProviderObservationInterpretation {
   id                    String              @id @default(cuid())
   originalObservationId String
-  derivedObservationId  String
   merchantId            String
   obligationId          String
   attemptId             String
+  originalMappingVersion String
   derivedAdapterVersion String
   derivedMappingVersion String
+  derivedOutcome        ObservationMappedOutcome
+  derivedAt             DateTime
   createdAt             DateTime            @default(now())
 
   originalObservation ProviderObservation @relation("OriginalProviderObservationInterpretations", fields: [originalObservationId, attemptId, obligationId, merchantId], references: [id, attemptId, obligationId, merchantId], onDelete: Restrict)
-  derivedObservation  ProviderObservation @relation("DerivedProviderObservationInterpretations", fields: [derivedObservationId, attemptId, obligationId, merchantId], references: [id, attemptId, obligationId, merchantId], onDelete: Restrict)
 
   @@unique([originalObservationId, derivedAdapterVersion, derivedMappingVersion], map: "provider_observation_interpretation_dedupe")
-  @@index([derivedObservationId])
   @@index([merchantId])
   @@index([attemptId])
   @@index([obligationId])
