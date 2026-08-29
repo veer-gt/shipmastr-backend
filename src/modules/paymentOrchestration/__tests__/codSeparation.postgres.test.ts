@@ -500,13 +500,14 @@ if (enabled) {
       {
         name: 'distinct double success leaves COD snapshot unchanged',
         setup: async (state: Awaited<ReturnType<typeof seedPartialCodCheckout>>) => {
+          const priorProviderOrderRef = nextId('order_prior_success');
           const priorAttempt = await prisma.paymentAttempt.create({
             data: directAttempt({
               id: nextId('attempt_prior_success'),
               merchantId: state.online.merchantId,
               obligationId: state.online.id,
               obligationCollectionRail: state.online.collectionRail,
-              providerOrderRef: nextId('order_prior_success'),
+              providerOrderRef: priorProviderOrderRef,
               outcomeStatus: 'SUCCEEDED',
               reviewStatus: 'COMPLETED',
               resolvedAt: new Date('2026-08-27T11:00:00.000Z'),
@@ -528,7 +529,7 @@ if (enabled) {
               credentialVersionId: priorAttempt.credentialVersionId,
               source: 'MOCK',
               providerEventId: 'event_prior_success',
-              providerOrderRef: priorAttempt.providerOrderRef,
+              providerOrderRef: priorProviderOrderRef,
               providerTransactionRef: 'txn_prior_success',
               nativeStatus: 'captured',
               nativeReasonCode: null,

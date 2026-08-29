@@ -83,3 +83,27 @@ node --import tsx --test src/modules/paymentOrchestration/__tests__/observationP
 ```
 
 - PostgreSQL/env-backed migration execution was intentionally not run for this follow-up.
+
+## Focused Follow-up: Nullable Attempt Order Ref Compile Guard
+
+- Independent review found two PostgreSQL tests still passed `PaymentAttempt.providerOrderRef` directly into `CanonicalObservation.providerOrderRef` after canonical truth was tightened to non-null.
+- The focused fix keeps the canonical type strict and makes the fixtures explicit:
+  - `codSeparation.postgres.test.ts` now reuses the seeded non-null `priorProviderOrderRef` constant when constructing the persisted observation fixture;
+  - `interpretation.postgres.test.ts` now reuses the seeded non-null `providerOrderRef` constant when constructing both the attempt and original observation fixture.
+- No new no-DB runtime regression was added because the issue was compile-only and fully covered by the safe TypeScript verification surface.
+
+### Compile follow-up checks
+
+- Safe verification command:
+
+```text
+./node_modules/.bin/tsc --noEmit --pretty false
+```
+
+- Additional hygiene command:
+
+```text
+git diff --check
+```
+
+- `npm run build` was intentionally not used because it would regenerate `dist/`.

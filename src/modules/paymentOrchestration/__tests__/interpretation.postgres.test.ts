@@ -134,13 +134,14 @@ if (enabled) {
           merchantId: namespace.id('merchant_interpretation'),
         }),
       });
+      const providerOrderRef = 'cf_order_interpretation';
       const attemptRow = await prisma.paymentAttempt.create({
         data: attempt({
           id: namespace.id('attempt_interpretation'),
           merchantId: obligationRow.merchantId,
           obligationId: obligationRow.id,
           obligationCollectionRail: obligationRow.collectionRail,
-          providerOrderRef: 'cf_order_interpretation',
+          providerOrderRef,
         }),
       });
       const originalObservation = await prisma.providerObservation.create({
@@ -151,7 +152,7 @@ if (enabled) {
           attemptId: attemptRow.id,
           credentialBindingId: attemptRow.credentialBindingId,
           credentialVersionId: attemptRow.credentialVersionId,
-          providerOrderRef: attemptRow.providerOrderRef,
+          providerOrderRef,
           rawBodyHash: namespace.id('hash_original_interpretation'),
           observationDedupeKey: namespace.id('dedupe_original_interpretation'),
           adapterVersion: 'cashfree-adapter-old',
