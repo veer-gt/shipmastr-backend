@@ -181,11 +181,11 @@ if (enabled) {
     it('lets a reviewer claim work and attach a PII-safe reference while preserving attempt invariants', async () => {
       const seeded = await createAttemptWithObligation({
         obligation: {
-          id: 'obligation_review_claim',
+          id: nextId('obligation_review_claim'),
           merchantId: namespace.id('merchant_review_claim'),
         },
         attempt: {
-          id: 'attempt_review_claim',
+          id: nextId('attempt_review_claim'),
           reviewStatus: 'REQUIRED',
           outcomeStatus: 'UNKNOWN',
           providerOrderRef: 'order_review_claim',
@@ -253,11 +253,11 @@ if (enabled) {
     it('rejects evidence references that fail the PII policy and audits only the sanitized reason', async () => {
       const seeded = await createAttemptWithObligation({
         obligation: {
-          id: 'obligation_review_reject',
+          id: nextId('obligation_review_reject'),
           merchantId: namespace.id('merchant_review_reject'),
         },
         attempt: {
-          id: 'attempt_review_reject',
+          id: nextId('attempt_review_reject'),
           reviewStatus: 'IN_PROGRESS',
           outcomeStatus: 'UNKNOWN',
           providerOrderRef: 'order_review_reject',
@@ -299,11 +299,11 @@ if (enabled) {
     it('emits a read-only query request without changing outcomeStatus or resolvedAt', async () => {
       const seeded = await createAttemptWithObligation({
         obligation: {
-          id: 'obligation_review_query',
+          id: nextId('obligation_review_query'),
           merchantId: namespace.id('merchant_review_query'),
         },
         attempt: {
-          id: 'attempt_review_query',
+          id: nextId('attempt_review_query'),
           reviewStatus: 'IN_PROGRESS',
           outcomeStatus: 'UNKNOWN',
           providerOrderRef: 'order_review_query',
@@ -370,11 +370,11 @@ if (enabled) {
     it('rejects cross-merchant review access for claim, attach, request, and view', async () => {
       const seeded = await createAttemptWithObligation({
         obligation: {
-          id: 'obligation_cross_merchant',
+          id: nextId('obligation_cross_merchant'),
           merchantId: namespace.id('merchant_review_owner'),
         },
         attempt: {
-          id: 'attempt_cross_merchant',
+          id: nextId('attempt_cross_merchant'),
           reviewStatus: 'REQUIRED',
           outcomeStatus: 'UNKNOWN',
           providerOrderRef: 'order_cross_merchant',
@@ -433,11 +433,11 @@ if (enabled) {
     it('lets a late webhook enter the normal ingestion path only when verification material remains available', async () => {
       const seeded = await createAttemptWithObligation({
         obligation: {
-          id: 'obligation_late_webhook_verified',
+          id: nextId('obligation_late_webhook_verified'),
           merchantId: namespace.id('merchant_late_webhook_verified'),
         },
         attempt: {
-          id: 'attempt_late_webhook_verified',
+          id: nextId('attempt_late_webhook_verified'),
           reviewStatus: 'NOT_REQUIRED',
           outcomeStatus: 'PENDING',
           providerOrderRef: 'order_late_webhook_verified',
@@ -489,11 +489,11 @@ if (enabled) {
     it('fails closed for a late webhook when verification material is unavailable and exposes no manual override path', async () => {
       const seeded = await createAttemptWithObligation({
         obligation: {
-          id: 'obligation_late_webhook_unavailable',
+          id: nextId('obligation_late_webhook_unavailable'),
           merchantId: namespace.id('merchant_late_webhook_unavailable'),
         },
         attempt: {
-          id: 'attempt_late_webhook_unavailable',
+          id: nextId('attempt_late_webhook_unavailable'),
           reviewStatus: 'REQUIRED',
           outcomeStatus: 'UNKNOWN',
           providerOrderRef: 'order_late_webhook_unavailable',

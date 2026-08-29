@@ -21,11 +21,12 @@ export async function ingestRawObservation(
 
   const rawBodyHash = createHash('sha256').update(input.rawBody).digest('hex');
   const signatureVerification = normalizeVerification(await deps.verify(input));
-  if (signatureVerification !== 'NOT_APPLICABLE') {
+  const trustedSource = requireTrustedSource(deps);
+  if (!isAcceptedVerificationForSource(signatureVerification, trustedSource)) {
     await persistSecurityRejection(deps, {
       provider: deps.parser.provider,
       environment: requireTrustedEnvironment(deps),
-      source: requireTrustedSource(deps),
+      source: trustedSource,
       reason: 'UNAUTHENTICATED',
       rawBodyHash,
       hashAlgorithm: 'SHA-256',
@@ -153,4 +154,18 @@ function normalizeVerification(value: unknown): ProviderSecurityRejectionEvidenc
     return value;
   }
   return 'UNAVAILABLE';
+}
+
+function isAcceptedVerificationForSource(
+  signatureVerification: ProviderSecurityRejectionEvidence['signatureVerification'],
+  source: RawIngestionDeps['source'],
+) {
+  switch (source) {
+    case 'WEBHOOK':
+      return signatureVerification === 'VERIFIED';
+    case 'STATUS_QUERY':
+    case 'PROVIDER_RECORD':
+    case 'MOCK':
+      return signatureVerification === 'NOT_APPLICABLE';
+  }
 }

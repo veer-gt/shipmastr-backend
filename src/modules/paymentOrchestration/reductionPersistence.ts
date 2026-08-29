@@ -68,6 +68,13 @@ export async function persistReduction(
     context.triggeringObservation.receivedAt,
   );
 
+  await tx.providerObservation.update({
+    where: { id: context.triggeringObservation.id },
+    data: {
+      reductionDisposition: plan.disposition,
+    },
+  });
+
   await tx.paymentAttempt.update({
     where: { id: context.targetAttempt.id },
     data: {
@@ -198,6 +205,9 @@ export function buildFactInserts(
   const rows: Prisma.PaymentNormalizedFactOutboxUncheckedCreateInput[] = [];
   for (const emission of plan.factEmissions) {
     const sourceObservation = requireFactSourceObservation(context, emission);
+    const refund = emission.factType === 'REFUND_DUE_DETECTED'
+      ? requireRefundFactEntry(plan, emission)
+      : null;
     rows.push({
       schemaVersion: FACT_SCHEMA_VERSION,
       merchantId: context.obligation.merchantId,
@@ -212,7 +222,7 @@ export function buildFactInserts(
       reducerVersion: REDUCER_VERSION,
       adapterVersion: sourceObservation.adapterVersion,
       mappingVersion: sourceObservation.mappingVersion,
-      dedupeKey: factDedupeKey(
+      dedupeKey: refund?.captureKey ?? factDedupeKey(
         emission.factType,
         emission.sourceAttemptId,
         emission.sourceObservationId,
@@ -265,6 +275,22 @@ function requireFactSourceObservation(
     throw new Error('FACT_SOURCE_OBSERVATION_NOT_FOUND');
   }
   return observation;
+}
+
+function requireRefundFactEntry(
+  plan: ReductionPlan,
+  emission: ReductionPlan['factEmissions'][number],
+) {
+  const refund = plan.refundDue.find((entry) =>
+    entry.sourceAttemptId === emission.sourceAttemptId &&
+    entry.sourceObservationId === emission.sourceObservationId &&
+    entry.provider === emission.provider &&
+    entry.providerTransactionRef === emission.providerReferenceId,
+  );
+  if (!refund) {
+    throw new Error('REFUND_FACT_SOURCE_NOT_FOUND');
+  }
+  return refund;
 }
 
 function outcomeReasonCode(plan: ReductionPlan) {

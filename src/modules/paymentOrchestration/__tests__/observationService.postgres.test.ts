@@ -396,6 +396,48 @@ if (enabled) {
       assert.equal(await prisma.paymentNormalizedFactOutbox.count({ where: namespaceRows }), 1);
     });
 
+    it('persists the reducer disposition instead of the candidate placeholder for unresolved evidence', async () => {
+      const { ingestObservation } = await loadObservationService();
+      const seeded = await createAttemptWithObligation({
+        obligation: {
+          id: 'obligation_pending_disposition',
+          merchantId: namespace.id('merchant_pending_disposition'),
+        },
+        attempt: {
+          id: 'attempt_pending_disposition',
+          providerOrderRef: 'order_pending_disposition',
+        },
+      });
+
+      const result = await ingestObservation(
+        prisma,
+        candidate({
+          attemptId: seeded.attempt.id,
+          obligationId: seeded.obligation.id,
+          merchantId: seeded.obligation.merchantId,
+          credentialBindingId: seeded.attempt.credentialBindingId,
+          credentialVersionId: seeded.attempt.credentialVersionId,
+          providerOrderRef: seeded.attempt.providerOrderRef!,
+          providerEventId: 'event_pending_disposition',
+          providerTransactionRef: null,
+          mappedOutcome: 'PENDING',
+          nativeStatus: 'pending',
+          rawBodyHash: 'hash_pending_disposition',
+        }),
+      );
+
+      assert.equal(result.disposition, 'PENDING');
+      assert.equal(
+        (
+          await prisma.providerObservation.findUniqueOrThrow({
+            where: { id: result.observationId },
+            select: { reductionDisposition: true },
+          })
+        ).reductionDisposition,
+        'PENDING',
+      );
+    });
+
     it('reuses the matching conflicting observation when the same event id and hash replay after A,B', async () => {
       const { ingestObservation } = await loadObservationService();
       const seeded = await createAttemptWithObligation({

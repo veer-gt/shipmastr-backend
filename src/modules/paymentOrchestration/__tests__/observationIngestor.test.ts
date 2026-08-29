@@ -242,6 +242,53 @@ describe('ingestRawObservation', () => {
     assert.equal(calls.securityRejections.length, 1);
   });
 
+  it('allows a verified webhook through to ordinary persistence', async () => {
+    const { deps: rawDeps, calls } = deps({
+      parser: mockParserStub({
+        source: 'WEBHOOK',
+      }),
+      source: 'WEBHOOK',
+      verify: async (input: RawObservationInput) => {
+        calls.verify.push([input]);
+        return 'VERIFIED';
+      },
+    });
+
+    await ingestRawObservation(rawDeps, rawInput());
+
+    assert.equal(calls.persist.length, 1);
+    assert.equal(calls.resolveBinding.length, 1);
+    assert.equal(calls.persist[0]?.[0].source, 'WEBHOOK');
+    assert.equal(calls.persist[0]?.[0].signatureVerification, 'VERIFIED');
+    assert.equal(calls.securityRejections.length, 0);
+  });
+
+  it('fails closed for an unsigned webhook', async () => {
+    const { deps: rawDeps, calls } = deps({
+      parser: mockParserStub({
+        source: 'WEBHOOK',
+      }),
+      source: 'WEBHOOK',
+      verify: async (input: RawObservationInput) => {
+        calls.verify.push([input]);
+        return 'NOT_APPLICABLE';
+      },
+    });
+
+    assert.deepEqual(await ingestRawObservation(rawDeps, rawInput()), {
+      kind: 'REJECTED',
+      reason: 'UNAUTHENTICATED',
+    });
+    assert.equal(calls.persist.length, 0);
+    assert.equal(calls.resolveBinding.length, 0);
+    assert.equal(calls.securityRejections.length, 1);
+    assert.partialDeepStrictEqual(calls.securityRejections[0]?.[0], {
+      source: 'WEBHOOK',
+      signatureVerification: 'NOT_APPLICABLE',
+      securityAlertCode: 'INVALID_PROVIDER_SIGNATURE',
+    });
+  });
+
   it('fails closed and records sanitized rejection for unexpected verifier metadata', async () => {
     const { deps: rawDeps, calls } = deps({
       verify: async () => 'TRUST_ME' as never,
